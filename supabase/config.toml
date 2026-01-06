@@ -1,0 +1,4 @@
+project_id = "xsdlzoyaosfbbwzmcinq"
+
+[functions.taxi-chat]
+verify_jwt = false
