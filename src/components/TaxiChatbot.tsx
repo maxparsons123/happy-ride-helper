@@ -160,7 +160,18 @@ export function TaxiChatbot() {
         </div>
 
         {/* Input */}
-        <ChatInput onSend={handleSend} disabled={isLoading || booking.status === "confirmed"} />
+        {booking.status === "confirmed" ? (
+          <div className="border-t border-chat-border bg-card/80 backdrop-blur-sm px-6 py-4">
+            <div className="flex items-center justify-center gap-4">
+              <p className="text-muted-foreground">Booking complete!</p>
+              <Button onClick={handleReset} className="bg-gradient-gold hover:opacity-90">
+                Book Another Taxi
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <ChatInput onSend={handleSend} disabled={isLoading} />
+        )}
       </div>
 
       {/* Sidebar - Booking Status */}
