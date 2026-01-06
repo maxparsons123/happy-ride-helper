@@ -69,7 +69,7 @@ Use this information to maintain context and don't ask for info already provided
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash-lite", // Faster model
+        model: "openai/gpt-5-mini", // Fast GPT model - similar to GPT-4o-mini
         messages: [
           { role: "system", content: SYSTEM_PROMPT + contextMessage },
           ...messages,
