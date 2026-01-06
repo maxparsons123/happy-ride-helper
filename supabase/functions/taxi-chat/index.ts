@@ -33,17 +33,7 @@ You must always return a JSON object:
   "passengers": "Number or null",
   "status": "collecting" | "confirmed" | "info_only",
   "intent": "booking" | "eta_query" | "price_query" | "availability_query" | "general"
-}
-
-### EXAMPLES
-User: "I need a cab from the train station to the mall."
-Response: {"response": "Got it! From the train station to the mall. How many passengers will be traveling?", "pickup": "train station", "destination": "mall", "passengers": null, "status": "collecting", "intent": "booking"}
-
-User: "I'm at the Hilton. Wait, how long is the wait?"
-Response: {"response": "Current wait is about 6 minutes. And where will you be heading from the Hilton?", "pickup": "Hilton", "destination": null, "passengers": null, "status": "collecting", "intent": "eta_query"}
-
-User: "Yes, book it please" (after all info gathered)
-Response: {"response": "Perfect! Your taxi is booked. A driver will arrive at [pickup] in 5-8 minutes to take you to [destination]. Thank you for choosing Imtech Taxi!", "pickup": "[previous]", "destination": "[previous]", "passengers": "[previous]", "status": "confirmed", "intent": "booking"}`;
+}`;
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -69,6 +59,9 @@ serve(async (req) => {
 Use this information to maintain context and don't ask for info already provided.`;
     }
 
+    console.log("Sending request to AI gateway...");
+    const startTime = Date.now();
+
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -76,17 +69,21 @@ Use this information to maintain context and don't ask for info already provided
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
+        model: "google/gemini-2.5-flash-lite", // Faster model
         messages: [
           { role: "system", content: SYSTEM_PROMPT + contextMessage },
           ...messages,
         ],
-        temperature: 0.7,
-        max_tokens: 500,
+        max_tokens: 300, // Reduced for faster response
       }),
     });
 
+    console.log(`AI response received in ${Date.now() - startTime}ms`);
+
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error("AI gateway error:", response.status, errorText);
+      
       if (response.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
           status: 429,
@@ -99,8 +96,6 @@ Use this information to maintain context and don't ask for info already provided
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      const errorText = await response.text();
-      console.error("AI gateway error:", response.status, errorText);
       return new Response(JSON.stringify({ error: "Failed to get AI response" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -121,12 +116,17 @@ Use this information to maintain context and don't ask for info already provided
       if (jsonMatch) {
         jsonStr = jsonMatch[1].trim();
       }
+      // Also try to find raw JSON object
+      const rawJsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (rawJsonMatch) {
+        jsonStr = rawJsonMatch[0];
+      }
       parsedResponse = JSON.parse(jsonStr);
-    } catch {
+    } catch (parseError) {
       // If parsing fails, return the raw response as a message
-      console.error("Failed to parse AI response as JSON:", aiContent);
+      console.error("Failed to parse AI response as JSON:", aiContent, parseError);
       parsedResponse = {
-        response: aiContent,
+        response: aiContent.replace(/```json|```/g, '').trim() || "I'm here to help you book a taxi. Where would you like to be picked up?",
         pickup: null,
         destination: null,
         passengers: null,
