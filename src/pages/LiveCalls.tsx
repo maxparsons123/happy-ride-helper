@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft } from "lucide-react";
 
 interface Transcript {
   role: string;
@@ -27,9 +29,127 @@ interface LiveCall {
   ended_at: string | null;
 }
 
+// Audio playback utilities
+const createWavFromPCM = (pcmData: Uint8Array): ArrayBuffer => {
+  const int16Data = new Int16Array(pcmData.length / 2);
+  for (let i = 0; i < pcmData.length; i += 2) {
+    int16Data[i / 2] = (pcmData[i + 1] << 8) | pcmData[i];
+  }
+  
+  const wavHeader = new ArrayBuffer(44);
+  const view = new DataView(wavHeader);
+  
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  const sampleRate = 24000;
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = int16Data.byteLength;
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  const wavArray = new Uint8Array(wavHeader.byteLength + int16Data.byteLength);
+  wavArray.set(new Uint8Array(wavHeader), 0);
+  wavArray.set(new Uint8Array(int16Data.buffer), wavHeader.byteLength);
+  
+  return wavArray.buffer;
+};
+
+class AudioQueue {
+  private queue: Uint8Array[] = [];
+  private isPlaying = false;
+  private audioContext: AudioContext;
+  private nextStartTime = 0;
+
+  constructor(audioContext: AudioContext) {
+    this.audioContext = audioContext;
+  }
+
+  async addToQueue(audioData: Uint8Array) {
+    this.queue.push(audioData);
+    if (!this.isPlaying) {
+      this.nextStartTime = this.audioContext.currentTime + 0.05;
+      await this.playNext();
+    }
+  }
+
+  private async playNext() {
+    if (this.queue.length === 0) {
+      this.isPlaying = false;
+      return;
+    }
+
+    this.isPlaying = true;
+    const audioData = this.queue.shift()!;
+
+    try {
+      const wavData = createWavFromPCM(audioData);
+      const audioBuffer = await this.audioContext.decodeAudioData(wavData);
+      
+      const source = this.audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.audioContext.destination);
+      
+      const startTime = Math.max(this.nextStartTime, this.audioContext.currentTime);
+      source.start(startTime);
+      this.nextStartTime = startTime + audioBuffer.duration;
+      
+      source.onended = () => this.playNext();
+    } catch (error) {
+      console.error('Error playing audio:', error);
+      this.playNext();
+    }
+  }
+
+  clear() {
+    this.queue = [];
+    this.isPlaying = false;
+  }
+}
+
 export default function LiveCalls() {
   const [calls, setCalls] = useState<LiveCall[]>([]);
   const [selectedCall, setSelectedCall] = useState<string | null>(null);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioQueueRef = useRef<AudioQueue | null>(null);
+
+  // Initialize audio context on user interaction
+  const enableAudio = useCallback(() => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      audioQueueRef.current = new AudioQueue(audioContextRef.current);
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume();
+    }
+    setAudioEnabled(true);
+  }, []);
+
+  const disableAudio = useCallback(() => {
+    audioQueueRef.current?.clear();
+    setAudioEnabled(false);
+  }, []);
 
   useEffect(() => {
     // Fetch initial active calls
@@ -100,6 +220,49 @@ export default function LiveCalls() {
     };
   }, []);
 
+  // Subscribe to audio stream for selected call
+  useEffect(() => {
+    if (!selectedCall || !audioEnabled) {
+      setIsListening(false);
+      return;
+    }
+
+    console.log(`[LiveCalls] Subscribing to audio for call: ${selectedCall}`);
+    setIsListening(true);
+
+    const audioChannel = supabase
+      .channel(`audio-${selectedCall}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "live_call_audio",
+          filter: `call_id=eq.${selectedCall}`
+        },
+        (payload) => {
+          const audioChunk = payload.new.audio_chunk as string;
+          if (audioChunk && audioQueueRef.current) {
+            // Convert base64 to Uint8Array
+            const binaryString = atob(audioChunk);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            audioQueueRef.current.addToQueue(bytes);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      console.log(`[LiveCalls] Unsubscribing from audio for call: ${selectedCall}`);
+      supabase.removeChannel(audioChannel);
+      audioQueueRef.current?.clear();
+      setIsListening(false);
+    };
+  }, [selectedCall, audioEnabled]);
+
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
 
@@ -123,10 +286,34 @@ export default function LiveCalls() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" asChild className="mr-2">
+              <Link to="/">
+                <ArrowLeft className="w-5 h-5" />
+              </Link>
+            </Button>
             <Radio className="w-8 h-8 text-primary animate-pulse" />
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* Audio toggle */}
+            <Button
+              variant={audioEnabled ? "default" : "outline"}
+              size="sm"
+              onClick={audioEnabled ? disableAudio : enableAudio}
+              className={audioEnabled ? "bg-green-600 hover:bg-green-700" : ""}
+            >
+              {audioEnabled ? (
+                <>
+                  <Volume2 className="w-4 h-4 mr-2" />
+                  {isListening ? "Listening..." : "Audio On"}
+                </>
+              ) : (
+                <>
+                  <VolumeX className="w-4 h-4 mr-2" />
+                  Enable Audio
+                </>
+              )}
+            </Button>
             <Badge variant="outline" className="text-green-400 border-green-400">
               <span className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
               {activeCalls.length} Active
