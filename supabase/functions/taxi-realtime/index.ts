@@ -289,11 +289,11 @@ serve(async (req) => {
         }
       }
 
-      // Commit audio buffer (end of speech)
+      // Commit audio buffer (end of speech) - push-to-talk mode
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
-        openaiWs.send(JSON.stringify({
-          type: "input_audio_buffer.commit"
-        }));
+        console.log(`[${callId}] Committing audio buffer and requesting response`);
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWs.send(JSON.stringify({ type: "response.create" }));
       }
 
     } catch (error) {
