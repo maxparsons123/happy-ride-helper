@@ -6,18 +6,21 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const SYSTEM_INSTRUCTIONS = `You are a friendly, cheerful Taxi Dispatcher for "Imtech Taxi" taking phone calls.
+const SYSTEM_INSTRUCTIONS = `You are Ada, a friendly and professional Taxi Dispatcher for "247 Radio Carz" taking phone calls.
+
+YOUR INTRODUCTION (say this when the call starts):
+"Hello, my name is Ada from 247 Radio Carz. How can I help you with your travels today?"
 
 PERSONALITY:
-- Warm and welcoming like a friendly local
-- Use casual British phrases: "Brilliant!", "Lovely!", "Right then!", "Smashing!"
+- Warm, welcoming British personality
+- Use casual British phrases: "Brilliant!", "Lovely!", "Right then!", "Smashing!", "No worries!"
 - Keep responses SHORT (1-2 sentences max) - this is a phone call
-- Add light banter when appropriate
+- Be efficient but personable
 
 BOOKING FLOW:
-1. Greet warmly and ask for pickup location
-2. Confirm pickup, then ask for destination
-3. Confirm destination, then ask for number of passengers
+1. After greeting, ask for pickup location
+2. Confirm pickup EXACTLY as stated, then ask for destination
+3. Confirm destination EXACTLY as stated, then ask for number of passengers
 4. When you have all 3 details, use the book_taxi function to confirm
 5. Tell the customer their taxi is on the way with ETA and fare
 
@@ -27,8 +30,13 @@ PRICING:
 - 6-seater van: add £5
 - ETA: Always 5-8 minutes
 
-RULES:
-- CRITICAL: When confirming addresses, repeat them back EXACTLY as the customer said them. Do not paraphrase or "correct" street names.
+CRITICAL TRANSCRIPTION RULES:
+- NEVER change, correct, or paraphrase addresses - repeat them EXACTLY as the customer said
+- If you're unsure of an address, ask the customer to spell it out
+- Street names, house numbers, and postcodes must be repeated verbatim
+- Do NOT assume or autocorrect street names (e.g., if they say "David Road", say "David Road", not "Aberdeen Road")
+
+GENERAL RULES:
 - Always confirm each detail before moving to the next
 - If customer changes their mind, be accommodating
 - Use the book_taxi function ONLY when you have pickup, destination, AND passengers confirmed`;
@@ -61,7 +69,6 @@ serve(async (req) => {
   let bookingData: any = {};
   let sessionReady = false;
   let pendingMessages: any[] = [];
-  let awaitingUserTranscriptForResponse = false;
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -89,11 +96,18 @@ serve(async (req) => {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            voice: "alloy",
+            voice: "ash", // British voice
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { model: "whisper-1" },
-            turn_detection: null, // push-to-talk
+            // Server VAD for <100ms barge-in support
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 200,
+              silence_duration_ms: 500, // Quick response after speech ends
+              create_response: true // Auto-create response when speech ends
+            },
             tools: [
               {
                 type: "function",
@@ -102,8 +116,8 @@ serve(async (req) => {
                 parameters: {
                   type: "object",
                   properties: {
-                    pickup: { type: "string", description: "Pickup location" },
-                    destination: { type: "string", description: "Drop-off location" },
+                    pickup: { type: "string", description: "Pickup location exactly as customer stated" },
+                    destination: { type: "string", description: "Drop-off location exactly as customer stated" },
                     passengers: { type: "integer", description: "Number of passengers" }
                   },
                   required: ["pickup", "destination", "passengers"]
@@ -113,6 +127,13 @@ serve(async (req) => {
             tool_choice: "auto",
             instructions: SYSTEM_INSTRUCTIONS
           }
+        }));
+
+        // Send initial greeting after session is configured
+        console.log(`[${callId}] Triggering initial greeting...`);
+        openaiWs?.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"] }
         }));
       }
 
@@ -208,7 +229,7 @@ serve(async (req) => {
         }));
       }
 
-      // User transcript
+      // User transcript (with server VAD, response is auto-created)
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
         socket.send(
@@ -218,21 +239,23 @@ serve(async (req) => {
             role: "user",
           }),
         );
+      }
 
-        // In push-to-talk mode, request a response AFTER the transcript arrives.
-        // DO NOT create a duplicate text item - the audio already created a conversation item.
-        // Just request the response now.
-        if (awaitingUserTranscriptForResponse && openaiWs?.readyState === WebSocket.OPEN) {
-          awaitingUserTranscriptForResponse = false;
-          console.log(`[${callId}] Transcript received; requesting response now (audio already in conversation)`);
+      // Speech started (barge-in detection)
+      if (data.type === "input_audio_buffer.speech_started") {
+        console.log(`[${callId}] >>> User started speaking (barge-in)`);
+        socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
+      }
 
-          openaiWs.send(
-            JSON.stringify({
-              type: "response.create",
-              response: { modalities: ["audio", "text"] },
-            }),
-          );
-        }
+      // Speech stopped
+      if (data.type === "input_audio_buffer.speech_stopped") {
+        console.log(`[${callId}] >>> User stopped speaking`);
+        socket.send(JSON.stringify({ type: "user_speaking", speaking: false }));
+      }
+
+      // Audio buffer committed (server VAD auto-commits)
+      if (data.type === "input_audio_buffer.committed") {
+        console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
       }
 
       // DEBUG: log response lifecycle events (helps diagnose missing audio)
@@ -374,10 +397,10 @@ serve(async (req) => {
         }
       }
 
-      // Commit audio buffer (end of speech) - push-to-talk mode
+      // Manual commit (for clients that want to force end of speech)
+      // With server VAD, this is optional - server auto-detects speech end
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
-        console.log(`[${callId}] Committing audio buffer (will request response after transcript)`);
-        awaitingUserTranscriptForResponse = true;
+        console.log(`[${callId}] Manual commit received`);
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
       }
 
