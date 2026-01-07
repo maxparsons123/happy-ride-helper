@@ -58,6 +58,8 @@ serve(async (req) => {
   let callId = `call-${Date.now()}`;
   let callStartAt = new Date().toISOString();
   let bookingData: any = {};
+  let sessionReady = false;
+  let pendingMessages: any[] = [];
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -114,6 +116,30 @@ serve(async (req) => {
             instructions: SYSTEM_INSTRUCTIONS
           }
         }));
+      }
+
+      // Session updated - now ready
+      if (data.type === "session.updated") {
+        console.log(`[${callId}] Session ready!`);
+        sessionReady = true;
+        socket.send(JSON.stringify({ type: "session_ready" }));
+        
+        // Process any pending messages
+        while (pendingMessages.length > 0) {
+          const msg = pendingMessages.shift();
+          console.log(`[${callId}] Processing pending message:`, msg.type);
+          if (msg.type === "text") {
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: msg.text }]
+              }
+            }));
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          }
+        }
       }
 
       // Forward audio to Asterisk bridge
@@ -245,17 +271,22 @@ serve(async (req) => {
       }
 
       // TEXT MODE: Send text message directly (for testing without audio)
-      if (message.type === "text" && openaiWs?.readyState === WebSocket.OPEN) {
+      if (message.type === "text") {
         console.log(`[${callId}] Text mode input: ${message.text}`);
-        openaiWs.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: message.text }]
-          }
-        }));
-        openaiWs.send(JSON.stringify({ type: "response.create" }));
+        if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: message.text }]
+            }
+          }));
+          openaiWs.send(JSON.stringify({ type: "response.create" }));
+        } else {
+          console.log(`[${callId}] Session not ready, queuing message`);
+          pendingMessages.push(message);
+        }
       }
 
       // Commit audio buffer (end of speech)
