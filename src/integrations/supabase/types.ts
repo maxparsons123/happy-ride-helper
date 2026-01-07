@@ -74,6 +74,27 @@ export type Database = {
         }
         Relationships: []
       }
+      live_call_audio: {
+        Row: {
+          audio_chunk: string
+          call_id: string
+          created_at: string
+          id: string
+        }
+        Insert: {
+          audio_chunk: string
+          call_id: string
+          created_at?: string
+          id?: string
+        }
+        Update: {
+          audio_chunk?: string
+          call_id?: string
+          created_at?: string
+          id?: string
+        }
+        Relationships: []
+      }
       live_calls: {
         Row: {
           booking_confirmed: boolean
