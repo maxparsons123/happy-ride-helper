@@ -34,16 +34,18 @@ export default function VoiceTest() {
   const [firstAudioLatency, setFirstAudioLatency] = useState<number | null>(null);
   const [responseCount, setResponseCount] = useState(0);
   
+  // Refs for WebSocket and audio
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const currentTranscriptRef = useRef("");
   const speechStartTimeRef = useRef(0);
   const firstAudioTimeRef = useRef(0);
   const latenciesRef = useRef<number[]>([]);
-  const nextStartTimeRef = useRef(0); // Global variable to track timing for smooth playback
+  const nextStartTimeRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isConnectingRef = useRef(false); // Guard double-connect
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -52,6 +54,56 @@ export default function VoiceTest() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, booking]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cleanupAudio();
+      wsRef.current?.close();
+    };
+  }, []);
+
+  // Keyboard controls: Space to talk
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !e.repeat && status === "connected" && !isRecording) {
+        e.preventDefault();
+        startRecording();
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space" && isRecording) {
+        e.preventDefault();
+        stopRecording();
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [status, isRecording]);
+
+  const cleanupAudio = useCallback(() => {
+    // Cleanup worklet
+    if (workletNodeRef.current) {
+      workletNodeRef.current.disconnect();
+      workletNodeRef.current = null;
+    }
+    // Cleanup media stream
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    // Cleanup audio context
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      audioContextRef.current.close().catch(() => {});
+    }
+    audioContextRef.current = null;
+    nextStartTimeRef.current = 0;
+  }, []);
 
   const addMessage = useCallback((text: string, type: Message["type"], latency?: number) => {
     setMessages(prev => [...prev, { text, type, latency }]);
@@ -67,14 +119,17 @@ export default function VoiceTest() {
   const playAudioChunk = useCallback((base64Audio: string) => {
     console.log("Playing audio chunk, length:", base64Audio.length);
     
+    // Create or reuse audio context
     if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      nextStartTimeRef.current = 0; // reset scheduling when recreating context
+      nextStartTimeRef.current = 0;
     }
     
-    // Resume AudioContext if suspended (browser autoplay policy)
-    if (audioContextRef.current.state === "suspended") {
-      audioContextRef.current.resume();
+    const ctx = audioContextRef.current;
+    
+    // Resume if suspended (browser autoplay policy)
+    if (ctx.state === "suspended") {
+      ctx.resume();
     }
 
     try {
@@ -92,7 +147,6 @@ export default function VoiceTest() {
         float32[i] = int16[i] / 32768.0;
       }
 
-      const ctx = audioContextRef.current;
       const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
 
@@ -100,10 +154,10 @@ export default function VoiceTest() {
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
 
-      // JITTER BUFFER: Schedule chunks to play exactly when the last one ends
+      // JITTER BUFFER: Schedule chunks precisely to avoid clicks
       const now = ctx.currentTime;
       if (nextStartTimeRef.current < now) {
-        nextStartTimeRef.current = now + 0.05; // 50ms safety buffer for smooth playback
+        nextStartTimeRef.current = now + 0.05; // 50ms safety buffer
       }
       
       source.start(nextStartTimeRef.current);
@@ -114,27 +168,28 @@ export default function VoiceTest() {
   }, []);
 
   const connect = useCallback(async () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      addMessage("Already connected", "system");
+    // Guard against double-connect
+    if (isConnectingRef.current || wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log("Already connected or connecting");
       return;
     }
 
+    isConnectingRef.current = true;
     setStatus("connecting");
     addMessage("Connecting to taxi AI...", "system");
 
-    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    }
+    // Initialize audio context
+    cleanupAudio();
+    audioContextRef.current = new AudioContext({ sampleRate: 24000 });
     if (audioContextRef.current.state === "suspended") {
-      void audioContextRef.current.resume();
+      await audioContextRef.current.resume();
     }
-    nextStartTimeRef.current = 0;
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatus("connecting");
+      console.log("WebSocket opened");
       addMessage("Connected, initializing session...", "system");
       
       ws.send(JSON.stringify({
@@ -147,14 +202,13 @@ export default function VoiceTest() {
       const data = JSON.parse(event.data);
       console.log("Received:", data);
 
-      // Session ready
       if (data.type === "session_ready") {
         setStatus("connected");
-        addMessage("Session ready! Hold mic button to speak.", "system");
-        setVoiceStatus("Ready - hold to speak");
+        isConnectingRef.current = false;
+        addMessage("Session ready! Hold mic button or press Space to speak.", "system");
+        setVoiceStatus("Ready - hold to speak (or Space)");
       }
 
-      // AI speaking state (sent by backend on response.created/response.done)
       if (data.type === "ai_speaking") {
         setIsSpeaking(Boolean(data.speaking));
       }
@@ -168,7 +222,6 @@ export default function VoiceTest() {
       }
 
       if (data.type === "audio") {
-        console.log("Received audio chunk");
         setIsSpeaking(true);
         playAudioChunk(data.audio);
       }
@@ -202,33 +255,42 @@ export default function VoiceTest() {
     };
 
     ws.onclose = () => {
+      console.log("WebSocket closed");
       setStatus("disconnected");
       setIsSpeaking(false);
-      nextStartTimeRef.current = 0;
+      setIsRecording(false);
+      isConnectingRef.current = false;
       addMessage("Disconnected", "system");
       setVoiceStatus("Connect first...");
+      cleanupAudio();
     };
 
     ws.onerror = (error) => {
       console.error("WebSocket error:", error);
+      isConnectingRef.current = false;
       addMessage("Connection error", "system");
     };
-  }, [addMessage, playAudioChunk, updateMetrics]);
+  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio]);
 
   const disconnect = useCallback(() => {
-    stopRecording();
+    stopRecordingInternal();
     setIsSpeaking(false);
-    nextStartTimeRef.current = 0;
-
-    try {
-      void audioContextRef.current?.close();
-    } catch {
-      // ignore
-    }
-    audioContextRef.current = null;
-
+    cleanupAudio();
     wsRef.current?.close();
     wsRef.current = null;
+    isConnectingRef.current = false;
+  }, [cleanupAudio]);
+
+  // Internal stop without state dependency issues
+  const stopRecordingInternal = useCallback(() => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.disconnect();
+      workletNodeRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
   }, []);
 
   const startRecording = useCallback(async () => {
@@ -241,7 +303,7 @@ export default function VoiceTest() {
       return;
     }
 
-    console.log("Starting recording...");
+    console.log("Starting recording with AudioWorklet...");
     setIsRecording(true);
     setVoiceStatus("🔴 Recording...");
     speechStartTimeRef.current = Date.now();
@@ -253,39 +315,44 @@ export default function VoiceTest() {
           sampleRate: 24000,
           channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true
         }
       });
       mediaStreamRef.current = stream;
       console.log("Got mic stream");
 
+      // Create or reuse audio context
       let ctx = audioContextRef.current;
-      const needsNewCtx = !ctx || ctx.state === "closed";
-      if (needsNewCtx) {
+      if (!ctx || ctx.state === "closed") {
         ctx = new AudioContext({ sampleRate: 24000 });
         audioContextRef.current = ctx;
         nextStartTimeRef.current = 0;
       }
       if (ctx.state === "suspended") {
-        void ctx.resume();
+        await ctx.resume();
+      }
+
+      // Load AudioWorklet module
+      try {
+        await ctx.audioWorklet.addModule("/audio-worklet.js");
+      } catch (e) {
+        // Module might already be loaded
+        console.log("Worklet module load:", e);
       }
 
       const source = ctx.createMediaStreamSource(stream);
-      // Use smaller buffer (2048) for faster mic response - halves latency
-      const processor = ctx.createScriptProcessor(2048, 1, 1);
-      processorRef.current = processor;
+      const workletNode = new AudioWorkletNode(ctx, "recorder");
+      workletNodeRef.current = workletNode;
 
-      processor.onaudioprocess = (e) => {
+      // Handle audio data from worklet
+      workletNode.port.onmessage = (e) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
-        const inputData = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-
-        const uint8 = new Uint8Array(int16.buffer);
+        const buffer = e.data as ArrayBuffer;
+        const uint8 = new Uint8Array(buffer);
+        
+        // Convert to base64
         let binary = "";
         for (let i = 0; i < uint8.length; i++) {
           binary += String.fromCharCode(uint8[i]);
@@ -298,14 +365,14 @@ export default function VoiceTest() {
         }));
       };
 
-      source.connect(processor);
-      processor.connect(ctx.destination);
-      console.log("Audio processing started");
+      source.connect(workletNode);
+      // Don't connect worklet to destination (we don't want to hear ourselves)
+      console.log("AudioWorklet recording started");
     } catch (error) {
       console.error("Mic error:", error);
       addMessage("Microphone access denied: " + (error as Error).message, "system");
       setIsRecording(false);
-      setVoiceStatus("Ready - hold to speak");
+      setVoiceStatus("Ready - hold to speak (or Space)");
     }
   }, [addMessage]);
 
@@ -316,10 +383,7 @@ export default function VoiceTest() {
     setIsRecording(false);
     setVoiceStatus("Processing...");
 
-    processorRef.current?.disconnect();
-    processorRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
+    stopRecordingInternal();
 
     // Tell the backend we're done speaking (push-to-talk)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -328,10 +392,10 @@ export default function VoiceTest() {
 
     setTimeout(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        setVoiceStatus("Ready - hold to speak");
+        setVoiceStatus("Ready - hold to speak (or Space)");
       }
     }, 500);
-  }, []);
+  }, [stopRecordingInternal]);
 
   const sendTextMessage = useCallback(() => {
     if (!textInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -348,6 +412,10 @@ export default function VoiceTest() {
     setTextInput("");
   }, [textInput, addMessage]);
 
+  // Check for reduced motion preference
+  const prefersReducedMotion = typeof window !== "undefined" 
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
   return (
     <div className="min-h-screen bg-gradient-dark p-6">
       <div className="max-w-2xl mx-auto space-y-4">
@@ -363,7 +431,11 @@ export default function VoiceTest() {
 
         {/* Controls */}
         <div className="flex gap-3">
-          <Button onClick={connect} disabled={status === "connected"} className="bg-gradient-gold">
+          <Button 
+            onClick={connect} 
+            disabled={status === "connected" || status === "connecting"} 
+            className="bg-gradient-gold"
+          >
             <Phone className="w-4 h-4 mr-2" />
             Connect
           </Button>
@@ -379,13 +451,16 @@ export default function VoiceTest() {
           <button
             onMouseDown={startRecording}
             onMouseUp={stopRecording}
+            onMouseLeave={() => isRecording && stopRecording()}
             onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
             onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
             disabled={status !== "connected"}
             style={{ touchAction: "none" }}
-            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all select-none ${
+            aria-label={isRecording ? "Release to stop recording" : "Hold to speak"}
+            aria-pressed={isRecording}
+            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all select-none focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background ${
               isRecording 
-                ? "bg-green-500 animate-pulse" 
+                ? `bg-green-500 ${prefersReducedMotion ? "" : "animate-pulse"}` 
                 : status === "connected"
                   ? "bg-red-500 hover:bg-red-600"
                   : "bg-muted cursor-not-allowed"
@@ -397,17 +472,24 @@ export default function VoiceTest() {
           <div className="flex-1">
             <p className="font-semibold">Hold to speak</p>
             <p className="text-sm text-muted-foreground">{voiceStatus}</p>
+            <p className="text-xs text-muted-foreground mt-1">Or press Space on keyboard</p>
           </div>
 
           {/* AI Speaking Indicator */}
           {isSpeaking && (
             <div className="flex items-center gap-2 px-3 py-2 bg-primary/20 rounded-full">
-              <div className="flex items-center gap-1">
-                <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_infinite]" />
-                <span className="w-1 h-4 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.1s_infinite]" />
-                <span className="w-1 h-2 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.2s_infinite]" />
-                <span className="w-1 h-5 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.3s_infinite]" />
-                <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.4s_infinite]" />
+              <div className={`flex items-center gap-1 ${prefersReducedMotion ? "" : ""}`}>
+                {prefersReducedMotion ? (
+                  <span className="w-2 h-2 bg-primary rounded-full" />
+                ) : (
+                  <>
+                    <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_infinite]" />
+                    <span className="w-1 h-4 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.1s_infinite]" />
+                    <span className="w-1 h-2 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.2s_infinite]" />
+                    <span className="w-1 h-5 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.3s_infinite]" />
+                    <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.4s_infinite]" />
+                  </>
+                )}
               </div>
               <span className="text-sm font-medium text-primary">AI Speaking</span>
             </div>
