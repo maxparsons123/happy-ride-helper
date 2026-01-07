@@ -14,7 +14,66 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      call_logs: {
+        Row: {
+          ai_latency_ms: number | null
+          ai_response: string | null
+          booking_status: string | null
+          call_end_at: string | null
+          call_id: string
+          call_start_at: string | null
+          created_at: string
+          destination: string | null
+          estimated_fare: string | null
+          id: string
+          passengers: number | null
+          pickup: string | null
+          stt_latency_ms: number | null
+          total_latency_ms: number | null
+          tts_latency_ms: number | null
+          turn_number: number | null
+          user_transcript: string | null
+        }
+        Insert: {
+          ai_latency_ms?: number | null
+          ai_response?: string | null
+          booking_status?: string | null
+          call_end_at?: string | null
+          call_id: string
+          call_start_at?: string | null
+          created_at?: string
+          destination?: string | null
+          estimated_fare?: string | null
+          id?: string
+          passengers?: number | null
+          pickup?: string | null
+          stt_latency_ms?: number | null
+          total_latency_ms?: number | null
+          tts_latency_ms?: number | null
+          turn_number?: number | null
+          user_transcript?: string | null
+        }
+        Update: {
+          ai_latency_ms?: number | null
+          ai_response?: string | null
+          booking_status?: string | null
+          call_end_at?: string | null
+          call_id?: string
+          call_start_at?: string | null
+          created_at?: string
+          destination?: string | null
+          estimated_fare?: string | null
+          id?: string
+          passengers?: number | null
+          pickup?: string | null
+          stt_latency_ms?: number | null
+          total_latency_ms?: number | null
+          tts_latency_ms?: number | null
+          turn_number?: number | null
+          user_transcript?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
