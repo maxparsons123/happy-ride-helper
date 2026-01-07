@@ -81,7 +81,8 @@ serve(async (req) => {
       
       // Session created - send configuration
       if (data.type === "session.created") {
-        console.log(`[${callId}] Session created, sending config...`);
+        console.log(`[${callId}] Session created. Server defaults:`, data.session);
+        console.log(`[${callId}] Sending session.update...`);
         openaiWs?.send(JSON.stringify({
           type: "session.update",
           session: {
@@ -90,7 +91,7 @@ serve(async (req) => {
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { model: "whisper-1" },
-            turn_detection: null, // Disable VAD for push-to-talk mode
+            turn_detection: null, // push-to-talk
             tools: [
               {
                 type: "function",
@@ -115,35 +116,63 @@ serve(async (req) => {
 
       // Session updated - now ready
       if (data.type === "session.updated") {
-        console.log(`[${callId}] Session ready!`);
+        console.log(`[${callId}] Session ready! Effective config:`, data.session);
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
-        
+
         // Process any pending messages
         while (pendingMessages.length > 0) {
           const msg = pendingMessages.shift();
           console.log(`[${callId}] Processing pending message:`, msg.type);
           if (msg.type === "text") {
-            openaiWs?.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: msg.text }]
-              }
-            }));
-            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            openaiWs?.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: msg.text }],
+                },
+              }),
+            );
+            openaiWs?.send(
+              JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["audio", "text"] },
+              }),
+            );
           }
+        }
+      }
+
+      // AI response started
+      if (data.type === "response.created") {
+        socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
+      }
+
+      // If the model responds in TEXT modality, forward it as assistant transcript
+      if (data.type === "response.text.delta" || data.type === "response.output_text.delta") {
+        const delta = data.delta || "";
+        if (delta) {
+          socket.send(
+            JSON.stringify({
+              type: "transcript",
+              text: delta,
+              role: "assistant",
+            }),
+          );
         }
       }
 
       // Forward audio to client
       if (data.type === "response.audio.delta") {
         console.log(`[${callId}] Sending audio chunk to client, length: ${data.delta?.length || 0}`);
-        socket.send(JSON.stringify({
-          type: "audio",
-          audio: data.delta
-        }));
+        socket.send(
+          JSON.stringify({
+            type: "audio",
+            audio: data.delta,
+          }),
+        );
       }
 
       // Forward transcript for logging
@@ -210,7 +239,12 @@ serve(async (req) => {
           }));
           
           // Trigger response
-          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          openaiWs?.send(
+            JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }),
+          );
           
           // Notify client
           socket.send(JSON.stringify({
@@ -222,6 +256,7 @@ serve(async (req) => {
 
       // Response completed
       if (data.type === "response.done") {
+        socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
         socket.send(JSON.stringify({ type: "response_done" }));
       }
 
@@ -278,7 +313,10 @@ serve(async (req) => {
               content: [{ type: "input_text", text: message.text }]
             }
           }));
-          openaiWs.send(JSON.stringify({ type: "response.create" }));
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
         } else {
           console.log(`[${callId}] Session not ready, queuing message`);
           pendingMessages.push(message);
@@ -289,7 +327,10 @@ serve(async (req) => {
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
         console.log(`[${callId}] Committing audio buffer and requesting response`);
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        openaiWs.send(JSON.stringify({ type: "response.create" }));
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"] }
+        }));
       }
 
     } catch (error) {
