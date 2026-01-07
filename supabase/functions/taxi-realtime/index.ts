@@ -188,21 +188,46 @@ serve(async (req) => {
       // User transcript
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
-        socket.send(JSON.stringify({
-          type: "transcript",
-          text: data.transcript,
-          role: "user"
-        }));
+        socket.send(
+          JSON.stringify({
+            type: "transcript",
+            text: data.transcript,
+            role: "user",
+          }),
+        );
 
-        // In push-to-talk mode, only request a response AFTER the transcript arrives.
+        // In push-to-talk mode, request a response AFTER the transcript arrives.
+        // To make this robust, we also inject the transcript as an explicit user text message.
         if (awaitingUserTranscriptForResponse && openaiWs?.readyState === WebSocket.OPEN) {
           awaitingUserTranscriptForResponse = false;
-          console.log(`[${callId}] Transcript received; requesting response now`);
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response: { modalities: ["audio", "text"] }
-          }));
+          console.log(`[${callId}] Transcript received; creating user text item + requesting response`);
+
+          openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: data.transcript }],
+              },
+            }),
+          );
+
+          openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }),
+          );
         }
+      }
+
+      // DEBUG: log response lifecycle events (helps diagnose missing audio)
+      if (data.type === "response.created") {
+        console.log(`[${callId}] OpenAI response.created`);
+      }
+      if (data.type === "response.done") {
+        console.log(`[${callId}] OpenAI response.done`);
       }
 
       // Handle function calls
