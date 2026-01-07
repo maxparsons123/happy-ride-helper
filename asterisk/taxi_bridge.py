@@ -23,6 +23,7 @@ import struct
 import base64
 import time
 import logging
+import socket as pysocket
 from typing import Optional
 from collections import deque
 
@@ -90,12 +91,21 @@ class TaxiBridge:
         self.running = False
         self.call_start_time = time.time()
         self.client_addr = writer.get_extra_info('peername')
-        
+
+        # Reduce latency for small audio frames
+        sock = writer.get_extra_info("socket")
+        try:
+            if sock is not None:
+                sock.setsockopt(pysocket.IPPROTO_TCP, pysocket.TCP_NODELAY, 1)
+                sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_KEEPALIVE, 1)
+        except Exception as e:
+            logger.warning(f"Could not set socket options: {e}")
+
         # Audio playback queue for smoother delivery
         self.audio_queue: deque = deque()
         self.audio_bytes_sent = 0
         self.audio_chunks_received = 0
-        
+
     async def run(self):
         """Main handler for a single call."""
         logger.info(f"New connection from {self.client_addr}")
@@ -156,9 +166,10 @@ class TaxiBridge:
                     break
                     
                 elif msg_type == MSG_UUID:
-                    self.call_uuid = payload.decode('utf-8').strip('\x00')
+                    # AudioSocket UUID is typically 16 raw bytes (binary UUID)
+                    self.call_uuid = payload.hex()
                     logger.info(f"Call UUID: {self.call_uuid}")
-                    
+
                 elif msg_type == MSG_AUDIO:
                     # Buffer audio and send in chunks
                     audio_buffer.extend(payload)
@@ -256,8 +267,8 @@ class TaxiBridge:
         # 8kHz mono 16-bit = 16000 bytes per second
         bytes_per_second = AST_RATE * 2
 
-        # Use 160 bytes (10ms) chunks - standard telephony frame size
-        chunk_size = 160
+        # Use 320 bytes (20ms) chunks - typical Asterisk frame size
+        chunk_size = 320
         silence_chunk = b"\x00" * chunk_size
 
         audio_buffer = bytearray()
