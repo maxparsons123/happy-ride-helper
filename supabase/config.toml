@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.taxi-voice]
 verify_jwt = false
+
+[functions.taxi-tts]
+verify_jwt = false
