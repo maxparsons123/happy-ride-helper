@@ -329,7 +329,7 @@ serve(async (req) => {
         }
       }
 
-      // Forward audio to client
+      // Forward audio to client AND broadcast to monitoring channel
       if (data.type === "response.audio.delta") {
         console.log(`[${callId}] >>> AUDIO DELTA received, length: ${data.delta?.length || 0}`);
         socket.send(
@@ -338,6 +338,19 @@ serve(async (req) => {
             audio: data.delta,
           }),
         );
+        
+        // Broadcast audio to monitoring channel via database insert
+        // Monitors will subscribe to this for live audio playback
+        try {
+          await supabase.from("live_call_audio").insert({
+            call_id: callId,
+            audio_chunk: data.delta,
+            created_at: new Date().toISOString()
+          });
+        } catch (e) {
+          // Ignore audio broadcast errors - monitoring is optional
+          console.log(`[${callId}] Audio broadcast skipped`);
+        }
       }
 
       // Log audio done
