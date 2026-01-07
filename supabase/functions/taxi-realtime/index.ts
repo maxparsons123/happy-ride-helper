@@ -141,8 +141,16 @@ serve(async (req) => {
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
 
-        // Trigger initial greeting NOW that session is fully configured
+        // Trigger initial greeting immediately - inject as system turn for faster response
         console.log(`[${callId}] Triggering initial greeting...`);
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "[Call connected - greet the customer]" }]
+          }
+        }));
         openaiWs?.send(JSON.stringify({
           type: "response.create",
           response: { modalities: ["audio", "text"] }
