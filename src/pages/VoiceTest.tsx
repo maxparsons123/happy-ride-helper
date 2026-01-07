@@ -42,8 +42,7 @@ export default function VoiceTest() {
   const speechStartTimeRef = useRef(0);
   const firstAudioTimeRef = useRef(0);
   const latenciesRef = useRef<number[]>([]);
-  const audioQueueRef = useRef<Float32Array[]>([]);
-  const isPlayingRef = useRef(false);
+  const nextStartTimeRef = useRef(0); // Global variable to track timing for smooth playback
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -65,25 +64,6 @@ export default function VoiceTest() {
     setResponseCount(latenciesRef.current.length);
   }, []);
 
-  const playQueue = useCallback(async () => {
-    if (audioQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      return;
-    }
-    isPlayingRef.current = true;
-
-    const samples = audioQueueRef.current.shift()!;
-    const ctx = audioContextRef.current!;
-    const buffer = ctx.createBuffer(1, samples.length, 24000);
-    buffer.copyToChannel(new Float32Array(samples.buffer.slice(0) as ArrayBuffer), 0);
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.onended = () => playQueue();
-    source.start();
-  }, []);
-
   const playAudioChunk = useCallback((base64Audio: string) => {
     console.log("Playing audio chunk, length:", base64Audio.length);
     
@@ -97,24 +77,40 @@ export default function VoiceTest() {
     }
 
     try {
-      const binaryString = atob(base64Audio);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      // Decode Base64 to ArrayBuffer
+      const binary = atob(base64Audio);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
       }
 
+      // Convert PCM16 to Float32
       const int16 = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768;
+        float32[i] = int16[i] / 32768.0;
       }
 
-      audioQueueRef.current.push(new Float32Array(float32));
-      if (!isPlayingRef.current) playQueue();
+      const ctx = audioContextRef.current;
+      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+
+      // SMOOTHING LOGIC: Prevents "pops" between chunks by scheduling playback
+      const now = ctx.currentTime;
+      if (nextStartTimeRef.current < now) {
+        nextStartTimeRef.current = now + 0.05; // Add a tiny 50ms buffer to prevent jitter
+      }
+      
+      source.start(nextStartTimeRef.current);
+      nextStartTimeRef.current += audioBuffer.duration;
     } catch (error) {
       console.error("Error playing audio:", error);
     }
-  }, [playQueue]);
+  }, []);
 
   const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
