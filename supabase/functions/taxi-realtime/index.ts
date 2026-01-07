@@ -674,13 +674,43 @@ serve(async (req) => {
         responseCreatedSinceCommit = false;
       }
 
-      // DEBUG: log response lifecycle events (helps diagnose missing audio)
+      // DEBUG + ERROR SURFACING: log response lifecycle events (helps diagnose missing audio)
       if (data.type === "response.done") {
         const status = data.response?.status || "unknown";
         const outputCount = data.response?.output?.length || 0;
         console.log(`[${callId}] >>> response.done - status: ${status}, outputs: ${outputCount}`);
-        if (data.response?.status_details) {
-          console.log(`[${callId}] >>> status_details:`, JSON.stringify(data.response.status_details));
+
+        const statusDetails = data.response?.status_details;
+        if (statusDetails) {
+          console.log(`[${callId}] >>> status_details:`, JSON.stringify(statusDetails));
+        }
+
+        // If the model failed (e.g. quota, rate limit), surface it to the client immediately.
+        if (status === "failed") {
+          const err = (statusDetails as any)?.error;
+          const code = err?.code || err?.type || "unknown_error";
+          const message = err?.message || "The AI service failed to generate a response.";
+
+          console.error(`[${callId}] >>> AI response failed:`, { code, message });
+
+          // Add a visible transcript line so /live and /voice-test show what happened
+          const friendly = code === "insufficient_quota"
+            ? "Sorry — the voice AI is out of quota right now, so I can’t respond. Please top up the AI provider balance and try again."
+            : `Sorry — the voice AI failed (${code}). Please try again in a moment.`;
+
+          transcriptHistory.push({
+            role: "assistant",
+            text: friendly,
+            timestamp: new Date().toISOString(),
+          });
+          broadcastLiveCall({});
+
+          socket.send(JSON.stringify({
+            type: "fatal_error",
+            code,
+            message,
+            friendly,
+          }));
         }
       }
 
