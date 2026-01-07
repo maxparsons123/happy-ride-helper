@@ -70,6 +70,11 @@ serve(async (req) => {
   let sessionReady = false;
   let pendingMessages: any[] = [];
 
+  // When audio is committed (server VAD or manual commit), we expect a response.
+  // Some clients still send manual commit; we defensively trigger response.create after STT completes.
+  let awaitingResponseAfterCommit = false;
+  let responseCreatedSinceCommit = false;
+
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
   // Connect to OpenAI Realtime API
@@ -171,6 +176,12 @@ serve(async (req) => {
       // AI response started
       if (data.type === "response.created") {
         console.log(`[${callId}] >>> response.created - AI starting to generate`);
+
+        if (awaitingResponseAfterCommit) {
+          responseCreatedSinceCommit = true;
+          console.log(`[${callId}] >>> response.created observed for committed audio turn`);
+        }
+
         socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
       }
 
@@ -229,7 +240,7 @@ serve(async (req) => {
         }));
       }
 
-      // User transcript (with server VAD, response is auto-created)
+      // User transcript
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
         socket.send(
@@ -239,6 +250,22 @@ serve(async (req) => {
             role: "user",
           }),
         );
+
+        // IMPORTANT: With some clients and/or manual commit, OpenAI may not auto-create a response
+        // even when server_vad is enabled. If we have a committed audio turn and no response yet,
+        // explicitly request one now.
+        if (awaitingResponseAfterCommit && !responseCreatedSinceCommit && openaiWs?.readyState === WebSocket.OPEN) {
+          console.log(`[${callId}] No response.created after commit; sending response.create as fallback`);
+          openaiWs.send(
+            JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }),
+          );
+        }
+
+        awaitingResponseAfterCommit = false;
+        responseCreatedSinceCommit = false;
       }
 
       // Speech started (barge-in detection)
@@ -256,6 +283,8 @@ serve(async (req) => {
       // Audio buffer committed (server VAD auto-commits)
       if (data.type === "input_audio_buffer.committed") {
         console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
+        awaitingResponseAfterCommit = true;
+        responseCreatedSinceCommit = false;
       }
 
       // DEBUG: log response lifecycle events (helps diagnose missing audio)
@@ -397,10 +426,12 @@ serve(async (req) => {
         }
       }
 
-      // Manual commit (for clients that want to force end of speech)
-      // With server VAD, this is optional - server auto-detects speech end
+      // Manual commit (for push-to-talk clients)
+      // Mark that we should get a response for this turn.
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
         console.log(`[${callId}] Manual commit received`);
+        awaitingResponseAfterCommit = true;
+        responseCreatedSinceCommit = false;
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
       }
 
