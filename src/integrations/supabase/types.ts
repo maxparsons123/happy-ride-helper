@@ -74,6 +74,57 @@ export type Database = {
         }
         Relationships: []
       }
+      live_calls: {
+        Row: {
+          booking_confirmed: boolean
+          call_id: string
+          destination: string | null
+          ended_at: string | null
+          eta: string | null
+          fare: string | null
+          id: string
+          passengers: number | null
+          pickup: string | null
+          source: string
+          started_at: string
+          status: string
+          transcripts: Json
+          updated_at: string
+        }
+        Insert: {
+          booking_confirmed?: boolean
+          call_id: string
+          destination?: string | null
+          ended_at?: string | null
+          eta?: string | null
+          fare?: string | null
+          id?: string
+          passengers?: number | null
+          pickup?: string | null
+          source?: string
+          started_at?: string
+          status?: string
+          transcripts?: Json
+          updated_at?: string
+        }
+        Update: {
+          booking_confirmed?: boolean
+          call_id?: string
+          destination?: string | null
+          ended_at?: string | null
+          eta?: string | null
+          fare?: string | null
+          id?: string
+          passengers?: number | null
+          pickup?: string | null
+          source?: string
+          started_at?: string
+          status?: string
+          transcripts?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

@@ -83,6 +83,9 @@ serve(async (req) => {
   let bookingData: any = {};
   let sessionReady = false;
   let pendingMessages: any[] = [];
+  let callSource = "web"; // 'web' or 'asterisk'
+  let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
+  let currentAssistantText = ""; // Buffer for assistant transcript
 
   type KnownBooking = {
     pickup?: string;
@@ -90,11 +93,30 @@ serve(async (req) => {
     passengers?: number;
   };
 
-  // We keep our own “known booking” extracted from the user's *exact* transcript/text,
+  // We keep our own "known booking" extracted from the user's *exact* transcript/text,
   // then prefer it over the model's paraphrasing when the booking is confirmed.
   let knownBooking: KnownBooking = {};
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
+
+  const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+
+  // Broadcast live call updates to the database for monitoring
+  const broadcastLiveCall = async (updates: Record<string, any>) => {
+    try {
+      const { error } = await supabase.from("live_calls").upsert({
+        call_id: callId,
+        source: callSource,
+        started_at: callStartAt,
+        ...updates,
+        transcripts: transcriptHistory,
+        updated_at: new Date().toISOString()
+      }, { onConflict: "call_id" });
+      if (error) console.error(`[${callId}] Live call broadcast error:`, error);
+    } catch (e) {
+      console.error(`[${callId}] Live call broadcast exception:`, e);
+    }
+  };
 
   const extractFromText = (text: string): Partial<KnownBooking> => {
     const t = text || "";
@@ -108,7 +130,7 @@ serve(async (req) => {
     const toMatch = t.match(/\b(?:to|going\s+to|heading\s+to)\s+(.+)$/i);
     if (toMatch?.[1]) out.destination = normalize(toMatch[1]);
 
-    // Passengers: “3 passengers” / “three passengers”
+    // Passengers: "3 passengers" / "three passengers"
     const wordToNum: Record<string, number> = {
       one: 1,
       two: 2,
@@ -148,6 +170,12 @@ serve(async (req) => {
       before.passengers !== knownBooking.passengers
     ) {
       console.log(`[${callId}] Known booking updated (${source}):`, knownBooking);
+      // Broadcast booking updates
+      broadcastLiveCall({
+        pickup: knownBooking.pickup,
+        destination: knownBooking.destination,
+        passengers: knownBooking.passengers
+      });
     }
   };
 
@@ -155,8 +183,6 @@ serve(async (req) => {
   // Some clients still send manual commit; we defensively trigger response.create after STT completes.
   let awaitingResponseAfterCommit = false;
   let responseCreatedSinceCommit = false;
-
-  const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
   // Connect to OpenAI Realtime API
   const connectToOpenAI = () => {
@@ -222,6 +248,9 @@ serve(async (req) => {
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
 
+        // Broadcast call started
+        await broadcastLiveCall({ status: "active" });
+
         // Trigger initial greeting immediately - inject as system turn for faster response
         console.log(`[${callId}] Triggering initial greeting...`);
         openaiWs?.send(JSON.stringify({
@@ -265,6 +294,7 @@ serve(async (req) => {
       // AI response started
       if (data.type === "response.created") {
         console.log(`[${callId}] >>> response.created - AI starting to generate`);
+        currentAssistantText = ""; // Reset buffer
 
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
@@ -315,9 +345,18 @@ serve(async (req) => {
         console.log(`[${callId}] >>> response.audio.done - audio generation complete`);
       }
 
-      // Log audio transcript
+      // Log audio transcript done - save complete assistant message
       if (data.type === "response.audio_transcript.done") {
         console.log(`[${callId}] >>> response.audio_transcript.done: "${data.transcript}"`);
+        if (data.transcript) {
+          transcriptHistory.push({
+            role: "assistant",
+            text: data.transcript,
+            timestamp: new Date().toISOString()
+          });
+          // Broadcast transcript update
+          broadcastLiveCall({});
+        }
       }
 
       // Forward transcript for logging
@@ -333,6 +372,18 @@ serve(async (req) => {
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
         updateKnownBookingFromText(data.transcript, "stt");
+        
+        // Save user message to history
+        if (data.transcript) {
+          transcriptHistory.push({
+            role: "user",
+            text: data.transcript,
+            timestamp: new Date().toISOString()
+          });
+          // Broadcast transcript update
+          broadcastLiveCall({});
+        }
+        
         socket.send(
           JSON.stringify({
             type: "transcript",
@@ -421,6 +472,16 @@ serve(async (req) => {
             booking_status: "confirmed",
             call_start_at: callStartAt
           });
+
+          // Broadcast booking confirmed
+          await broadcastLiveCall({
+            pickup: finalBooking.pickup,
+            destination: finalBooking.destination,
+            passengers: finalBooking.passengers,
+            booking_confirmed: true,
+            fare: `£${fare}`,
+            eta: eta
+          });
           
           // Send function result back to OpenAI
           openaiWs?.send(JSON.stringify({
@@ -491,7 +552,11 @@ serve(async (req) => {
       if (message.type === "init") {
         callId = message.call_id || callId;
         callStartAt = new Date().toISOString();
-        console.log(`[${callId}] Call initialized`);
+        // Detect Asterisk calls by call_id prefix
+        if (callId.startsWith("ast-") || callId.startsWith("asterisk-")) {
+          callSource = "asterisk";
+        }
+        console.log(`[${callId}] Call initialized (source: ${callSource})`);
         return;
       }
       
@@ -506,6 +571,14 @@ serve(async (req) => {
       // TEXT MODE: Send text message directly (for testing without audio)
       if (message.type === "text") {
         updateKnownBookingFromText(message.text, "text");
+        // Save user text to history
+        transcriptHistory.push({
+          role: "user",
+          text: message.text,
+          timestamp: new Date().toISOString()
+        });
+        broadcastLiveCall({});
+        
         console.log(`[${callId}] Text mode input: ${message.text}`);
         if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({
@@ -535,6 +608,12 @@ serve(async (req) => {
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
       }
 
+      // Hangup from Asterisk
+      if (message.type === "hangup") {
+        console.log(`[${callId}] Hangup received`);
+        socket.close();
+      }
+
     } catch (error) {
       console.error(`[${callId}] Message parse error:`, error);
     }
@@ -547,6 +626,12 @@ serve(async (req) => {
     await supabase.from("call_logs")
       .update({ call_end_at: new Date().toISOString() })
       .eq("call_id", callId);
+
+    // Update live call status
+    await broadcastLiveCall({
+      status: "completed",
+      ended_at: new Date().toISOString()
+    });
     
     openaiWs?.close();
   };
