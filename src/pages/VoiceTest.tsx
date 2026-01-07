@@ -270,8 +270,13 @@ export default function VoiceTest() {
 
     processorRef.current?.disconnect();
     processorRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach(t => t.stop());
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
     mediaStreamRef.current = null;
+
+    // Tell the backend we're done speaking (push-to-talk)
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "commit" }));
+    }
 
     setTimeout(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
