@@ -248,15 +248,40 @@ serve(async (req) => {
               {
                 type: "function",
                 name: "book_taxi",
-                description: "Book a taxi when pickup, destination and number of passengers are all confirmed by the customer",
+                description: "Book a taxi when all required booking details are confirmed. Extract EXACT addresses as spoken - never paraphrase, correct spelling, add/remove postcodes, or normalise formatting.",
                 parameters: {
                   type: "object",
                   properties: {
-                    pickup: { type: "string", description: "Pickup location exactly as customer stated" },
-                    destination: { type: "string", description: "Drop-off location exactly as customer stated" },
-                    passengers: { type: "integer", description: "Number of passengers" }
+                    pickup_location: { 
+                      type: "string", 
+                      description: "Pickup address EXACTLY as customer stated. Use 'by_gps' only if customer says 'my location' or 'here' with no other address. Never guess or infer." 
+                    },
+                    dropoff_location: { 
+                      type: "string", 
+                      description: "Dropoff address EXACTLY as customer stated. Use 'as directed' if customer says 'as directed' or doesn't specify. Never guess or infer." 
+                    },
+                    pickup_time: { 
+                      type: "string", 
+                      description: "Pickup time in 'YYYY-MM-DD HH:MM' format or 'ASAP'. Default to 'ASAP' if no time mentioned." 
+                    },
+                    number_of_passengers: { 
+                      type: "integer", 
+                      description: "Number of passengers (1-8)" 
+                    },
+                    luggage: { 
+                      type: "string", 
+                      description: "Luggage details exactly as stated: '2 luggage', '3 bags', 'one suitcase'. Null if not mentioned." 
+                    },
+                    special_requests: { 
+                      type: "string", 
+                      description: "Any driver instructions, preferences, vehicle requests, or notes EXACTLY as stated. Examples: 'ring me when outside', 'wheelchair access', 'driver 314 please', 'send a lady driver', 'I have a dog'" 
+                    },
+                    nearest_place: { 
+                      type: "string", 
+                      description: "Nearest landmark if customer uses words like 'nearest' or 'closest'. E.g., 'nearest Tesco'" 
+                    }
                   },
-                  required: ["pickup", "destination", "passengers"]
+                  required: ["pickup_location", "dropoff_location", "number_of_passengers"]
                 }
               }
             ],
@@ -482,45 +507,93 @@ serve(async (req) => {
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
 
-          // Prefer exact values we extracted from the user's transcript/text (prevents 52A -> 50A style drift)
+          // Map new field names and prefer exact values from user transcript
           const finalBooking = {
-            pickup: knownBooking.pickup ?? args.pickup,
-            destination: knownBooking.destination ?? args.destination,
-            passengers: knownBooking.passengers ?? args.passengers,
+            pickup_location: knownBooking.pickup ?? args.pickup_location,
+            dropoff_location: knownBooking.destination ?? args.dropoff_location,
+            pickup_time: args.pickup_time || "ASAP",
+            number_of_passengers: knownBooking.passengers ?? args.number_of_passengers,
+            luggage: args.luggage || null,
+            special_requests: args.special_requests || null,
+            nearest_place: args.nearest_place || null
           };
 
           bookingData = finalBooking;
           console.log(`[${callId}] Booking (final):`, finalBooking);
           
-          // Calculate fare
-          const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
-          const is6Seater = Number(finalBooking.passengers || 0) > 4;
+          // Calculate fare based on destination
+          const destLower = String(finalBooking.dropoff_location || "").toLowerCase();
+          const isAirport = destLower.includes("airport");
+          const is6Seater = Number(finalBooking.number_of_passengers || 0) > 4;
           let fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
           if (is6Seater) fare += 5;
           const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
           
+          // Build TTS confirmation message with all booking details
+          let confirmationParts: string[] = [];
+          confirmationParts.push(`Brilliant! Your taxi is booked`);
+          
+          // Pickup info
+          if (finalBooking.pickup_location && finalBooking.pickup_location !== "by_gps") {
+            confirmationParts.push(`from ${finalBooking.pickup_location}`);
+          }
+          
+          // Dropoff info
+          if (finalBooking.dropoff_location && finalBooking.dropoff_location !== "as directed") {
+            confirmationParts.push(`to ${finalBooking.dropoff_location}`);
+          } else if (finalBooking.dropoff_location === "as directed") {
+            confirmationParts.push(`and the driver will take your directions`);
+          }
+          
+          // Passenger count
+          const passengerText = finalBooking.number_of_passengers === 1 
+            ? "1 passenger" 
+            : `${finalBooking.number_of_passengers} passengers`;
+          confirmationParts.push(`for ${passengerText}`);
+          
+          // Pickup time
+          if (finalBooking.pickup_time && finalBooking.pickup_time !== "ASAP") {
+            confirmationParts.push(`at ${finalBooking.pickup_time}`);
+          }
+          
+          // Luggage
+          if (finalBooking.luggage) {
+            confirmationParts.push(`with ${finalBooking.luggage}`);
+          }
+          
+          // ETA and fare
+          confirmationParts.push(`The driver will be with you in ${eta} and the fare is £${fare}`);
+          
+          // Special requests acknowledgment
+          if (finalBooking.special_requests) {
+            confirmationParts.push(`I've noted: ${finalBooking.special_requests}`);
+          }
+          
+          const confirmationMessage = confirmationParts.join(". ") + ". Have a lovely journey!";
+          
           // Log to database
           await supabase.from("call_logs").insert({
             call_id: callId,
-            pickup: finalBooking.pickup,
-            destination: finalBooking.destination,
-            passengers: finalBooking.passengers,
+            pickup: finalBooking.pickup_location,
+            destination: finalBooking.dropoff_location,
+            passengers: finalBooking.number_of_passengers,
             estimated_fare: `£${fare}`,
             booking_status: "confirmed",
-            call_start_at: callStartAt
+            call_start_at: callStartAt,
+            user_transcript: finalBooking.special_requests // Store special requests
           });
 
           // Broadcast booking confirmed
           await broadcastLiveCall({
-            pickup: finalBooking.pickup,
-            destination: finalBooking.destination,
-            passengers: finalBooking.passengers,
+            pickup: finalBooking.pickup_location,
+            destination: finalBooking.dropoff_location,
+            passengers: finalBooking.number_of_passengers,
             booking_confirmed: true,
             fare: `£${fare}`,
             eta: eta
           });
           
-          // Send function result back to OpenAI
+          // Send function result back to OpenAI with structured response for TTS
           openaiWs?.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
@@ -529,16 +602,21 @@ serve(async (req) => {
               output: JSON.stringify({
                 success: true,
                 booking_id: callId,
-                pickup: finalBooking.pickup,
-                destination: finalBooking.destination,
-                passengers: finalBooking.passengers,
+                confirmation_message: confirmationMessage,
+                pickup_location: finalBooking.pickup_location,
+                dropoff_location: finalBooking.dropoff_location,
+                pickup_time: finalBooking.pickup_time,
+                number_of_passengers: finalBooking.number_of_passengers,
+                luggage: finalBooking.luggage,
+                special_requests: finalBooking.special_requests,
+                nearest_place: finalBooking.nearest_place,
                 estimated_fare: `£${fare}`,
                 eta: eta
               })
             }
           }));
           
-          // Trigger response
+          // Trigger response - OpenAI will use the confirmation_message for TTS
           openaiWs?.send(
             JSON.stringify({
               type: "response.create",
@@ -549,7 +627,12 @@ serve(async (req) => {
           // Notify client
           socket.send(JSON.stringify({
             type: "booking_confirmed",
-            booking: { ...finalBooking, fare: `£${fare}`, eta }
+            booking: { 
+              ...finalBooking, 
+              fare: `£${fare}`, 
+              eta,
+              confirmation_message: confirmationMessage
+            }
           }));
         }
       }
