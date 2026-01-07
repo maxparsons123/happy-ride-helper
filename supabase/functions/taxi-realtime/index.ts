@@ -72,7 +72,7 @@ YOU MUST PRESERVE ADDRESSES EXACTLY AS SPOKEN. THIS IS THE MOST IMPORTANT RULE.
    - "Was that 52 with the letter A at the end?"
    - "Just to confirm, was that house number one-two-one-four?"
 
-6. WHEN CALLING book_taxi:
+6. WHEN CALLING book_taxi or update_booking:
    - Use the EXACT address the customer spoke
    - Do NOT "clean up" or standardize addresses
    - Include flats, units, letters, landmarks exactly as stated
@@ -81,12 +81,34 @@ YOU MUST PRESERVE ADDRESSES EXACTLY AS SPOKEN. THIS IS THE MOST IMPORTANT RULE.
 WHEN TO CALL book_taxi:
 - Call IMMEDIATELY when you have confirmed: pickup + destination + passengers
 - Do NOT wait for customer to say "yes" or "confirm" - the function IS the confirmation
-- If customer changes details after booking, apologize and take new booking
+
+=== UPDATE BOOKING FLOW ===
+After a booking is confirmed, if the customer wants to change ANY details:
+- Use the update_booking function for corrections
+- Only include fields the customer is CHANGING - leave others null
+- Say "No problem, I'll update that for you" and confirm the change
+- Examples of update triggers:
+  - "Actually, make that..." / "Sorry, I meant..."
+  - "Can you change the pickup to..." / "The address is wrong..."
+  - "Add luggage" / "I need a wheelchair accessible vehicle"
+  - "Ring me when outside" / "Driver 314 please"
+
+LUGGAGE HANDLING:
+- "2 luggage", "3 bags", "one suitcase" → luggage field
+- "remove luggage" → luggage = "CLEAR"
+- Luggage ALWAYS has priority over special_requests
+
+SPECIAL REQUESTS (go to special_requests field):
+- Driver instructions: "ring me when outside", "tell driver to hurry"
+- Driver requests: "driver 314 please", "same driver again", "lady driver"
+- Vehicle requests: "wheelchair access", "child seat"
+- Other notes: "I have a dog", "wait at X for 10 minutes"
 
 GENERAL RULES:
 - Never ask for information you already have
-- If customer mentions extra requirements (wheelchair, child seat), acknowledge but proceed with booking
+- If customer mentions extra requirements, acknowledge and include in booking
 - Stay focused on completing the booking efficiently`;
+
 
 serve(async (req) => {
   // Handle regular HTTP requests (health check)
@@ -112,6 +134,7 @@ serve(async (req) => {
   
   let openaiWs: WebSocket | null = null;
   let callId = `call-${Date.now()}`;
+  let referenceNumber = `REF-${Date.now().toString(36).toUpperCase()}`;
   let callStartAt = new Date().toISOString();
   let bookingData: any = {};
   let sessionReady = false;
@@ -119,6 +142,20 @@ serve(async (req) => {
   let callSource = "web"; // 'web' or 'asterisk'
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
+  let bookingConfirmed = false; // Track if initial booking is done
+  
+  // Current confirmed booking state for updates
+  interface ConfirmedBooking {
+    pickup_location: string | null;
+    dropoff_location: string | null;
+    pickup_time: string | null;
+    number_of_passengers: number | null;
+    luggage: string | null;
+    special_requests: string | null;
+    nearest_place: string | null;
+    reference_number: string;
+  }
+  let confirmedBooking: ConfirmedBooking | null = null;
 
   type KnownBooking = {
     pickup?: string;
@@ -257,7 +294,7 @@ serve(async (req) => {
               {
                 type: "function",
                 name: "book_taxi",
-                description: "Book a taxi when all required booking details are confirmed. Extract EXACT addresses as spoken - never paraphrase, correct spelling, add/remove postcodes, or normalise formatting.",
+                description: "Book a NEW taxi when all required booking details are confirmed. Extract EXACT addresses as spoken - never paraphrase, correct spelling, add/remove postcodes, or normalise formatting.",
                 parameters: {
                   type: "object",
                   properties: {
@@ -291,6 +328,45 @@ serve(async (req) => {
                     }
                   },
                   required: ["pickup_location", "dropoff_location", "number_of_passengers"]
+                }
+              },
+              {
+                type: "function",
+                name: "update_booking",
+                description: "Update an EXISTING booking when customer wants to change or correct details. Only include fields being changed - leave unchanged fields null. Use this for corrections like 'actually it's 1214A not 124A', adding luggage, special requests, or changing addresses.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    pickup_location: { 
+                      type: "string", 
+                      description: "New pickup address EXACTLY as customer stated. Only if customer is changing pickup. Null if not changing." 
+                    },
+                    dropoff_location: { 
+                      type: "string", 
+                      description: "New dropoff address EXACTLY as customer stated. Only if customer is changing dropoff. Null if not changing." 
+                    },
+                    pickup_time: { 
+                      type: "string", 
+                      description: "New pickup time in 'YYYY-MM-DD HH:MM' format or 'ASAP'. Only if customer is changing time. Null if not changing." 
+                    },
+                    number_of_passengers: { 
+                      type: "integer", 
+                      description: "New number of passengers. Only if customer is changing passenger count. Null if not changing." 
+                    },
+                    luggage: { 
+                      type: "string", 
+                      description: "Luggage details exactly as stated. Use 'CLEAR' if customer says 'remove luggage'. Null if not changing." 
+                    },
+                    special_requests: { 
+                      type: "string", 
+                      description: "Any driver instructions, preferences, vehicle requests, or notes EXACTLY as stated. Null if not adding." 
+                    },
+                    nearest_place: { 
+                      type: "string", 
+                      description: "Nearest landmark if customer updates this. Null if not changing." 
+                    }
+                  },
+                  required: []
                 }
               }
             ],
@@ -516,7 +592,6 @@ serve(async (req) => {
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
 
-          // Map new field names and prefer exact values from user transcript
           // Use AI-extracted details exactly as provided in the function call
           const finalBooking = {
             pickup_location: args.pickup_location,
@@ -581,6 +656,13 @@ serve(async (req) => {
           
           const confirmationMessage = confirmationParts.join(". ") + ". Have a lovely journey!";
           
+          // Save confirmed booking state for updates
+          confirmedBooking = {
+            ...finalBooking,
+            reference_number: referenceNumber
+          };
+          bookingConfirmed = true;
+          
           // Log to database
           await supabase.from("call_logs").insert({
             call_id: callId,
@@ -612,6 +694,7 @@ serve(async (req) => {
               output: JSON.stringify({
                 success: true,
                 booking_id: callId,
+                reference_number: referenceNumber,
                 confirmation_message: confirmationMessage,
                 pickup_location: finalBooking.pickup_location,
                 dropoff_location: finalBooking.dropoff_location,
@@ -639,10 +722,126 @@ serve(async (req) => {
             type: "booking_confirmed",
             booking: { 
               ...finalBooking, 
+              reference_number: referenceNumber,
               fare: `£${fare}`, 
               eta,
               confirmation_message: confirmationMessage
             }
+          }));
+        }
+        
+        // Handle booking updates
+        if (data.name === "update_booking" && confirmedBooking) {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] Update booking request:`, args);
+          
+          // Build list of what's being updated
+          const updates: string[] = [];
+          
+          // Apply updates - only change fields that are explicitly provided
+          if (args.pickup_location !== null && args.pickup_location !== undefined) {
+            confirmedBooking.pickup_location = args.pickup_location;
+            updates.push(`pickup to ${args.pickup_location}`);
+          }
+          if (args.dropoff_location !== null && args.dropoff_location !== undefined) {
+            confirmedBooking.dropoff_location = args.dropoff_location;
+            updates.push(`dropoff to ${args.dropoff_location}`);
+          }
+          if (args.pickup_time !== null && args.pickup_time !== undefined) {
+            confirmedBooking.pickup_time = args.pickup_time;
+            updates.push(`time to ${args.pickup_time}`);
+          }
+          if (args.number_of_passengers !== null && args.number_of_passengers !== undefined) {
+            confirmedBooking.number_of_passengers = args.number_of_passengers;
+            updates.push(`passengers to ${args.number_of_passengers}`);
+          }
+          if (args.luggage !== null && args.luggage !== undefined) {
+            if (args.luggage === "CLEAR") {
+              confirmedBooking.luggage = null;
+              updates.push(`removed luggage`);
+            } else {
+              confirmedBooking.luggage = args.luggage;
+              updates.push(`luggage: ${args.luggage}`);
+            }
+          }
+          if (args.special_requests !== null && args.special_requests !== undefined) {
+            // Append to existing special requests
+            if (confirmedBooking.special_requests) {
+              confirmedBooking.special_requests = `${confirmedBooking.special_requests}; ${args.special_requests}`;
+            } else {
+              confirmedBooking.special_requests = args.special_requests;
+            }
+            updates.push(`noted: ${args.special_requests}`);
+          }
+          if (args.nearest_place !== null && args.nearest_place !== undefined) {
+            confirmedBooking.nearest_place = args.nearest_place;
+            updates.push(`nearest place: ${args.nearest_place}`);
+          }
+          
+          console.log(`[${callId}] Updated booking:`, confirmedBooking);
+          
+          // Recalculate fare if destination changed
+          const destLower = String(confirmedBooking.dropoff_location || "").toLowerCase();
+          const isAirport = destLower.includes("airport");
+          const is6Seater = Number(confirmedBooking.number_of_passengers || 0) > 4;
+          let fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
+          if (is6Seater) fare += 5;
+          
+          // Build update confirmation message
+          const updateMessage = updates.length > 0 
+            ? `No problem! I've updated your booking: ${updates.join(", ")}. Your taxi is still on its way.`
+            : `Your booking is unchanged.`;
+          
+          // Update database
+          await supabase.from("call_logs")
+            .update({
+              pickup: confirmedBooking.pickup_location,
+              destination: confirmedBooking.dropoff_location,
+              passengers: confirmedBooking.number_of_passengers,
+              estimated_fare: `£${fare}`,
+              user_transcript: confirmedBooking.special_requests
+            })
+            .eq("call_id", callId);
+          
+          // Broadcast update
+          await broadcastLiveCall({
+            pickup: confirmedBooking.pickup_location,
+            destination: confirmedBooking.dropoff_location,
+            passengers: confirmedBooking.number_of_passengers,
+            fare: `£${fare}`
+          });
+          
+          // Send function result back to OpenAI
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: data.call_id,
+              output: JSON.stringify({
+                success: true,
+                reference_number: referenceNumber,
+                update_message: updateMessage,
+                updated_fields: updates,
+                current_booking: confirmedBooking,
+                estimated_fare: `£${fare}`
+              })
+            }
+          }));
+          
+          // Trigger response
+          openaiWs?.send(
+            JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }),
+          );
+          
+          // Notify client
+          socket.send(JSON.stringify({
+            type: "booking_updated",
+            booking: confirmedBooking,
+            updates: updates,
+            fare: `£${fare}`
           }));
         }
       }
