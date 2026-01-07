@@ -65,6 +65,7 @@ YOU MUST PRESERVE ADDRESSES EXACTLY AS SPOKEN. THIS IS THE MOST IMPORTANT RULE.
 4. LETTERS IN ADDRESSES:
    - A, B, C after numbers (52A, 18B, 7C, 1214A) - always include the letter
    - "A" sounds like "8" - if unsure ask "Was that the letter A or the number eight?"
+   - If customer SPELLS a street name letter-by-letter (e.g. "D-O-V-E-Y"), that spelling is authoritative - use it exactly
    
 5. WHEN IN DOUBT, ALWAYS ASK:
    - "Sorry, was that fifteen or fifty?"
@@ -141,6 +142,7 @@ serve(async (req) => {
   let pendingMessages: any[] = [];
   let callSource = "web"; // 'web' or 'asterisk'
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
+  let lastUserTranscript: string | null = null; // last STT/text input (for corrections like spelling)
   let currentAssistantText = ""; // Buffer for assistant transcript
   let bookingConfirmed = false; // Track if initial booking is done
   
@@ -168,6 +170,31 @@ serve(async (req) => {
   let knownBooking: KnownBooking = {};
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
+
+  const toTitleCase = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
+
+  // Extract spelled words like "D-O-V-E-Y" or "D O V E Y" from a transcript.
+  const extractSpelledWord = (text: string): string | null => {
+    const m = (text || "").match(/(?:\b[A-Za-z]\b(?:\s*-\s*|\s+)){2,}\b[A-Za-z]\b/);
+    if (!m?.[0]) return null;
+    const letters = m[0].split(/[\s-]+/).filter(Boolean);
+    if (letters.length < 3) return null;
+    return letters.join("").toUpperCase();
+  };
+
+  // If caller spells the street name, build a corrected pickup like: "34 Dovey Road".
+  const buildPickupFromSpellingTranscript = (text: string): string | null => {
+    const t = text || "";
+    const spelled = extractSpelledWord(t);
+    if (!spelled) return null;
+
+    const number = t.match(/\b(\d+[A-Za-z]?)\b/)?.[1] || null;
+    const roadTypeMatch = t.match(/\b(road|street|lane|drive|avenue|close|way|crescent|place|court)\b/i);
+    const roadType = roadTypeMatch?.[0] || null;
+
+    if (!number || !roadType) return null;
+    return `${number} ${toTitleCase(spelled)} ${roadType}`;
+  };
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -518,6 +545,7 @@ serve(async (req) => {
       // User transcript
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
+        lastUserTranscript = data.transcript || null;
         updateKnownBookingFromText(data.transcript, "stt");
         
         // Save user message to history
@@ -740,8 +768,14 @@ serve(async (req) => {
           
           // Apply updates - only change fields that are explicitly provided
           if (args.pickup_location !== null && args.pickup_location !== undefined) {
-            confirmedBooking.pickup_location = args.pickup_location;
-            updates.push(`pickup to ${args.pickup_location}`);
+            // If caller spelled the street name (e.g. "D-O-V-E-Y"), prefer that spelling.
+            const spelledPickup = lastUserTranscript ? buildPickupFromSpellingTranscript(lastUserTranscript) : null;
+            const newPickup = spelledPickup ?? args.pickup_location;
+            if (spelledPickup) {
+              console.log(`[${callId}] Applying spelling-derived pickup override:`, { lastUserTranscript, spelledPickup, argsPickup: args.pickup_location });
+            }
+            confirmedBooking.pickup_location = newPickup;
+            updates.push(`pickup to ${newPickup}`);
           }
           if (args.dropoff_location !== null && args.dropoff_location !== undefined) {
             confirmedBooking.dropoff_location = args.dropoff_location;
@@ -897,10 +931,11 @@ serve(async (req) => {
         }));
       }
 
-      // TEXT MODE: Send text message directly (for testing without audio)
-      if (message.type === "text") {
-        updateKnownBookingFromText(message.text, "text");
-        // Save user text to history
+       // TEXT MODE: Send text message directly (for testing without audio)
+       if (message.type === "text") {
+         lastUserTranscript = message.text || null;
+         updateKnownBookingFromText(message.text, "text");
+         // Save user text to history
         transcriptHistory.push({
           role: "user",
           text: message.text,
