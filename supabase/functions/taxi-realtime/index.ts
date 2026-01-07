@@ -96,7 +96,7 @@ serve(async (req) => {
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            voice: "ash", // British voice
+            voice: "shimmer", // British female voice
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { model: "whisper-1" },
@@ -128,13 +128,6 @@ serve(async (req) => {
             instructions: SYSTEM_INSTRUCTIONS
           }
         }));
-
-        // Send initial greeting after session is configured
-        console.log(`[${callId}] Triggering initial greeting...`);
-        openaiWs?.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["audio", "text"] }
-        }));
       }
 
       // Session updated - now ready
@@ -142,6 +135,13 @@ serve(async (req) => {
         console.log(`[${callId}] Session ready! Effective config:`, data.session);
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
+
+        // Trigger initial greeting NOW that session is fully configured
+        console.log(`[${callId}] Triggering initial greeting...`);
+        openaiWs?.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"] }
+        }));
 
         // Process any pending messages
         while (pendingMessages.length > 0) {
