@@ -14,3 +14,6 @@ verify_jwt = false
 
 [functions.taxi-booking-webhook]
 verify_jwt = false
+
+[functions.taxi-realtime]
+verify_jwt = false
