@@ -24,6 +24,7 @@ import base64
 import time
 import logging
 from typing import Optional
+from collections import deque
 
 try:
     import websockets
@@ -90,6 +91,11 @@ class TaxiBridge:
         self.call_start_time = time.time()
         self.client_addr = writer.get_extra_info('peername')
         
+        # Audio playback queue for smoother delivery
+        self.audio_queue: deque = deque()
+        self.audio_bytes_sent = 0
+        self.audio_chunks_received = 0
+        
     async def run(self):
         """Main handler for a single call."""
         logger.info(f"New connection from {self.client_addr}")
@@ -103,17 +109,21 @@ class TaxiBridge:
                 logger.info("Connected to taxi-realtime")
                 
                 # Initialize session
-                call_id = f"asterisk-{int(time.time() * 1000)}"
+                call_id = f"ast-{int(time.time())}"
                 await ws.send(json.dumps({
                     "type": "init",
                     "call_id": call_id
                 }))
                 logger.info(f"Session initialized: {call_id}")
                 
-                # Run both directions concurrently
+                # Run three tasks concurrently:
+                # 1. Asterisk -> AI (send caller audio)
+                # 2. AI -> Queue (receive AI audio into queue)  
+                # 3. Queue -> Asterisk (play audio to caller)
                 await asyncio.gather(
                     self.asterisk_to_ai(),
-                    self.ai_to_asterisk()
+                    self.ai_to_queue(),
+                    self.queue_to_asterisk()
                 )
                 
         except Exception as e:
@@ -180,12 +190,12 @@ class TaxiBridge:
                 logger.error(f"Error receiving from Asterisk: {e}")
                 self.running = False
                 break
-                
-    async def ai_to_asterisk(self):
-        """Receive audio from AI (24kHz), downsample to 8kHz, send to Asterisk."""
+    
+    async def ai_to_queue(self):
+        """Receive messages from AI WebSocket and queue audio for playback."""
         while self.running and self.ws:
             try:
-                message = await asyncio.wait_for(self.ws.recv(), timeout=0.1)
+                message = await self.ws.recv()
                 data = json.loads(message)
                 
                 msg_type = data.get("type")
@@ -193,15 +203,16 @@ class TaxiBridge:
                 if msg_type == "audio":
                     # Decode base64 audio (24kHz from AI)
                     audio_b64 = data.get("audio", "")
-                    audio_bytes = base64.b64decode(audio_b64)
-                    
-                    # Downsample 24kHz -> 8kHz for Asterisk
-                    downsampled = resample_audio(audio_bytes, AI_RATE, AST_RATE)
-                    
-                    # Send to Asterisk as AudioSocket frame
-                    header = struct.pack('>BH', MSG_AUDIO, len(downsampled))
-                    self.writer.write(header + downsampled)
-                    await self.writer.drain()
+                    if audio_b64:
+                        audio_bytes = base64.b64decode(audio_b64)
+                        self.audio_chunks_received += 1
+                        
+                        # Downsample 24kHz -> 8kHz for Asterisk
+                        downsampled = resample_audio(audio_bytes, AI_RATE, AST_RATE)
+                        
+                        # Add to playback queue
+                        self.audio_queue.append(downsampled)
+                        logger.debug(f"Queued audio chunk #{self.audio_chunks_received}, size: {len(downsampled)}")
                     
                 elif msg_type == "session_ready":
                     logger.info("Taxi AI session ready")
@@ -209,20 +220,23 @@ class TaxiBridge:
                 elif msg_type == "transcript":
                     role = data.get("role", "")
                     text = data.get("text", "")
-                    logger.info(f"[{role}] {text}")
+                    if text.strip():
+                        logger.info(f"[{role}] {text}")
                     
                 elif msg_type == "booking_confirmed":
                     booking = data.get("booking", {})
                     logger.info(f"BOOKING CONFIRMED: {booking}")
                     
+                elif msg_type == "ai_speaking":
+                    speaking = data.get("speaking", False)
+                    logger.info(f"AI speaking: {speaking}")
+                    
                 elif msg_type == "response_done":
-                    logger.info("AI response complete")
+                    logger.info(f"AI response complete. Chunks received: {self.audio_chunks_received}")
                     
                 elif msg_type == "error":
                     logger.error(f"WebSocket error: {data.get('error')}")
                     
-            except asyncio.TimeoutError:
-                continue
             except websockets.ConnectionClosed:
                 logger.info("WebSocket connection closed")
                 self.running = False
@@ -231,12 +245,56 @@ class TaxiBridge:
                 logger.error(f"Error receiving from WebSocket: {e}")
                 continue
                 
+    async def queue_to_asterisk(self):
+        """Send queued audio to Asterisk at proper rate."""
+        # Send audio at 8kHz rate (8000 samples/sec * 2 bytes = 16000 bytes/sec)
+        bytes_per_second = AST_RATE * 2
+        chunk_duration = 0.02  # 20ms chunks for smooth playback
+        chunk_size = int(bytes_per_second * chunk_duration)
+        
+        audio_buffer = bytearray()
+        last_send_time = time.time()
+        
+        while self.running:
+            try:
+                # Collect audio from queue into buffer
+                while self.audio_queue:
+                    audio_buffer.extend(self.audio_queue.popleft())
+                
+                # Send chunks at proper rate
+                if len(audio_buffer) >= chunk_size:
+                    current_time = time.time()
+                    elapsed = current_time - last_send_time
+                    
+                    # Rate limit to prevent overwhelming Asterisk
+                    if elapsed < chunk_duration:
+                        await asyncio.sleep(chunk_duration - elapsed)
+                    
+                    chunk = bytes(audio_buffer[:chunk_size])
+                    audio_buffer = audio_buffer[chunk_size:]
+                    
+                    # Send to Asterisk as AudioSocket frame
+                    header = struct.pack('>BH', MSG_AUDIO, len(chunk))
+                    self.writer.write(header + chunk)
+                    await self.writer.drain()
+                    
+                    self.audio_bytes_sent += len(chunk)
+                    last_send_time = time.time()
+                else:
+                    # No audio ready, sleep briefly
+                    await asyncio.sleep(0.005)
+                    
+            except Exception as e:
+                logger.error(f"Error sending to Asterisk: {e}")
+                break
+                
     async def cleanup(self):
         """Clean up resources."""
         self.running = False
         
         call_duration = time.time() - self.call_start_time
         logger.info(f"Call ended. Duration: {call_duration:.1f}s")
+        logger.info(f"Audio stats - Chunks received: {self.audio_chunks_received}, Bytes sent: {self.audio_bytes_sent}")
         
         try:
             self.writer.close()
