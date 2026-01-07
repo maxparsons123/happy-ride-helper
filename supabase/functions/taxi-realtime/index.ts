@@ -60,6 +60,7 @@ serve(async (req) => {
   let bookingData: any = {};
   let sessionReady = false;
   let pendingMessages: any[] = [];
+  let awaitingUserTranscriptForResponse = false;
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -192,6 +193,16 @@ serve(async (req) => {
           text: data.transcript,
           role: "user"
         }));
+
+        // In push-to-talk mode, only request a response AFTER the transcript arrives.
+        if (awaitingUserTranscriptForResponse && openaiWs?.readyState === WebSocket.OPEN) {
+          awaitingUserTranscriptForResponse = false;
+          console.log(`[${callId}] Transcript received; requesting response now`);
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
       }
 
       // Handle function calls
@@ -325,12 +336,9 @@ serve(async (req) => {
 
       // Commit audio buffer (end of speech) - push-to-talk mode
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
-        console.log(`[${callId}] Committing audio buffer and requesting response`);
+        console.log(`[${callId}] Committing audio buffer (will request response after transcript)`);
+        awaitingUserTranscriptForResponse = true;
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["audio", "text"] }
-        }));
       }
 
     } catch (error) {
