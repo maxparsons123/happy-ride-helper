@@ -24,6 +24,7 @@ export default function VoiceTest() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [booking, setBooking] = useState<Booking | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("Connect first...");
   const [textInput, setTextInput] = useState("");
   
@@ -160,6 +161,7 @@ export default function VoiceTest() {
 
       if (data.type === "audio") {
         console.log("Received audio chunk");
+        setIsSpeaking(true);
         playAudioChunk(data.audio);
       }
 
@@ -171,12 +173,15 @@ export default function VoiceTest() {
         }
       }
 
-      if (data.type === "response_done" && currentTranscriptRef.current) {
-        const responseLatency = speechStartTimeRef.current > 0 ? Date.now() - speechStartTimeRef.current : undefined;
-        addMessage(currentTranscriptRef.current, "assistant", responseLatency);
-        currentTranscriptRef.current = "";
-        speechStartTimeRef.current = 0;
-        firstAudioTimeRef.current = 0;
+      if (data.type === "response_done") {
+        setIsSpeaking(false);
+        if (currentTranscriptRef.current) {
+          const responseLatency = speechStartTimeRef.current > 0 ? Date.now() - speechStartTimeRef.current : undefined;
+          addMessage(currentTranscriptRef.current, "assistant", responseLatency);
+          currentTranscriptRef.current = "";
+          speechStartTimeRef.current = 0;
+          firstAudioTimeRef.current = 0;
+        }
       }
 
       if (data.type === "booking_confirmed") {
@@ -340,6 +345,7 @@ export default function VoiceTest() {
 
         {/* Voice Area */}
         <div className="flex items-center gap-4 p-4 bg-card rounded-xl border border-chat-border">
+          {/* Mic Button */}
           <button
             onMouseDown={startRecording}
             onMouseUp={stopRecording}
@@ -356,10 +362,25 @@ export default function VoiceTest() {
           >
             <Mic className="w-6 h-6 text-white" />
           </button>
-          <div>
+          
+          <div className="flex-1">
             <p className="font-semibold">Hold to speak</p>
             <p className="text-sm text-muted-foreground">{voiceStatus}</p>
           </div>
+
+          {/* AI Speaking Indicator */}
+          {isSpeaking && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-primary/20 rounded-full">
+              <div className="flex items-center gap-1">
+                <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_infinite]" />
+                <span className="w-1 h-4 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.1s_infinite]" />
+                <span className="w-1 h-2 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.2s_infinite]" />
+                <span className="w-1 h-5 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.3s_infinite]" />
+                <span className="w-1 h-3 bg-primary rounded-full animate-[pulse_0.6s_ease-in-out_0.4s_infinite]" />
+              </div>
+              <span className="text-sm font-medium text-primary">AI Speaking</span>
+            </div>
+          )}
         </div>
 
         {/* Messages */}
