@@ -173,27 +173,98 @@ serve(async (req) => {
 
   const toTitleCase = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
 
-  // Extract spelled words like "D-O-V-E-Y" or "D O V E Y" from a transcript.
-  const extractSpelledWord = (text: string): string | null => {
-    const m = (text || "").match(/(?:\b[A-Za-z]\b(?:\s*-\s*|\s+)){2,}\b[A-Za-z]\b/);
-    if (!m?.[0]) return null;
-    const letters = m[0].split(/[\s-]+/).filter(Boolean);
-    if (letters.length < 3) return null;
-    return letters.join("").toUpperCase();
+  // NATO phonetic alphabet mapping
+  const natoToLetter: Record<string, string> = {
+    alpha: "A", bravo: "B", charlie: "C", delta: "D", echo: "E",
+    foxtrot: "F", golf: "G", hotel: "H", india: "I", juliet: "J",
+    kilo: "K", lima: "L", mike: "M", november: "N", oscar: "O",
+    papa: "P", quebec: "Q", romeo: "R", sierra: "S", tango: "T",
+    uniform: "U", victor: "V", whiskey: "W", xray: "X", yankee: "Y", zulu: "Z"
   };
 
-  // If caller spells the street name, build a corrected pickup like: "34 Dovey Road".
-  const buildPickupFromSpellingTranscript = (text: string): string | null => {
+  // Phonetic letter names (how people say letters)
+  const phoneticToLetter: Record<string, string> = {
+    ay: "A", bee: "B", see: "C", dee: "D", ee: "E",
+    eff: "F", gee: "G", aitch: "H", eye: "I", jay: "J",
+    kay: "K", el: "L", em: "M", en: "N", oh: "O",
+    pee: "P", cue: "Q", queue: "Q", are: "R", ess: "S", tee: "T",
+    you: "U", vee: "V", double: "W", ex: "X", why: "Y", zee: "Z", zed: "Z"
+  };
+
+  // Extract spelled words from multiple formats:
+  // 1. "D-O-V-E-Y" or "D O V E Y" (single letters separated)
+  // 2. "dee oh vee ee why" (phonetic pronunciation)
+  // 3. "delta oscar victor echo yankee" (NATO alphabet)
+  const extractSpelledWord = (text: string): string | null => {
+    const t = (text || "").toLowerCase();
+    
+    // Try NATO alphabet first (e.g., "delta oscar victor echo yankee")
+    const natoWords = t.split(/\s+/).filter(w => natoToLetter[w]);
+    if (natoWords.length >= 3) {
+      const result = natoWords.map(w => natoToLetter[w]).join("");
+      console.log(`[spelling] NATO detected: "${natoWords.join(" ")}" → "${result}"`);
+      return result;
+    }
+
+    // Try phonetic pronunciation (e.g., "dee oh vee ee why")
+    const phoneticWords = t.split(/\s+/).filter(w => phoneticToLetter[w]);
+    if (phoneticWords.length >= 3) {
+      const result = phoneticWords.map(w => phoneticToLetter[w]).join("");
+      console.log(`[spelling] Phonetic detected: "${phoneticWords.join(" ")}" → "${result}"`);
+      return result;
+    }
+
+    // Try single letters with separators: "D-O-V-E-Y", "D O V E Y", "D. O. V. E. Y."
+    // Match sequences of single letters separated by spaces, dashes, or periods
+    const letterPattern = /(?:\b[A-Za-z]\b[\s.\-]*){3,}/g;
+    const matches = text.match(letterPattern);
+    if (matches) {
+      for (const m of matches) {
+        const letters = m.replace(/[\s.\-]+/g, "").toUpperCase();
+        if (letters.length >= 3 && /^[A-Z]+$/.test(letters)) {
+          console.log(`[spelling] Letter sequence detected: "${m}" → "${letters}"`);
+          return letters;
+        }
+      }
+    }
+
+    return null;
+  };
+
+  // If caller spells the street name, build a corrected address like: "34 Dovey Road".
+  // This works for both pickup and dropoff corrections.
+  const buildAddressFromSpellingTranscript = (text: string): string | null => {
     const t = text || "";
     const spelled = extractSpelledWord(t);
     if (!spelled) return null;
 
+    // Extract house number (with optional letter suffix like 52A)
     const number = t.match(/\b(\d+[A-Za-z]?)\b/)?.[1] || null;
-    const roadTypeMatch = t.match(/\b(road|street|lane|drive|avenue|close|way|crescent|place|court)\b/i);
+    
+    // Extract road type
+    const roadTypes = ["road", "street", "lane", "drive", "avenue", "close", "way", "crescent", "place", "court", "gardens", "terrace", "grove", "hill", "park"];
+    const roadTypeMatch = t.match(new RegExp(`\\b(${roadTypes.join("|")})\\b`, "i"));
     const roadType = roadTypeMatch?.[0] || null;
 
-    if (!number || !roadType) return null;
-    return `${number} ${toTitleCase(spelled)} ${roadType}`;
+    // Build the address - need at least the spelled name
+    if (number && roadType) {
+      const result = `${number} ${toTitleCase(spelled)} ${roadType}`;
+      console.log(`[spelling] Built full address: "${result}" from transcript: "${t}"`);
+      return result;
+    } else if (roadType) {
+      // Just the street name without number
+      const result = `${toTitleCase(spelled)} ${roadType}`;
+      console.log(`[spelling] Built street name: "${result}" from transcript: "${t}"`);
+      return result;
+    } else if (number) {
+      // Number + spelled word (assume it's a road name)
+      const result = `${number} ${toTitleCase(spelled)} Road`;
+      console.log(`[spelling] Built address with assumed Road: "${result}" from transcript: "${t}"`);
+      return result;
+    }
+    
+    // Just return the spelled word titlecased if we can't build a full address
+    return toTitleCase(spelled);
   };
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
@@ -620,10 +691,32 @@ serve(async (req) => {
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
 
-          // Use AI-extracted details exactly as provided in the function call
+          // Check if user spelled out an address - if so, use that spelling
+          const spelledAddress = lastUserTranscript ? buildAddressFromSpellingTranscript(lastUserTranscript) : null;
+          
+          // Determine if the spelled address applies to pickup or dropoff based on context
+          // For initial booking, we check the transcript for "from" or "to" keywords
+          let spelledPickup: string | null = null;
+          let spelledDropoff: string | null = null;
+          if (spelledAddress && lastUserTranscript) {
+            const lowerTranscript = lastUserTranscript.toLowerCase();
+            if (lowerTranscript.includes("from") || lowerTranscript.includes("pick")) {
+              spelledPickup = spelledAddress;
+              console.log(`[${callId}] Spelling detected for PICKUP:`, spelledAddress);
+            } else if (lowerTranscript.includes("to") || lowerTranscript.includes("going") || lowerTranscript.includes("destination")) {
+              spelledDropoff = spelledAddress;
+              console.log(`[${callId}] Spelling detected for DROPOFF:`, spelledAddress);
+            } else {
+              // Default: assume pickup correction (more common)
+              spelledPickup = spelledAddress;
+              console.log(`[${callId}] Spelling detected (defaulting to PICKUP):`, spelledAddress);
+            }
+          }
+
+          // Use AI-extracted details, but override with spelled address if detected
           const finalBooking = {
-            pickup_location: args.pickup_location,
-            dropoff_location: args.dropoff_location,
+            pickup_location: spelledPickup ?? args.pickup_location,
+            dropoff_location: spelledDropoff ?? args.dropoff_location,
             pickup_time: args.pickup_time || "ASAP",
             number_of_passengers: args.number_of_passengers,
             luggage: args.luggage || null,
@@ -769,7 +862,7 @@ serve(async (req) => {
           // Apply updates - only change fields that are explicitly provided
           if (args.pickup_location !== null && args.pickup_location !== undefined) {
             // If caller spelled the street name (e.g. "D-O-V-E-Y"), prefer that spelling.
-            const spelledPickup = lastUserTranscript ? buildPickupFromSpellingTranscript(lastUserTranscript) : null;
+            const spelledPickup = lastUserTranscript ? buildAddressFromSpellingTranscript(lastUserTranscript) : null;
             const newPickup = spelledPickup ?? args.pickup_location;
             if (spelledPickup) {
               console.log(`[${callId}] Applying spelling-derived pickup override:`, { lastUserTranscript, spelledPickup, argsPickup: args.pickup_location });
@@ -778,8 +871,14 @@ serve(async (req) => {
             updates.push(`pickup to ${newPickup}`);
           }
           if (args.dropoff_location !== null && args.dropoff_location !== undefined) {
-            confirmedBooking.dropoff_location = args.dropoff_location;
-            updates.push(`dropoff to ${args.dropoff_location}`);
+            // Also check for spelled dropoff
+            const spelledDropoff = lastUserTranscript ? buildAddressFromSpellingTranscript(lastUserTranscript) : null;
+            const newDropoff = spelledDropoff ?? args.dropoff_location;
+            if (spelledDropoff) {
+              console.log(`[${callId}] Applying spelling-derived dropoff override:`, { lastUserTranscript, spelledDropoff, argsDropoff: args.dropoff_location });
+            }
+            confirmedBooking.dropoff_location = newDropoff;
+            updates.push(`dropoff to ${newDropoff}`);
           }
           if (args.pickup_time !== null && args.pickup_time !== undefined) {
             confirmedBooking.pickup_time = args.pickup_time;
