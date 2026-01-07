@@ -517,11 +517,12 @@ serve(async (req) => {
           const args = JSON.parse(data.arguments);
 
           // Map new field names and prefer exact values from user transcript
+          // Use AI-extracted details exactly as provided in the function call
           const finalBooking = {
-            pickup_location: knownBooking.pickup ?? args.pickup_location,
-            dropoff_location: knownBooking.destination ?? args.dropoff_location,
+            pickup_location: args.pickup_location,
+            dropoff_location: args.dropoff_location,
             pickup_time: args.pickup_time || "ASAP",
-            number_of_passengers: knownBooking.passengers ?? args.number_of_passengers,
+            number_of_passengers: args.number_of_passengers,
             luggage: args.luggage || null,
             special_requests: args.special_requests || null,
             nearest_place: args.nearest_place || null
