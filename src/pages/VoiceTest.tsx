@@ -69,6 +69,7 @@ export default function VoiceTest() {
     
     if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      nextStartTimeRef.current = 0; // reset scheduling when recreating context
     }
     
     // Resume AudioContext if suspended (browser autoplay policy)
@@ -121,7 +122,13 @@ export default function VoiceTest() {
     setStatus("connecting");
     addMessage("Connecting to taxi AI...", "system");
 
-    audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
+      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+    }
+    if (audioContextRef.current.state === "suspended") {
+      void audioContextRef.current.resume();
+    }
+    nextStartTimeRef.current = 0;
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
@@ -196,6 +203,8 @@ export default function VoiceTest() {
 
     ws.onclose = () => {
       setStatus("disconnected");
+      setIsSpeaking(false);
+      nextStartTimeRef.current = 0;
       addMessage("Disconnected", "system");
       setVoiceStatus("Connect first...");
     };
@@ -208,6 +217,16 @@ export default function VoiceTest() {
 
   const disconnect = useCallback(() => {
     stopRecording();
+    setIsSpeaking(false);
+    nextStartTimeRef.current = 0;
+
+    try {
+      void audioContextRef.current?.close();
+    } catch {
+      // ignore
+    }
+    audioContextRef.current = null;
+
     wsRef.current?.close();
     wsRef.current = null;
   }, []);
@@ -240,8 +259,17 @@ export default function VoiceTest() {
       mediaStreamRef.current = stream;
       console.log("Got mic stream");
 
-      const ctx = new AudioContext({ sampleRate: 24000 });
-      audioContextRef.current = ctx;
+      let ctx = audioContextRef.current;
+      const needsNewCtx = !ctx || ctx.state === "closed";
+      if (needsNewCtx) {
+        ctx = new AudioContext({ sampleRate: 24000 });
+        audioContextRef.current = ctx;
+        nextStartTimeRef.current = 0;
+      }
+      if (ctx.state === "suspended") {
+        void ctx.resume();
+      }
+
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
