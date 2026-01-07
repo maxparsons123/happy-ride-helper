@@ -246,64 +246,69 @@ class TaxiBridge:
                 continue
                 
     async def queue_to_asterisk(self):
-        """Send queued audio to Asterisk at real-time playback rate."""
+        """Send queued audio to Asterisk at real-time playback rate.
+
+        Key behavior:
+        - Always pace output at 8kHz (10ms/160 bytes) to avoid jitter.
+        - Send SILENCE frames when we have no AI audio ready. Some setups will
+          reset/close the AudioSocket if no frames are sent for too long.
+        """
         # 8kHz mono 16-bit = 16000 bytes per second
         bytes_per_second = AST_RATE * 2
-        
+
         # Use 160 bytes (10ms) chunks - standard telephony frame size
         chunk_size = 160
-        chunk_duration = chunk_size / bytes_per_second  # ~0.01 seconds
-        
+        silence_chunk = b"\x00" * chunk_size
+
         audio_buffer = bytearray()
-        playback_start_time = None
         bytes_played = 0
-        
+
         # Initial buffer delay to allow queue to fill (reduces jitter)
         initial_buffer_ms = 100
         buffering = True
-        
+
+        playback_start_time = time.time()
+        logger.info("Playback loop started (sending silence when needed)")
+
         while self.running:
             try:
                 # Collect audio from queue into buffer
                 while self.audio_queue:
                     audio_buffer.extend(self.audio_queue.popleft())
-                
-                # Wait for initial buffer to fill before starting playback
-                if buffering:
-                    if len(audio_buffer) >= int(bytes_per_second * initial_buffer_ms / 1000):
-                        buffering = False
-                        playback_start_time = time.time()
-                        logger.info(f"Starting playback with {len(audio_buffer)} bytes buffered")
-                    else:
-                        await asyncio.sleep(0.01)
-                        continue
-                
-                # Send chunks at exact real-time rate
-                if len(audio_buffer) >= chunk_size:
-                    # Calculate when this chunk should be sent based on bytes already played
-                    expected_time = playback_start_time + (bytes_played / bytes_per_second)
-                    current_time = time.time()
-                    
-                    # Wait if we're ahead of schedule
-                    if current_time < expected_time:
-                        await asyncio.sleep(expected_time - current_time)
-                    
+
+                # Flip out of buffering mode once we have enough audio queued
+                if buffering and len(audio_buffer) >= int(bytes_per_second * initial_buffer_ms / 1000):
+                    buffering = False
+                    logger.info(f"Starting AI audio playback with {len(audio_buffer)} bytes buffered")
+
+                # Calculate when this 10ms frame should be sent
+                expected_time = playback_start_time + (bytes_played / bytes_per_second)
+                now = time.time()
+                if now < expected_time:
+                    await asyncio.sleep(expected_time - now)
+
+                # Choose frame: real audio if available (and not buffering), else silence
+                if not buffering and len(audio_buffer) >= chunk_size:
                     chunk = bytes(audio_buffer[:chunk_size])
-                    audio_buffer = audio_buffer[chunk_size:]
-                    
-                    # Send to Asterisk as AudioSocket frame
-                    header = struct.pack('>BH', MSG_AUDIO, len(chunk))
-                    self.writer.write(header + chunk)
-                    await self.writer.drain()
-                    
-                    bytes_played += len(chunk)
-                    self.audio_bytes_sent += len(chunk)
+                    del audio_buffer[:chunk_size]
                 else:
-                    # Buffer underrun - wait for more audio
-                    await asyncio.sleep(0.005)
-                    
+                    chunk = silence_chunk
+
+                # Send to Asterisk as AudioSocket frame
+                header = struct.pack('>BH', MSG_AUDIO, len(chunk))
+                self.writer.write(header + chunk)
+                await self.writer.drain()
+
+                bytes_played += len(chunk)
+                self.audio_bytes_sent += len(chunk)
+
+            except (ConnectionResetError, BrokenPipeError) as e:
+                logger.info(f"Asterisk connection closed/reset: {e}")
+                self.running = False
+                break
             except Exception as e:
                 logger.error(f"Error sending to Asterisk: {e}")
+                self.running = False
                 break
                 
     async def cleanup(self):
