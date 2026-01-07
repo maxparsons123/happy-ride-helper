@@ -42,7 +42,8 @@ export default function VoiceTest() {
   const speechStartTimeRef = useRef(0);
   const firstAudioTimeRef = useRef(0);
   const latenciesRef = useRef<number[]>([]);
-  const nextStartTimeRef = useRef(0); // For smooth scheduled playback
+  const audioQueueRef = useRef<Float32Array[]>([]);
+  const isPlayingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -64,59 +65,56 @@ export default function VoiceTest() {
     setResponseCount(latenciesRef.current.length);
   }, []);
 
-  // Improved audio playback with scheduled timing to prevent glitches
+  const playQueue = useCallback(async () => {
+    if (audioQueueRef.current.length === 0) {
+      isPlayingRef.current = false;
+      return;
+    }
+    isPlayingRef.current = true;
+
+    const samples = audioQueueRef.current.shift()!;
+    const ctx = audioContextRef.current!;
+    const buffer = ctx.createBuffer(1, samples.length, 24000);
+    buffer.copyToChannel(new Float32Array(samples.buffer.slice(0) as ArrayBuffer), 0);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.onended = () => playQueue();
+    source.start();
+  }, []);
+
   const playAudioChunk = useCallback((base64Audio: string) => {
     console.log("Playing audio chunk, length:", base64Audio.length);
     
     if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      nextStartTimeRef.current = 0; // Reset timing for new context
     }
     
-    const ctx = audioContextRef.current;
-    
     // Resume AudioContext if suspended (browser autoplay policy)
-    if (ctx.state === "suspended") {
-      ctx.resume();
+    if (audioContextRef.current.state === "suspended") {
+      audioContextRef.current.resume();
     }
 
     try {
-      // Decode Base64 to ArrayBuffer
       const binaryString = atob(base64Audio);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      // Convert PCM16 to Float32
       const int16 = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768.0;
+        float32[i] = int16[i] / 32768;
       }
 
-      // Create audio buffer
-      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
-      audioBuffer.getChannelData(0).set(float32);
-
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-
-      // SMOOTHING LOGIC: Schedule playback to prevent pops/gaps between chunks
-      const now = ctx.currentTime;
-      if (nextStartTimeRef.current < now) {
-        // Add a tiny 50ms buffer to prevent jitter when starting fresh
-        nextStartTimeRef.current = now + 0.05;
-      }
-      
-      source.start(nextStartTimeRef.current);
-      nextStartTimeRef.current += audioBuffer.duration;
-      
+      audioQueueRef.current.push(new Float32Array(float32));
+      if (!isPlayingRef.current) playQueue();
     } catch (error) {
       console.error("Error playing audio:", error);
     }
-  }, []);
+  }, [playQueue]);
 
   const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
