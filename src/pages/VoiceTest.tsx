@@ -194,8 +194,20 @@ export default function VoiceTest() {
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    if (isRecording) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log("Cannot record: WebSocket not open");
+      return;
+    }
+    if (mediaStreamRef.current) {
+      console.log("Already recording");
+      return;
+    }
+
+    console.log("Starting recording...");
+    setIsRecording(true);
+    setVoiceStatus("🔴 Recording...");
+    speechStartTimeRef.current = Date.now();
+    firstAudioTimeRef.current = 0;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -207,6 +219,7 @@ export default function VoiceTest() {
         }
       });
       mediaStreamRef.current = stream;
+      console.log("Got mic stream");
 
       const ctx = new AudioContext({ sampleRate: 24000 });
       audioContextRef.current = ctx;
@@ -215,7 +228,7 @@ export default function VoiceTest() {
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
-        if (!isRecording || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
         const int16 = new Int16Array(inputData.length);
@@ -239,20 +252,19 @@ export default function VoiceTest() {
 
       source.connect(processor);
       processor.connect(ctx.destination);
-
-      setIsRecording(true);
-      speechStartTimeRef.current = Date.now();
-      firstAudioTimeRef.current = 0;
-      setVoiceStatus("🔴 Recording...");
+      console.log("Audio processing started");
     } catch (error) {
       console.error("Mic error:", error);
-      addMessage("Microphone access denied", "system");
+      addMessage("Microphone access denied: " + (error as Error).message, "system");
+      setIsRecording(false);
+      setVoiceStatus("Ready - hold to speak");
     }
-  }, [isRecording, addMessage]);
+  }, [addMessage]);
 
   const stopRecording = useCallback(() => {
-    if (!isRecording) return;
+    if (!mediaStreamRef.current) return;
 
+    console.log("Stopping recording...");
     setIsRecording(false);
     setVoiceStatus("Processing...");
 
@@ -266,7 +278,7 @@ export default function VoiceTest() {
         setVoiceStatus("Ready - hold to speak");
       }
     }, 500);
-  }, [isRecording]);
+  }, []);
 
   const sendTextMessage = useCallback(() => {
     if (!textInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
