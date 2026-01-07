@@ -244,6 +244,20 @@ serve(async (req) => {
         }));
       }
 
+      // TEXT MODE: Send text message directly (for testing without audio)
+      if (message.type === "text" && openaiWs?.readyState === WebSocket.OPEN) {
+        console.log(`[${callId}] Text mode input: ${message.text}`);
+        openaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: message.text }]
+          }
+        }));
+        openaiWs.send(JSON.stringify({ type: "response.create" }));
+      }
+
       // Commit audio buffer (end of speech)
       if (message.type === "commit" && openaiWs?.readyState === WebSocket.OPEN) {
         openaiWs.send(JSON.stringify({

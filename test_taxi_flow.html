@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Taxi AI Flow Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, sans-serif; 
+      max-width: 600px; 
+      margin: 40px auto; 
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 { color: #d4af37; margin-bottom: 8px; }
+    .status { 
+      padding: 8px 16px; 
+      border-radius: 20px; 
+      display: inline-block;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .status.connected { background: #2e7d32; }
+    .status.disconnected { background: #c62828; }
+    .status.connecting { background: #f57c00; }
+    #messages {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 16px;
+      height: 400px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+    }
+    .message {
+      padding: 10px 14px;
+      margin: 8px 0;
+      border-radius: 12px;
+      max-width: 85%;
+    }
+    .user { 
+      background: #d4af37; 
+      color: #1a1a2e;
+      margin-left: auto;
+      text-align: right;
+    }
+    .assistant { 
+      background: #0f3460; 
+      color: #eee;
+    }
+    .system { 
+      background: #333; 
+      color: #888;
+      font-size: 12px;
+      text-align: center;
+      max-width: 100%;
+    }
+    .booking {
+      background: #2e7d32;
+      color: white;
+      padding: 16px;
+      border-radius: 12px;
+      margin: 8px 0;
+    }
+    #inputArea {
+      display: flex;
+      gap: 8px;
+    }
+    input {
+      flex: 1;
+      padding: 14px;
+      border-radius: 25px;
+      border: none;
+      background: #16213e;
+      color: #eee;
+      font-size: 16px;
+    }
+    input:focus { outline: 2px solid #d4af37; }
+    button {
+      padding: 14px 28px;
+      border-radius: 25px;
+      border: none;
+      background: #d4af37;
+      color: #1a1a2e;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:hover { background: #c9a227; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    .controls { margin-bottom: 16px; }
+    .controls button { margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h1>🚕 Imtech Taxi AI Test</h1>
+  <div id="statusIndicator" class="status disconnected">Disconnected</div>
+  
+  <div class="controls">
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+  </div>
+  
+  <div id="messages"></div>
+  
+  <div id="inputArea">
+    <input type="text" id="userInput" placeholder="Type a message..." onkeypress="if(event.key==='Enter')sendMessage()">
+    <button onclick="sendMessage()">Send</button>
+  </div>
+
+  <script>
+    const WS_URL = 'wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime';
+    let ws = null;
+    let currentTranscript = '';
+
+    function setStatus(status) {
+      const el = document.getElementById('statusIndicator');
+      el.className = 'status ' + status;
+      el.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    }
+
+    function addMessage(text, type) {
+      const messages = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'message ' + type;
+      div.textContent = text;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function addBooking(booking) {
+      const messages = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'booking';
+      div.innerHTML = `
+        <strong>✅ Booking Confirmed!</strong><br>
+        📍 Pickup: ${booking.pickup}<br>
+        🎯 Destination: ${booking.destination}<br>
+        👥 Passengers: ${booking.passengers}<br>
+        💷 Fare: ${booking.fare}<br>
+        ⏱️ ETA: ${booking.eta}
+      `;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        addMessage('Already connected', 'system');
+        return;
+      }
+
+      setStatus('connecting');
+      addMessage('Connecting to taxi AI...', 'system');
+
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        setStatus('connected');
+        addMessage('Connected! Say hello to start booking.', 'system');
+        
+        // Initialize the call
+        ws.send(JSON.stringify({
+          type: 'init',
+          call_id: 'test-' + Date.now()
+        }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log('Received:', data);
+
+        if (data.type === 'transcript') {
+          if (data.role === 'assistant') {
+            // Accumulate assistant transcript
+            currentTranscript += data.text;
+          } else if (data.role === 'user') {
+            addMessage(data.text, 'user');
+          }
+        }
+
+        if (data.type === 'response_done' && currentTranscript) {
+          addMessage(currentTranscript, 'assistant');
+          currentTranscript = '';
+        }
+
+        if (data.type === 'booking_confirmed') {
+          addBooking(data.booking);
+        }
+
+        if (data.type === 'error') {
+          addMessage('Error: ' + JSON.stringify(data.error), 'system');
+        }
+      };
+
+      ws.onclose = () => {
+        setStatus('disconnected');
+        addMessage('Disconnected', 'system');
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        addMessage('Connection error', 'system');
+      };
+    }
+
+    function disconnect() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+    }
+
+    function sendMessage() {
+      const input = document.getElementById('userInput');
+      const text = input.value.trim();
+      
+      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      // Send as text message (test mode)
+      ws.send(JSON.stringify({
+        type: 'text',
+        text: text
+      }));
+
+      addMessage(text, 'user');
+      input.value = '';
+    }
+
+    // Auto-connect on load
+    // connect();
+  </script>
+</body>
+</html>
