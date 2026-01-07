@@ -84,24 +84,35 @@ export default function VoiceTest() {
   }, []);
 
   const playAudioChunk = useCallback((base64Audio: string) => {
-    if (!audioContextRef.current) {
+    console.log("Playing audio chunk, length:", base64Audio.length);
+    
+    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
     }
-
-    const binaryString = atob(base64Audio);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
+    
+    // Resume AudioContext if suspended (browser autoplay policy)
+    if (audioContextRef.current.state === "suspended") {
+      audioContextRef.current.resume();
     }
 
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768;
-    }
+    try {
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
 
-    audioQueueRef.current.push(new Float32Array(float32));
-    if (!isPlayingRef.current) playQueue();
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768;
+      }
+
+      audioQueueRef.current.push(new Float32Array(float32));
+      if (!isPlayingRef.current) playQueue();
+    } catch (error) {
+      console.error("Error playing audio:", error);
+    }
   }, [playQueue]);
 
   const connect = useCallback(async () => {
@@ -144,9 +155,11 @@ export default function VoiceTest() {
         const latency = firstAudioTimeRef.current - speechStartTimeRef.current;
         setFirstAudioLatency(latency);
         updateMetrics(latency);
+        console.log("First audio received, latency:", latency, "ms");
       }
 
       if (data.type === "audio") {
+        console.log("Received audio chunk");
         playAudioChunk(data.audio);
       }
 

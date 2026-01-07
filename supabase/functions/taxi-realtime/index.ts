@@ -142,8 +142,9 @@ serve(async (req) => {
         }
       }
 
-      // Forward audio to Asterisk bridge
+      // Forward audio to client
       if (data.type === "response.audio.delta") {
+        console.log(`[${callId}] Sending audio chunk to client, length: ${data.delta?.length || 0}`);
         socket.send(JSON.stringify({
           type: "audio",
           audio: data.delta
