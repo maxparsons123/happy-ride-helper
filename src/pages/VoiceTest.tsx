@@ -151,6 +151,11 @@ export default function VoiceTest() {
         setVoiceStatus("Ready - hold to speak");
       }
 
+      // AI speaking state (sent by backend on response.created/response.done)
+      if (data.type === "ai_speaking") {
+        setIsSpeaking(Boolean(data.speaking));
+      }
+
       if (data.type === "audio" && speechStartTimeRef.current > 0 && firstAudioTimeRef.current === 0) {
         firstAudioTimeRef.current = Date.now();
         const latency = firstAudioTimeRef.current - speechStartTimeRef.current;
