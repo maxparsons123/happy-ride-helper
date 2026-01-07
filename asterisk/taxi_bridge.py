@@ -246,14 +246,21 @@ class TaxiBridge:
                 continue
                 
     async def queue_to_asterisk(self):
-        """Send queued audio to Asterisk at proper rate."""
-        # Send audio at 8kHz rate (8000 samples/sec * 2 bytes = 16000 bytes/sec)
+        """Send queued audio to Asterisk at real-time playback rate."""
+        # 8kHz mono 16-bit = 16000 bytes per second
         bytes_per_second = AST_RATE * 2
-        chunk_duration = 0.02  # 20ms chunks for smooth playback
-        chunk_size = int(bytes_per_second * chunk_duration)
+        
+        # Use 160 bytes (10ms) chunks - standard telephony frame size
+        chunk_size = 160
+        chunk_duration = chunk_size / bytes_per_second  # ~0.01 seconds
         
         audio_buffer = bytearray()
-        last_send_time = time.time()
+        playback_start_time = None
+        bytes_played = 0
+        
+        # Initial buffer delay to allow queue to fill (reduces jitter)
+        initial_buffer_ms = 100
+        buffering = True
         
         while self.running:
             try:
@@ -261,14 +268,25 @@ class TaxiBridge:
                 while self.audio_queue:
                     audio_buffer.extend(self.audio_queue.popleft())
                 
-                # Send chunks at proper rate
+                # Wait for initial buffer to fill before starting playback
+                if buffering:
+                    if len(audio_buffer) >= int(bytes_per_second * initial_buffer_ms / 1000):
+                        buffering = False
+                        playback_start_time = time.time()
+                        logger.info(f"Starting playback with {len(audio_buffer)} bytes buffered")
+                    else:
+                        await asyncio.sleep(0.01)
+                        continue
+                
+                # Send chunks at exact real-time rate
                 if len(audio_buffer) >= chunk_size:
+                    # Calculate when this chunk should be sent based on bytes already played
+                    expected_time = playback_start_time + (bytes_played / bytes_per_second)
                     current_time = time.time()
-                    elapsed = current_time - last_send_time
                     
-                    # Rate limit to prevent overwhelming Asterisk
-                    if elapsed < chunk_duration:
-                        await asyncio.sleep(chunk_duration - elapsed)
+                    # Wait if we're ahead of schedule
+                    if current_time < expected_time:
+                        await asyncio.sleep(expected_time - current_time)
                     
                     chunk = bytes(audio_buffer[:chunk_size])
                     audio_buffer = audio_buffer[chunk_size:]
@@ -278,10 +296,10 @@ class TaxiBridge:
                     self.writer.write(header + chunk)
                     await self.writer.drain()
                     
+                    bytes_played += len(chunk)
                     self.audio_bytes_sent += len(chunk)
-                    last_send_time = time.time()
                 else:
-                    # No audio ready, sleep briefly
+                    # Buffer underrun - wait for more audio
                     await asyncio.sleep(0.005)
                     
             except Exception as e:
