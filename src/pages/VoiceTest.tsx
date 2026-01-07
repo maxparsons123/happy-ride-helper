@@ -46,6 +46,7 @@ export default function VoiceTest() {
   const nextStartTimeRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isConnectingRef = useRef(false); // Guard double-connect
+  const audioSentRef = useRef(false); // Track if audio was actually sent
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -308,6 +309,7 @@ export default function VoiceTest() {
     setVoiceStatus("🔴 Recording...");
     speechStartTimeRef.current = Date.now();
     firstAudioTimeRef.current = 0;
+    audioSentRef.current = false; // Reset audio sent flag
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -363,6 +365,9 @@ export default function VoiceTest() {
           type: "audio",
           audio: base64
         }));
+        
+        // Mark that we actually sent audio
+        audioSentRef.current = true;
       };
 
       source.connect(workletNode);
@@ -385,10 +390,15 @@ export default function VoiceTest() {
 
     stopRecordingInternal();
 
-    // Tell the backend we're done speaking (push-to-talk)
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    // Only send commit if we actually sent audio (prevents empty buffer error)
+    if (wsRef.current?.readyState === WebSocket.OPEN && audioSentRef.current) {
       wsRef.current.send(JSON.stringify({ type: "commit" }));
+    } else {
+      console.log("Skipping commit - no audio was sent");
     }
+    
+    // Reset audio sent flag
+    audioSentRef.current = false;
 
     setTimeout(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
