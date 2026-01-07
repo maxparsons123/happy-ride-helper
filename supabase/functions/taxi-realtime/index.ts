@@ -357,7 +357,7 @@ serve(async (req) => {
     console.log(`[${callId}] Connecting to OpenAI Realtime API...`);
     
     openaiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-12-15",
+      "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini",
       ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]
     );
 
