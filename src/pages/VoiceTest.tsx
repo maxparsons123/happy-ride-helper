@@ -119,9 +119,8 @@ export default function VoiceTest() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatus("connected");
-      addMessage("Connected! Hold mic button to speak.", "system");
-      setVoiceStatus("Ready - hold to speak");
+      setStatus("connecting");
+      addMessage("Connected, initializing session...", "system");
       
       ws.send(JSON.stringify({
         type: "init",
@@ -132,6 +131,13 @@ export default function VoiceTest() {
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       console.log("Received:", data);
+
+      // Session ready
+      if (data.type === "session_ready") {
+        setStatus("connected");
+        addMessage("Session ready! Hold mic button to speak.", "system");
+        setVoiceStatus("Ready - hold to speak");
+      }
 
       if (data.type === "audio" && speechStartTimeRef.current > 0 && firstAudioTimeRef.current === 0) {
         firstAudioTimeRef.current = Date.now();
