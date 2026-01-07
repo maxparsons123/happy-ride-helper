@@ -82,6 +82,73 @@ serve(async (req) => {
   let sessionReady = false;
   let pendingMessages: any[] = [];
 
+  type KnownBooking = {
+    pickup?: string;
+    destination?: string;
+    passengers?: number;
+  };
+
+  // We keep our own “known booking” extracted from the user's *exact* transcript/text,
+  // then prefer it over the model's paraphrasing when the booking is confirmed.
+  let knownBooking: KnownBooking = {};
+
+  const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
+
+  const extractFromText = (text: string): Partial<KnownBooking> => {
+    const t = text || "";
+    const out: Partial<KnownBooking> = {};
+
+    // Pickup: "from X" (stop before "to/going to/heading to" if present)
+    const fromMatch = t.match(/\bfrom\s+(.+?)(?:\s+(?:to|going\s+to|heading\s+to)\b|$)/i);
+    if (fromMatch?.[1]) out.pickup = normalize(fromMatch[1]);
+
+    // Destination: "to Y" / "going to Y" / "heading to Y"
+    const toMatch = t.match(/\b(?:to|going\s+to|heading\s+to)\s+(.+)$/i);
+    if (toMatch?.[1]) out.destination = normalize(toMatch[1]);
+
+    // Passengers: “3 passengers” / “three passengers”
+    const wordToNum: Record<string, number> = {
+      one: 1,
+      two: 2,
+      three: 3,
+      four: 4,
+      five: 5,
+      six: 6,
+      seven: 7,
+      eight: 8,
+      nine: 9,
+      ten: 10,
+    };
+
+    const passengersDigit = t.match(/\b(\d+)\s*(?:passengers?|people|persons?)\b/i);
+    if (passengersDigit?.[1]) out.passengers = Number(passengersDigit[1]);
+
+    const passengersWord = t.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:passengers?|people|persons?)\b/i);
+    if (passengersWord?.[1]) out.passengers = wordToNum[passengersWord[1].toLowerCase()];
+
+    return out;
+  };
+
+  const updateKnownBookingFromText = (text: string, source: "stt" | "text") => {
+    const extracted = extractFromText(text);
+    const before = { ...knownBooking };
+
+    knownBooking = {
+      ...knownBooking,
+      ...Object.fromEntries(
+        Object.entries(extracted).filter(([, v]) => v !== undefined && v !== null && v !== "")
+      ),
+    };
+
+    if (
+      before.pickup !== knownBooking.pickup ||
+      before.destination !== knownBooking.destination ||
+      before.passengers !== knownBooking.passengers
+    ) {
+      console.log(`[${callId}] Known booking updated (${source}):`, knownBooking);
+    }
+  };
+
   // When audio is committed (server VAD or manual commit), we expect a response.
   // Some clients still send manual commit; we defensively trigger response.create after STT completes.
   let awaitingResponseAfterCommit = false;
@@ -263,6 +330,7 @@ serve(async (req) => {
       // User transcript
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
+        updateKnownBookingFromText(data.transcript, "stt");
         socket.send(
           JSON.stringify({
             type: "transcript",
@@ -323,11 +391,20 @@ serve(async (req) => {
         
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
-          bookingData = args;
+
+          // Prefer exact values we extracted from the user's transcript/text (prevents 52A -> 50A style drift)
+          const finalBooking = {
+            pickup: knownBooking.pickup ?? args.pickup,
+            destination: knownBooking.destination ?? args.destination,
+            passengers: knownBooking.passengers ?? args.passengers,
+          };
+
+          bookingData = finalBooking;
+          console.log(`[${callId}] Booking (final):`, finalBooking);
           
           // Calculate fare
-          const isAirport = args.destination?.toLowerCase().includes("airport");
-          const is6Seater = args.passengers > 4;
+          const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
+          const is6Seater = Number(finalBooking.passengers || 0) > 4;
           let fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
           if (is6Seater) fare += 5;
           const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
@@ -335,9 +412,9 @@ serve(async (req) => {
           // Log to database
           await supabase.from("call_logs").insert({
             call_id: callId,
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers,
+            pickup: finalBooking.pickup,
+            destination: finalBooking.destination,
+            passengers: finalBooking.passengers,
             estimated_fare: `£${fare}`,
             booking_status: "confirmed",
             call_start_at: callStartAt
@@ -352,9 +429,9 @@ serve(async (req) => {
               output: JSON.stringify({
                 success: true,
                 booking_id: callId,
-                pickup: args.pickup,
-                destination: args.destination,
-                passengers: args.passengers,
+                pickup: finalBooking.pickup,
+                destination: finalBooking.destination,
+                passengers: finalBooking.passengers,
                 estimated_fare: `£${fare}`,
                 eta: eta
               })
@@ -372,7 +449,7 @@ serve(async (req) => {
           // Notify client
           socket.send(JSON.stringify({
             type: "booking_confirmed",
-            booking: { ...args, fare: `£${fare}`, eta }
+            booking: { ...finalBooking, fare: `£${fare}`, eta }
           }));
         }
       }
@@ -426,6 +503,7 @@ serve(async (req) => {
 
       // TEXT MODE: Send text message directly (for testing without audio)
       if (message.type === "text") {
+        updateKnownBookingFromText(message.text, "text");
         console.log(`[${callId}] Text mode input: ${message.text}`);
         if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({
