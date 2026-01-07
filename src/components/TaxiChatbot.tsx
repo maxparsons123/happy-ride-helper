@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { TypingIndicator } from "./TypingIndicator";
 import { BookingStatus } from "./BookingStatus";
 import { useToast } from "@/hooks/use-toast";
-import { Car, RotateCcw } from "lucide-react";
+import { Car, RotateCcw, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface Message {
@@ -139,15 +140,28 @@ export function TaxiChatbot() {
               <p className="text-xs text-muted-foreground">AI Dispatcher</p>
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleReset}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <RotateCcw className="mr-2 h-4 w-4" />
-            New Booking
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              asChild
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <Link to="/voice-test">
+                <Mic className="mr-2 h-4 w-4" />
+                Voice Test
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleReset}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <RotateCcw className="mr-2 h-4 w-4" />
+              New Booking
+            </Button>
+          </div>
         </header>
 
         {/* Messages */}
