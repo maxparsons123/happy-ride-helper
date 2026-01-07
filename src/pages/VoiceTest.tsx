@@ -102,7 +102,7 @@ export default function VoiceTest() {
       // SMOOTHING LOGIC: Prevents "pops" between chunks by scheduling playback
       const now = ctx.currentTime;
       if (nextStartTimeRef.current < now) {
-        nextStartTimeRef.current = now + 0.05; // Add a tiny 50ms buffer to prevent jitter
+        nextStartTimeRef.current = now + 0.01; // Add a tiny 10ms buffer to prevent jitter
       }
       
       source.start(nextStartTimeRef.current);
