@@ -100,10 +100,10 @@ export default function VoiceTest() {
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
 
-      // SMOOTHING LOGIC: Prevents "pops" between chunks by scheduling playback
+      // JITTER BUFFER: Schedule chunks to play exactly when the last one ends
       const now = ctx.currentTime;
       if (nextStartTimeRef.current < now) {
-        nextStartTimeRef.current = now + 0.01; // Add a tiny 10ms buffer to prevent jitter
+        nextStartTimeRef.current = now + 0.05; // 50ms safety buffer for smooth playback
       }
       
       source.start(nextStartTimeRef.current);
@@ -271,7 +271,8 @@ export default function VoiceTest() {
       }
 
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      // Use smaller buffer (2048) for faster mic response - halves latency
+      const processor = ctx.createScriptProcessor(2048, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
@@ -378,10 +379,11 @@ export default function VoiceTest() {
           <button
             onMouseDown={startRecording}
             onMouseUp={stopRecording}
-            onTouchStart={startRecording}
-            onTouchEnd={stopRecording}
+            onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
+            onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
             disabled={status !== "connected"}
-            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${
+            style={{ touchAction: "none" }}
+            className={`w-16 h-16 rounded-full flex items-center justify-center transition-all select-none ${
               isRecording 
                 ? "bg-green-500 animate-pulse" 
                 : status === "connected"
