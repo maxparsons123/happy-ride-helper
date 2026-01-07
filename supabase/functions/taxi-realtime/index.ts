@@ -145,6 +145,10 @@ serve(async (req) => {
   let lastUserTranscript: string | null = null; // last STT/text input (for corrections like spelling)
   let currentAssistantText = ""; // Buffer for assistant transcript
   let bookingConfirmed = false; // Track if initial booking is done
+
+  // Monitoring audio broadcast throttling (DB inserts per delta can hurt realtime playback)
+  let lastAudioBroadcastAtMs = 0;
+  const AUDIO_BROADCAST_MIN_INTERVAL_MS = 120;
   
   // Current confirmed booking state for updates
   interface ConfirmedBooking {
@@ -561,27 +565,35 @@ serve(async (req) => {
         }
       }
 
-      // Forward audio to client AND broadcast to monitoring channel
+      // Forward audio to client AND (optionally) broadcast to monitoring channel
       if (data.type === "response.audio.delta") {
         console.log(`[${callId}] >>> AUDIO DELTA received, length: ${data.delta?.length || 0}`);
+
+        // Primary path: send audio to the caller/client ASAP
         socket.send(
           JSON.stringify({
             type: "audio",
             audio: data.delta,
           }),
         );
-        
-        // Broadcast audio to monitoring channel via database insert
-        // Monitors will subscribe to this for live audio playback
-        try {
-          await supabase.from("live_call_audio").insert({
-            call_id: callId,
-            audio_chunk: data.delta,
-            created_at: new Date().toISOString()
-          });
-        } catch (e) {
-          // Ignore audio broadcast errors - monitoring is optional
-          console.log(`[${callId}] Audio broadcast skipped`);
+
+        // Monitoring path: throttle DB inserts to avoid backpressure/jitter
+        const now = Date.now();
+        if (now - lastAudioBroadcastAtMs >= AUDIO_BROADCAST_MIN_INTERVAL_MS) {
+          lastAudioBroadcastAtMs = now;
+
+          (async () => {
+            try {
+              await supabase.from("live_call_audio").insert({
+                call_id: callId,
+                audio_chunk: data.delta,
+                created_at: new Date().toISOString(),
+              });
+            } catch {
+              // Monitoring is optional; never fail the call audio path
+              console.log(`[${callId}] Audio broadcast skipped`);
+            }
+          })();
         }
       }
 
