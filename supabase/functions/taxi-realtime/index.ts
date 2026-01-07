@@ -148,12 +148,24 @@ serve(async (req) => {
 
       // AI response started
       if (data.type === "response.created") {
+        console.log(`[${callId}] >>> response.created - AI starting to generate`);
         socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
+      }
+
+      // Log response output item added (tells us what modalities are being generated)
+      if (data.type === "response.output_item.added") {
+        console.log(`[${callId}] >>> response.output_item.added:`, JSON.stringify(data.item));
+      }
+
+      // Log content part added
+      if (data.type === "response.content_part.added") {
+        console.log(`[${callId}] >>> response.content_part.added:`, JSON.stringify(data.part));
       }
 
       // If the model responds in TEXT modality, forward it as assistant transcript
       if (data.type === "response.text.delta" || data.type === "response.output_text.delta") {
         const delta = data.delta || "";
+        console.log(`[${callId}] >>> text delta: "${delta}"`);
         if (delta) {
           socket.send(
             JSON.stringify({
@@ -167,13 +179,23 @@ serve(async (req) => {
 
       // Forward audio to client
       if (data.type === "response.audio.delta") {
-        console.log(`[${callId}] Sending audio chunk to client, length: ${data.delta?.length || 0}`);
+        console.log(`[${callId}] >>> AUDIO DELTA received, length: ${data.delta?.length || 0}`);
         socket.send(
           JSON.stringify({
             type: "audio",
             audio: data.delta,
           }),
         );
+      }
+
+      // Log audio done
+      if (data.type === "response.audio.done") {
+        console.log(`[${callId}] >>> response.audio.done - audio generation complete`);
+      }
+
+      // Log audio transcript
+      if (data.type === "response.audio_transcript.done") {
+        console.log(`[${callId}] >>> response.audio_transcript.done: "${data.transcript}"`);
       }
 
       // Forward transcript for logging
@@ -213,11 +235,13 @@ serve(async (req) => {
       }
 
       // DEBUG: log response lifecycle events (helps diagnose missing audio)
-      if (data.type === "response.created") {
-        console.log(`[${callId}] OpenAI response.created`);
-      }
       if (data.type === "response.done") {
-        console.log(`[${callId}] OpenAI response.done`);
+        const status = data.response?.status || "unknown";
+        const outputCount = data.response?.output?.length || 0;
+        console.log(`[${callId}] >>> response.done - status: ${status}, outputs: ${outputCount}`);
+        if (data.response?.status_details) {
+          console.log(`[${callId}] >>> status_details:`, JSON.stringify(data.response.status_details));
+        }
       }
 
       // Handle function calls
