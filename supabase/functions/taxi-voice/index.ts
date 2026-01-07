@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.89.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -25,7 +26,7 @@ PRICING: city £15-25, airport £45, 6-seater add £5
 ETA: Always 5-8 minutes
 
 CRITICAL: Respond with ONLY valid JSON:
-{"response":"your short message","pickup":"value or null","destination":"value or null","passengers":"number or null","status":"collecting or confirmed"}`;
+{"response":"your short message","pickup":"value or null","destination":"value or null","passengers":"number or null","status":"collecting or confirmed","estimated_fare":"£X or null"}`;
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -33,8 +34,10 @@ serve(async (req) => {
   }
 
   try {
-    const { text, currentBooking, call_id } = await req.json();
+    const { text, currentBooking, call_id, stt_latency_ms, turn_number } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
@@ -66,8 +69,8 @@ serve(async (req) => {
       }),
     });
 
-    const latency = Date.now() - startTime;
-    console.log(`[${call_id || 'unknown'}] AI response in ${latency}ms`);
+    const aiLatency = Date.now() - startTime;
+    console.log(`[${call_id || 'unknown'}] AI response in ${aiLatency}ms`);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -77,7 +80,7 @@ serve(async (req) => {
       return new Response(JSON.stringify({ 
         response: "Sorry, having a bit of trouble. Can you say that again?",
         status: "collecting",
-        latency_ms: latency
+        ai_latency_ms: aiLatency
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -113,10 +116,32 @@ serve(async (req) => {
     }
 
     // Add metadata for Asterisk
-    parsedResponse.latency_ms = latency;
+    parsedResponse.ai_latency_ms = aiLatency;
     parsedResponse.call_id = call_id;
 
     console.log(`[${call_id || 'unknown'}] Response:`, parsedResponse.response);
+
+    // Log to database (non-blocking)
+    if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && call_id) {
+      const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+      
+      supabase.from("call_logs").insert({
+        call_id,
+        user_transcript: text,
+        ai_response: parsedResponse.response,
+        pickup: parsedResponse.pickup,
+        destination: parsedResponse.destination,
+        passengers: parsedResponse.passengers ? parseInt(parsedResponse.passengers) : null,
+        estimated_fare: parsedResponse.estimated_fare || null,
+        booking_status: parsedResponse.status,
+        stt_latency_ms: stt_latency_ms || null,
+        ai_latency_ms: aiLatency,
+        turn_number: turn_number || 1,
+      }).then(({ error }) => {
+        if (error) console.error(`[${call_id}] Failed to log call:`, error);
+        else console.log(`[${call_id}] Call logged successfully`);
+      });
+    }
 
     return new Response(JSON.stringify(parsedResponse), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
