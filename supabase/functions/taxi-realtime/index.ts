@@ -197,21 +197,11 @@ serve(async (req) => {
         );
 
         // In push-to-talk mode, request a response AFTER the transcript arrives.
-        // To make this robust, we also inject the transcript as an explicit user text message.
+        // DO NOT create a duplicate text item - the audio already created a conversation item.
+        // Just request the response now.
         if (awaitingUserTranscriptForResponse && openaiWs?.readyState === WebSocket.OPEN) {
           awaitingUserTranscriptForResponse = false;
-          console.log(`[${callId}] Transcript received; creating user text item + requesting response`);
-
-          openaiWs.send(
-            JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: data.transcript }],
-              },
-            }),
-          );
+          console.log(`[${callId}] Transcript received; requesting response now (audio already in conversation)`);
 
           openaiWs.send(
             JSON.stringify({
