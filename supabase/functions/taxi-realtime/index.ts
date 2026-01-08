@@ -141,11 +141,12 @@ WHEN THE book_taxi FUNCTION RETURNS:
 - Keep it short: confirm it's booked, give ETA and fare, and ask if they need anything else.
 
 ENDING THE CALL - CRITICAL:
-- After booking is confirmed and you ask "Is there anything else I can help you with?"
-- If the customer says "no", "that's all", "that's it", "nothing else", "I'm good", "all sorted" etc.
-- Say a brief, warm goodbye like "You're welcome! Have a great journey, goodbye!" or "Take care, bye!"
-- Then IMMEDIATELY call the end_call function to hang up the call
-- Do NOT wait for the customer to hang up - YOU end the call after saying goodbye
+- After booking is confirmed, ask: "Is there anything else I can help you with?"
+- IMPORTANT: STOP speaking after you ask this question. Do NOT say goodbye in the same turn.
+- Wait for the customer's NEXT response.
+- ONLY if the customer clearly says "no", "that's all", "nothing else", "I'm good", etc:
+  - Say a brief goodbye ("You're welcome! Have a great journey, goodbye!")
+  - Then IMMEDIATELY call the end_call function
 
 GENERAL RULES:
 - Never ask for information you already have
@@ -191,7 +192,9 @@ serve(async (req) => {
   let callerLastDestination = ""; // Last destination address
   let callerCity = ""; // City extracted from caller's last addresses or phone area
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
-  let currentAssistantText = ""; let aiSpeaking = false; // Buffer for assistant transcript + local speaking flag
+  let currentAssistantText = ""; // Buffer for assistant transcript
+  let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
+  let lastFinalUserTranscript = ""; // Last finalized user transcript (safeguards for end_call)
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
 
@@ -1107,7 +1110,7 @@ Rules:
         }
         
         console.log(`[${callId}] User said: ${rawTranscript}`);
-        
+        lastFinalUserTranscript = rawTranscript;
         // IMMEDIATE NAME INJECTION - for new callers, quickly extract and inject name BEFORE AI responds
         // This prevents misheard names from being used in Ada's greeting
         if (!callerName) {
@@ -1357,30 +1360,74 @@ Rules:
         // Handle end_call function
         if (data.name === "end_call") {
           const args = JSON.parse(data.arguments);
+
+          const t = (lastFinalUserTranscript || "").toLowerCase().trim();
+          const customerSaidNo =
+            t === "no" ||
+            t === "nope" ||
+            t === "nah" ||
+            t.includes("nothing else") ||
+            t.includes("that's all") ||
+            t.includes("thats all") ||
+            t.includes("that's it") ||
+            t.includes("thats it") ||
+            t.includes("all sorted") ||
+            t.includes("i'm good") ||
+            t.includes("im good") ||
+            t.includes("no thanks") ||
+            t.includes("no thank you");
+
+          // Safety: don't allow hanging up unless customer explicitly declined further help.
+          if (!customerSaidNo) {
+            console.log(
+              `[${callId}] 🚫 Rejecting end_call (customer hasn't declined further assistance). lastUser="${lastFinalUserTranscript}" reason=${args.reason}`,
+            );
+
+            openaiWs?.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message:
+                      "Customer has not confirmed they're finished. Ask again if they need anything else, then wait.",
+                  }),
+                },
+              }),
+            );
+            return;
+          }
+
           console.log(`[${callId}] 📞 End call requested: ${args.reason}`);
-          
+
           // Update call status
           await broadcastLiveCall({
             status: "ended",
-            ended_at: new Date().toISOString()
+            ended_at: new Date().toISOString(),
           });
-          
+
           // Send function result
-          openaiWs?.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: data.call_id,
-              output: JSON.stringify({ success: true, message: "Call ended" })
-            }
-          }));
-          
+          openaiWs?.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({ success: true, message: "Call ended" }),
+              },
+            }),
+          );
+
           // Notify client to end the call
-          socket.send(JSON.stringify({
-            type: "call_ended",
-            reason: args.reason
-          }));
-          
+          socket.send(
+            JSON.stringify({
+              type: "call_ended",
+              reason: args.reason,
+            }),
+          );
+
           // Close the WebSocket connection after a short delay to allow goodbye audio to finish
           setTimeout(() => {
             console.log(`[${callId}] 📞 Closing connection after end_call`);
