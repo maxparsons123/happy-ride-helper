@@ -42,7 +42,9 @@ except ImportError:
 # Configuration
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime"
+
+# IMPORTANT: Edge Functions WebSocket endpoint lives on the *.functions.supabase.co domain
+WS_URL = "wss://xsdlzoyaosfbbwzmcinq.functions.supabase.co/functions/v1/taxi-realtime"
 
 # Audio settings
 AST_RATE = 8000   # Asterisk sample rate (standard telephony)
