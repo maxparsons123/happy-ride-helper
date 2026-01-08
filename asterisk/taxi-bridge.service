@@ -9,7 +9,7 @@ Type=simple
 User=asterisk
 Group=asterisk
 WorkingDirectory=/opt/taxi-bridge
-ExecStart=/usr/bin/python3 /opt/taxi-bridge/taxi_bridge_v2.py
+ExecStart=/usr/bin/python3 /opt/taxi-bridge/taxi_bridge_v3.py
 Restart=always
 RestartSec=5
 
