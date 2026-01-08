@@ -471,13 +471,13 @@ serve(async (req) => {
               // Prompt helps Whisper understand taxi booking context and common terms
               prompt: "247 Radio Carz taxi booking. Common words: pickup, destination, passengers, David Road, Sweet Spot, Sweetspots, Manchester, Wolverhampton, airport, train station, city centre. Numbers: one, two, three, four, five passengers. Names: Ada, Max, John, Sarah. Phrases: just me, two of us, that's correct, yes please."
             },
-            // Server VAD for <100ms barge-in support
+            // Server VAD - tuned for natural conversation pace
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 200,
-              silence_duration_ms: 500, // Quick response after speech ends
-              create_response: true // Auto-create response when speech ends
+              threshold: 0.6,          // Slightly higher threshold to avoid false triggers from background noise
+              prefix_padding_ms: 300,   // Capture more audio before speech starts
+              silence_duration_ms: 1200, // Wait 1.2 seconds of silence before responding (gives time to finish sentences)
+              create_response: true     // Auto-create response when speech ends
             },
             tools: [
               {
