@@ -298,7 +298,7 @@ export default function LiveCalls() {
       
       try {
         const { data, error } = await supabase.functions.invoke("geocode", {
-          body: { address, city: "Bradford", country: "UK" }
+          body: { address, country: "UK" }
         });
         
         if (error) {
