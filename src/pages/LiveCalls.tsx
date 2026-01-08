@@ -142,6 +142,7 @@ export default function LiveCalls() {
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [addressVerification, setAddressVerification] = useState(true);
+  const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
   const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
   
@@ -358,6 +359,17 @@ export default function LiveCalls() {
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* Address TTS Splicing Toggle */}
+            <div className="flex items-center gap-2">
+              <Switch
+                id="address-tts"
+                checked={addressTtsSplicing}
+                onCheckedChange={setAddressTtsSplicing}
+              />
+              <label htmlFor="address-tts" className="text-sm text-muted-foreground cursor-pointer">
+                Address TTS
+              </label>
+            </div>
             {/* Address Verification Toggle */}
             <div className="flex items-center gap-2">
               <Switch
