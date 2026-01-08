@@ -482,13 +482,13 @@ serve(async (req) => {
               // No language specified = auto-detect any language
               // Whisper supports 99+ languages including Polish, Urdu, Punjabi, Hindi, Arabic, etc.
             },
-            // Server VAD - balanced for natural conversation
-            // Note: VAD is time-based only, not semantic. It cannot detect "sentence finished"
+            // Server VAD - tuned to reduce audio artifacts (hiss at word endings)
+            // Higher prefix captures more lead-in, longer silence prevents premature cutoff
             turn_detection: {
               type: "server_vad",
-              threshold: 0.55,          // Balanced threshold for speech detection
-              prefix_padding_ms: 250,   // Capture audio just before speech starts
-              silence_duration_ms: 900, // Wait ~1 second of silence (balance between quick replies and patience)
+              threshold: 0.5,           // Slightly lower = more sensitive to quiet speech
+              prefix_padding_ms: 300,   // Capture 300ms before speech starts (smoother onset)
+              silence_duration_ms: 800, // 800ms silence before triggering response
               create_response: true     // Auto-create response when speech ends
             },
             tools: [
