@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.taxi-realtime]
 verify_jwt = false
+
+[functions.taxi-extract]
+verify_jwt = false
