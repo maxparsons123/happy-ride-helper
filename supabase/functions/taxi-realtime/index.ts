@@ -702,13 +702,31 @@ serve(async (req) => {
       if (message.type === "init") {
         callId = message.call_id || callId;
         callStartAt = new Date().toISOString();
+        
         // Extract phone number from Asterisk
         if (message.user_phone) {
           userPhone = message.user_phone;
           console.log(`[${callId}] User phone: ${userPhone}`);
-          // Look up caller in database
+        }
+        
+        // If name provided directly from Asterisk, use it
+        if (message.user_name) {
+          callerName = message.user_name;
+          console.log(`[${callId}] 👤 Caller name from Asterisk: ${callerName}`);
+          
+          // Save/update caller with provided name
+          if (userPhone && userPhone !== "Unknown") {
+            await supabase.from("callers").upsert({
+              phone_number: userPhone,
+              name: callerName,
+              updated_at: new Date().toISOString()
+            }, { onConflict: "phone_number" });
+          }
+        } else if (userPhone && userPhone !== "Unknown") {
+          // Look up caller in database if no name provided
           await lookupCaller(userPhone);
         }
+        
         // Detect Asterisk calls by call_id prefix
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";

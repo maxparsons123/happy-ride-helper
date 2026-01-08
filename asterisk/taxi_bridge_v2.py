@@ -73,6 +73,7 @@ class TaxiBridgeV2:
         self.audio_queue = deque()
         self.call_id = f"ast-{int(time.time() * 1000)}"
         self.phone = "Unknown"
+        self.caller_name = ""
 
         # AudioSocket format detection
         # - slin16: 16-bit linear PCM, typical frames are 320 bytes (20ms)
@@ -146,16 +147,21 @@ class TaxiBridgeV2:
 
                 if m_type == MSG_UUID:
                     uuid_str = payload.decode("utf-8", errors="ignore").strip("\x00")
-                    if "-" in uuid_str:
-                        self.phone = uuid_str.split("-")[-1]
+                    # UUID format: ast-EPOCH-PHONE-NAME or ast-EPOCH-PHONE
+                    parts = uuid_str.split("-")
+                    if len(parts) >= 3:
+                        self.phone = parts[2] if len(parts) > 2 else "Unknown"
+                    if len(parts) >= 4:
+                        self.caller_name = "-".join(parts[3:])  # Name might have hyphens
 
-                    logger.info(f"[{self.call_id}] 👤 Identified Phone: {self.phone}")
+                    logger.info(f"[{self.call_id}] 👤 Caller: {self.caller_name or 'Unknown'} ({self.phone})")
                     await self.ws.send(
                         json.dumps(
                             {
                                 "type": "init",
                                 "call_id": self.call_id,
                                 "user_phone": self.phone,
+                                "user_name": self.caller_name,
                             }
                         )
                     )
