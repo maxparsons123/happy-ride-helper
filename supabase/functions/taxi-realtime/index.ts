@@ -464,7 +464,11 @@ serve(async (req) => {
             voice: "shimmer", // British female voice
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
-            input_audio_transcription: { model: "whisper-1" },
+            input_audio_transcription: { 
+              model: "whisper-1",
+              // Prompt helps Whisper understand taxi booking context and common terms
+              prompt: "247 Radio Carz taxi booking. Common words: pickup, destination, passengers, David Road, Sweet Spot, Sweetspots, Manchester, Wolverhampton, airport, train station, city centre. Numbers: one, two, three, four, five passengers. Names: Ada, Max, John, Sarah. Phrases: just me, two of us, that's correct, yes please."
+            },
             // Server VAD for <100ms barge-in support
             turn_detection: {
               type: "server_vad",
