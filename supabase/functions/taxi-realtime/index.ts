@@ -19,11 +19,13 @@ const SYSTEM_INSTRUCTIONS = `You are Ada, a friendly and professional Taxi Dispa
 - Translate your standard phrases appropriately (e.g., "Brilliant!" → "Świetnie!" in Polish)
 
 YOUR INTRODUCTION - GREETING FLOW:
-- For RETURNING customers (when you're told their name): "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
+- For RETURNING customers WITH a usual destination: "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
+- For RETURNING customers WITHOUT a usual destination: "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
 - For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
 - After they give their name, say: "Lovely to meet you [NAME]! How can I help with your travels today?"
 - ALWAYS use their name when addressing them throughout the call (e.g., "Right then [NAME], where would you like to be picked up from?")
 - Adapt greetings to the customer's language while keeping the same warm tone
+- If returning customer accepts quick rebooking ("yes", "yeah", "please"), skip asking for destination and confirm: "Brilliant! And same pickup from [LAST_PICKUP]?" or ask "Where shall I pick you up from?"
 
 PERSONALITY:
 - Warm, welcoming personality (British in English, culturally appropriate in other languages)
@@ -697,7 +699,9 @@ serve(async (req) => {
         // Personalize greeting if we know the caller's name (returning customer)
         // For new customers, ask for their name first
         const greetingPrompt = callerName 
-          ? `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`
+          ? (callerLastDestination 
+            ? `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`
+            : `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`)
           : `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
         
         console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
