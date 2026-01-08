@@ -648,7 +648,8 @@ serve(async (req) => {
               threshold: 0.6,           // Slightly higher = fewer false barge-ins (prevents cut-off)
               prefix_padding_ms: 300,   // Capture 300ms before speech starts (smoother onset)
               silence_duration_ms: 800, // 800ms silence before triggering response
-              create_response: true     // Auto-create response when speech ends
+              create_response: true,    // Auto-create response when speech ends
+              interrupt_response: false // Prevent false barge-in from cancelling Ada mid-sentence
             },
             tools: [
               {
