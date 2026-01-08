@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.taxi-extract]
 verify_jwt = false
+
+[functions.geocode]
+verify_jwt = false

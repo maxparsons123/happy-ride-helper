@@ -4,12 +4,23 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 
 interface Transcript {
   role: string;
   text: string;
   timestamp: string;
+}
+
+interface GeocodeResult {
+  found: boolean;
+  address: string;
+  display_name?: string;
+  lat?: number;
+  lon?: number;
+  error?: string;
+  loading?: boolean;
 }
 
 interface LiveCall {
@@ -130,6 +141,9 @@ export default function LiveCalls() {
   const [selectedCall, setSelectedCall] = useState<string | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [addressVerification, setAddressVerification] = useState(true);
+  const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
+  const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<AudioQueue | null>(null);
@@ -263,6 +277,55 @@ export default function LiveCalls() {
     };
   }, [selectedCall, audioEnabled]);
 
+  // Geocode addresses when they change and verification is enabled
+  useEffect(() => {
+    if (!addressVerification || !selectedCall) {
+      setPickupGeocode(null);
+      setDestinationGeocode(null);
+      return;
+    }
+
+    const callData = calls.find(c => c.call_id === selectedCall);
+    if (!callData) return;
+
+    const geocodeAddress = async (address: string, setter: (r: GeocodeResult) => void) => {
+      if (!address) {
+        setter({ found: false, address: "", error: "No address" });
+        return;
+      }
+      
+      setter({ found: false, address, loading: true });
+      
+      try {
+        const { data, error } = await supabase.functions.invoke("geocode", {
+          body: { address, city: "Bradford", country: "UK" }
+        });
+        
+        if (error) {
+          setter({ found: false, address, error: error.message });
+        } else {
+          setter(data);
+        }
+      } catch (err) {
+        setter({ found: false, address, error: "Failed to verify" });
+      }
+    };
+
+    // Geocode pickup if present
+    if (callData.pickup) {
+      geocodeAddress(callData.pickup, setPickupGeocode);
+    } else {
+      setPickupGeocode(null);
+    }
+
+    // Geocode destination if present
+    if (callData.destination) {
+      geocodeAddress(callData.destination, setDestinationGeocode);
+    } else {
+      setDestinationGeocode(null);
+    }
+  }, [selectedCall, addressVerification, calls]);
+
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
 
@@ -295,6 +358,17 @@ export default function LiveCalls() {
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* Address Verification Toggle */}
+            <div className="flex items-center gap-2">
+              <Switch
+                id="address-verify"
+                checked={addressVerification}
+                onCheckedChange={setAddressVerification}
+              />
+              <label htmlFor="address-verify" className="text-sm text-muted-foreground cursor-pointer">
+                Verify Addresses
+              </label>
+            </div>
             {/* Audio toggle */}
             <Button
               variant={audioEnabled ? "default" : "outline"}
@@ -436,15 +510,60 @@ export default function LiveCalls() {
                   {selectedCallData.booking_confirmed && (
                     <div className="mt-4 p-3 bg-primary/10 rounded-lg border border-primary/30">
                       <p className="text-sm font-semibold text-primary mb-2">✅ Booking Confirmed</p>
-                      <div className="grid grid-cols-4 gap-4 text-sm">
-                        <div className="flex items-center gap-2">
-                          <MapPin className="w-4 h-4 text-green-400" />
-                          <span>{selectedCallData.pickup || "—"}</span>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        {/* Pickup with verification */}
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <MapPin className="w-4 h-4 text-green-400" />
+                            <span className="font-medium">Pickup</span>
+                            {addressVerification && pickupGeocode && (
+                              pickupGeocode.loading ? (
+                                <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                              ) : pickupGeocode.found ? (
+                                <CheckCircle2 className="w-4 h-4 text-green-500" />
+                              ) : (
+                                <XCircle className="w-4 h-4 text-red-500" />
+                              )
+                            )}
+                          </div>
+                          <p className="text-muted-foreground pl-6">{selectedCallData.pickup || "—"}</p>
+                          {addressVerification && pickupGeocode && !pickupGeocode.loading && (
+                            <p className={`text-xs pl-6 ${pickupGeocode.found ? "text-green-400" : "text-red-400"}`}>
+                              {pickupGeocode.found 
+                                ? `✓ ${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
+                                : `✗ ${pickupGeocode.error || "Not found"}`}
+                            </p>
+                          )}
                         </div>
-                        <div className="flex items-center gap-2">
-                          <MapPin className="w-4 h-4 text-red-400" />
-                          <span>{selectedCallData.destination || "—"}</span>
+                        
+                        {/* Destination with verification */}
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <MapPin className="w-4 h-4 text-red-400" />
+                            <span className="font-medium">Destination</span>
+                            {addressVerification && destinationGeocode && (
+                              destinationGeocode.loading ? (
+                                <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                              ) : destinationGeocode.found ? (
+                                <CheckCircle2 className="w-4 h-4 text-green-500" />
+                              ) : (
+                                <XCircle className="w-4 h-4 text-red-500" />
+                              )
+                            )}
+                          </div>
+                          <p className="text-muted-foreground pl-6">{selectedCallData.destination || "—"}</p>
+                          {addressVerification && destinationGeocode && !destinationGeocode.loading && (
+                            <p className={`text-xs pl-6 ${destinationGeocode.found ? "text-green-400" : "text-red-400"}`}>
+                              {destinationGeocode.found 
+                                ? `✓ ${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
+                                : `✗ ${destinationGeocode.error || "Not found"}`}
+                            </p>
+                          )}
                         </div>
+                      </div>
+                      
+                      {/* Passengers and Fare */}
+                      <div className="grid grid-cols-2 gap-4 text-sm mt-3 pt-3 border-t border-primary/20">
                         <div className="flex items-center gap-2">
                           <Users className="w-4 h-4" />
                           <span>{selectedCallData.passengers || "—"} passengers</span>
