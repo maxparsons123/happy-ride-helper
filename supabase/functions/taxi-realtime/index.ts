@@ -191,7 +191,7 @@ serve(async (req) => {
   let callerLastDestination = ""; // Last destination address
   let callerCity = ""; // City extracted from caller's last addresses or phone area
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
-  let currentAssistantText = ""; // Buffer for assistant transcript
+  let currentAssistantText = ""; let aiSpeaking = false; // Buffer for assistant transcript + local speaking flag
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
 
@@ -942,7 +942,7 @@ Rules:
       // AI response started
       if (data.type === "response.created") {
         console.log(`[${callId}] >>> response.created - AI starting to generate`);
-        currentAssistantText = ""; // Reset buffer
+        currentAssistantText = ""; aiSpeaking = true; // Reset buffer
 
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
@@ -1243,8 +1243,8 @@ Rules:
       if (data.type === "input_audio_buffer.speech_started") {
         console.log(`[${callId}] >>> User started speaking (barge-in)`);
         socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
-        // Note: Removed response.cancel - it was causing errors when no response was active
-        // and may have been degrading audio quality. Server VAD handles interruption naturally.
+        // If Ada is speaking, cancel the current response so the caller can answer.
+        if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN) openaiWs.send(JSON.stringify({ type: "response.cancel" }));
       }
 
       // Speech stopped
@@ -1391,7 +1391,7 @@ Rules:
 
       // Response completed
       if (data.type === "response.done") {
-        socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+        aiSpeaking = false; socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
         socket.send(JSON.stringify({ type: "response_done" }));
       }
 
