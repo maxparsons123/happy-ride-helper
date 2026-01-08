@@ -857,12 +857,12 @@ Rules:
               prompt: "247 Radio Carz taxi booking. House numbers: 52A, 1214A, 18B, 234C, 1567, 2345A. Streets: David Road, Warwick Road, Bradford Road, Coventry, Manchester, Leeds, Birmingham. Passengers: one, two, three, four, five, six. Spelling: Alpha Bravo Charlie Delta Echo Foxtrot."
             },
             // Server VAD - balanced for natural conversation flow
-            // Allow interruption so Ada stops when user speaks (prevents repetition)
+            // Give user more time to respond after Ada asks a question
             turn_detection: {
               type: "server_vad",
               threshold: 0.7,           // Higher threshold = only clear speech triggers barge-in
               prefix_padding_ms: 350,   // Capture lead-in for smoother onset
-              silence_duration_ms: 600, // Faster response after user stops speaking
+              silence_duration_ms: 900, // Wait longer (900ms) for user to respond
               create_response: true,    // Auto-create response when speech ends
               interrupt_response: true  // Allow user to interrupt Ada (prevents repetition)
             },
