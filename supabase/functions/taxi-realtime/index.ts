@@ -145,6 +145,7 @@ serve(async (req) => {
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let geocodingEnabled = true; // Enable address verification by default
+  let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
 
   type KnownBooking = {
     pickup?: string;
@@ -185,6 +186,36 @@ serve(async (req) => {
     } catch (e) {
       console.error(`[${callId}] Geocode exception:`, e);
       return { found: false, error: "Geocoding failed" };
+    }
+  };
+
+  // Generate TTS audio for an address using the taxi-address-tts function
+  const generateAddressTts = async (address: string): Promise<{ audio: string; bytes: number } | null> => {
+    if (!addressTtsSplicingEnabled) return null;
+    
+    try {
+      console.log(`[${callId}] 🔊 Generating address TTS for: "${address}"`);
+      
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-address-tts`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({ address, format: "pcm16" }),
+      });
+
+      if (!response.ok) {
+        console.error(`[${callId}] Address TTS API error: ${response.status}`);
+        return null;
+      }
+
+      const result = await response.json();
+      console.log(`[${callId}] 🔊 Address TTS generated: ${result.bytes} bytes for "${address}"`);
+      return { audio: result.audio, bytes: result.bytes };
+    } catch (e) {
+      console.error(`[${callId}] Address TTS exception:`, e);
+      return null;
     }
   };
 
@@ -450,6 +481,37 @@ serve(async (req) => {
               // Address not found - ask Ada to request correction
               notifyGeocodeResult("destination", knownBooking.destination!, false);
               return; // Don't continue - wait for corrected address
+            }
+          }
+        }
+
+        // GENERATE ADDRESS TTS (if splicing is enabled)
+        // This creates audio from the EXTRACTED address text for accurate pronunciation
+        if (addressTtsSplicingEnabled) {
+          if (pickupChanged && knownBooking.pickup) {
+            const pickupTts = await generateAddressTts(knownBooking.pickup);
+            if (pickupTts) {
+              console.log(`[${callId}] 🔊 Sending pickup address TTS to client`);
+              socket.send(JSON.stringify({
+                type: "address_tts",
+                addressType: "pickup",
+                address: knownBooking.pickup,
+                audio: pickupTts.audio,
+                bytes: pickupTts.bytes
+              }));
+            }
+          }
+          if (destinationChanged && knownBooking.destination) {
+            const destTts = await generateAddressTts(knownBooking.destination);
+            if (destTts) {
+              console.log(`[${callId}] 🔊 Sending destination address TTS to client`);
+              socket.send(JSON.stringify({
+                type: "address_tts",
+                addressType: "destination",
+                address: knownBooking.destination,
+                audio: destTts.audio,
+                bytes: destTts.bytes
+              }));
             }
           }
         }
@@ -951,6 +1013,12 @@ serve(async (req) => {
         if (message.geocoding !== undefined) {
           geocodingEnabled = message.geocoding;
           console.log(`[${callId}] 🌍 Geocoding: ${geocodingEnabled ? "ENABLED" : "DISABLED"}`);
+        }
+        
+        // Enable/disable address TTS splicing from client (default: false)
+        if (message.addressTtsSplicing !== undefined) {
+          addressTtsSplicingEnabled = message.addressTtsSplicing;
+          console.log(`[${callId}] 🔊 Address TTS Splicing: ${addressTtsSplicingEnabled ? "ENABLED" : "DISABLED"}`);
         }
         
         // If name provided directly from Asterisk, use it
