@@ -77,6 +77,39 @@ export type Database = {
         }
         Relationships: []
       }
+      callers: {
+        Row: {
+          created_at: string
+          id: string
+          last_destination: string | null
+          last_pickup: string | null
+          name: string | null
+          phone_number: string
+          total_bookings: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          last_destination?: string | null
+          last_pickup?: string | null
+          name?: string | null
+          phone_number: string
+          total_bookings?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          last_destination?: string | null
+          last_pickup?: string | null
+          name?: string | null
+          phone_number?: string
+          total_bookings?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       live_call_audio: {
         Row: {
           audio_chunk: string
