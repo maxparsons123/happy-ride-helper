@@ -140,6 +140,13 @@ WHEN THE book_taxi FUNCTION RETURNS:
 - IMPORTANT: Do NOT ask "is that correct" again after booking. This is not a second confirmation.
 - Keep it short: confirm it's booked, give ETA and fare, and ask if they need anything else.
 
+ENDING THE CALL - CRITICAL:
+- After booking is confirmed and you ask "Is there anything else I can help you with?"
+- If the customer says "no", "that's all", "that's it", "nothing else", "I'm good", "all sorted" etc.
+- Say a brief, warm goodbye like "You're welcome! Have a great journey, goodbye!" or "Take care, bye!"
+- Then IMMEDIATELY call the end_call function to hang up the call
+- Do NOT wait for the customer to hang up - YOU end the call after saying goodbye
+
 GENERAL RULES:
 - Never ask for information you already have
 - If customer mentions extra requirements (wheelchair, child seat), acknowledge but proceed with booking
@@ -827,6 +834,18 @@ Rules:
                   },
                   required: ["pickup", "destination", "passengers"]
                 }
+              },
+              {
+                type: "function",
+                name: "end_call",
+                description: "End the phone call after the customer confirms they don't need anything else. Call this IMMEDIATELY after saying goodbye.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: { type: "string", description: "Reason for ending call: 'booking_complete', 'customer_request', or 'no_further_assistance'" }
+                  },
+                  required: ["reason"]
+                }
               }
             ],
             tool_choice: "auto",
@@ -1321,6 +1340,40 @@ Rules:
             type: "booking_confirmed",
             booking: { ...finalBooking, fare: `£${fare}`, eta }
           }));
+        }
+        
+        // Handle end_call function
+        if (data.name === "end_call") {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] 📞 End call requested: ${args.reason}`);
+          
+          // Update call status
+          await broadcastLiveCall({
+            status: "ended",
+            ended_at: new Date().toISOString()
+          });
+          
+          // Send function result
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: data.call_id,
+              output: JSON.stringify({ success: true, message: "Call ended" })
+            }
+          }));
+          
+          // Notify client to end the call
+          socket.send(JSON.stringify({
+            type: "call_ended",
+            reason: args.reason
+          }));
+          
+          // Close the WebSocket connection after a short delay to allow goodbye audio to finish
+          setTimeout(() => {
+            console.log(`[${callId}] 📞 Closing connection after end_call`);
+            socket.close();
+          }, 3000);
         }
       }
 
