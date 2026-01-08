@@ -1290,11 +1290,60 @@ Rules:
           bookingData = finalBooking;
           console.log(`[${callId}] Booking (final):`, finalBooking);
           
-          // Calculate fare
-          const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
+          // Calculate fare based on distance
+          const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
+          const BASE_FARE = 3.50;
+          const PER_MILE_RATE = 1.00;
+          let distanceMiles = 0;
+          let fare = 0;
+          
+          // Try to get actual road distance via Google Distance Matrix API
+          if (GOOGLE_MAPS_API_KEY && finalBooking.pickup && finalBooking.destination) {
+            try {
+              const distanceUrl = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                `?origins=${encodeURIComponent(finalBooking.pickup + ", UK")}` +
+                `&destinations=${encodeURIComponent(finalBooking.destination + ", UK")}` +
+                `&units=imperial` +
+                `&key=${GOOGLE_MAPS_API_KEY}`;
+              
+              console.log(`[${callId}] 📏 Calculating distance: ${finalBooking.pickup} → ${finalBooking.destination}`);
+              const distResponse = await fetch(distanceUrl);
+              const distData = await distResponse.json();
+              
+              if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
+                const element = distData.rows[0].elements[0];
+                // Distance comes in meters when using imperial, but text shows miles
+                const distanceText = element.distance?.text || "";
+                const distanceMatch = distanceText.match(/([\d.]+)\s*mi/);
+                if (distanceMatch) {
+                  distanceMiles = parseFloat(distanceMatch[1]);
+                } else {
+                  // Fallback: convert meters to miles
+                  distanceMiles = (element.distance?.value || 0) / 1609.34;
+                }
+                console.log(`[${callId}] 📏 Distance: ${distanceMiles.toFixed(2)} miles`);
+              }
+            } catch (e) {
+              console.error(`[${callId}] Distance Matrix error:`, e);
+            }
+          }
+          
+          // Calculate fare: base + per mile
+          if (distanceMiles > 0) {
+            fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
+            fare = Math.round(fare * 100) / 100; // Round to 2 decimal places
+            console.log(`[${callId}] 💷 Fare: £${fare} (£${BASE_FARE} + ${distanceMiles.toFixed(2)} mi × £${PER_MILE_RATE})`);
+          } else {
+            // Fallback: estimate if distance calculation failed
+            const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
+            fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
+            console.log(`[${callId}] 💷 Fare (fallback): £${fare}`);
+          }
+          
+          // Add £5 for 6-seater van (5+ passengers)
           const is6Seater = Number(finalBooking.passengers || 0) > 4;
-          let fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
           if (is6Seater) fare += 5;
+          
           const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
           
           // Log to database with phone number
