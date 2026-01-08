@@ -88,8 +88,6 @@ class TaxiBridgeV2:
             self.ast_codec = "slin16"
             self.ast_frame_bytes = 320
         else:
-            # Keep things working even if Asterisk changes its frame size.
-            # If it's small, it could be ulaw; but safest is to treat as slin16.
             self.ast_codec = "slin16"
             self.ast_frame_bytes = frame_len_bytes
 
@@ -99,13 +97,11 @@ class TaxiBridgeV2:
 
     def _ast_in_to_linear16(self, payload: bytes) -> bytes:
         if self.ast_codec == "ulaw":
-            # Convert 8-bit u-law -> 16-bit linear
             return audioop.ulaw2lin(payload, 2)
         return payload
 
     def _linear16_to_ast_out(self, payload_linear16: bytes) -> bytes:
         if self.ast_codec == "ulaw":
-            # Convert 16-bit linear -> 8-bit u-law
             return audioop.lin2ulaw(payload_linear16, 2)
         return payload_linear16
 
@@ -114,7 +110,6 @@ class TaxiBridgeV2:
 
     def _silence_frame(self) -> bytes:
         if self.ast_codec == "ulaw":
-            # u-law silence
             return b"\xFF" * self.ast_frame_bytes
         return b"\x00" * self.ast_frame_bytes
 
@@ -167,7 +162,8 @@ class TaxiBridgeV2:
 
                 elif m_type == MSG_AUDIO:
                     # Detect format from the *first* audio frame we see
-                    if self.ast_frame_bytes == 320 and self.ast_codec == "slin16" and m_len != 320:
+                    if not hasattr(self, '_format_detected'):
+                        self._format_detected = True
                         self._detect_ast_format_from_frame(m_len)
 
                     linear16 = self._ast_in_to_linear16(payload)
@@ -193,12 +189,21 @@ class TaxiBridgeV2:
 
     async def ai_to_queue(self):
         """Receives AI responses and buffers audio for outbound playback."""
+        audio_chunks_received = 0
         try:
             async for message in self.ws:
                 data = json.loads(message)
 
                 if data.get("type") == "audio":
                     raw_audio_24k = base64.b64decode(data["audio"])
+                    audio_chunks_received += 1
+
+                    # Log first few chunks for debugging
+                    if audio_chunks_received <= 3:
+                        logger.info(
+                            f"[{self.call_id}] 🔊 AI audio chunk #{audio_chunks_received}: "
+                            f"24k={len(raw_audio_24k)}B"
+                        )
 
                     # Ensure we are working in linear16 at AST_RATE
                     linear16_8k = resample_audio_linear16(raw_audio_24k, AI_RATE, AST_RATE)
@@ -207,6 +212,12 @@ class TaxiBridgeV2:
                     out_bytes = self._linear16_to_ast_out(linear16_8k)
                     if out_bytes:
                         self.audio_queue.append(out_bytes)
+
+                        if audio_chunks_received <= 3:
+                            logger.info(
+                                f"[{self.call_id}] 📤 Queued for Asterisk: {len(out_bytes)}B "
+                                f"(codec={self.ast_codec})"
+                            )
 
                 elif data.get("type") == "transcript":
                     logger.info(
