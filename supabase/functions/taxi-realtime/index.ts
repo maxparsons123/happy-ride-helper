@@ -768,18 +768,12 @@ serve(async (req) => {
           }),
         );
         
-        // Broadcast audio to monitoring channel via database insert
-        // Monitors will subscribe to this for live audio playback
-        try {
-          await supabase.from("live_call_audio").insert({
-            call_id: callId,
-            audio_chunk: data.delta,
-            created_at: new Date().toISOString()
-          });
-        } catch (e) {
-          // Ignore audio broadcast errors - monitoring is optional
-          console.log(`[${callId}] Audio broadcast skipped`);
-        }
+        // NON-BLOCKING: Broadcast audio to monitoring channel (no await = no jitter)
+        void supabase.from("live_call_audio").insert({
+          call_id: callId,
+          audio_chunk: data.delta,
+          created_at: new Date().toISOString()
+        }); // Fire and forget - monitoring is optional
       }
 
       // Log audio done
@@ -915,9 +909,11 @@ serve(async (req) => {
         responseCreatedSinceCommit = false;
       }
 
-      // Speech started (barge-in detection)
+      // Speech started (barge-in detection) - CANCEL AI response for faster interruption
       if (data.type === "input_audio_buffer.speech_started") {
-        console.log(`[${callId}] >>> User started speaking (barge-in)`);
+        console.log(`[${callId}] >>> User started speaking (barge-in) - canceling AI response`);
+        // Cancel any in-progress AI response for instant barge-in
+        openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
         socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
       }
 
