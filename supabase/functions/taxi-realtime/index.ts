@@ -149,6 +149,29 @@ serve(async (req) => {
   // Monitoring audio broadcast throttling (DB inserts per delta can hurt realtime playback)
   let lastAudioBroadcastAtMs = 0;
   const AUDIO_BROADCAST_MIN_INTERVAL_MS = 120;
+
+  // Monitoring audio buffering: we *combine* multiple realtime audio deltas into a single
+  // chunk before inserting, so the /live dashboard doesn't sound choppy.
+  let monitorAudioParts: Uint8Array[] = [];
+  let monitorAudioBytes = 0;
+  let monitorFlushInFlight = false;
+
+  const base64ToBytes = (b64: string): Uint8Array => {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  };
+
+  const bytesToBase64 = (bytes: Uint8Array): string => {
+    const chunkSize = 0x8000;
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  };
   
   // Current confirmed booking state for updates
   interface ConfirmedBooking {
@@ -577,21 +600,49 @@ serve(async (req) => {
           }),
         );
 
-        // Monitoring path: throttle DB inserts to avoid backpressure/jitter
+        // Monitoring path: buffer + periodic DB insert (never block the call audio path)
+        if (data.delta) {
+          try {
+            const bytes = base64ToBytes(data.delta);
+            monitorAudioParts.push(bytes);
+            monitorAudioBytes += bytes.length;
+          } catch {
+            // Ignore invalid base64 chunks
+          }
+        }
+
         const now = Date.now();
-        if (now - lastAudioBroadcastAtMs >= AUDIO_BROADCAST_MIN_INTERVAL_MS) {
+        if (!monitorFlushInFlight && now - lastAudioBroadcastAtMs >= AUDIO_BROADCAST_MIN_INTERVAL_MS) {
           lastAudioBroadcastAtMs = now;
+          monitorFlushInFlight = true;
 
           (async () => {
             try {
+              if (!monitorAudioParts.length) return;
+
+              const combined = new Uint8Array(monitorAudioBytes);
+              let offset = 0;
+              for (const part of monitorAudioParts) {
+                combined.set(part, offset);
+                offset += part.length;
+              }
+
+              // Reset buffer before awaiting IO to avoid backpressure
+              monitorAudioParts = [];
+              monitorAudioBytes = 0;
+
               await supabase.from("live_call_audio").insert({
                 call_id: callId,
-                audio_chunk: data.delta,
+                audio_chunk: bytesToBase64(combined),
                 created_at: new Date().toISOString(),
               });
             } catch {
               // Monitoring is optional; never fail the call audio path
               console.log(`[${callId}] Audio broadcast skipped`);
+              monitorAudioParts = [];
+              monitorAudioBytes = 0;
+            } finally {
+              monitorFlushInFlight = false;
             }
           })();
         }
