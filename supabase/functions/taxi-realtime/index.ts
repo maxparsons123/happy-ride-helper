@@ -1131,8 +1131,8 @@ serve(async (req) => {
           console.log(`[${callId}] 🔊 Address TTS Splicing: ${addressTtsSplicingEnabled ? "ENABLED" : "DISABLED"}`);
         }
         
-        // If name provided directly from Asterisk, use it
-        if (message.user_name) {
+        // If name provided directly from Asterisk, use it (but not "Guest" placeholder)
+        if (message.user_name && message.user_name !== "Guest" && message.user_name !== "Unknown") {
           callerName = message.user_name;
           console.log(`[${callId}] 👤 Caller name from Asterisk: ${callerName}`);
           
