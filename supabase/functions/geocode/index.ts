@@ -23,7 +23,7 @@ serve(async (req) => {
   }
 
   try {
-    const { address, city = "Bradford", country = "UK" } = await req.json();
+    const { address, country = "UK" } = await req.json();
     
     if (!address) {
       return new Response(
@@ -32,10 +32,24 @@ serve(async (req) => {
       );
     }
 
-    console.log(`[Geocode] Looking up: "${address}" in ${city}, ${country}`);
+    // Common UK city names to detect if address already contains a city
+    const ukCities = [
+      "london", "manchester", "birmingham", "leeds", "glasgow", "liverpool",
+      "newcastle", "sheffield", "bristol", "edinburgh", "cardiff", "belfast",
+      "nottingham", "leicester", "coventry", "bradford", "stoke", "wolverhampton",
+      "derby", "swansea", "southampton", "portsmouth", "oxford", "cambridge",
+      "york", "bath", "brighton", "reading", "luton", "hull", "sunderland"
+    ];
+    
+    const addressLower = address.toLowerCase();
+    const hasCity = ukCities.some(city => addressLower.includes(city));
+    
+    // If address already contains a city, just append country; otherwise append nothing extra
+    // This prevents "52A David Road, Coventry, Bradford, UK" type errors
+    const searchQuery = hasCity ? `${address}, ${country}` : `${address}, ${country}`;
+    
+    console.log(`[Geocode] Looking up: "${address}" (hasCity: ${hasCity})`);
 
-    // Build search query - append city/country for better results
-    const searchQuery = `${address}, ${city}, ${country}`;
     const encodedQuery = encodeURIComponent(searchQuery);
     
     // Use OSM Nominatim API (free, no API key required)
