@@ -20,10 +20,12 @@ PERSONALITY:
 BOOKING FLOW - FOLLOW THIS EXACTLY:
 1. Greet the customer with the introduction above
 2. Ask: "Where would you like to be picked up from?"
-3. When they give pickup, repeat it back EXACTLY and ask: "And where are you heading to?"
-4. When they give destination, repeat it back EXACTLY and ask: "How many passengers will there be?"
-5. When they give passenger count, you now have ALL 3 details - call the book_taxi function IMMEDIATELY
-6. After booking, tell them: "Your taxi is on its way! It'll be with you in [ETA] and the fare is [fare]."
+3. When they give pickup, SPELL IT BACK and ask for confirmation: "Was that 5-2-A David Road? D-A-V-I-D?"
+4. When confirmed, ask: "And where are you heading to?"
+5. When they give destination, confirm it the same way
+6. Ask: "How many passengers will there be?"
+7. When they give passenger count, you now have ALL 3 details - call the book_taxi function IMMEDIATELY
+8. After booking, tell them: "Your taxi is on its way! It'll be with you in [ETA] and the fare is [fare]."
 
 INFORMATION EXTRACTION - CRITICAL:
 - Listen carefully for: pickup location, destination, number of passengers
@@ -37,13 +39,21 @@ PRICING (calculate based on destination):
 - If 5+ passengers: add £5 for 6-seater van
 - ETA: Always 5-8 minutes
 
-CRITICAL TRANSCRIPTION RULES:
-- NEVER change, correct, or paraphrase addresses - repeat them EXACTLY as the customer said
-- House numbers with letters (e.g., "52A", "18B") must be repeated with the exact number AND letter
-- Pay special attention to: 52 vs 58, 15 vs 50, A vs 8 - these sound similar but are different
-- If you mishear or are unsure, ask: "Sorry, could you repeat that for me? Was that fifty-two A?"
-- Street names, house numbers, and postcodes must be repeated verbatim
-- Do NOT assume, autocorrect, or "clean up" street names or numbers
+CRITICAL ADDRESS ACCURACY RULES:
+- Street names that sound similar are OFTEN MISHEARD. Common confusions:
+  * David / Davy / Davey / Dewsbury / Derby
+  * Main / Mane / Maine
+  * Park / Bark / Mark
+- When the customer gives an address, ALWAYS spell back the street name letter by letter
+- Example: "Was that D-A-V-I-D Road, David?"
+- If the customer corrects you, apologize and repeat the correction back
+- House numbers with letters (52A, 18B) - say each character: "five two A"
+- NEVER assume you heard correctly - always verify by spelling
+
+WHEN THE book_taxi FUNCTION RETURNS:
+- The function output contains the VERIFIED pickup and destination
+- Use EXACTLY those addresses in your confirmation (they are the corrected/verified versions)
+- Say: "Your taxi is on its way from [pickup from function output] to [destination from function output]"
 
 WHEN TO CALL book_taxi:
 - Call IMMEDIATELY when you have confirmed: pickup + destination + passengers
@@ -498,7 +508,8 @@ serve(async (req) => {
             eta: eta
           });
           
-          // Send function result back to OpenAI
+          // Send function result back to OpenAI with EXACT addresses to use in response
+          // The AI MUST use these exact addresses in its confirmation message
           openaiWs?.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
@@ -507,11 +518,12 @@ serve(async (req) => {
               output: JSON.stringify({
                 success: true,
                 booking_id: callId,
-                pickup: finalBooking.pickup,
-                destination: finalBooking.destination,
-                passengers: finalBooking.passengers,
-                estimated_fare: `£${fare}`,
-                eta: eta
+                pickup_address: finalBooking.pickup,
+                destination_address: finalBooking.destination,
+                passenger_count: finalBooking.passengers,
+                fare: `£${fare}`,
+                eta: eta,
+                confirmation_script: `Your taxi is booked! Picking up from ${finalBooking.pickup}, heading to ${finalBooking.destination}, for ${finalBooking.passengers} passenger${finalBooking.passengers === 1 ? '' : 's'}. The fare is £${fare} and your driver will be with you in ${eta}.`
               })
             }
           }));
