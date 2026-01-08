@@ -1294,8 +1294,22 @@ Rules:
           const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
           const BASE_FARE = 3.50;
           const PER_MILE_RATE = 1.00;
+          const ROAD_MULTIPLIER = 1.3; // Haversine to road distance approximation
           let distanceMiles = 0;
           let fare = 0;
+          let distanceSource = "none";
+          
+          // Haversine formula for straight-line distance
+          const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+            const R = 3958.8; // Earth's radius in miles
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+          };
           
           // Try to get actual road distance via Google Distance Matrix API
           if (GOOGLE_MAPS_API_KEY && finalBooking.pickup && finalBooking.destination) {
@@ -1312,19 +1326,50 @@ Rules:
               
               if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
                 const element = distData.rows[0].elements[0];
-                // Distance comes in meters when using imperial, but text shows miles
                 const distanceText = element.distance?.text || "";
                 const distanceMatch = distanceText.match(/([\d.]+)\s*mi/);
                 if (distanceMatch) {
                   distanceMiles = parseFloat(distanceMatch[1]);
                 } else {
-                  // Fallback: convert meters to miles
                   distanceMiles = (element.distance?.value || 0) / 1609.34;
                 }
-                console.log(`[${callId}] 📏 Distance: ${distanceMiles.toFixed(2)} miles`);
+                distanceSource = "google";
+                console.log(`[${callId}] 📏 Google Distance: ${distanceMiles.toFixed(2)} miles`);
               }
             } catch (e) {
               console.error(`[${callId}] Distance Matrix error:`, e);
+            }
+          }
+          
+          // Fallback to Haversine if Google failed - geocode both addresses
+          if (distanceMiles === 0 && finalBooking.pickup && finalBooking.destination) {
+            try {
+              console.log(`[${callId}] 📏 Google failed, trying Haversine fallback...`);
+              
+              // Geocode pickup
+              const pickupGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
+                body: JSON.stringify({ address: finalBooking.pickup, country: "UK" })
+              });
+              const pickupData = await pickupGeo.json();
+              
+              // Geocode destination
+              const destGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
+                body: JSON.stringify({ address: finalBooking.destination, country: "UK" })
+              });
+              const destData = await destGeo.json();
+              
+              if (pickupData.found && destData.found && pickupData.lat && pickupData.lon && destData.lat && destData.lon) {
+                const straightLine = haversineDistance(pickupData.lat, pickupData.lon, destData.lat, destData.lon);
+                distanceMiles = straightLine * ROAD_MULTIPLIER; // Apply road multiplier
+                distanceSource = "haversine";
+                console.log(`[${callId}] 📏 Haversine: ${straightLine.toFixed(2)} mi straight × ${ROAD_MULTIPLIER} = ${distanceMiles.toFixed(2)} mi road estimate`);
+              }
+            } catch (e) {
+              console.error(`[${callId}] Haversine fallback error:`, e);
             }
           }
           
@@ -1332,12 +1377,12 @@ Rules:
           if (distanceMiles > 0) {
             fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
             fare = Math.round(fare * 100) / 100; // Round to 2 decimal places
-            console.log(`[${callId}] 💷 Fare: £${fare} (£${BASE_FARE} + ${distanceMiles.toFixed(2)} mi × £${PER_MILE_RATE})`);
+            console.log(`[${callId}] 💷 Fare: £${fare} (£${BASE_FARE} + ${distanceMiles.toFixed(2)} mi × £${PER_MILE_RATE}) [${distanceSource}]`);
           } else {
-            // Fallback: estimate if distance calculation failed
+            // Final fallback: estimate if all distance calculation failed
             const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
             fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
-            console.log(`[${callId}] 💷 Fare (fallback): £${fare}`);
+            console.log(`[${callId}] 💷 Fare (random fallback): £${fare}`);
           }
           
           // Add £5 for 6-seater van (5+ passengers)
