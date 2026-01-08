@@ -14,6 +14,9 @@ interface GeocodeResult {
   type?: string;
   place_id?: string;
   formatted_address?: string;
+  city?: string;
+  postcode?: string;
+  map_link?: string;
   error?: string;
 }
 
@@ -24,7 +27,7 @@ serve(async (req) => {
   }
 
   try {
-    const { address, city, country = "UK" } = await req.json();
+    const { address, city, country = "UK", lat, lon } = await req.json();
     
     if (!address) {
       return new Response(
@@ -40,27 +43,44 @@ serve(async (req) => {
       return await nominatimFallback(address, city, country);
     }
 
-    // Build search query with city context if provided
-    let searchQuery = address;
-    if (city) {
-      searchQuery = `${address}, ${city}`;
+    // Determine search coordinates - use provided lat/lon first, then city coords
+    let searchLat: number | undefined = lat;
+    let searchLon: number | undefined = lon;
+    
+    if (!searchLat || !searchLon) {
+      if (city) {
+        const cityCoords = getCityCoordinates(city);
+        if (cityCoords) {
+          searchLat = cityCoords.lat;
+          searchLon = cityCoords.lng;
+        }
+      }
     }
-    
-    console.log(`[Geocode] Google Places lookup: "${searchQuery}" (city: ${city || 'not specified'})`);
 
-    // Try Google Places Text Search first (better for place names like "Sweet Spot")
-    const placesResult = await googlePlacesSearch(searchQuery, city, country, GOOGLE_MAPS_API_KEY);
-    
-    if (placesResult.found) {
+    console.log(`[Geocode] Searching: "${address}" (city: ${city || 'N/A'}, coords: ${searchLat},${searchLon})`);
+
+    // If we have caller coordinates, try nearby search first for local places
+    if (searchLat && searchLon) {
+      const nearbyResult = await googleNearbySearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
+      if (nearbyResult.found) {
+        return new Response(
+          JSON.stringify(nearbyResult),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // Try text search with location bias
+    const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
+    if (textSearchResult.found) {
       return new Response(
-        JSON.stringify(placesResult),
+        JSON.stringify(textSearchResult),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     // Fall back to Google Geocoding API for street addresses
-    const geocodeResult = await googleGeocode(searchQuery, country, GOOGLE_MAPS_API_KEY);
-    
+    const geocodeResult = await googleGeocode(address, city, country, GOOGLE_MAPS_API_KEY);
     if (geocodeResult.found) {
       return new Response(
         JSON.stringify(geocodeResult),
@@ -86,81 +106,195 @@ serve(async (req) => {
   }
 });
 
-async function googlePlacesSearch(
-  query: string, 
-  city: string | undefined, 
-  country: string, 
+// Nearby Search - finds places closest to the caller's location
+async function googleNearbySearch(
+  query: string,
+  lat: number,
+  lon: number,
   apiKey: string
 ): Promise<GeocodeResult> {
   try {
-    // Use Places API Text Search for finding businesses/places by name
-    const params = new URLSearchParams({
-      query: city ? `${query}, ${city}, ${country}` : `${query}, ${country}`,
-      key: apiKey,
-    });
+    const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
+      `?location=${lat},${lon}` +
+      `&rankby=distance` +
+      `&keyword=${encodeURIComponent(query)}` +
+      `&key=${apiKey}`;
 
-    // If we have a city, add location bias
-    if (city) {
-      // Get approximate coordinates for major UK cities
-      const cityCoords = getCityCoordinates(city);
-      if (cityCoords) {
-        params.append("location", `${cityCoords.lat},${cityCoords.lng}`);
-        params.append("radius", "20000"); // 20km radius
-      }
-    }
-
-    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
-    console.log(`[Geocode] Google Places Text Search: ${query}`);
+    console.log(`[Geocode] Nearby search: "${query}" near ${lat},${lon}`);
 
     const response = await fetch(url);
     const data = await response.json();
 
-    if (data.status === "OK" && data.results && data.results.length > 0) {
-      const place = data.results[0];
-      console.log(`[Geocode] ✅ Google Places found: "${place.name}" at ${place.formatted_address}`);
-      
-      return {
-        found: true,
-        address: query,
-        display_name: place.name,
-        formatted_address: place.formatted_address,
-        lat: place.geometry.location.lat,
-        lon: place.geometry.location.lng,
-        type: place.types?.[0] || "place",
-        place_id: place.place_id,
-      };
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      console.log(`[Geocode] Nearby search: no results (status: ${data.status})`);
+      return { found: false, address: query };
     }
 
-    console.log(`[Geocode] Google Places found no results for "${query}" (status: ${data.status})`);
-    return { found: false, address: query };
-    
+    const placeId = data.results[0].place_id;
+    if (!placeId) {
+      return { found: false, address: query };
+    }
+
+    // Get full place details
+    return await getPlaceDetails(placeId, query, apiKey);
+
   } catch (error) {
-    console.error("[Geocode] Google Places error:", error);
+    console.error("[Geocode] Nearby search error:", error);
     return { found: false, address: query, error: String(error) };
   }
 }
 
+// Text Search with location bias
+async function googleTextSearch(
+  query: string,
+  lat: number | undefined,
+  lon: number | undefined,
+  apiKey: string
+): Promise<GeocodeResult> {
+  try {
+    let url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+      `?query=${encodeURIComponent(query)}` +
+      `&key=${apiKey}`;
+
+    // Add location bias if we have coordinates
+    if (lat && lon) {
+      url += `&location=${lat},${lon}&radius=5000`;
+    }
+
+    console.log(`[Geocode] Text search: "${query}"${lat ? ` biased to ${lat},${lon}` : ''}`);
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      console.log(`[Geocode] Text search: no results (status: ${data.status})`);
+      return { found: false, address: query };
+    }
+
+    const placeId = data.results[0].place_id;
+    if (!placeId) {
+      return { found: false, address: query };
+    }
+
+    // Get full place details for address components
+    return await getPlaceDetails(placeId, query, apiKey);
+
+  } catch (error) {
+    console.error("[Geocode] Text search error:", error);
+    return { found: false, address: query, error: String(error) };
+  }
+}
+
+// Get detailed place information including address components
+async function getPlaceDetails(
+  placeId: string,
+  originalQuery: string,
+  apiKey: string
+): Promise<GeocodeResult> {
+  try {
+    const url = `https://maps.googleapis.com/maps/api/place/details/json` +
+      `?place_id=${placeId}` +
+      `&fields=name,formatted_address,geometry,address_components` +
+      `&key=${apiKey}`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.result) {
+      return { found: false, address: originalQuery };
+    }
+
+    const result = data.result;
+    const components = result.address_components || [];
+
+    // Extract address components
+    const getComponent = (type: string): string | undefined => {
+      const comp = components.find((c: any) => c.types?.includes(type));
+      return comp?.long_name;
+    };
+
+    const houseNumber = getComponent("street_number");
+    const streetName = getComponent("route");
+    const postcode = getComponent("postal_code");
+    const city = getComponent("locality") || 
+                 getComponent("postal_town") || 
+                 getComponent("administrative_area_level_2") ||
+                 getComponent("administrative_area_level_1");
+
+    const loc = result.geometry?.location;
+    if (!loc) {
+      return { found: false, address: originalQuery };
+    }
+
+    const latitude = loc.lat;
+    const longitude = loc.lng;
+
+    // Build display name: prefer place name, fall back to street address
+    let displayName = result.name || result.formatted_address;
+    
+    // If we have a house number and street, include it
+    if (houseNumber && streetName) {
+      displayName = `${result.name || ''} ${houseNumber} ${streetName}`.trim();
+    }
+
+    console.log(`[Geocode] ✅ Found: "${displayName}" (${city}, ${postcode}) at ${latitude},${longitude}`);
+
+    return {
+      found: true,
+      address: originalQuery,
+      display_name: displayName,
+      formatted_address: result.formatted_address,
+      lat: latitude,
+      lon: longitude,
+      type: "place",
+      place_id: placeId,
+      city: city,
+      postcode: postcode,
+      map_link: `https://maps.google.com/?q=${latitude},${longitude}`,
+    };
+
+  } catch (error) {
+    console.error("[Geocode] Place details error:", error);
+    return { found: false, address: originalQuery, error: String(error) };
+  }
+}
+
 async function googleGeocode(
-  query: string, 
+  query: string,
+  city: string | undefined,
   country: string, 
   apiKey: string
 ): Promise<GeocodeResult> {
   try {
+    const searchQuery = city ? `${query}, ${city}, ${country}` : `${query}, ${country}`;
+    
     const params = new URLSearchParams({
-      address: `${query}, ${country}`,
+      address: searchQuery,
       key: apiKey,
       components: `country:${country === "UK" ? "GB" : country}`,
     });
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?${params}`;
-    console.log(`[Geocode] Google Geocoding API: ${query}`);
+    console.log(`[Geocode] Geocoding API: "${searchQuery}"`);
 
     const response = await fetch(url);
     const data = await response.json();
 
     if (data.status === "OK" && data.results && data.results.length > 0) {
       const result = data.results[0];
-      console.log(`[Geocode] ✅ Google Geocode found: "${result.formatted_address}"`);
+      const components = result.address_components || [];
+
+      const getComponent = (type: string): string | undefined => {
+        const comp = components.find((c: any) => c.types?.includes(type));
+        return comp?.long_name;
+      };
+
+      const city = getComponent("locality") || 
+                   getComponent("postal_town") || 
+                   getComponent("administrative_area_level_2");
+      const postcode = getComponent("postal_code");
+
+      console.log(`[Geocode] ✅ Geocode found: "${result.formatted_address}"`);
       
       return {
         found: true,
@@ -171,14 +305,17 @@ async function googleGeocode(
         lon: result.geometry.location.lng,
         type: result.types?.[0] || "address",
         place_id: result.place_id,
+        city: city,
+        postcode: postcode,
+        map_link: `https://maps.google.com/?q=${result.geometry.location.lat},${result.geometry.location.lng}`,
       };
     }
 
-    console.log(`[Geocode] Google Geocode found no results for "${query}" (status: ${data.status})`);
+    console.log(`[Geocode] Geocode found no results (status: ${data.status})`);
     return { found: false, address: query };
     
   } catch (error) {
-    console.error("[Geocode] Google Geocode error:", error);
+    console.error("[Geocode] Geocode error:", error);
     return { found: false, address: query, error: String(error) };
   }
 }
@@ -236,6 +373,9 @@ async function nominatimFallback(
     lat: parseFloat(best.lat),
     lon: parseFloat(best.lon),
     type: best.type,
+    city: best.address?.city || best.address?.town || best.address?.village,
+    postcode: best.address?.postcode,
+    map_link: `https://maps.google.com/?q=${best.lat},${best.lon}`,
   };
 
   console.log(`[Geocode] Nominatim best match: "${best.display_name}"`);
