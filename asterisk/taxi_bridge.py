@@ -25,7 +25,7 @@ WS_URL = "wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime"
 # Audio Settings
 AST_RATE = 8000   # Asterisk standard
 AI_RATE = 24000   # AI Engine standard
-CHUNK_SIZE = 160  # 10ms of audio at 8kHz
+CHUNK_SIZE = 320  # 20ms of audio at 8kHz (Asterisk default frame size)
 
 # AudioSocket Message Types
 MSG_HANGUP = 0x00
@@ -133,35 +133,43 @@ class TaxiBridge:
             pass
 
     async def queue_to_asterisk(self):
-        """Pumps audio to Asterisk at a strict 8kHz pace"""
-        bytes_per_sec = AST_RATE * 2
+        """Pumps audio to Asterisk at a strict 8kHz pace.
+
+        If we don't have enough AI audio yet, we send silence frames to keep Asterisk's
+        timing stable (prevents dead-air when the buffer underflows).
+        """
+        bytes_per_sec = AST_RATE * 2  # 16-bit mono PCM
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
+        silence = b"\x00" * CHUNK_SIZE
 
         while self.running:
+            # Drain queued audio into the local buffer
             while self.audio_queue:
                 buffer.extend(self.audio_queue.popleft())
 
-            if len(buffer) >= CHUNK_SIZE:
-                # Timing Control
-                expected_time = start_time + (bytes_played / bytes_per_sec)
-                now = time.time()
-                if now < expected_time:
-                    await asyncio.sleep(expected_time - now)
+            # Timing control
+            expected_time = start_time + (bytes_played / bytes_per_sec)
+            now = time.time()
+            if now < expected_time:
+                await asyncio.sleep(expected_time - now)
 
+            # Send real audio if available, otherwise send silence
+            if len(buffer) >= CHUNK_SIZE:
                 chunk = bytes(buffer[:CHUNK_SIZE])
                 del buffer[:CHUNK_SIZE]
-
-                try:
-                    header = struct.pack('>BH', MSG_AUDIO, len(chunk))
-                    self.writer.write(header + chunk)
-                    await self.writer.drain()
-                    bytes_played += len(chunk)
-                except Exception:
-                    break
             else:
-                await asyncio.sleep(0.01)  # Wait for buffer
+                chunk = silence
+
+            try:
+                header = struct.pack('>BH', MSG_AUDIO, len(chunk))
+                self.writer.write(header + chunk)
+                await self.writer.drain()
+                bytes_played += len(chunk)
+            except Exception:
+                break
+
 
     async def cleanup(self):
         self.running = False
