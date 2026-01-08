@@ -149,6 +149,9 @@ serve(async (req) => {
   let callSource = "web"; // 'web' or 'asterisk'
   let userPhone = ""; // Phone number from Asterisk
   let callerName = ""; // Known caller's name from database
+  let callerTotalBookings = 0; // Number of previous bookings
+  let callerLastPickup = ""; // Last pickup address
+  let callerLastDestination = ""; // Last destination address
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let geocodingEnabled = true; // Enable address verification by default
@@ -277,9 +280,12 @@ serve(async (req) => {
       
       if (data?.name) {
         callerName = data.name;
-        console.log(`[${callId}] 👤 Known caller: ${callerName} (${data.total_bookings} previous bookings)`);
-        if (data.last_pickup) {
-          console.log(`[${callId}] 📍 Last trip: ${data.last_pickup} → ${data.last_destination}`);
+        callerTotalBookings = data.total_bookings || 0;
+        callerLastPickup = data.last_pickup || "";
+        callerLastDestination = data.last_destination || "";
+        console.log(`[${callId}] 👤 Known caller: ${callerName} (${callerTotalBookings} previous bookings)`);
+        if (callerLastPickup) {
+          console.log(`[${callId}] 📍 Last trip: ${callerLastPickup} → ${callerLastDestination}`);
         }
       } else {
         console.log(`[${callId}] 👤 New caller: ${phone}`);
@@ -335,6 +341,11 @@ serve(async (req) => {
         call_id: callId,
         source: callSource,
         started_at: callStartAt,
+        caller_name: callerName || null,
+        caller_phone: userPhone || null,
+        caller_total_bookings: callerTotalBookings,
+        caller_last_pickup: callerLastPickup || null,
+        caller_last_destination: callerLastDestination || null,
         ...updates,
         transcripts: transcriptHistory,
         updated_at: new Date().toISOString()

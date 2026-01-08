@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History } from "lucide-react";
 
 interface Transcript {
   role: string;
@@ -38,6 +38,12 @@ interface LiveCall {
   started_at: string;
   updated_at: string;
   ended_at: string | null;
+  // Caller info
+  caller_name: string | null;
+  caller_phone: string | null;
+  caller_total_bookings: number | null;
+  caller_last_pickup: string | null;
+  caller_last_destination: string | null;
 }
 
 // Audio playback utilities (PCM16 @ 24kHz)
@@ -486,6 +492,56 @@ export default function LiveCalls() {
                       </Badge>
                     </div>
                   </div>
+
+                  {/* Caller Info Card */}
+                  {(selectedCallData.caller_name || selectedCallData.caller_phone) && (
+                    <div className="mt-4 p-3 bg-muted/50 rounded-lg border border-border">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-full bg-primary/20">
+                          <User className="w-5 h-5 text-primary" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-semibold text-lg">
+                              {selectedCallData.caller_name || "Unknown Caller"}
+                            </p>
+                            {selectedCallData.caller_total_bookings && selectedCallData.caller_total_bookings > 0 && (
+                              <Badge variant="outline" className="text-xs">
+                                {selectedCallData.caller_total_bookings} {selectedCallData.caller_total_bookings === 1 ? "booking" : "bookings"}
+                              </Badge>
+                            )}
+                          </div>
+                          {selectedCallData.caller_phone && (
+                            <p className="text-sm text-muted-foreground font-mono">
+                              +{selectedCallData.caller_phone}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {/* Last Trip */}
+                      {selectedCallData.caller_last_pickup && (
+                        <div className="mt-3 pt-3 border-t border-border/50">
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+                            <History className="w-3 h-3" />
+                            <span>Last Trip</span>
+                          </div>
+                          <div className="text-sm space-y-1">
+                            <p className="flex items-center gap-2">
+                              <MapPin className="w-3 h-3 text-green-400" />
+                              <span className="truncate">{selectedCallData.caller_last_pickup}</span>
+                            </p>
+                            {selectedCallData.caller_last_destination && (
+                              <p className="flex items-center gap-2">
+                                <MapPin className="w-3 h-3 text-red-400" />
+                                <span className="truncate">{selectedCallData.caller_last_destination}</span>
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Booking Info */}
                   {selectedCallData.booking_confirmed && (
