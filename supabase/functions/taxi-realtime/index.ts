@@ -471,12 +471,13 @@ serve(async (req) => {
               // Prompt helps Whisper understand taxi booking context and common terms
               prompt: "247 Radio Carz taxi booking. Common words: pickup, destination, passengers, David Road, Sweet Spot, Sweetspots, Manchester, Wolverhampton, airport, train station, city centre. Numbers: one, two, three, four, five passengers. Names: Ada, Max, John, Sarah. Phrases: just me, two of us, that's correct, yes please."
             },
-            // Server VAD - tuned for natural conversation pace
+            // Server VAD - balanced for natural conversation
+            // Note: VAD is time-based only, not semantic. It cannot detect "sentence finished"
             turn_detection: {
               type: "server_vad",
-              threshold: 0.6,          // Slightly higher threshold to avoid false triggers from background noise
-              prefix_padding_ms: 300,   // Capture more audio before speech starts
-              silence_duration_ms: 1200, // Wait 1.2 seconds of silence before responding (gives time to finish sentences)
+              threshold: 0.55,          // Balanced threshold for speech detection
+              prefix_padding_ms: 250,   // Capture audio just before speech starts
+              silence_duration_ms: 900, // Wait ~1 second of silence (balance between quick replies and patience)
               create_response: true     // Auto-create response when speech ends
             },
             tools: [
