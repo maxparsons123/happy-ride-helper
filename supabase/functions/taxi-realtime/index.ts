@@ -911,10 +911,10 @@ serve(async (req) => {
 
       // Speech started (barge-in detection) - CANCEL AI response for faster interruption
       if (data.type === "input_audio_buffer.speech_started") {
-        console.log(`[${callId}] >>> User started speaking (barge-in) - canceling AI response`);
-        // Cancel any in-progress AI response for instant barge-in
-        openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+        console.log(`[${callId}] >>> User started speaking (barge-in)`);
         socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
+        // Note: Removed response.cancel - it was causing errors when no response was active
+        // and may have been degrading audio quality. Server VAD handles interruption naturally.
       }
 
       // Speech stopped
