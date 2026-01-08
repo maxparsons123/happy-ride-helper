@@ -129,59 +129,100 @@ serve(async (req) => {
     }
   };
 
-  const extractFromText = (text: string): Partial<KnownBooking> => {
+  // Call the AI extraction function to get structured booking data from transcript
+  const extractBookingFromTranscript = async (transcript: string): Promise<void> => {
+    try {
+      console.log(`[${callId}] 🔍 Extracting booking info from: "${transcript}"`);
+      
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          transcript,
+          mode: knownBooking.pickup || knownBooking.destination ? "update" : "new",
+          existing_booking: knownBooking,
+        }),
+      });
+
+      if (!response.ok) {
+        console.error(`[${callId}] Extraction API error: ${response.status}`);
+        return;
+      }
+
+      const extracted = await response.json();
+      console.log(`[${callId}] 📦 AI Extracted:`, extracted);
+
+      // Only update fields that were extracted (non-null)
+      const before = { ...knownBooking };
+      
+      if (extracted.pickup_location) {
+        knownBooking.pickup = extracted.pickup_location;
+      }
+      if (extracted.dropoff_location) {
+        knownBooking.destination = extracted.dropoff_location;
+      }
+      if (extracted.number_of_passengers) {
+        knownBooking.passengers = extracted.number_of_passengers;
+      }
+
+      if (
+        before.pickup !== knownBooking.pickup ||
+        before.destination !== knownBooking.destination ||
+        before.passengers !== knownBooking.passengers
+      ) {
+        console.log(`[${callId}] ✅ Known booking updated via AI extraction:`, knownBooking);
+        broadcastLiveCall({
+          pickup: knownBooking.pickup,
+          destination: knownBooking.destination,
+          passengers: knownBooking.passengers
+        });
+      }
+    } catch (e) {
+      console.error(`[${callId}] Extraction error:`, e);
+      // Fallback to regex extraction if AI extraction fails
+      fallbackExtractFromText(transcript);
+    }
+  };
+
+  // Fallback regex extraction (used if AI extraction fails)
+  const fallbackExtractFromText = (text: string): void => {
     const t = text || "";
-    const out: Partial<KnownBooking> = {};
+    const before = { ...knownBooking };
 
     // Pickup: "from X" (stop before "to/going to/heading to" if present)
     const fromMatch = t.match(/\bfrom\s+(.+?)(?:\s+(?:to|going\s+to|heading\s+to)\b|$)/i);
-    if (fromMatch?.[1]) out.pickup = normalize(fromMatch[1]);
+    if (fromMatch?.[1]) knownBooking.pickup = normalize(fromMatch[1]);
 
     // Destination: "to Y" / "going to Y" / "heading to Y"
     const toMatch = t.match(/\b(?:to|going\s+to|heading\s+to)\s+(.+)$/i);
-    if (toMatch?.[1]) out.destination = normalize(toMatch[1]);
+    if (toMatch?.[1]) knownBooking.destination = normalize(toMatch[1]);
 
     // Passengers: "3 passengers" / "three passengers"
     const wordToNum: Record<string, number> = {
-      one: 1,
-      two: 2,
-      three: 3,
-      four: 4,
-      five: 5,
-      six: 6,
-      seven: 7,
-      eight: 8,
-      nine: 9,
-      ten: 10,
+      one: 1, two: 2, three: 3, four: 4, five: 5,
+      six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
     };
 
     const passengersDigit = t.match(/\b(\d+)\s*(?:passengers?|people|persons?)\b/i);
-    if (passengersDigit?.[1]) out.passengers = Number(passengersDigit[1]);
+    if (passengersDigit?.[1]) knownBooking.passengers = Number(passengersDigit[1]);
 
     const passengersWord = t.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:passengers?|people|persons?)\b/i);
-    if (passengersWord?.[1]) out.passengers = wordToNum[passengersWord[1].toLowerCase()];
+    if (passengersWord?.[1]) knownBooking.passengers = wordToNum[passengersWord[1].toLowerCase()];
 
-    return out;
-  };
-
-  const updateKnownBookingFromText = (text: string, source: "stt" | "text") => {
-    const extracted = extractFromText(text);
-    const before = { ...knownBooking };
-
-    knownBooking = {
-      ...knownBooking,
-      ...Object.fromEntries(
-        Object.entries(extracted).filter(([, v]) => v !== undefined && v !== null && v !== "")
-      ),
-    };
+    // "just me" / "just one" / "myself"
+    if (/\b(just\s+me|myself|just\s+one)\b/i.test(t)) {
+      knownBooking.passengers = 1;
+    }
 
     if (
       before.pickup !== knownBooking.pickup ||
       before.destination !== knownBooking.destination ||
       before.passengers !== knownBooking.passengers
     ) {
-      console.log(`[${callId}] Known booking updated (${source}):`, knownBooking);
-      // Broadcast booking updates
+      console.log(`[${callId}] Known booking updated (fallback regex):`, knownBooking);
       broadcastLiveCall({
         pickup: knownBooking.pickup,
         destination: knownBooking.destination,
@@ -392,10 +433,12 @@ serve(async (req) => {
         }));
       }
 
-      // User transcript
+      // User transcript - extract booking info using AI
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         console.log(`[${callId}] User said: ${data.transcript}`);
-        updateKnownBookingFromText(data.transcript, "stt");
+        
+        // Use AI extraction for accurate booking data
+        extractBookingFromTranscript(data.transcript);
         
         // Save user message to history
         if (data.transcript) {
@@ -602,7 +645,9 @@ serve(async (req) => {
 
       // TEXT MODE: Send text message directly (for testing without audio)
       if (message.type === "text") {
-        updateKnownBookingFromText(message.text, "text");
+        // Use AI extraction for accurate booking data
+        extractBookingFromTranscript(message.text);
+        
         // Save user text to history
         transcriptHistory.push({
           role: "user",
