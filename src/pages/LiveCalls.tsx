@@ -118,6 +118,7 @@ export default function LiveCalls() {
   const [isListening, setIsListening] = useState(false);
   const [addressVerification, setAddressVerification] = useState(true);
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
+  const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
   const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
   
@@ -334,6 +335,20 @@ export default function LiveCalls() {
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* Pipeline Selector */}
+            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
+              <span className={`text-xs font-medium ${!useGeminiPipeline ? 'text-primary' : 'text-muted-foreground'}`}>
+                OpenAI
+              </span>
+              <Switch
+                id="pipeline-select"
+                checked={useGeminiPipeline}
+                onCheckedChange={setUseGeminiPipeline}
+              />
+              <span className={`text-xs font-medium ${useGeminiPipeline ? 'text-green-400' : 'text-muted-foreground'}`}>
+                Gemini
+              </span>
+            </div>
             {/* Address TTS Splicing Toggle */}
             <div className="flex items-center gap-2">
               <Switch
@@ -383,6 +398,28 @@ export default function LiveCalls() {
               {calls.length} Total
             </Badge>
           </div>
+        </div>
+
+        {/* Pipeline Status Bar */}
+        <div className="mb-4 p-3 rounded-lg bg-card/50 border border-border flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full ${useGeminiPipeline ? 'bg-green-400' : 'bg-primary'}`} />
+            <span className="text-sm font-medium">
+              Pipeline: {useGeminiPipeline ? 'Gemini (STT → LLM → TTS)' : 'OpenAI Realtime (Audio-to-Audio)'}
+            </span>
+            <Badge variant="outline" className="text-xs">
+              {useGeminiPipeline ? 'FREE LLM' : '~$2.40/M tokens'}
+            </Badge>
+            <Badge variant="outline" className="text-xs">
+              {useGeminiPipeline ? '~800-1200ms latency' : '~400-500ms latency'}
+            </Badge>
+          </div>
+          <code className="text-xs bg-muted px-2 py-1 rounded font-mono text-muted-foreground">
+            {useGeminiPipeline 
+              ? 'wss://xsdlzoyaosfbbwzmcinq.functions.supabase.co/functions/v1/taxi-realtime-gemini'
+              : 'wss://xsdlzoyaosfbbwzmcinq.functions.supabase.co/functions/v1/taxi-realtime'
+            }
+          </code>
         </div>
 
         <div className="grid grid-cols-12 gap-6">
