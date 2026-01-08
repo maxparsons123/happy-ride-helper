@@ -174,7 +174,7 @@ serve(async (req) => {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
-        body: JSON.stringify({ address, city: "Bradford", country: "UK" }),
+        body: JSON.stringify({ address, country: "UK" }),
       });
 
       if (!response.ok) {

@@ -32,23 +32,10 @@ serve(async (req) => {
       );
     }
 
-    // Common UK city names to detect if address already contains a city
-    const ukCities = [
-      "london", "manchester", "birmingham", "leeds", "glasgow", "liverpool",
-      "newcastle", "sheffield", "bristol", "edinburgh", "cardiff", "belfast",
-      "nottingham", "leicester", "coventry", "bradford", "stoke", "wolverhampton",
-      "derby", "swansea", "southampton", "portsmouth", "oxford", "cambridge",
-      "york", "bath", "brighton", "reading", "luton", "hull", "sunderland"
-    ];
+    // Just use the address as-is with country appended for UK context
+    const searchQuery = `${address}, ${country}`;
     
-    const addressLower = address.toLowerCase();
-    const hasCity = ukCities.some(city => addressLower.includes(city));
-    
-    // If address already contains a city, just append country; otherwise append nothing extra
-    // This prevents "52A David Road, Coventry, Bradford, UK" type errors
-    const searchQuery = hasCity ? `${address}, ${country}` : `${address}, ${country}`;
-    
-    console.log(`[Geocode] Looking up: "${address}" (hasCity: ${hasCity})`);
+    console.log(`[Geocode] Looking up: "${searchQuery}"`);
 
     const encodedQuery = encodeURIComponent(searchQuery);
     
