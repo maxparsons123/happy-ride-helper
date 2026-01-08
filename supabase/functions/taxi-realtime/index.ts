@@ -84,6 +84,7 @@ serve(async (req) => {
   let sessionReady = false;
   let pendingMessages: any[] = [];
   let callSource = "web"; // 'web' or 'asterisk'
+  let userPhone = ""; // Phone number from Asterisk
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
 
@@ -475,7 +476,7 @@ serve(async (req) => {
           if (is6Seater) fare += 5;
           const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
           
-          // Log to database
+          // Log to database with phone number
           await supabase.from("call_logs").insert({
             call_id: callId,
             pickup: finalBooking.pickup,
@@ -483,7 +484,8 @@ serve(async (req) => {
             passengers: finalBooking.passengers,
             estimated_fare: `£${fare}`,
             booking_status: "confirmed",
-            call_start_at: callStartAt
+            call_start_at: callStartAt,
+            user_phone: userPhone || null
           });
 
           // Broadcast booking confirmed
@@ -565,11 +567,16 @@ serve(async (req) => {
       if (message.type === "init") {
         callId = message.call_id || callId;
         callStartAt = new Date().toISOString();
+        // Extract phone number from Asterisk
+        if (message.user_phone) {
+          userPhone = message.user_phone;
+          console.log(`[${callId}] User phone: ${userPhone}`);
+        }
         // Detect Asterisk calls by call_id prefix
-        if (callId.startsWith("ast-") || callId.startsWith("asterisk-")) {
+        if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone})`);
         return;
       }
       
