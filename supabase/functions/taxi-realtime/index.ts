@@ -812,16 +812,78 @@ serve(async (req) => {
 
       // User transcript - extract booking info using AI
       if (data.type === "conversation.item.input_audio_transcription.completed") {
-        console.log(`[${callId}] User said: ${data.transcript}`);
+        const rawTranscript = data.transcript || "";
+        console.log(`[${callId}] Raw user transcript: ${rawTranscript}`);
+        
+        // Filter Whisper hallucinations - common patterns when there's silence/noise
+        const isHallucination = (text: string): boolean => {
+          const t = text.trim();
+          if (!t) return true;
+          
+          // Too many numbers in sequence (phone numbers, random digits)
+          const digitCount = (t.match(/\d/g) || []).length;
+          const wordCount = t.split(/\s+/).length;
+          if (digitCount > 8 && digitCount > wordCount * 2) {
+            console.log(`[${callId}] 🚫 Hallucination detected: too many digits (${digitCount})`);
+            return true;
+          }
+          
+          // Contains multiple city names in one utterance (unrealistic)
+          const cities = ['london', 'manchester', 'birmingham', 'coventry', 'leeds', 'liverpool', 'sheffield', 'bristol', 'nottingham', 'leicester'];
+          const citiesFound = cities.filter(c => t.toLowerCase().includes(c));
+          if (citiesFound.length >= 3) {
+            console.log(`[${callId}] 🚫 Hallucination detected: multiple cities (${citiesFound.join(', ')})`);
+            return true;
+          }
+          
+          // Common Whisper hallucination phrases
+          const hallucinationPhrases = [
+            /thank you for watching/i,
+            /please subscribe/i,
+            /like and subscribe/i,
+            /\[music\]/i,
+            /\[applause\]/i,
+            /subtitles by/i,
+            /transcribed by/i,
+            /^\.+$/,  // Just dots
+            /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
+          ];
+          
+          for (const pattern of hallucinationPhrases) {
+            if (pattern.test(t)) {
+              console.log(`[${callId}] 🚫 Hallucination detected: matches pattern ${pattern}`);
+              return true;
+            }
+          }
+          
+          // Very long transcript from short audio (likely hallucination)
+          // Normal speech is ~150 words per minute, so 3 seconds max = ~7-8 words
+          // If we get 50+ words, it's likely a hallucination
+          if (wordCount > 50) {
+            console.log(`[${callId}] 🚫 Hallucination detected: too long (${wordCount} words)`);
+            return true;
+          }
+          
+          return false;
+        };
+        
+        // Skip hallucinated transcripts
+        if (isHallucination(rawTranscript)) {
+          console.log(`[${callId}] 🚫 Skipping hallucinated transcript: "${rawTranscript.substring(0, 100)}..."`);
+          // Don't process, don't save, don't forward
+          return;
+        }
+        
+        console.log(`[${callId}] User said: ${rawTranscript}`);
         
         // Use AI extraction for accurate booking data
-        extractBookingFromTranscript(data.transcript);
+        extractBookingFromTranscript(rawTranscript);
         
         // Save user message to history
-        if (data.transcript) {
+        if (rawTranscript) {
           transcriptHistory.push({
             role: "user",
-            text: data.transcript,
+            text: rawTranscript,
             timestamp: new Date().toISOString()
           });
           // Broadcast transcript update
