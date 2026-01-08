@@ -1104,16 +1104,25 @@ Rules:
         
         const addresses = quickExtractAddresses(rawTranscript);
         if (addresses.length > 0 && openaiWs?.readyState === WebSocket.OPEN) {
-          // Inject the exact addresses into Ada's context immediately
-          const addressNote = `[CRITICAL: Use these EXACT addresses in your response - ${addresses.map((a, i) => `Address ${i+1}: "${a}"`).join(', ')}. Do NOT paraphrase or change these addresses.]`;
-          console.log(`[${callId}] 📢 Quick address injection: ${addressNote}`);
+          // Inject the exact addresses as a USER message so Ada MUST use them in her response
+          // Using role: "user" ensures this becomes part of the input context, not a memory note
+          const pickupAddr = addresses[0] || null;
+          const destAddr = addresses[1] || null;
           
+          let addressInstruction = `[SYSTEM: The customer just provided addresses. You MUST use these EXACT spellings:\n`;
+          if (pickupAddr) addressInstruction += `- PICKUP: "${pickupAddr}"\n`;
+          if (destAddr) addressInstruction += `- DESTINATION: "${destAddr}"\n`;
+          addressInstruction += `Repeat these addresses back EXACTLY as written above. Do NOT change any letters.]`;
+          
+          console.log(`[${callId}] 📢 Quick address injection: pickup="${pickupAddr}", dest="${destAddr}"`);
+          
+          // Inject as a hidden user message so it becomes part of the context
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "assistant",
-              content: [{ type: "text", text: addressNote }]
+              role: "user",
+              content: [{ type: "input_text", text: addressInstruction }]
             }
           }));
         }
