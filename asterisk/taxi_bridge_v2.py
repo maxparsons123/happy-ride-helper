@@ -123,7 +123,7 @@ class TaxiBridgeV2:
                 self.ws = ws
 
                 # Initial handshake (call_id only). Phone gets sent when UUID arrives.
-                await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id}))
+                await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id, "addressTtsSplicing": True}))
 
                 await asyncio.gather(
                     self.asterisk_to_ai(),
@@ -162,6 +162,7 @@ class TaxiBridgeV2:
                                 "call_id": self.call_id,
                                 "user_phone": self.phone,
                                 "user_name": self.caller_name,
+                                "addressTtsSplicing": True,
                             }
                         )
                     )
@@ -224,6 +225,16 @@ class TaxiBridgeV2:
                                 f"[{self.call_id}] 📤 Queued for Asterisk: {len(out_bytes)}B "
                                 f"(codec={self.ast_codec})"
                             )
+
+                elif data.get("type") == "address_tts":
+                    raw_audio_24k = base64.b64decode(data["audio"])
+                    linear16_8k = resample_audio_linear16(raw_audio_24k, AI_RATE, AST_RATE)
+                    out_bytes = self._linear16_to_ast_out(linear16_8k)
+                    if out_bytes:
+                        self.audio_queue.appendleft(out_bytes)
+                        logger.info(
+                            f"[{self.call_id}] 🔊 Queued address_tts: {len(out_bytes)}B (codec={self.ast_codec})"
+                        )
 
                 elif data.get("type") == "transcript":
                     logger.info(

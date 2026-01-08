@@ -67,7 +67,7 @@ class TaxiBridge:
             async with websockets.connect(WS_URL, ping_interval=5, ping_timeout=10) as ws:
                 self.ws = ws
                 # Initial handshake
-                await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id}))
+                await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id, "addressTtsSplicing": True}))
                 
                 # Start concurrent loops
                 await asyncio.gather(
@@ -99,7 +99,8 @@ class TaxiBridge:
                     await self.ws.send(json.dumps({
                         "type": "init", 
                         "call_id": self.call_id, 
-                        "user_phone": self.phone
+                        "user_phone": self.phone,
+                        "addressTtsSplicing": True
                     }))
 
                 elif m_type == MSG_AUDIO:
@@ -127,6 +128,12 @@ class TaxiBridge:
                     # Downsample AI (24k) to Asterisk (8k)
                     downsampled = resample_audio(raw_audio, AI_RATE, AST_RATE)
                     self.audio_queue.append(downsampled)
+                elif data.get("type") == "address_tts":
+                    # High-fidelity address audio - prioritize it in the queue
+                    raw_audio = base64.b64decode(data["audio"])
+                    downsampled = resample_audio(raw_audio, AI_RATE, AST_RATE)
+                    self.audio_queue.appendleft(downsampled)
+                    logger.info(f"[{self.call_id}] 🔊 Queued address_tts ({len(downsampled)} bytes)")
                 elif data.get("type") == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role')}: {data.get('text')}")
         except Exception:
