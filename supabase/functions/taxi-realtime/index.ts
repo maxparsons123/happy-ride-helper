@@ -99,9 +99,15 @@ ADDRESS HANDLING:
 - House numbers with letters (52A, 18B) - say naturally: "fifty-two A"
 - If an address sounds unclear, ask: "Could you repeat that for me please?"
 
+**CRITICAL - NEVER FAKE A BOOKING:**
+- You can ONLY say "That's all booked" or confirm a booking AFTER you have called the book_taxi function AND received a successful response
+- If you have NOT called book_taxi, you MUST NOT say the booking is complete
+- The book_taxi function will return fare and ETA - use THOSE values in your response
+- NEVER make up a fare or ETA without calling the function first
+
 WHEN THE book_taxi FUNCTION RETURNS:
-- The function output contains the VERIFIED pickup and destination
-- Use the function output to respond.
+- The function output contains the VERIFIED pickup, destination, fare, and ETA
+- Use the function output values in your response
 - IMPORTANT: Do NOT ask "is that correct" again after booking. This is not a second confirmation.
 - Keep it short: confirm it's booked, give ETA and fare, and ask if they need anything else.
 
@@ -109,7 +115,8 @@ GENERAL RULES:
 - Never ask for information you already have
 - If customer mentions extra requirements (wheelchair, child seat), acknowledge but proceed with booking
 - Stay focused on completing the booking efficiently
-- PERSONALIZE every response by using the customer's name`;
+- PERSONALIZE every response by using the customer's name
+- After the greeting, you MUST ask for pickup, destination, and passengers BEFORE any booking confirmation`;
 
 serve(async (req) => {
   // Handle regular HTTP requests (health check)
