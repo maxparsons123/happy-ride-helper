@@ -98,6 +98,7 @@ serve(async (req) => {
   let pendingMessages: any[] = [];
   let callSource = "web"; // 'web' or 'asterisk'
   let userPhone = ""; // Phone number from Asterisk
+  let callerName = ""; // Known caller's name from database
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
 
@@ -114,6 +115,74 @@ serve(async (req) => {
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+
+  // Look up caller by phone number
+  const lookupCaller = async (phone: string): Promise<void> => {
+    if (!phone) return;
+    try {
+      const { data, error } = await supabase
+        .from("callers")
+        .select("name, last_pickup, last_destination, total_bookings")
+        .eq("phone_number", phone)
+        .maybeSingle();
+      
+      if (error) {
+        console.error(`[${callId}] Caller lookup error:`, error);
+        return;
+      }
+      
+      if (data?.name) {
+        callerName = data.name;
+        console.log(`[${callId}] 👤 Known caller: ${callerName} (${data.total_bookings} previous bookings)`);
+        if (data.last_pickup) {
+          console.log(`[${callId}] 📍 Last trip: ${data.last_pickup} → ${data.last_destination}`);
+        }
+      } else {
+        console.log(`[${callId}] 👤 New caller: ${phone}`);
+      }
+    } catch (e) {
+      console.error(`[${callId}] Caller lookup exception:`, e);
+    }
+  };
+
+  // Save or update caller info after booking
+  const saveCallerInfo = async (booking: { pickup: string; destination: string; passengers: number }): Promise<void> => {
+    if (!userPhone) return;
+    try {
+      // Check if caller exists
+      const { data: existing } = await supabase
+        .from("callers")
+        .select("id, total_bookings")
+        .eq("phone_number", userPhone)
+        .maybeSingle();
+      
+      if (existing) {
+        // Update existing caller
+        const { error } = await supabase.from("callers").update({
+          last_pickup: booking.pickup,
+          last_destination: booking.destination,
+          total_bookings: (existing.total_bookings || 0) + 1,
+          updated_at: new Date().toISOString()
+        }).eq("phone_number", userPhone);
+        
+        if (error) console.error(`[${callId}] Update caller error:`, error);
+        else console.log(`[${callId}] 💾 Updated caller ${userPhone} (${existing.total_bookings + 1} bookings)`);
+      } else {
+        // Insert new caller
+        const { error } = await supabase.from("callers").insert({
+          phone_number: userPhone,
+          last_pickup: booking.pickup,
+          last_destination: booking.destination,
+          total_bookings: 1
+        });
+        
+        if (error) console.error(`[${callId}] Insert caller error:`, error);
+        else console.log(`[${callId}] 💾 New caller saved: ${userPhone}`);
+      }
+    } catch (e) {
+      console.error(`[${callId}] Save caller exception:`, e);
+    }
+  };
 
   // Broadcast live call updates to the database for monitoring
   const broadcastLiveCall = async (updates: Record<string, any>) => {
@@ -307,13 +376,18 @@ serve(async (req) => {
         await broadcastLiveCall({ status: "active" });
 
         // Trigger initial greeting immediately - inject as system turn for faster response
-        console.log(`[${callId}] Triggering initial greeting...`);
+        // Personalize greeting if we know the caller's name
+        const greetingPrompt = callerName 
+          ? `[Call connected - greet the customer by name. Their name is ${callerName}. Say something like "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`
+          : "[Call connected - greet the customer]";
+        
+        console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'unknown'})`);
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
             type: "message",
             role: "user",
-            content: [{ type: "input_text", text: "[Call connected - greet the customer]" }]
+            content: [{ type: "input_text", text: greetingPrompt }]
           }
         }));
         openaiWs?.send(JSON.stringify({
@@ -544,6 +618,9 @@ serve(async (req) => {
             user_phone: userPhone || null
           });
 
+          // Save/update caller info for future calls
+          await saveCallerInfo(finalBooking);
+
           // Broadcast booking confirmed
           await broadcastLiveCall({
             pickup: finalBooking.pickup,
@@ -617,7 +694,7 @@ serve(async (req) => {
     connectToOpenAI();
   };
 
-  socket.onmessage = (event) => {
+  socket.onmessage = async (event) => {
     try {
       const message = JSON.parse(event.data);
       
@@ -629,12 +706,14 @@ serve(async (req) => {
         if (message.user_phone) {
           userPhone = message.user_phone;
           console.log(`[${callId}] User phone: ${userPhone}`);
+          // Look up caller in database
+          await lookupCaller(userPhone);
         }
         // Detect Asterisk calls by call_id prefix
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'})`);
         return;
       }
       
