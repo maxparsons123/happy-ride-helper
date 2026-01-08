@@ -264,17 +264,45 @@ serve(async (req) => {
         knownBooking.passengers = extracted.number_of_passengers;
       }
 
-      if (
-        before.pickup !== knownBooking.pickup ||
-        before.destination !== knownBooking.destination ||
-        before.passengers !== knownBooking.passengers
-      ) {
+      // Check if anything changed
+      const pickupChanged = before.pickup !== knownBooking.pickup && knownBooking.pickup;
+      const destinationChanged = before.destination !== knownBooking.destination && knownBooking.destination;
+      const passengersChanged = before.passengers !== knownBooking.passengers && knownBooking.passengers;
+
+      if (pickupChanged || destinationChanged || passengersChanged) {
         console.log(`[${callId}] ✅ Known booking updated via AI extraction:`, knownBooking);
         broadcastLiveCall({
           pickup: knownBooking.pickup,
           destination: knownBooking.destination,
           passengers: knownBooking.passengers
         });
+
+        // INJECT CORRECT DATA INTO ADA'S CONTEXT
+        // This ensures Ada uses the EXACT extracted addresses, not her hallucinated versions
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          let contextUpdate = "SYSTEM UPDATE - Use these EXACT details (do not modify or correct them):\n";
+          
+          if (knownBooking.pickup) {
+            contextUpdate += `• PICKUP ADDRESS: "${knownBooking.pickup}" - say this EXACTLY as written\n`;
+          }
+          if (knownBooking.destination) {
+            contextUpdate += `• DESTINATION: "${knownBooking.destination}" - say this EXACTLY as written\n`;
+          }
+          if (knownBooking.passengers) {
+            contextUpdate += `• PASSENGERS: ${knownBooking.passengers}\n`;
+          }
+          
+          console.log(`[${callId}] 📢 Injecting correct data into Ada's context`);
+          
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user", 
+              content: [{ type: "input_text", text: `[SYSTEM: ${contextUpdate}]` }]
+            }
+          }));
+        }
       }
     } catch (e) {
       console.error(`[${callId}] Extraction error:`, e);
