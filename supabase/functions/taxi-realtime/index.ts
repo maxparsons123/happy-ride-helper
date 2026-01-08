@@ -707,36 +707,12 @@ Rules:
           }
         }
 
-        // GENERATE ADDRESS TTS (if splicing is enabled)
-        // This creates audio from the EXTRACTED address text for accurate pronunciation
-        if (addressTtsSplicingEnabled) {
-          if (pickupChanged && knownBooking.pickup) {
-            const pickupTts = await generateAddressTts(knownBooking.pickup);
-            if (pickupTts) {
-              console.log(`[${callId}] 🔊 Sending pickup address TTS to client`);
-              socket.send(JSON.stringify({
-                type: "address_tts",
-                addressType: "pickup",
-                address: knownBooking.pickup,
-                audio: pickupTts.audio,
-                bytes: pickupTts.bytes
-              }));
-            }
-          }
-          if (destinationChanged && knownBooking.destination) {
-            const destTts = await generateAddressTts(knownBooking.destination);
-            if (destTts) {
-              console.log(`[${callId}] 🔊 Sending destination address TTS to client`);
-              socket.send(JSON.stringify({
-                type: "address_tts",
-                addressType: "destination",
-                address: knownBooking.destination,
-                audio: destTts.audio,
-                bytes: destTts.bytes
-              }));
-            }
-          }
-        }
+        // NOTE: Address TTS splicing is DISABLED
+        // It was causing double-speak because Ada's response already includes the address
+        // and the spliced audio plays separately on top of it.
+        // If we want address splicing to work, we'd need to either:
+        // 1. Have Ada skip saying the address (complex prompt engineering)
+        // 2. Or splice DURING her response (requires audio manipulation)
 
         // INJECT CORRECT DATA INTO ADA'S CONTEXT (silently - no response triggered)
         // This ensures Ada uses the EXACT extracted addresses, not her hallucinated versions
