@@ -246,11 +246,28 @@ class TaxiBridgeV2:
     async def queue_to_asterisk(self):
         """Pumps audio to Asterisk at a strict real-time pace.
 
-        Sends silence when we don't have enough AI audio yet to avoid timing collapse.
+        IMPORTANT:
+        - Audio from the AI arrives in bursts over the network.
+        - If we start playing immediately, small network jitter can cause buffer underflows,
+          which sound like Ada "cutting out" mid-sentence.
+
+        To reduce this, we implement a small jitter buffer:
+        - Start in "buffering" mode and send silence until we have a minimum amount of audio.
+        - If we underflow later, re-enter buffering mode until the buffer refills.
         """
         bytes_per_sec = self._bytes_per_sec_out()
         start_time = time.time()
         bytes_played = 0
+
+        # Jitter buffer target (tuned for phone calls: smooth > ultra-low latency)
+        MIN_BUFFER_MS = 200
+        min_buffer_bytes = int(bytes_per_sec * (MIN_BUFFER_MS / 1000.0))
+        # Always require at least a few frames so the "min" isn't smaller than one frame.
+        min_buffer_bytes = max(min_buffer_bytes, self.ast_frame_bytes * 5)
+
+        buffering = True
+        underflow_count = 0
+        last_stats_log = 0.0
 
         buffer = bytearray()
 
@@ -258,17 +275,38 @@ class TaxiBridgeV2:
             while self.audio_queue:
                 buffer.extend(self.audio_queue.popleft())
 
+            # Periodic stats (helps confirm whether we are underflowing)
+            now = time.time()
+            if now - last_stats_log >= 10:
+                last_stats_log = now
+                logger.info(
+                    f"[{self.call_id}] 🎧 buffer={len(buffer)}B queue={len(self.audio_queue)} buffering={buffering}"
+                )
+
+            # If we're buffering and have enough audio, resume playback
+            if buffering and len(buffer) >= min_buffer_bytes:
+                buffering = False
+                logger.info(
+                    f"[{self.call_id}] ✅ Jitter buffer filled ({len(buffer)}B). Resuming AI audio."
+                )
+
             # Timing control
             expected_time = start_time + (bytes_played / bytes_per_sec)
-            now = time.time()
             if now < expected_time:
                 await asyncio.sleep(expected_time - now)
 
             # Choose next chunk
-            if len(buffer) >= self.ast_frame_bytes:
+            if (not buffering) and len(buffer) >= self.ast_frame_bytes:
                 chunk = bytes(buffer[: self.ast_frame_bytes])
                 del buffer[: self.ast_frame_bytes]
             else:
+                # If we expected to play audio but ran out, enter buffering mode again
+                if not buffering and len(buffer) < self.ast_frame_bytes:
+                    buffering = True
+                    underflow_count += 1
+                    logger.info(
+                        f"[{self.call_id}] ⚠️ AI audio underflow (#{underflow_count}). Buffering..."
+                    )
                 chunk = self._silence_frame()
 
             try:
