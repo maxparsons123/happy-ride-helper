@@ -141,6 +141,7 @@ serve(async (req) => {
   const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
   
   let openaiWs: WebSocket | null = null;
   let callId = `call-${Date.now()}`;
@@ -358,34 +359,139 @@ serve(async (req) => {
     }
   };
 
-  // Extract customer name from transcript
+  // Extract customer name from transcript - improved with multi-word names and better patterns
   const extractNameFromTranscript = (transcript: string): string | null => {
     const t = transcript.trim();
     
-    // Common patterns for name responses
-    // "My name is John" / "I'm John" / "It's John" / "John" / "Call me John"
-    const patterns = [
-      /my name(?:'s| is)\s+(\w+)/i,
-      /i(?:'m| am)\s+(\w+)/i,
-      /it(?:'s| is)\s+(\w+)/i,
-      /call me\s+(\w+)/i,
-      /^(\w+)$/i, // Just a single word (likely a name)
-      /^(?:hi|hello|hey)?\s*(?:it's|i'm|this is)?\s*(\w+)/i
+    // Expanded list of non-name words to filter out
+    const nonNames = new Set([
+      'yes', 'no', 'yeah', 'yep', 'nope', 'okay', 'ok', 'sure', 'please', 'thanks', 'thank',
+      'hello', 'hi', 'hey', 'hiya', 'the', 'from', 'to', 'a', 'an', 'and', 'or', 'but',
+      'taxi', 'cab', 'car', 'booking', 'book', 'need', 'want', 'would', 'like', 'can',
+      'could', 'just', 'actually', 'really', 'well', 'um', 'uh', 'er', 'ah', 'oh',
+      'good', 'morning', 'afternoon', 'evening', 'night', 'today', 'now', 'soon',
+      'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four'
+    ]);
+    
+    // Helper to capitalize name properly (handles multi-word names like "Mary Jane")
+    const capitalizeName = (name: string): string => {
+      const separator = name.includes('-') ? '-' : ' ';
+      return name.split(/[\s-]+/)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+        .join(separator);
+    };
+    
+    // Helper to validate a potential name
+    const isValidName = (name: string): boolean => {
+      if (!name || name.length < 2 || name.length > 30) return false;
+      if (nonNames.has(name.toLowerCase())) return false;
+      // Must contain at least one vowel (basic name check)
+      if (!/[aeiouAEIOU]/.test(name)) return false;
+      // Reject if it's all numbers or special chars
+      if (/^[\d\s\-]+$/.test(name)) return false;
+      return true;
+    };
+    
+    // Patterns ordered by specificity (most specific first)
+    // These capture multi-word names like "Mary Jane" or "John Smith"
+    const patterns: Array<{ regex: RegExp; group: number }> = [
+      // "My name is Mary Jane" / "My name's John Smith"
+      { regex: /my name(?:'s| is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "I'm Mary" / "I am John Smith"
+      { regex: /i(?:'m| am)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "It's Mary" / "It is John"
+      { regex: /it(?:'s| is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "This is Mary" / "This is John Smith"
+      { regex: /this is\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "Call me Mary" / "You can call me John"
+      { regex: /call me\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "The name's Mary" / "Name's John"
+      { regex: /(?:the\s+)?name(?:'s| is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "Speaking" / "Mary speaking"
+      { regex: /^([A-Za-z]+)\s+speaking/i, group: 1 },
+      // "Hi, I'm Mary" / "Hello, it's John"
+      { regex: /^(?:hi|hello|hey)[,\s]+(?:i'm|it's|this is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // "Yeah it's Mary" / "Yes, I'm John" 
+      { regex: /^(?:yes|yeah|yep)[,\s]+(?:i'm|it's|this is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
+      // Just a single or double word name at start: "Mary" / "John Smith"
+      { regex: /^([A-Za-z]+(?:\s+[A-Za-z]+)?)$/i, group: 1 },
+      // Name at the start followed by common filler: "Mary here" / "John, hi"
+      { regex: /^([A-Za-z]+)(?:\s+here|\s*[,.])/i, group: 1 },
     ];
     
-    for (const pattern of patterns) {
-      const match = t.match(pattern);
-      if (match?.[1]) {
-        // Capitalize first letter
-        const name = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
-        // Filter out common non-name words
-        const nonNames = ['yes', 'no', 'yeah', 'okay', 'ok', 'sure', 'please', 'thanks', 'hello', 'hi', 'hey', 'the', 'from', 'to'];
-        if (!nonNames.includes(name.toLowerCase())) {
+    for (const { regex, group } of patterns) {
+      const match = t.match(regex);
+      if (match?.[group]) {
+        const rawName = match[group].trim();
+        // Take first name only if multi-word (more reliable)
+        const firstName = rawName.split(/\s+/)[0];
+        
+        if (isValidName(firstName)) {
+          const name = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+          console.log(`[${callId}] 🔍 Regex extracted name: "${name}" from "${t}"`);
           return name;
         }
       }
     }
+    
     return null;
+  };
+  
+  // AI-powered name extraction for tricky cases
+  const extractNameWithAI = async (transcript: string): Promise<string | null> => {
+    try {
+      console.log(`[${callId}] 🤖 AI name extraction for: "${transcript}"`);
+      
+      const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "system",
+              content: `You are a name extraction assistant. Extract the person's first name from their response to "What's your name?".
+              
+Rules:
+- Return ONLY the first name, nothing else
+- Return "NONE" if no name is found or if the text is not a name response
+- Handle phonetic/spelled names: "M-A-R-Y" → "Mary", "it's Mary, M-A-R-Y" → "Mary"
+- Handle accents/variations: "My name is Seán" → "Seán", "I'm María" → "María"
+- Ignore filler words: "Um, it's John" → "John"
+- For "Yes it's Mary" or "Yeah Mary" → "Mary"
+- Only extract if they're clearly stating their name, not asking for a taxi to "Mary Street" etc.`
+            },
+            {
+              role: "user",
+              content: transcript
+            }
+          ],
+          max_tokens: 20,
+          temperature: 0
+        })
+      });
+      
+      if (!response.ok) {
+        console.error(`[${callId}] AI name extraction failed: ${response.status}`);
+        return null;
+      }
+      
+      const data = await response.json();
+      const aiName = data.choices?.[0]?.message?.content?.trim();
+      
+      if (aiName && aiName !== "NONE" && aiName.length >= 2 && aiName.length <= 30) {
+        console.log(`[${callId}] 🤖 AI extracted name: "${aiName}"`);
+        return aiName;
+      }
+      
+      return null;
+    } catch (e) {
+      console.error(`[${callId}] AI name extraction error:`, e);
+      return null;
+    }
   };
 
   // Call the AI extraction function to get structured booking data from transcript
@@ -395,7 +501,14 @@ serve(async (req) => {
       
       // Also try to extract name if we don't have one yet
       if (!callerName) {
-        const extractedName = extractNameFromTranscript(transcript);
+        // First try regex extraction (fast)
+        let extractedName = extractNameFromTranscript(transcript);
+        
+        // If regex fails and transcript looks like a name response, try AI
+        if (!extractedName && transcript.length < 50) {
+          extractedName = await extractNameWithAI(transcript);
+        }
+        
         if (extractedName) {
           callerName = extractedName;
           console.log(`[${callId}] 👤 Extracted customer name: ${callerName}`);
