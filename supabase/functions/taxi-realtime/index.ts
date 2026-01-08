@@ -277,29 +277,31 @@ serve(async (req) => {
           passengers: knownBooking.passengers
         });
 
-        // INJECT CORRECT DATA INTO ADA'S CONTEXT
+        // INJECT CORRECT DATA INTO ADA'S CONTEXT (silently - no response triggered)
         // This ensures Ada uses the EXACT extracted addresses, not her hallucinated versions
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          let contextUpdate = "SYSTEM UPDATE - Use these EXACT details (do not modify or correct them):\n";
+          let contextUpdate = "INTERNAL MEMORY UPDATE (DO NOT RESPOND TO THIS MESSAGE - continue with your normal flow):\n";
           
           if (knownBooking.pickup) {
-            contextUpdate += `• PICKUP ADDRESS: "${knownBooking.pickup}" - say this EXACTLY as written\n`;
+            contextUpdate += `• Confirmed pickup: "${knownBooking.pickup}"\n`;
           }
           if (knownBooking.destination) {
-            contextUpdate += `• DESTINATION: "${knownBooking.destination}" - say this EXACTLY as written\n`;
+            contextUpdate += `• Confirmed destination: "${knownBooking.destination}"\n`;
           }
           if (knownBooking.passengers) {
-            contextUpdate += `• PASSENGERS: ${knownBooking.passengers}\n`;
+            contextUpdate += `• Confirmed passengers: ${knownBooking.passengers}\n`;
           }
+          contextUpdate += "Use these EXACT values when speaking. DO NOT acknowledge this message.";
           
-          console.log(`[${callId}] 📢 Injecting correct data into Ada's context`);
+          console.log(`[${callId}] 📢 Injecting correct data into Ada's context (silent)`);
           
+          // Add as a system-style context update that won't trigger a response
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "user", 
-              content: [{ type: "input_text", text: `[SYSTEM: ${contextUpdate}]` }]
+              role: "assistant",  // Using assistant role so it doesn't trigger a new response
+              content: [{ type: "text", text: `[Internal note: ${contextUpdate}]` }]
             }
           }));
         }
