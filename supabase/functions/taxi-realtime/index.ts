@@ -100,13 +100,13 @@ You are in a CONVERSATION. When you ask a question, you MUST:
 
 **MANDATORY CONFIRMATION STEP - CRITICAL:**
 Before calling book_taxi, you MUST:
-1. Summarize ALL details back to the customer ONCE: "Just to confirm [NAME] - pickup from [ADDRESS], going to [DESTINATION], for [X] passengers. Is that all correct?"
-2. WAIT for the customer to explicitly confirm with "yes", "correct", "that's right", "yeah", etc.
+1. Summarize ALL details back to the customer EXACTLY ONCE: "Just to confirm [NAME] - pickup from [ADDRESS], going to [DESTINATION], for [X] passengers. Is that all correct?"
+2. WAIT for the customer to explicitly confirm with "yes", "correct", "that's right", "yeah", "roger", "that's it", etc.
 3. If they confirm YES: IMMEDIATELY call book_taxi (do NOT speak any extra words first)
 4. If they say "no" or correct something, update the detail and do a NEW full confirmation
 
 DO NOT call book_taxi until the customer says YES to your confirmation summary!
-DO NOT repeat the confirmation question twice. If you heard a clear YES, proceed straight to booking.
+CRITICAL - NO DOUBLE CONFIRMATIONS: Once you've asked "Is that all correct?" and the customer says YES (or any affirmative), you MUST call book_taxi IMMEDIATELY. Do NOT ask for confirmation again. Do NOT say "Just to confirm" twice. One confirmation = one booking.
 
 INFORMATION EXTRACTION - CRITICAL:
 - Listen carefully for: customer name, pickup location, destination, number of passengers
@@ -267,12 +267,21 @@ serve(async (req) => {
       console.log(`[${callId}] ✅ ${addressType} address verified: "${address}"`);
       // No need to say anything - address is valid
     } else {
-      console.log(`[${callId}] ❌ ${addressType} address NOT FOUND: "${address}" - asking for correction`);
+      console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - but accepting it anyway`);
       
-      // Inject a message to Ada to ask for address correction
+      // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
+      // Only ask for clarification if it's a residential address that sounds garbled
+      const isLandmark = /\b(station|airport|hospital|university|college|school|shopping|centre|center|mall|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|hotel|inn|pub|restaurant|church|mosque|temple|gurdwara|park|library|museum|theatre|theater|cinema|gym|sports|leisure|pool|bus\s*stop|taxi\s*rank)\b/i.test(address);
+      
+      if (isLandmark) {
+        console.log(`[${callId}] 📍 Landmark detected - accepting without clarification: "${address}"`);
+        return; // Don't ask for clarification on landmarks
+      }
+      
+      // Only ask for clarification on unclear residential addresses
       const message = addressType === "pickup"
-        ? `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and number please?"]`
-        : `[SYSTEM: The destination address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm not quite finding that destination. Could you spell out the street name for me please?"]`;
+        ? `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`
+        : `[SYSTEM: The destination address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that destination. Could you give me the full address or postcode please?"]`;
       
       openaiWs.send(JSON.stringify({
         type: "conversation.item.create",
