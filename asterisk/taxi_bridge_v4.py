@@ -131,8 +131,25 @@ class TaxiBridgeV4:
                     self.audio_queue.append(out)
                 elif data.get("type") == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role').upper()}: {data.get('text')}")
+                elif data.get("type") == "call_ended":
+                    logger.info(f"[{self.call_id}] 📴 AI requested hangup: {data.get('reason', 'unknown')}")
+                    # Send hangup message to Asterisk
+                    await self._send_hangup()
+                    self.running = False
+                    break
         except Exception:
             pass
+
+    async def _send_hangup(self):
+        """Send hangup message to Asterisk"""
+        try:
+            # MSG_HANGUP = 0x00, with 0 length payload
+            header = struct.pack(">BH", MSG_HANGUP, 0)
+            self.writer.write(header)
+            await self.writer.drain()
+            logger.info(f"[{self.call_id}] 📴 Hangup sent to Asterisk")
+        except Exception as e:
+            logger.error(f"[{self.call_id}] ❌ Failed to send hangup: {e}")
 
     async def queue_to_asterisk(self):
         bytes_per_sec = AST_RATE * (1 if self.ast_codec == "ulaw" else 2)
