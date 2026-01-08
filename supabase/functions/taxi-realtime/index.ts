@@ -1256,19 +1256,9 @@ Rules:
           }),
         );
 
-        // IMPORTANT: With some clients and/or manual commit, OpenAI may not auto-create a response
-        // even when server_vad is enabled. If we have a committed audio turn and no response yet,
-        // explicitly request one now.
-        if (awaitingResponseAfterCommit && !responseCreatedSinceCommit && openaiWs?.readyState === WebSocket.OPEN) {
-          console.log(`[${callId}] No response.created after commit; sending response.create as fallback`);
-          openaiWs.send(
-            JSON.stringify({
-              type: "response.create",
-              response: { modalities: ["audio", "text"] },
-            }),
-          );
-        }
-
+        // NOTE: With create_response: true in VAD config, OpenAI auto-creates responses
+        // Removed manual fallback to prevent double-speak race condition
+        
         awaitingResponseAfterCommit = false;
         responseCreatedSinceCommit = false;
       }
