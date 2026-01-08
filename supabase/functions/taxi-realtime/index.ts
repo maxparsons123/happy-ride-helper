@@ -8,20 +8,24 @@ const corsHeaders = {
 
 const SYSTEM_INSTRUCTIONS = `You are Ada, a friendly and professional Taxi Dispatcher for "247 Radio Carz" taking phone calls.
 
-YOUR INTRODUCTION (say this IMMEDIATELY when the call starts):
-"Hello, my name is Ada from 247 Radio Carz. How can I help you with your travels today?"
+YOUR INTRODUCTION - GREETING FLOW:
+- For RETURNING customers (when you're told their name): "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
+- For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
+- After they give their name, say: "Lovely to meet you [NAME]! How can I help with your travels today?"
+- ALWAYS use their name when addressing them throughout the call (e.g., "Right then [NAME], where would you like to be picked up from?")
 
 PERSONALITY:
 - Warm, welcoming British personality
 - Use casual British phrases: "Brilliant!", "Lovely!", "Right then!", "Smashing!", "No worries!"
 - Keep responses SHORT (1-2 sentences max) - this is a phone call
 - Be efficient but personable
+- ALWAYS address the customer by name once you know it
 
 BOOKING FLOW - FOLLOW THIS EXACTLY:
-1. Greet the customer with the introduction above
-2. Ask: "Where would you like to be picked up from?"
+1. Greet the customer (get their name if new)
+2. Ask: "Where would you like to be picked up from, [NAME]?"
 3. When they give pickup, SPELL IT BACK: "Was that 5-2-A David Road? D-A-V-I-D?"
-4. When confirmed, ask: "And where are you heading to?"
+4. When confirmed, ask: "And where are you heading to, [NAME]?"
 5. When they give destination, confirm it the same way
 6. Ask: "How many passengers will there be?"
 7. Once you have ALL 3 details, you MUST do a FULL CONFIRMATION before booking
@@ -29,17 +33,21 @@ BOOKING FLOW - FOLLOW THIS EXACTLY:
 **INTELLIGENT QUESTION HANDLING - CRITICAL:**
 When you ask a question, you MUST wait for a VALID answer before proceeding:
 
-1. PICKUP QUESTION: "Where would you like to be picked up from?"
+1. NAME QUESTION: "What's your name please?"
+   - Valid answers: Any name (first name is enough)
+   - If unclear: "Sorry, I didn't catch that. What name should I call you?"
+
+2. PICKUP QUESTION: "Where would you like to be picked up from?"
    - Valid answers: Any address, location, landmark, postcode
    - Invalid: "yes", "no", "okay", random words, or answering a different question
    - If invalid: "Sorry, I didn't catch the pickup address. Where would you like to be picked up from?"
 
-2. DESTINATION QUESTION: "And where are you heading to?"
+3. DESTINATION QUESTION: "And where are you heading to?"
    - Valid answers: Any address, location, landmark, postcode, "as directed"
    - Invalid: "yes", "no", silence, or repeating the pickup
    - If invalid: "I missed that - where would you like to go to?"
 
-3. PASSENGERS QUESTION: "How many passengers will there be?"
+4. PASSENGERS QUESTION: "How many passengers will there be?"
    - Valid answers: A number (1-8), or words like "just me", "two of us", "three people"
    - Invalid: "yes", addresses, destinations, or non-numeric responses
    - If invalid: "Sorry, I need to know the number of passengers. How many will be travelling?"
@@ -52,7 +60,7 @@ When you ask a question, you MUST wait for a VALID answer before proceeding:
 
 **MANDATORY CONFIRMATION STEP - CRITICAL:**
 Before calling book_taxi, you MUST:
-1. Summarize ALL details back to the customer: "Just to confirm - pickup from [ADDRESS], going to [DESTINATION], for [X] passengers. Is that all correct?"
+1. Summarize ALL details back to the customer: "Just to confirm [NAME] - pickup from [ADDRESS], going to [DESTINATION], for [X] passengers. Is that all correct?"
 2. WAIT for the customer to explicitly confirm with "yes", "correct", "that's right", "yeah", etc.
 3. ONLY call book_taxi AFTER they say yes
 4. If they say "no" or correct something, update the detail and do a NEW full confirmation
@@ -60,7 +68,7 @@ Before calling book_taxi, you MUST:
 DO NOT call book_taxi until the customer says YES to your confirmation summary!
 
 INFORMATION EXTRACTION - CRITICAL:
-- Listen carefully for: pickup location, destination, number of passengers
+- Listen carefully for: customer name, pickup location, destination, number of passengers
 - Extract numbers spoken as words (e.g., "two passengers" = 2, "just me" = 1, "couple of us" = 2)
 - If customer gives all info at once, still do the FULL CONFIRMATION before booking
 - If any info is unclear, ask for clarification before proceeding
@@ -85,12 +93,13 @@ CRITICAL ADDRESS ACCURACY RULES:
 WHEN THE book_taxi FUNCTION RETURNS:
 - The function output contains the VERIFIED pickup and destination
 - Use EXACTLY those addresses in your confirmation (they are the corrected/verified versions)
-- Say: "Your taxi is on its way from [pickup from function output] to [destination from function output]"
+- Say: "Your taxi is on its way [NAME] from [pickup from function output] to [destination from function output]"
 
 GENERAL RULES:
 - Never ask for information you already have
 - If customer mentions extra requirements (wheelchair, child seat), acknowledge but proceed with booking
-- Stay focused on completing the booking efficiently`;
+- Stay focused on completing the booking efficiently
+- PERSONALIZE every response by using the customer's name`;
 
 serve(async (req) => {
   // Handle regular HTTP requests (health check)
@@ -225,10 +234,76 @@ serve(async (req) => {
     }
   };
 
+  // Extract customer name from transcript
+  const extractNameFromTranscript = (transcript: string): string | null => {
+    const t = transcript.trim();
+    
+    // Common patterns for name responses
+    // "My name is John" / "I'm John" / "It's John" / "John" / "Call me John"
+    const patterns = [
+      /my name(?:'s| is)\s+(\w+)/i,
+      /i(?:'m| am)\s+(\w+)/i,
+      /it(?:'s| is)\s+(\w+)/i,
+      /call me\s+(\w+)/i,
+      /^(\w+)$/i, // Just a single word (likely a name)
+      /^(?:hi|hello|hey)?\s*(?:it's|i'm|this is)?\s*(\w+)/i
+    ];
+    
+    for (const pattern of patterns) {
+      const match = t.match(pattern);
+      if (match?.[1]) {
+        // Capitalize first letter
+        const name = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+        // Filter out common non-name words
+        const nonNames = ['yes', 'no', 'yeah', 'okay', 'ok', 'sure', 'please', 'thanks', 'hello', 'hi', 'hey', 'the', 'from', 'to'];
+        if (!nonNames.includes(name.toLowerCase())) {
+          return name;
+        }
+      }
+    }
+    return null;
+  };
+
   // Call the AI extraction function to get structured booking data from transcript
   const extractBookingFromTranscript = async (transcript: string): Promise<void> => {
     try {
       console.log(`[${callId}] 🔍 Extracting booking info from: "${transcript}"`);
+      
+      // Also try to extract name if we don't have one yet
+      if (!callerName) {
+        const extractedName = extractNameFromTranscript(transcript);
+        if (extractedName) {
+          callerName = extractedName;
+          console.log(`[${callId}] 👤 Extracted customer name: ${callerName}`);
+          
+          // Update caller record with name if we have their phone
+          if (userPhone) {
+            try {
+              await supabase.from("callers").upsert({
+                phone_number: userPhone,
+                name: callerName,
+                updated_at: new Date().toISOString()
+              }, { onConflict: "phone_number" });
+              console.log(`[${callId}] 💾 Saved name ${callerName} for ${userPhone}`);
+            } catch (e) {
+              console.error(`[${callId}] Failed to save name:`, e);
+            }
+          }
+          
+          // Inject name into Ada's context
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            console.log(`[${callId}] 📢 Injecting customer name into Ada's context: ${callerName}`);
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: `[Internal note: Customer's name is ${callerName}. Address them by name from now on.]` }]
+              }
+            }));
+          }
+        }
+      }
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract`, {
         method: "POST",
@@ -430,12 +505,13 @@ serve(async (req) => {
         await broadcastLiveCall({ status: "active" });
 
         // Trigger initial greeting immediately - inject as system turn for faster response
-        // Personalize greeting if we know the caller's name
+        // Personalize greeting if we know the caller's name (returning customer)
+        // For new customers, ask for their name first
         const greetingPrompt = callerName 
-          ? `[Call connected - greet the customer by name. Their name is ${callerName}. Say something like "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`
-          : "[Call connected - greet the customer]";
+          ? `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`
+          : `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
         
-        console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'unknown'})`);
+        console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
