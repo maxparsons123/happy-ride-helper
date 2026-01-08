@@ -844,7 +844,7 @@ Rules:
           response: { modalities: ["audio", "text"] }
         }));
 
-        // Process any pending messages
+        // Process any pending messages (including queued audio)
         while (pendingMessages.length > 0) {
           const msg = pendingMessages.shift();
           console.log(`[${callId}] Processing pending message:`, msg.type);
@@ -865,6 +865,12 @@ Rules:
                 response: { modalities: ["audio", "text"] },
               }),
             );
+          } else if (msg.type === "audio" && msg.audio) {
+            // Forward queued audio now that session is ready
+            openaiWs?.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: msg.audio
+            }));
           }
         }
       }
@@ -1375,8 +1381,14 @@ Rules:
         return;
       }
       
-      // Forward audio to OpenAI
+      // Forward audio to OpenAI - ONLY if session is fully configured
       if (message.type === "audio" && openaiWs?.readyState === WebSocket.OPEN) {
+        if (!sessionReady) {
+          // Queue audio until session is ready (prevents responses with default OpenAI instructions)
+          console.log(`[${callId}] ⏳ Audio received before session ready - queueing`);
+          pendingMessages.push({ type: "audio", audio: message.audio });
+          return;
+        }
         openaiWs.send(JSON.stringify({
           type: "input_audio_buffer.append",
           audio: message.audio
