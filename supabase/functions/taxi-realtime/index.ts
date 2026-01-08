@@ -838,6 +838,25 @@ serve(async (req) => {
             return true;
           }
           
+          // Detect counting sequences (one, two, three, four... OR 1, 2, 3, 4...)
+          // These are common Whisper hallucinations when audio is unclear
+          const numberWords = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 
+            'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
+            'twenty-one', 'twenty-two', 'twenty-three', 'twenty-four', 'twenty-five'];
+          const wordsLower = t.toLowerCase();
+          let numberWordCount = 0;
+          for (const nw of numberWords) {
+            // Count occurrences of each number word
+            const regex = new RegExp(`\\b${nw}\\b`, 'gi');
+            const matches = wordsLower.match(regex);
+            if (matches) numberWordCount += matches.length;
+          }
+          // If more than 4 number words, likely a counting hallucination
+          if (numberWordCount >= 5) {
+            console.log(`[${callId}] 🚫 Hallucination detected: counting sequence (${numberWordCount} number words)`);
+            return true;
+          }
+          
           // Common Whisper hallucination phrases
           const hallucinationPhrases = [
             /thank you for watching/i,
