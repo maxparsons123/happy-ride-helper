@@ -189,6 +189,7 @@ serve(async (req) => {
   let callerTotalBookings = 0; // Number of previous bookings
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
+  let callerCity = ""; // City extracted from caller's last addresses or phone area
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let geocodingEnabled = true; // Enable address verification by default
@@ -208,10 +209,43 @@ serve(async (req) => {
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
 
-  // Geocode an address using OSM Nominatim
-  const geocodeAddress = async (address: string): Promise<{ found: boolean; display_name?: string; error?: string }> => {
+  // Extract city from an address string
+  const extractCityFromAddress = (address: string): string => {
+    if (!address) return "";
+    
+    // Common UK city patterns - look for city names in the address
+    const ukCities = [
+      "london", "birmingham", "manchester", "leeds", "liverpool", "newcastle", 
+      "sheffield", "bristol", "nottingham", "leicester", "coventry", "bradford",
+      "cardiff", "edinburgh", "glasgow", "belfast", "cambridge", "oxford",
+      "southampton", "portsmouth", "brighton", "reading", "derby", "wolverhampton",
+      "stoke", "hull", "york", "sunderland", "swansea", "middlesbrough",
+      "peterborough", "luton", "preston", "blackpool", "norwich", "exeter",
+      "plymouth", "aberdeen", "dundee"
+    ];
+    
+    const lowerAddress = address.toLowerCase();
+    for (const city of ukCities) {
+      if (lowerAddress.includes(city)) {
+        return city.charAt(0).toUpperCase() + city.slice(1);
+      }
+    }
+    return "";
+  };
+
+  // Geocode an address using Google Maps API (with city context)
+  const geocodeAddress = async (address: string): Promise<{ found: boolean; display_name?: string; formatted_address?: string; error?: string }> => {
     try {
-      console.log(`[${callId}] 🌍 Geocoding address: "${address}"`);
+      // Use caller's city if we have one, otherwise try to extract from last addresses
+      let city = callerCity;
+      if (!city && callerLastPickup) {
+        city = extractCityFromAddress(callerLastPickup);
+      }
+      if (!city && callerLastDestination) {
+        city = extractCityFromAddress(callerLastDestination);
+      }
+      
+      console.log(`[${callId}] 🌍 Geocoding address: "${address}" (city context: ${city || 'none'})`);
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
         method: "POST",
@@ -219,7 +253,7 @@ serve(async (req) => {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
-        body: JSON.stringify({ address, country: "UK" }),
+        body: JSON.stringify({ address, city, country: "UK" }),
       });
 
       if (!response.ok) {
@@ -228,7 +262,7 @@ serve(async (req) => {
       }
 
       const result = await response.json();
-      console.log(`[${callId}] 🌍 Geocode result for "${address}":`, result.found ? "FOUND" : "NOT FOUND");
+      console.log(`[${callId}] 🌍 Geocode result for "${address}":`, result.found ? `FOUND - ${result.formatted_address || result.display_name}` : "NOT FOUND");
       return result;
     } catch (e) {
       console.error(`[${callId}] Geocode exception:`, e);
@@ -329,9 +363,21 @@ serve(async (req) => {
         callerTotalBookings = data.total_bookings || 0;
         callerLastPickup = data.last_pickup || "";
         callerLastDestination = data.last_destination || "";
+        
+        // Extract city from last addresses for location-biased geocoding
+        if (callerLastPickup) {
+          callerCity = extractCityFromAddress(callerLastPickup);
+        }
+        if (!callerCity && callerLastDestination) {
+          callerCity = extractCityFromAddress(callerLastDestination);
+        }
+        
         console.log(`[${callId}] 👤 Known caller: ${callerName} (${callerTotalBookings} previous bookings)`);
         if (callerLastPickup) {
           console.log(`[${callId}] 📍 Last trip: ${callerLastPickup} → ${callerLastDestination}`);
+        }
+        if (callerCity) {
+          console.log(`[${callId}] 🏙️ Caller city: ${callerCity}`);
         }
       } else {
         console.log(`[${callId}] 👤 New caller: ${phone}`);
@@ -1431,6 +1477,12 @@ Rules:
           console.log(`[${callId}] 🔊 Address TTS Splicing: ${addressTtsSplicingEnabled ? "ENABLED" : "DISABLED"}`);
         }
         
+        // Set caller's city for location-biased geocoding
+        if (message.city) {
+          callerCity = message.city;
+          console.log(`[${callId}] 🏙️ Caller city from Asterisk: ${callerCity}`);
+        }
+        
         // If name provided directly from Asterisk, use it (but not "Guest" placeholder)
         if (message.user_name && message.user_name !== "Guest" && message.user_name !== "Unknown") {
           callerName = message.user_name;
@@ -1453,7 +1505,7 @@ Rules:
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, geocoding: ${geocodingEnabled})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled})`);
         return;
       }
       
