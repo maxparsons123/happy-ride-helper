@@ -877,7 +877,32 @@ serve(async (req) => {
         
         console.log(`[${callId}] User said: ${rawTranscript}`);
         
-        // Use AI extraction for accurate booking data
+        // IMMEDIATE ADDRESS INJECTION - use regex to quickly find addresses and inject BEFORE AI responds
+        // This prevents OpenAI from hallucinating addresses in its response
+        const quickExtractAddresses = (text: string) => {
+          // Pattern for addresses like "52A David Road" or "1214A Warwick Road"
+          const addressPattern = /\b(\d+[A-Za-z]?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?(?:\s+Road|Street|Avenue|Lane|Drive|Close|Way|Place|Court)?)\b/gi;
+          const matches = text.match(addressPattern);
+          return matches || [];
+        };
+        
+        const addresses = quickExtractAddresses(rawTranscript);
+        if (addresses.length > 0 && openaiWs?.readyState === WebSocket.OPEN) {
+          // Inject the exact addresses into Ada's context immediately
+          const addressNote = `[CRITICAL: Use these EXACT addresses in your response - ${addresses.map((a, i) => `Address ${i+1}: "${a}"`).join(', ')}. Do NOT paraphrase or change these addresses.]`;
+          console.log(`[${callId}] 📢 Quick address injection: ${addressNote}`);
+          
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "text", text: addressNote }]
+            }
+          }));
+        }
+        
+        // Use AI extraction for accurate booking data (async - will update knownBooking)
         extractBookingFromTranscript(rawTranscript);
         
         // Save user message to history
