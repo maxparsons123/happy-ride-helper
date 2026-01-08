@@ -32,6 +32,7 @@ export type Database = {
           total_latency_ms: number | null
           tts_latency_ms: number | null
           turn_number: number | null
+          user_phone: string | null
           user_transcript: string | null
         }
         Insert: {
@@ -51,6 +52,7 @@ export type Database = {
           total_latency_ms?: number | null
           tts_latency_ms?: number | null
           turn_number?: number | null
+          user_phone?: string | null
           user_transcript?: string | null
         }
         Update: {
@@ -70,6 +72,7 @@ export type Database = {
           total_latency_ms?: number | null
           tts_latency_ms?: number | null
           turn_number?: number | null
+          user_phone?: string | null
           user_transcript?: string | null
         }
         Relationships: []
