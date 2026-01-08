@@ -641,15 +641,15 @@ serve(async (req) => {
               // Prompt with taxi vocabulary and multi-digit house numbers for accuracy
               prompt: "247 Radio Carz taxi booking. House numbers: 52A, 1214A, 18B, 234C, 1567, 2345A. Streets: David Road, Warwick Road, Bradford Road, Coventry, Manchester, Leeds, Birmingham. Passengers: one, two, three, four, five, six. Spelling: Alpha Bravo Charlie Delta Echo Foxtrot."
             },
-            // Server VAD - tuned to reduce audio artifacts (hiss at word endings)
-            // Higher prefix captures more lead-in, longer silence prevents premature cutoff
+            // Server VAD - balanced for natural conversation flow
+            // Allow interruption so Ada stops when user speaks (prevents repetition)
             turn_detection: {
               type: "server_vad",
-              threshold: 0.6,           // Slightly higher = fewer false barge-ins (prevents cut-off)
-              prefix_padding_ms: 300,   // Capture 300ms before speech starts (smoother onset)
-              silence_duration_ms: 800, // 800ms silence before triggering response
+              threshold: 0.7,           // Higher threshold = only clear speech triggers barge-in
+              prefix_padding_ms: 350,   // Capture lead-in for smoother onset
+              silence_duration_ms: 600, // Faster response after user stops speaking
               create_response: true,    // Auto-create response when speech ends
-              interrupt_response: false // Prevent false barge-in from cancelling Ada mid-sentence
+              interrupt_response: true  // Allow user to interrupt Ada (prevents repetition)
             },
             tools: [
               {
