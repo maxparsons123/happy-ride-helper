@@ -1025,6 +1025,74 @@ Rules:
         
         console.log(`[${callId}] User said: ${rawTranscript}`);
         
+        // IMMEDIATE NAME INJECTION - for new callers, quickly extract and inject name BEFORE AI responds
+        // This prevents misheard names from being used in Ada's greeting
+        if (!callerName) {
+          const quickExtractName = (text: string): string | null => {
+            const t = text.trim();
+            // Quick patterns for common name responses
+            const patterns = [
+              /my name(?:'s| is)\s+([A-Za-z]+)/i,
+              /i(?:'m| am)\s+([A-Za-z]+)/i,
+              /it(?:'s| is)\s+([A-Za-z]+)/i,
+              /this is\s+([A-Za-z]+)/i,
+              /call me\s+([A-Za-z]+)/i,
+              /^(?:yes|yeah)[,\s]+(?:i'm|it's)\s+([A-Za-z]+)/i,
+              /^([A-Za-z]+)\s+speaking/i,
+              /^([A-Za-z]+)$/i, // Single word
+            ];
+            
+            const nonNames = new Set([
+              'yes', 'no', 'yeah', 'yep', 'okay', 'ok', 'sure', 'please', 'thanks',
+              'hello', 'hi', 'hey', 'taxi', 'cab', 'booking', 'book', 'need', 'want',
+              'good', 'morning', 'afternoon', 'evening', 'just', 'actually', 'um', 'uh'
+            ]);
+            
+            for (const pattern of patterns) {
+              const match = t.match(pattern);
+              if (match?.[1]) {
+                const name = match[1].trim();
+                if (name.length >= 2 && name.length <= 20 && !nonNames.has(name.toLowerCase())) {
+                  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+                }
+              }
+            }
+            return null;
+          };
+          
+          const quickName = quickExtractName(rawTranscript);
+          if (quickName && openaiWs?.readyState === WebSocket.OPEN) {
+            callerName = quickName;
+            console.log(`[${callId}] 👤 Quick name injection: "${callerName}"`);
+            
+            // Inject the exact name into Ada's context immediately
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: `[CRITICAL: Customer's name is "${callerName}". Use this EXACT spelling. Say "Lovely to meet you ${callerName}!" and continue with the booking.]` }]
+              }
+            }));
+            
+            // Save to database async (don't block)
+            if (userPhone) {
+              (async () => {
+                try {
+                  await supabase.from("callers").upsert({
+                    phone_number: userPhone,
+                    name: callerName,
+                    updated_at: new Date().toISOString()
+                  }, { onConflict: "phone_number" });
+                  console.log(`[${callId}] 💾 Quick-saved name ${callerName} for ${userPhone}`);
+                } catch (e) {
+                  console.error(`[${callId}] Failed to quick-save name:`, e);
+                }
+              })();
+            }
+          }
+        }
+        
         // IMMEDIATE ADDRESS INJECTION - use regex to quickly find addresses and inject BEFORE AI responds
         // This prevents OpenAI from hallucinating addresses in its response
         const quickExtractAddresses = (text: string) => {
