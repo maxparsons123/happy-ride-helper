@@ -147,11 +147,14 @@ serve(async (req) => {
   let callerName = ""; // Known caller's name from database
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
+  let geocodingEnabled = true; // Enable address verification by default
 
   type KnownBooking = {
     pickup?: string;
     destination?: string;
     passengers?: number;
+    pickupVerified?: boolean;
+    destinationVerified?: boolean;
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -159,6 +162,66 @@ serve(async (req) => {
   let knownBooking: KnownBooking = {};
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
+
+  // Geocode an address using OSM Nominatim
+  const geocodeAddress = async (address: string): Promise<{ found: boolean; display_name?: string; error?: string }> => {
+    try {
+      console.log(`[${callId}] 🌍 Geocoding address: "${address}"`);
+      
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({ address, city: "Bradford", country: "UK" }),
+      });
+
+      if (!response.ok) {
+        console.error(`[${callId}] Geocode API error: ${response.status}`);
+        return { found: false, error: "Geocoding service unavailable" };
+      }
+
+      const result = await response.json();
+      console.log(`[${callId}] 🌍 Geocode result for "${address}":`, result.found ? "FOUND" : "NOT FOUND");
+      return result;
+    } catch (e) {
+      console.error(`[${callId}] Geocode exception:`, e);
+      return { found: false, error: "Geocoding failed" };
+    }
+  };
+
+  // Notify Ada about geocoding result and ask for correction if needed
+  const notifyGeocodeResult = (addressType: "pickup" | "destination", address: string, found: boolean) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+
+    if (found) {
+      console.log(`[${callId}] ✅ ${addressType} address verified: "${address}"`);
+      // No need to say anything - address is valid
+    } else {
+      console.log(`[${callId}] ❌ ${addressType} address NOT FOUND: "${address}" - asking for correction`);
+      
+      // Inject a message to Ada to ask for address correction
+      const message = addressType === "pickup"
+        ? `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and number please?"]`
+        : `[SYSTEM: The destination address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm not quite finding that destination. Could you spell out the street name for me please?"]`;
+      
+      openaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: message }]
+        }
+      }));
+      
+      // Trigger Ada to respond
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities: ["audio", "text"] }
+      }));
+    }
+  };
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -365,16 +428,45 @@ serve(async (req) => {
           passengers: knownBooking.passengers
         });
 
+        // GEOCODE NEW ADDRESSES (if geocoding is enabled)
+        if (geocodingEnabled) {
+          // Geocode pickup if it changed and hasn't been verified yet
+          if (pickupChanged && !knownBooking.pickupVerified) {
+            const pickupResult = await geocodeAddress(knownBooking.pickup!);
+            if (pickupResult.found) {
+              knownBooking.pickupVerified = true;
+              console.log(`[${callId}] ✅ Pickup verified: ${pickupResult.display_name}`);
+            } else {
+              // Address not found - ask Ada to request correction
+              notifyGeocodeResult("pickup", knownBooking.pickup!, false);
+              return; // Don't continue - wait for corrected address
+            }
+          }
+          
+          // Geocode destination if it changed and hasn't been verified yet
+          if (destinationChanged && !knownBooking.destinationVerified) {
+            const destResult = await geocodeAddress(knownBooking.destination!);
+            if (destResult.found) {
+              knownBooking.destinationVerified = true;
+              console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
+            } else {
+              // Address not found - ask Ada to request correction
+              notifyGeocodeResult("destination", knownBooking.destination!, false);
+              return; // Don't continue - wait for corrected address
+            }
+          }
+        }
+
         // INJECT CORRECT DATA INTO ADA'S CONTEXT (silently - no response triggered)
         // This ensures Ada uses the EXACT extracted addresses, not her hallucinated versions
         if (openaiWs?.readyState === WebSocket.OPEN) {
           let contextUpdate = "INTERNAL MEMORY UPDATE (DO NOT RESPOND TO THIS MESSAGE - continue with your normal flow):\n";
           
           if (knownBooking.pickup) {
-            contextUpdate += `• Confirmed pickup: "${knownBooking.pickup}"\n`;
+            contextUpdate += `• Confirmed pickup: "${knownBooking.pickup}"${knownBooking.pickupVerified ? " ✓ VERIFIED" : ""}\n`;
           }
           if (knownBooking.destination) {
-            contextUpdate += `• Confirmed destination: "${knownBooking.destination}"\n`;
+            contextUpdate += `• Confirmed destination: "${knownBooking.destination}"${knownBooking.destinationVerified ? " ✓ VERIFIED" : ""}\n`;
           }
           if (knownBooking.passengers) {
             contextUpdate += `• Confirmed passengers: ${knownBooking.passengers}\n`;
@@ -857,6 +949,12 @@ serve(async (req) => {
           console.log(`[${callId}] User phone: ${userPhone}`);
         }
         
+        // Enable/disable geocoding from client (default: true)
+        if (message.geocoding !== undefined) {
+          geocodingEnabled = message.geocoding;
+          console.log(`[${callId}] 🌍 Geocoding: ${geocodingEnabled ? "ENABLED" : "DISABLED"}`);
+        }
+        
         // If name provided directly from Asterisk, use it
         if (message.user_name) {
           callerName = message.user_name;
@@ -879,7 +977,7 @@ serve(async (req) => {
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, geocoding: ${geocodingEnabled})`);
         return;
       }
       
