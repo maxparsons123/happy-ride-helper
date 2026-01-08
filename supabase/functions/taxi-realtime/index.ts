@@ -645,7 +645,7 @@ serve(async (req) => {
             // Higher prefix captures more lead-in, longer silence prevents premature cutoff
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,           // Slightly lower = more sensitive to quiet speech
+              threshold: 0.6,           // Slightly higher = fewer false barge-ins (prevents cut-off)
               prefix_padding_ms: 300,   // Capture 300ms before speech starts (smoother onset)
               silence_duration_ms: 800, // 800ms silence before triggering response
               create_response: true     // Auto-create response when speech ends

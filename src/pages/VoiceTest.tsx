@@ -189,15 +189,16 @@ export default function VoiceTest() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      console.log("WebSocket opened");
-      addMessage("Connected, initializing session...", "system");
-      
-      ws.send(JSON.stringify({
-        type: "init",
-        call_id: "voice-test-" + Date.now()
-      }));
-    };
+      ws.onopen = () => {
+        console.log("WebSocket opened");
+        addMessage("Connected, initializing session...", "system");
+        
+        ws.send(JSON.stringify({
+          type: "init",
+          call_id: "voice-test-" + Date.now(),
+          addressTtsSplicing: true,
+        }));
+      };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -224,6 +225,11 @@ export default function VoiceTest() {
 
       if (data.type === "audio") {
         setIsSpeaking(true);
+        playAudioChunk(data.audio);
+      }
+
+      if (data.type === "address_tts") {
+        // Play the high-fidelity address audio (same PCM16 24kHz format)
         playAudioChunk(data.audio);
       }
 
