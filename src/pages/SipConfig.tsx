@@ -9,6 +9,44 @@ import { useToast } from "@/hooks/use-toast";
 import { Phone, Plus, Trash2, Copy, Server, Eye, EyeOff } from "lucide-react";
 import { Link } from "react-router-dom";
 
+// Credential row component for consistent display
+interface CredentialRowProps {
+  label: string;
+  value: string;
+  onCopy: () => void;
+  showToggle?: boolean;
+  isVisible?: boolean;
+  onToggleVisibility?: () => void;
+}
+
+const CredentialRow = ({ label, value, onCopy, showToggle, isVisible, onToggleVisibility }: CredentialRowProps) => (
+  <div className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
+    <span className="text-sm text-muted-foreground min-w-[180px]">{label}:</span>
+    <div className="flex items-center gap-2 flex-1 justify-end">
+      <span className="font-mono text-sm text-foreground truncate max-w-[300px]">{value}</span>
+      {showToggle && onToggleVisibility && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0"
+          onClick={onToggleVisibility}
+        >
+          {isVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
+        onClick={onCopy}
+      >
+        <Copy className="h-3 w-3 mr-1" />
+        Copy
+      </Button>
+    </div>
+  </div>
+);
+
 interface SipTrunk {
   id: string;
   name: string;
@@ -294,60 +332,36 @@ const SipConfig = () => {
                     </div>
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* Webhook URL */}
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium">Webhook URL (configure in your SIP provider)</Label>
-                    <div className="flex gap-2">
-                      <Input
-                        value={getWebhookUrl(trunk.webhook_token)}
-                        readOnly
-                        className="font-mono text-xs"
-                      />
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={() => copyToClipboard(getWebhookUrl(trunk.webhook_token))}
-                      >
-                        <Copy className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-
-                  {/* SIP Details */}
-                  {(trunk.sip_server || trunk.sip_username) && (
-                    <div className="grid grid-cols-3 gap-4 pt-2 border-t">
-                      {trunk.sip_server && (
-                        <div>
-                          <Label className="text-xs text-muted-foreground">Server</Label>
-                          <p className="text-sm font-mono">{trunk.sip_server}</p>
-                        </div>
-                      )}
-                      {trunk.sip_username && (
-                        <div>
-                          <Label className="text-xs text-muted-foreground">Username</Label>
-                          <p className="text-sm font-mono">{trunk.sip_username}</p>
-                        </div>
-                      )}
-                      {trunk.sip_password && (
-                        <div>
-                          <Label className="text-xs text-muted-foreground">Password</Label>
-                          <div className="flex items-center gap-2">
-                            <p className="text-sm font-mono">
-                              {showPasswords[trunk.id] ? trunk.sip_password : "••••••••"}
-                            </p>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              onClick={() => setShowPasswords({ ...showPasswords, [trunk.id]: !showPasswords[trunk.id] })}
-                            >
-                              {showPasswords[trunk.id] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                <CardContent className="space-y-1 bg-muted/30 rounded-lg p-4">
+                  {/* Credential Rows */}
+                  <CredentialRow 
+                    label="Webhook URL" 
+                    value={getWebhookUrl(trunk.webhook_token)} 
+                    onCopy={() => copyToClipboard(getWebhookUrl(trunk.webhook_token))} 
+                  />
+                  {trunk.sip_server && (
+                    <CredentialRow 
+                      label="Registrar Hostname or IP" 
+                      value={trunk.sip_server} 
+                      onCopy={() => copyToClipboard(trunk.sip_server!)} 
+                    />
+                  )}
+                  {trunk.sip_username && (
+                    <CredentialRow 
+                      label="Authentication ID" 
+                      value={trunk.sip_username} 
+                      onCopy={() => copyToClipboard(trunk.sip_username!)} 
+                    />
+                  )}
+                  {trunk.sip_password && (
+                    <CredentialRow 
+                      label="Authentication Password" 
+                      value={showPasswords[trunk.id] ? trunk.sip_password : "••••••••"} 
+                      onCopy={() => copyToClipboard(trunk.sip_password!)}
+                      showToggle
+                      isVisible={showPasswords[trunk.id]}
+                      onToggleVisibility={() => setShowPasswords({ ...showPasswords, [trunk.id]: !showPasswords[trunk.id] })}
+                    />
                   )}
                 </CardContent>
               </Card>
