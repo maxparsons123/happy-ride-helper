@@ -298,6 +298,16 @@ serve(async (req) => {
     return "";
   };
 
+  // If the customer mentions a city anywhere (e.g. "...in Coventry"), use it as location context.
+  // This stabilizes geocoding + fares for ambiguous streets/venues.
+  const maybeUpdateCallerCityFromText = (text: string) => {
+    const hintedCity = extractCityFromAddress(text);
+    if (hintedCity && (!callerCity || callerCity.toLowerCase() !== hintedCity.toLowerCase())) {
+      callerCity = hintedCity;
+      console.log(`[${callId}] 🏙️ City context updated from transcript: ${callerCity}`);
+    }
+  };
+
   // Geocode an address using Google Maps API (with city context and caller location biasing)
   // Returns disambiguation info if multiple similar addresses found
   interface GeocodeMatch {
@@ -919,6 +929,9 @@ Rules:
   const extractBookingFromTranscript = async (transcript: string): Promise<void> => {
     try {
       console.log(`[${callId}] 🔍 Extracting booking info from: "${transcript}"`);
+
+      // Capture any city hints the customer mentions (e.g. "Coventry") for more accurate local geocoding.
+      maybeUpdateCallerCityFromText(transcript);
       
       // Also try to extract name if we don't have one yet
       if (!callerName) {
@@ -988,10 +1001,22 @@ Rules:
       const before = { ...knownBooking };
       
       if (extracted.pickup_location) {
-        knownBooking.pickup = extracted.pickup_location;
+        const newPickup = extracted.pickup_location;
+        if (newPickup !== knownBooking.pickup) {
+          // Reset verification flags when the address changes
+          knownBooking.pickupVerified = false;
+          knownBooking.highFareVerified = false;
+        }
+        knownBooking.pickup = newPickup;
       }
       if (extracted.dropoff_location) {
-        knownBooking.destination = extracted.dropoff_location;
+        const newDestination = extracted.dropoff_location;
+        if (newDestination !== knownBooking.destination) {
+          // Reset verification flags when the address changes
+          knownBooking.destinationVerified = false;
+          knownBooking.highFareVerified = false;
+        }
+        knownBooking.destination = newDestination;
       }
       if (extracted.number_of_passengers) {
         knownBooking.passengers = extracted.number_of_passengers;
