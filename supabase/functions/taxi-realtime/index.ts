@@ -19,13 +19,23 @@ const SYSTEM_INSTRUCTIONS = `You are Ada, a friendly and professional Taxi Dispa
 - Translate your standard phrases appropriately (e.g., "Brilliant!" → "Świetnie!" in Polish)
 
 YOUR INTRODUCTION - GREETING FLOW:
-- For RETURNING customers WITH a usual destination: "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
+- For customers WITH AN ACTIVE BOOKING: "Hello [NAME]! I can see you have an active booking from [PICKUP] to [DESTINATION]. Would you like to keep that booking, or would you like to cancel it?"
+  - If they say "cancel" or "cancel it" or similar: Use the cancel_booking tool IMMEDIATELY, then say "That's cancelled for you. Would you like to book a new taxi instead?"
+  - If they say "keep" or "no" or "leave it": Say "No problem, your booking is still active. Is there anything else I can help with?"
+  - If they want to CHANGE the booking: Cancel the old one first, then start a new booking flow
+- For RETURNING customers WITH a usual destination (but NO active booking): "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
 - For RETURNING customers WITHOUT a usual destination: "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
 - For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
 - After they give their name, say: "Lovely to meet you [NAME]! How can I help with your travels today?"
 - ALWAYS use their name when addressing them throughout the call (e.g., "Right then [NAME], where would you like to be picked up from?")
 - Adapt greetings to the customer's language while keeping the same warm tone
 - If returning customer accepts quick rebooking ("yes", "yeah", "please"), skip asking for destination and confirm: "Brilliant! And same pickup from [LAST_PICKUP]?" or ask "Where shall I pick you up from?"
+
+CANCELLATION INTENT - CRITICAL:
+- At ANY point in the call, if the customer says "cancel my booking", "I want to cancel", "cancel it", or similar:
+  - If they have an active booking: Call cancel_booking tool IMMEDIATELY, then confirm "That's cancelled. Would you like to book a new taxi instead?"
+  - If they have NO active booking: Say "I don't see any active bookings for your number. Would you like me to book you a taxi?"
+- NEVER ask for confirmation before cancelling - just do it immediately when they ask
 
 PERSONALITY:
 - Warm, welcoming personality (British in English, culturally appropriate in other languages)
@@ -191,6 +201,7 @@ serve(async (req) => {
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
   let callerCity = ""; // City extracted from caller's last addresses or phone area
+  let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
@@ -346,10 +357,11 @@ serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
-  // Look up caller by phone number
+  // Look up caller by phone number and check for active bookings
   const lookupCaller = async (phone: string): Promise<void> => {
     if (!phone) return;
     try {
+      // Lookup caller info
       const { data, error } = await supabase
         .from("callers")
         .select("name, last_pickup, last_destination, total_bookings")
@@ -384,6 +396,25 @@ serve(async (req) => {
         }
       } else {
         console.log(`[${callId}] 👤 New caller: ${phone}`);
+      }
+      
+      // Check for active bookings
+      const { data: bookingData, error: bookingError } = await supabase
+        .from("bookings")
+        .select("id, pickup, destination, passengers, fare, booked_at")
+        .eq("caller_phone", phone)
+        .eq("status", "active")
+        .order("booked_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (bookingError) {
+        console.error(`[${callId}] Active booking lookup error:`, bookingError);
+      } else if (bookingData) {
+        activeBooking = bookingData;
+        console.log(`[${callId}] 📋 Active booking found: ${activeBooking.pickup} → ${activeBooking.destination}`);
+      } else {
+        console.log(`[${callId}] 📋 No active bookings for ${phone}`);
       }
     } catch (e) {
       console.error(`[${callId}] Caller lookup exception:`, e);
@@ -871,6 +902,18 @@ Rules:
                   },
                   required: ["reason"]
                 }
+              },
+              {
+                type: "function",
+                name: "cancel_booking",
+                description: "Cancel an active booking for the customer. Call this IMMEDIATELY when they say they want to cancel their booking.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: { type: "string", description: "Why the booking is being cancelled: 'customer_request', 'change_plans', etc." }
+                  },
+                  required: ["reason"]
+                }
               }
             ],
             tool_choice: "auto",
@@ -889,13 +932,24 @@ Rules:
         await broadcastLiveCall({ status: "active" });
 
         // Trigger initial greeting immediately - inject as system turn for faster response
-        // Personalize greeting if we know the caller's name (returning customer)
-        // For new customers, ask for their name first
-        const greetingPrompt = callerName 
-          ? (callerLastDestination 
-            ? `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`
-            : `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`)
-          : `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
+        // Priority: Active booking > Quick rebooking > Normal greeting
+        let greetingPrompt: string;
+        
+        if (activeBooking) {
+          // Customer has an outstanding booking - offer to cancel/keep
+          greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. Active booking: pickup "${activeBooking.pickup}" to destination "${activeBooking.destination}" for ${activeBooking.passengers} passengers, fare ${activeBooking.fare}. 
+Say: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
+If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to keep it, ask if there's anything else you can help with.]`;
+        } else if (callerName && callerLastDestination) {
+          // Returning customer with usual destination - offer quick rebooking
+          greetingPrompt = `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
+        } else if (callerName) {
+          // Returning customer without usual destination
+          greetingPrompt = `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`;
+        } else {
+          // New customer
+          greetingPrompt = `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
+        }
         
         console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
         openaiWs?.send(JSON.stringify({
@@ -1403,6 +1457,29 @@ Rules:
             user_phone: userPhone || null
           });
 
+          // Save booking to bookings table for persistence
+          if (userPhone) {
+            const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
+              call_id: callId,
+              caller_phone: userPhone,
+              caller_name: callerName || null,
+              pickup: finalBooking.pickup,
+              destination: finalBooking.destination,
+              passengers: finalBooking.passengers,
+              fare: `£${fare}`,
+              eta: eta,
+              status: "active",
+              booked_at: new Date().toISOString()
+            }).select().single();
+            
+            if (bookingInsertError) {
+              console.error(`[${callId}] Failed to save booking:`, bookingInsertError);
+            } else {
+              activeBooking = newBooking;
+              console.log(`[${callId}] 📋 Booking saved to DB: ${newBooking.id}`);
+            }
+          }
+
           // Save/update caller info for future calls
           await saveCallerInfo(finalBooking);
 
@@ -1448,6 +1525,89 @@ Rules:
           socket.send(JSON.stringify({
             type: "booking_confirmed",
             booking: { ...finalBooking, fare: `£${fare}`, eta }
+          }));
+        }
+        
+        // Handle cancel_booking function
+        if (data.name === "cancel_booking") {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] 🚫 Cancel booking requested: ${args.reason}`);
+          
+          if (activeBooking) {
+            // Cancel the active booking in database
+            const { error: cancelError } = await supabase
+              .from("bookings")
+              .update({
+                status: "cancelled",
+                cancelled_at: new Date().toISOString(),
+                cancellation_reason: args.reason
+              })
+              .eq("id", activeBooking.id);
+            
+            if (cancelError) {
+              console.error(`[${callId}] Failed to cancel booking:`, cancelError);
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message: "Sorry, there was an error cancelling the booking. Please try again."
+                  })
+                }
+              }));
+            } else {
+              console.log(`[${callId}] ✅ Booking ${activeBooking.id} cancelled`);
+              
+              // Clear active booking
+              const cancelledBooking = { ...activeBooking };
+              activeBooking = null;
+              
+              // Notify client
+              socket.send(JSON.stringify({
+                type: "booking_cancelled",
+                booking: cancelledBooking
+              }));
+              
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: true,
+                    message: "Booking has been cancelled.",
+                    cancelled_booking: {
+                      pickup: cancelledBooking.pickup,
+                      destination: cancelledBooking.destination
+                    },
+                    next_action: "Ask if they would like to book a new taxi instead."
+                  })
+                }
+              }));
+            }
+          } else {
+            // No active booking to cancel
+            console.log(`[${callId}] ⚠️ No active booking to cancel`);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  message: "No active booking found for this customer.",
+                  next_action: "Tell the customer you don't see any active bookings and ask if they'd like to book a taxi."
+                })
+              }
+            }));
+          }
+          
+          // Trigger response
+          openaiWs?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
           }));
         }
         

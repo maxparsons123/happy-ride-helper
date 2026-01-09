@@ -14,6 +14,66 @@ export type Database = {
   }
   public: {
     Tables: {
+      bookings: {
+        Row: {
+          booked_at: string
+          call_id: string
+          caller_name: string | null
+          caller_phone: string
+          cancellation_reason: string | null
+          cancelled_at: string | null
+          completed_at: string | null
+          created_at: string
+          destination: string
+          eta: string | null
+          fare: string | null
+          id: string
+          passengers: number
+          pickup: string
+          scheduled_for: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          booked_at?: string
+          call_id: string
+          caller_name?: string | null
+          caller_phone: string
+          cancellation_reason?: string | null
+          cancelled_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          destination: string
+          eta?: string | null
+          fare?: string | null
+          id?: string
+          passengers?: number
+          pickup: string
+          scheduled_for?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          booked_at?: string
+          call_id?: string
+          caller_name?: string | null
+          caller_phone?: string
+          cancellation_reason?: string | null
+          cancelled_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          destination?: string
+          eta?: string | null
+          fare?: string | null
+          id?: string
+          passengers?: number
+          pickup?: string
+          scheduled_for?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       call_logs: {
         Row: {
           ai_latency_ms: number | null
