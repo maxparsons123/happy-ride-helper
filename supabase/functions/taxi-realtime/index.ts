@@ -32,10 +32,11 @@ YOUR INTRODUCTION - GREETING FLOW:
 - If returning customer accepts quick rebooking ("yes", "yeah", "please"), skip asking for destination and confirm: "Brilliant! And same pickup from [LAST_PICKUP]?" or ask "Where shall I pick you up from?"
 
 CANCELLATION INTENT - CRITICAL:
-- At ANY point in the call, if the customer says "cancel my booking", "I want to cancel", "cancel it", or similar:
-  - If they have an active booking: Call cancel_booking tool IMMEDIATELY, then confirm "That's cancelled. Would you like to book a new taxi instead?"
-  - If they have NO active booking: Say "I don't see any active bookings for your number. Would you like me to book you a taxi?"
-- NEVER ask for confirmation before cancelling - just do it immediately when they ask
+- ONLY cancel a booking when the customer EXPLICITLY says "cancel", "cancel my booking", "cancel it", or "I want to cancel"
+- If you asked "Would you like to cancel?" and they say "yes" - that counts as explicit cancellation intent
+- If they give ANY other response (address, destination, new booking request), do NOT cancel - they are starting a new booking
+- When cancelling: Call cancel_booking tool IMMEDIATELY, then say "That's cancelled for you. Would you like to book a new taxi instead?"
+- If they have NO active booking: Say "I don't see any active bookings for your number. Would you like me to book you a taxi?"
 
 MODIFICATION INTENT - CRITICAL:
 - If customer says "change my booking", "different pickup", "different destination", "change the address", or similar:
@@ -216,6 +217,8 @@ serve(async (req) => {
   let lastFinalUserTranscript = ""; // Last finalized user transcript (safeguards for end_call)
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
+  let greetingSent = false; // Prevent duplicate greetings on session.updated
+
 
   type KnownBooking = {
     pickup?: string;
@@ -1025,8 +1028,9 @@ Rules:
       if (data.type === "session.updated") {
         console.log(`[${callId}] Session ready! Effective config:`, data.session);
         
-        // If customer has an active booking, update session instructions to include it
-        if (activeBooking) {
+        // If customer has an active booking and we haven't injected the context yet, do it now
+        // But DON'T trigger the greeting again - we use greetingSent flag for that
+        if (activeBooking && !greetingSent) {
           console.log(`[${callId}] 📋 Injecting active booking context into session...`);
           const activeBookingContext = `
 
@@ -1050,6 +1054,7 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
 `;
           
           // Send updated instructions with active booking context
+          // This will trigger another session.updated, but greetingSent will prevent duplicate greetings
           openaiWs?.send(JSON.stringify({
             type: "session.update",
             session: {
@@ -1061,10 +1066,18 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
 
-        // Broadcast call started
-        await broadcastLiveCall({ status: "active" });
+        // Broadcast call started (only once)
+        if (!greetingSent) {
+          await broadcastLiveCall({ status: "active" });
+        }
 
-        // Trigger initial greeting immediately - inject as system turn for faster response
+        // Trigger initial greeting ONLY ONCE
+        if (greetingSent) {
+          console.log(`[${callId}] ⏭️ Greeting already sent, skipping duplicate`);
+          return;
+        }
+        greetingSent = true;
+
         // Priority: Active booking > Quick rebooking > Normal greeting
         let greetingPrompt: string;
         
@@ -1078,12 +1091,9 @@ ACTIVE BOOKING DETAILS:
 - Passengers: ${activeBooking.passengers}
 - Fare: ${activeBooking.fare}
 
-Say: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
+Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
 
-CRITICAL: If they say "cancel" or "yes" to cancelling:
-1. Call the cancel_booking tool IMMEDIATELY with reason "customer_request"
-2. The booking ID ${activeBooking.id} is already loaded - the tool WILL work
-3. After cancelling, ask if they want to book a new taxi]`;
+Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "cancel" or "cancel it".]`;
         } else if (callerName && callerLastDestination) {
           // Returning customer with usual destination - offer quick rebooking
           greetingPrompt = `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
