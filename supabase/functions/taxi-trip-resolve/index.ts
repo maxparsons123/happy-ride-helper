@@ -955,13 +955,29 @@ serve(async (req) => {
       coordsContext = getCityCoords(cityContext);
     }
     
-    // Geocode both addresses in parallel
-    // PICKUP = strictPickup (must be local)
-    // DROPOFF = not strict (can be global - airports, destinations outside city)
-    const [pickup, dropoff] = await Promise.all([
-      pickup_input ? geocodeAddress(pickup_input, cityContext, coordsContext, country, true) : null,  // strictPickup = true
-      dropoff_input ? geocodeAddress(dropoff_input, cityContext, coordsContext, country, false) : null, // strictPickup = false (can be global)
-    ]);
+    // Geocode PICKUP first, then use its location to bias DROPOFF search
+    // This ensures venues like "Sweet Spot" are found near the pickup, not globally
+    let pickup: ResolvedLocation | null = null;
+    let dropoff: ResolvedLocation | null = null;
+    
+    // Resolve pickup first
+    if (pickup_input) {
+      pickup = await geocodeAddress(pickup_input, cityContext, coordsContext, country, true);  // strictPickup = true
+      
+      // Use pickup location for dropoff biasing
+      if (pickup && pickup.lat && pickup.lng) {
+        coordsContext = { lat: pickup.lat, lng: pickup.lng };
+        if (!cityContext && pickup.city) {
+          cityContext = pickup.city;
+        }
+        console.log(`[Resolve] Using pickup for dropoff bias: ${pickup.city} (${pickup.lat}, ${pickup.lng})`);
+      }
+    }
+    
+    // Now resolve dropoff with pickup location as bias
+    if (dropoff_input) {
+      dropoff = await geocodeAddress(dropoff_input, cityContext, coordsContext, country, false);  // strictPickup = false (can be global)
+    }
     
     if (pickup) response.pickup = pickup;
     if (dropoff) response.dropoff = dropoff;
