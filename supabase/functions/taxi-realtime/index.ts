@@ -169,6 +169,13 @@ PRICING - ALL FARES IN GBP (£):
 - If 5+ passengers: add £5 for 6-seater van
 - ETA: Always 5-8 minutes (unless scheduled for later)
 
+VEHICLE TYPE - PASSIVE CAPTURE:
+- If customer mentions 6 or more passengers, briefly mention: "Right, that's 6 passengers - I'll book you a larger vehicle."
+- If customer specifically requests a vehicle type (e.g., "6 seater", "MPV", "estate", "saloon", "minibus", "van"), acknowledge and note it
+- Do NOT proactively ask about vehicle type - only respond if customer mentions it
+- Include vehicle type in confirmation if specified: "...for 6 passengers in a 6-seater..."
+- Common vehicle types: saloon (standard 4-seater), estate, MPV, 6-seater, 7-seater, 8-seater, minibus
+
 ADDRESS HANDLING:
 - Repeat addresses back naturally to confirm (e.g., "That's 52A David Road, yes?")
 - Do NOT spell addresses out letter-by-letter yourself
@@ -298,6 +305,7 @@ serve(async (req) => {
     // Alternative addresses (when STT and Ada differ, store both for Ada to choose)
     pickupAlternative?: string; // Ada's interpretation if different from STT
     destinationAlternative?: string; // Ada's interpretation if different from STT
+    vehicleType?: string; // e.g., "6 seater", "saloon", "MPV", "estate" - captured from customer request
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -1875,7 +1883,8 @@ Rules:
                     pickup: { type: "string", description: "Pickup location exactly as customer stated" },
                     destination: { type: "string", description: "Drop-off location exactly as customer stated" },
                     passengers: { type: "integer", description: "Number of passengers" },
-                    pickup_time: { type: "string", description: "When the taxi is needed: 'ASAP' for immediate, or 'YYYY-MM-DD HH:MM' format for scheduled bookings" }
+                    pickup_time: { type: "string", description: "When the taxi is needed: 'ASAP' for immediate, or 'YYYY-MM-DD HH:MM' format for scheduled bookings" },
+                    vehicle_type: { type: "string", description: "Optional: Vehicle type if customer requested (e.g., '6 seater', 'MPV', 'estate', 'saloon', 'minibus')" }
                   },
                   required: ["pickup", "destination", "passengers", "pickup_time"]
                 }
@@ -1913,7 +1922,8 @@ Rules:
                   properties: {
                     new_pickup: { type: "string", description: "New pickup address (only if customer wants to change it)" },
                     new_destination: { type: "string", description: "New destination address (only if customer wants to change it)" },
-                    new_passengers: { type: "integer", description: "New number of passengers (only if customer wants to change it)" }
+                    new_passengers: { type: "integer", description: "New number of passengers (only if customer wants to change it)" },
+                    new_vehicle_type: { type: "string", description: "New vehicle type (e.g., '6 seater', 'MPV', 'estate') - only if customer requests it" }
                   },
                   required: []
                 }
@@ -2491,6 +2501,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             destination: args.destination ?? knownBooking.destination, // Ada's confirmed destination takes priority
             passengers: knownBooking.passengers ?? args.passengers,
             pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
+            vehicleType: knownBooking.vehicleType ?? args.vehicle_type ?? null, // e.g., "6 seater", "MPV"
           };
 
           bookingData = finalBooking;
@@ -2752,12 +2763,13 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           
           // Build confirmation script based on ASAP vs scheduled
           let confirmationScript: string;
+          const vehicleNote = finalBooking.vehicleType ? ` in a ${finalBooking.vehicleType}` : "";
           if (isAsap) {
-            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked. The fare is £${fare} and your driver will be with you in ${eta}. Is there anything else I can help you with?`;
+            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked${vehicleNote}. The fare is £${fare} and your driver will be with you in ${eta}. Is there anything else I can help you with?`;
           } else {
             // Format scheduled time nicely
             const timeDisplay = scheduledTime || finalBooking.pickupTime;
-            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked for ${timeDisplay}. The fare will be £${fare}. Is there anything else I can help you with?`;
+            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked for ${timeDisplay}${vehicleNote}. The fare will be £${fare}. Is there anything else I can help you with?`;
           }
           
           // Send function result back to OpenAI with EXACT addresses to use in response
@@ -2773,6 +2785,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 pickup_address: finalBooking.pickup,
                 destination_address: finalBooking.destination,
                 passenger_count: finalBooking.passengers,
+                vehicle_type: finalBooking.vehicleType || null,
                 pickup_time: isAsap ? "ASAP" : scheduledTime,
                 fare: `£${fare}`,
                 eta: isAsap ? eta : null,
