@@ -947,6 +947,40 @@ Rules:
       // Session updated - now ready
       if (data.type === "session.updated") {
         console.log(`[${callId}] Session ready! Effective config:`, data.session);
+        
+        // If customer has an active booking, update session instructions to include it
+        if (activeBooking) {
+          console.log(`[${callId}] 📋 Injecting active booking context into session...`);
+          const activeBookingContext = `
+
+==================================================
+ACTIVE BOOKING FOR THIS CUSTOMER (CRITICAL)
+==================================================
+Booking ID: ${activeBooking.id}
+Pickup: ${activeBooking.pickup}
+Destination: ${activeBooking.destination}
+Passengers: ${activeBooking.passengers}
+Fare: ${activeBooking.fare}
+Booked at: ${activeBooking.booked_at}
+
+IMPORTANT: This customer has an active booking. When they ask to:
+- CANCEL: Call cancel_booking tool IMMEDIATELY - the booking data is already loaded
+- MODIFY: Call modify_booking tool with the changes - only include fields being changed
+- KEEP: Confirm the booking is still active and ask if they need anything else
+
+You MUST use the cancel_booking or modify_booking tools when requested - they will work because the booking is loaded.
+==================================================
+`;
+          
+          // Send updated instructions with active booking context
+          openaiWs?.send(JSON.stringify({
+            type: "session.update",
+            session: {
+              instructions: SYSTEM_INSTRUCTIONS + activeBookingContext
+            }
+          }));
+        }
+        
         sessionReady = true;
         socket.send(JSON.stringify({ type: "session_ready" }));
 
@@ -959,9 +993,20 @@ Rules:
         
         if (activeBooking) {
           // Customer has an outstanding booking - offer to cancel/keep
-          greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. Active booking: pickup "${activeBooking.pickup}" to destination "${activeBooking.destination}" for ${activeBooking.passengers} passengers, fare ${activeBooking.fare}. 
+          greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. 
+ACTIVE BOOKING DETAILS:
+- Booking ID: ${activeBooking.id}
+- Pickup: ${activeBooking.pickup}
+- Destination: ${activeBooking.destination}
+- Passengers: ${activeBooking.passengers}
+- Fare: ${activeBooking.fare}
+
 Say: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
-If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to keep it, ask if there's anything else you can help with.]`;
+
+CRITICAL: If they say "cancel" or "yes" to cancelling:
+1. Call the cancel_booking tool IMMEDIATELY with reason "customer_request"
+2. The booking ID ${activeBooking.id} is already loaded - the tool WILL work
+3. After cancelling, ask if they want to book a new taxi]`;
         } else if (callerName && callerLastDestination) {
           // Returning customer with usual destination - offer quick rebooking
           greetingPrompt = `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
@@ -1555,7 +1600,29 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
           const args = JSON.parse(data.arguments);
           console.log(`[${callId}] 🚫 Cancel booking requested: ${args.reason}`);
           
-          if (activeBooking) {
+          // If activeBooking not set but we have phone, try to look it up
+          let bookingToCancel = activeBooking;
+          if (!bookingToCancel && userPhone) {
+            console.log(`[${callId}] 🔍 Looking up active booking for phone: ${userPhone}`);
+            const { data: foundBooking, error: lookupError } = await supabase
+              .from("bookings")
+              .select("id, pickup, destination, passengers, fare, booked_at")
+              .eq("caller_phone", userPhone)
+              .eq("status", "active")
+              .order("booked_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            
+            if (lookupError) {
+              console.error(`[${callId}] Booking lookup error:`, lookupError);
+            } else if (foundBooking) {
+              bookingToCancel = foundBooking;
+              activeBooking = foundBooking; // Update local state
+              console.log(`[${callId}] 📋 Found active booking: ${foundBooking.id}`);
+            }
+          }
+          
+          if (bookingToCancel) {
             // Cancel the active booking in database
             const { error: cancelError } = await supabase
               .from("bookings")
@@ -1564,7 +1631,7 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                 cancelled_at: new Date().toISOString(),
                 cancellation_reason: args.reason
               })
-              .eq("id", activeBooking.id);
+              .eq("id", bookingToCancel.id);
             
             if (cancelError) {
               console.error(`[${callId}] Failed to cancel booking:`, cancelError);
@@ -1580,10 +1647,10 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                 }
               }));
             } else {
-              console.log(`[${callId}] ✅ Booking ${activeBooking.id} cancelled`);
+              console.log(`[${callId}] ✅ Booking ${bookingToCancel.id} cancelled`);
               
               // Clear active booking
-              const cancelledBooking = { ...activeBooking };
+              const cancelledBooking = { ...bookingToCancel };
               activeBooking = null;
               
               // Notify client
@@ -1611,7 +1678,7 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
             }
           } else {
             // No active booking to cancel
-            console.log(`[${callId}] ⚠️ No active booking to cancel`);
+            console.log(`[${callId}] ⚠️ No active booking found for phone: ${userPhone || 'unknown'}`);
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -1620,7 +1687,7 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                 output: JSON.stringify({
                   success: false,
                   message: "No active booking found for this customer.",
-                  next_action: "Tell the customer you don't see any active bookings and ask if they'd like to book a taxi."
+                  next_action: "Tell the customer you don't see any active bookings for their number and ask if they'd like to book a taxi."
                 })
               }
             }));
@@ -1638,7 +1705,29 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
           const args = JSON.parse(data.arguments);
           console.log(`[${callId}] ✏️ Modify booking requested:`, args);
           
-          if (activeBooking) {
+          // If activeBooking not set but we have phone, try to look it up
+          let bookingToModify = activeBooking;
+          if (!bookingToModify && userPhone) {
+            console.log(`[${callId}] 🔍 Looking up active booking for modification, phone: ${userPhone}`);
+            const { data: foundBooking, error: lookupError } = await supabase
+              .from("bookings")
+              .select("id, pickup, destination, passengers, fare, booked_at")
+              .eq("caller_phone", userPhone)
+              .eq("status", "active")
+              .order("booked_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            
+            if (lookupError) {
+              console.error(`[${callId}] Booking lookup error:`, lookupError);
+            } else if (foundBooking) {
+              bookingToModify = foundBooking;
+              activeBooking = foundBooking; // Update local state
+              console.log(`[${callId}] 📋 Found active booking for modification: ${foundBooking.id}`);
+            }
+          }
+          
+          if (bookingToModify) {
             const updates: Record<string, any> = {};
             const changes: string[] = [];
             
@@ -1671,9 +1760,9 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
               }));
             } else {
               // Recalculate fare if pickup or destination changed
-              let newFare = activeBooking.fare;
-              const finalPickup = updates.pickup || activeBooking.pickup;
-              const finalDestination = updates.destination || activeBooking.destination;
+              let newFare = bookingToModify.fare;
+              const finalPickup = updates.pickup || bookingToModify.pickup;
+              const finalDestination = updates.destination || bookingToModify.destination;
               
               if (args.new_pickup || args.new_destination) {
                 // Recalculate fare
@@ -1706,7 +1795,7 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                 
                 if (distanceMiles > 0) {
                   let fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
-                  const passengers = updates.passengers || activeBooking.passengers;
+                  const passengers = updates.passengers || bookingToModify.passengers;
                   if (passengers > 4) fare += 5;
                   newFare = `£${Math.round(fare * 100) / 100}`;
                   updates.fare = newFare;
@@ -1718,7 +1807,7 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
               const { error: updateError } = await supabase
                 .from("bookings")
                 .update(updates)
-                .eq("id", activeBooking.id);
+                .eq("id", bookingToModify.id);
               
               if (updateError) {
                 console.error(`[${callId}] Failed to modify booking:`, updateError);
@@ -1734,21 +1823,23 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                   }
                 }));
               } else {
-                // Update local activeBooking
-                activeBooking = {
-                  ...activeBooking,
+                // Update local activeBooking with modified values
+                const updatedBooking = {
+                  id: bookingToModify.id,
                   pickup: finalPickup,
                   destination: finalDestination,
-                  passengers: updates.passengers || activeBooking.passengers,
-                  fare: newFare
+                  passengers: updates.passengers || bookingToModify.passengers,
+                  fare: newFare,
+                  booked_at: bookingToModify.booked_at
                 };
+                activeBooking = updatedBooking;
                 
                 console.log(`[${callId}] ✅ Booking modified: ${changes.join(", ")}`);
                 
                 // Notify client
                 socket.send(JSON.stringify({
                   type: "booking_modified",
-                  booking: activeBooking,
+                  booking: updatedBooking,
                   changes: changes
                 }));
                 
@@ -1761,12 +1852,12 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                       success: true,
                       message: `Booking updated: ${changes.join(", ")}`,
                       updated_booking: {
-                        pickup: activeBooking.pickup,
-                        destination: activeBooking.destination,
-                        passengers: activeBooking.passengers,
-                        fare: activeBooking.fare
+                        pickup: updatedBooking.pickup,
+                        destination: updatedBooking.destination,
+                        passengers: updatedBooking.passengers,
+                        fare: updatedBooking.fare
                       },
-                      confirmation_script: `I've updated your booking. It's now from ${activeBooking.pickup} to ${activeBooking.destination} for ${activeBooking.passengers} passenger${activeBooking.passengers > 1 ? 's' : ''}, and the fare is ${activeBooking.fare}. Is there anything else?`
+                      confirmation_script: `I've updated your booking. It's now from ${updatedBooking.pickup} to ${updatedBooking.destination} for ${updatedBooking.passengers} passenger${updatedBooking.passengers > 1 ? 's' : ''}, and the fare is ${updatedBooking.fare}. Is there anything else?`
                     })
                   }
                 }));
