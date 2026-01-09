@@ -18,6 +18,17 @@ interface GeocodeResult {
   postcode?: string;
   map_link?: string;
   error?: string;
+  multiple_matches?: GeocodeMatch[]; // When multiple similar addresses found
+}
+
+interface GeocodeMatch {
+  display_name: string;
+  formatted_address: string;
+  lat: number;
+  lon: number;
+  city?: string;
+  postcode?: string;
+  place_id?: string;
 }
 
 serve(async (req) => {
@@ -27,7 +38,7 @@ serve(async (req) => {
   }
 
   try {
-    const { address, city, country = "UK", lat, lon } = await req.json();
+    const { address, city, country = "UK", lat, lon, check_ambiguous = false } = await req.json();
     
     if (!address) {
       return new Response(
@@ -70,8 +81,8 @@ serve(async (req) => {
       }
     }
 
-    // Try text search with location bias
-    const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
+    // Try text search with location bias (check for multiple matches if requested)
+    const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
     if (textSearchResult.found) {
       return new Response(
         JSON.stringify(textSearchResult),
@@ -144,12 +155,13 @@ async function googleNearbySearch(
   }
 }
 
-// Text Search with location bias
+// Text Search with location bias - returns multiple matches if ambiguous
 async function googleTextSearch(
   query: string,
   lat: number | undefined,
   lon: number | undefined,
-  apiKey: string
+  apiKey: string,
+  returnMultiple: boolean = false
 ): Promise<GeocodeResult> {
   try {
     let url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
@@ -169,6 +181,36 @@ async function googleTextSearch(
     if (data.status !== "OK" || !data.results || data.results.length === 0) {
       console.log(`[Geocode] Text search: no results (status: ${data.status})`);
       return { found: false, address: query };
+    }
+
+    // Check for multiple similar matches (e.g., "David Road" in different areas)
+    if (returnMultiple && data.results.length > 1) {
+      // Check if results are in different areas (different cities/postcodes)
+      const uniqueAreas = new Set<string>();
+      const matches: GeocodeMatch[] = [];
+      
+      for (const result of data.results.slice(0, 5)) { // Max 5 matches
+        const areaKey = result.formatted_address?.split(',').slice(-2).join(',') || result.place_id;
+        if (!uniqueAreas.has(areaKey)) {
+          uniqueAreas.add(areaKey);
+          matches.push({
+            display_name: result.name || result.formatted_address,
+            formatted_address: result.formatted_address,
+            lat: result.geometry?.location?.lat,
+            lon: result.geometry?.location?.lng,
+            place_id: result.place_id,
+          });
+        }
+      }
+      
+      // If we have multiple matches in different areas, return them for disambiguation
+      if (matches.length > 1) {
+        console.log(`[Geocode] Multiple matches found: ${matches.length} results in different areas`);
+        // Still return the best match, but include alternatives
+        const bestMatch = await getPlaceDetails(data.results[0].place_id, query, apiKey);
+        bestMatch.multiple_matches = matches;
+        return bestMatch;
+      }
     }
 
     const placeId = data.results[0].place_id;

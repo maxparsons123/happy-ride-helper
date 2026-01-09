@@ -147,6 +147,18 @@ ADDRESS HANDLING:
 - House numbers with letters (52A, 18B) - say naturally: "fifty-two A"
 - If an address sounds unclear, ask: "Could you repeat that for me please?"
 
+**MULTIPLE ADDRESSES - DISAMBIGUATION:**
+- If the system tells you there are MULTIPLE addresses with the same name (e.g., "2 David Roads found"), you MUST ask the customer to clarify
+- Say something like: "I've found a couple of streets with that name. Do you mean David Road in [Area 1] or David Road in [Area 2]?"
+- Wait for their answer before proceeding
+- Do NOT guess - always ask when there's ambiguity
+
+**HIGH FARE VERIFICATION:**
+- If the book_taxi function returns a "requires_verification" response with a high fare (over £50), you MUST verify with the customer
+- Say: "Just to make sure I have the right addresses - you're going from [PICKUP] to [DESTINATION]? That will be around [FARE]. Is that correct?"
+- If they confirm YES, call book_taxi again to complete the booking
+- If they correct an address, update it and start the confirmation flow again
+
 **CRITICAL - NEVER FAKE A BOOKING:**
 - You can ONLY say "That's all booked" or confirm a booking AFTER you have called the book_taxi function AND received a successful response
 - If you have NOT called book_taxi, you MUST NOT say the booking is complete
@@ -226,6 +238,7 @@ serve(async (req) => {
     passengers?: number;
     pickupVerified?: boolean;
     destinationVerified?: boolean;
+    highFareVerified?: boolean; // Track if high fare has been verified with customer
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -259,19 +272,68 @@ serve(async (req) => {
     return "";
   };
 
-  // Geocode an address using Google Maps API (with city context)
-  const geocodeAddress = async (address: string): Promise<{ found: boolean; display_name?: string; formatted_address?: string; error?: string }> => {
+  // Geocode an address using Google Maps API (with city context and caller location biasing)
+  // Returns disambiguation info if multiple similar addresses found
+  interface GeocodeMatch {
+    display_name: string;
+    formatted_address: string;
+    lat: number;
+    lon: number;
+    city?: string;
+  }
+  
+  interface EnhancedGeocodeResult {
+    found: boolean;
+    display_name?: string;
+    formatted_address?: string;
+    lat?: number;
+    lon?: number;
+    city?: string;
+    error?: string;
+    multiple_matches?: GeocodeMatch[];
+  }
+  
+  const geocodeAddress = async (address: string, checkAmbiguous: boolean = false): Promise<EnhancedGeocodeResult> => {
     try {
-      // Use caller's city if we have one, otherwise try to extract from last addresses
+      // Use caller's last addresses for location biasing (smarter guessing)
       let city = callerCity;
-      if (!city && callerLastPickup) {
-        city = extractCityFromAddress(callerLastPickup);
-      }
-      if (!city && callerLastDestination) {
-        city = extractCityFromAddress(callerLastDestination);
+      let biasLat: number | undefined;
+      let biasLon: number | undefined;
+      
+      // If caller has history, try to get coordinates from their last addresses
+      if (callerLastPickup || callerLastDestination) {
+        // Extract city from caller's history for search biasing
+        if (!city && callerLastPickup) {
+          city = extractCityFromAddress(callerLastPickup);
+        }
+        if (!city && callerLastDestination) {
+          city = extractCityFromAddress(callerLastDestination);
+        }
+        
+        // Get coordinates from caller's last pickup for better location biasing
+        if (callerLastPickup) {
+          try {
+            const lastPickupGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify({ address: callerLastPickup, city, country: "UK" }),
+            });
+            const lastPickupData = await lastPickupGeo.json();
+            if (lastPickupData.found && lastPickupData.lat && lastPickupData.lon) {
+              biasLat = lastPickupData.lat;
+              biasLon = lastPickupData.lon;
+              console.log(`[${callId}] 📍 Using caller history for location bias: ${biasLat}, ${biasLon}`);
+            }
+          } catch (e) {
+            console.error(`[${callId}] Failed to get caller history coordinates:`, e);
+          }
+        }
       }
       
-      console.log(`[${callId}] 🌍 Geocoding address: "${address}" (city context: ${city || 'none'})`);
+      console.log(`[${callId}] 🌍 Geocoding address: "${address}" (city: ${city || 'none'}, bias: ${biasLat ? 'yes' : 'no'}, check_ambiguous: ${checkAmbiguous})`);
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
         method: "POST",
@@ -279,7 +341,14 @@ serve(async (req) => {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
-        body: JSON.stringify({ address, city, country: "UK" }),
+        body: JSON.stringify({ 
+          address, 
+          city, 
+          country: "UK",
+          lat: biasLat,
+          lon: biasLon,
+          check_ambiguous: checkAmbiguous 
+        }),
       });
 
       if (!response.ok) {
@@ -288,12 +357,81 @@ serve(async (req) => {
       }
 
       const result = await response.json();
+      
+      // Log multiple matches if found
+      if (result.multiple_matches?.length > 1) {
+        console.log(`[${callId}] 🔍 Multiple address matches found:`, result.multiple_matches.map((m: GeocodeMatch) => m.formatted_address));
+      }
+      
       console.log(`[${callId}] 🌍 Geocode result for "${address}":`, result.found ? `FOUND - ${result.formatted_address || result.display_name}` : "NOT FOUND");
       return result;
     } catch (e) {
       console.error(`[${callId}] Geocode exception:`, e);
       return { found: false, error: "Geocoding failed" };
     }
+  };
+  
+  // Ask Ada to disambiguate when multiple similar addresses are found
+  const askForAddressDisambiguation = (addressType: "pickup" | "destination", matches: GeocodeMatch[]) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN || matches.length < 2) return;
+    
+    // Format the options for Ada to present
+    const optionsList = matches.slice(0, 3).map((m, i) => `${i + 1}. ${m.formatted_address}`).join('\n');
+    
+    const message = `[SYSTEM: CRITICAL - MULTIPLE ADDRESSES FOUND]
+I found ${matches.length} locations that match that ${addressType}:
+${optionsList}
+
+You MUST ask the customer which one they mean. Say something like:
+"I've found a couple of ${addressType === 'pickup' ? 'pickup locations' : 'destinations'} with that name. Do you mean [first option] or [second option]?"
+
+Wait for their response before proceeding.`;
+    
+    console.log(`[${callId}] 🔀 Asking for address disambiguation: ${addressType} - ${matches.length} options`);
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }]
+      }
+    }));
+    
+    // Trigger Ada to respond
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] }
+    }));
+  };
+  
+  // Verify a high fare and ask Ada to confirm addresses with customer
+  const verifyHighFare = (fare: number, pickup: string, destination: string) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    
+    const message = `[SYSTEM: FARE VERIFICATION REQUIRED]
+The calculated fare is £${fare}, which is quite high. Before confirming, please double-check with the customer:
+
+"Just to confirm - you're going from ${pickup} to ${destination}? The fare will be around £${fare}. Is that the right journey?"
+
+Wait for their confirmation. If they say the addresses are wrong, ask them to clarify.`;
+    
+    console.log(`[${callId}] 💷 High fare detected (£${fare}) - asking for verification`);
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }]
+      }
+    }));
+    
+    // Trigger Ada to respond
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] }
+    }));
   };
 
   // Generate TTS audio for an address using the taxi-address-tts function
@@ -801,11 +939,21 @@ Rules:
         });
 
         // GEOCODE NEW ADDRESSES (if geocoding is enabled)
+        // Also check for ambiguous addresses (multiple matches) when caller has no history
         if (geocodingEnabled) {
+          // Check for ambiguous addresses only if caller has no booking history
+          const shouldCheckAmbiguous = callerTotalBookings === 0;
+          
           // Geocode pickup if it changed and hasn't been verified yet
           if (pickupChanged && !knownBooking.pickupVerified) {
-            const pickupResult = await geocodeAddress(knownBooking.pickup!);
+            const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous);
             if (pickupResult.found) {
+              // Check if there are multiple matches and caller has no history
+              if (pickupResult.multiple_matches && pickupResult.multiple_matches.length > 1 && shouldCheckAmbiguous) {
+                console.log(`[${callId}] 🔀 Multiple pickup matches found - asking for clarification`);
+                askForAddressDisambiguation("pickup", pickupResult.multiple_matches);
+                return; // Wait for customer to clarify
+              }
               knownBooking.pickupVerified = true;
               console.log(`[${callId}] ✅ Pickup verified: ${pickupResult.display_name}`);
             } else {
@@ -817,8 +965,14 @@ Rules:
           
           // Geocode destination if it changed and hasn't been verified yet
           if (destinationChanged && !knownBooking.destinationVerified) {
-            const destResult = await geocodeAddress(knownBooking.destination!);
+            const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous);
             if (destResult.found) {
+              // Check if there are multiple matches and caller has no history
+              if (destResult.multiple_matches && destResult.multiple_matches.length > 1 && shouldCheckAmbiguous) {
+                console.log(`[${callId}] 🔀 Multiple destination matches found - asking for clarification`);
+                askForAddressDisambiguation("destination", destResult.multiple_matches);
+                return; // Wait for customer to clarify
+              }
               knownBooking.destinationVerified = true;
               console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
             } else {
@@ -1596,6 +1750,41 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           // Add £5 for 6-seater van (5+ passengers)
           const is6Seater = Number(finalBooking.passengers || 0) > 4;
           if (is6Seater) fare += 5;
+          
+          // HIGH FARE VERIFICATION: If fare exceeds £50 and not yet verified, double-check with customer
+          // This helps catch potential address errors that result in unrealistic fares
+          const HIGH_FARE_THRESHOLD = 50;
+          if (fare > HIGH_FARE_THRESHOLD && distanceSource !== "random" && !knownBooking.highFareVerified) {
+            console.log(`[${callId}] ⚠️ High fare detected: £${fare} - requesting verification`);
+            
+            // Mark as verified so we don't loop forever
+            knownBooking.highFareVerified = true;
+            
+            // Send a verification request back to Ada to confirm with customer
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  requires_verification: true,
+                  fare: `£${fare}`,
+                  pickup: finalBooking.pickup,
+                  destination: finalBooking.destination,
+                  message: `The fare is £${fare} which is quite high. Please confirm with the customer: "Just to make sure I have the right addresses - you're going from ${finalBooking.pickup} to ${finalBooking.destination}? That will be around £${fare}. Is that correct?" If they say yes, call book_taxi again. If they correct an address, update it and recalculate.`
+                })
+              }
+            }));
+            
+            // Trigger Ada to verify
+            openaiWs?.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] }
+            }));
+            
+            return;
+          }
           
           const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
           
