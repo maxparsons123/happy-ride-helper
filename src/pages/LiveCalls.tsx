@@ -787,52 +787,50 @@ export default function LiveCalls() {
                 </div>
 
                 {/* Live Transcript */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                  <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider sticky top-0 bg-card py-2">
-                    Live Transcript
-                  </h4>
-                  
-                  {selectedCallData.transcripts.length === 0 ? (
-                    <div className="text-center py-12 text-muted-foreground">
-                      <Clock className="w-8 h-8 mx-auto mb-2 animate-spin" />
-                      <p>Waiting for conversation...</p>
-                    </div>
-                  ) : (
-                    selectedCallData.transcripts.map((t, i) => (
-                      <div
-                        key={i}
-                        className={`flex ${
-                          t.role === "user" 
-                            ? "justify-end" 
-                            : t.role === "system" 
-                              ? "justify-center" 
-                              : "justify-start"
-                        }`}
-                      >
-                        {t.role === "system" ? (
-                          <div className="max-w-[90%] px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
-                            <p className="text-xs font-mono">{t.text}</p>
-                            <p className="text-xs opacity-60 mt-0.5 text-center">
-                              {formatTime(t.timestamp)}
-                            </p>
-                          </div>
-                        ) : (
-                          <div
-                            className={`max-w-[80%] p-3 rounded-xl ${
-                              t.role === "user"
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted"
-                            }`}
-                          >
-                            <p className="text-sm">{t.text}</p>
-                            <p className="text-xs opacity-60 mt-1">
-                              {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp)}
-                            </p>
-                          </div>
-                        )}
+                <div className="flex-1 overflow-y-auto p-4 flex flex-col-reverse">
+                  <div className="space-y-3">
+                    {selectedCallData.transcripts.length === 0 ? (
+                      <div className="text-center py-12 text-muted-foreground">
+                        <Clock className="w-8 h-8 mx-auto mb-2 animate-spin" />
+                        <p>Waiting for conversation...</p>
                       </div>
-                    ))
-                  )}
+                    ) : (
+                      selectedCallData.transcripts.map((t, i) => (
+                        <div
+                          key={i}
+                          className={`flex ${
+                            t.role === "user" 
+                              ? "justify-end" 
+                              : t.role === "system" 
+                                ? "justify-center" 
+                                : "justify-start"
+                          }`}
+                        >
+                          {t.role === "system" ? (
+                            <div className="max-w-[90%] px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                              <p className="text-xs font-mono">{t.text}</p>
+                              <p className="text-xs opacity-60 mt-0.5 text-center">
+                                {formatTime(t.timestamp)}
+                              </p>
+                            </div>
+                          ) : (
+                            <div
+                              className={`max-w-[80%] p-3 rounded-xl ${
+                                t.role === "user"
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-muted"
+                              }`}
+                            >
+                              <p className="text-sm">{t.text}</p>
+                              <p className="text-xs opacity-60 mt-1">
+                                {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp)}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </Card>
             ) : (
