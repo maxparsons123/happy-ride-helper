@@ -917,9 +917,22 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         callerLastPickup = data.last_pickup || "";
         callerLastDestination = data.last_destination || "";
         
-        // Load known_areas and derive primary city from highest count
+        // Load known_areas for reference
         callerKnownAreas = (data.known_areas as Record<string, number>) || {};
-        if (Object.keys(callerKnownAreas).length > 0) {
+        
+        // CRITICAL FIX: Derive primary city from last_pickup FIRST (caller's "home" area)
+        // This is more important than total mention counts, because a caller might travel
+        // TO Manchester often but LIVE in Coventry. Pickups are where they start from.
+        if (callerLastPickup) {
+          const pickupCity = extractCityFromAddress(callerLastPickup);
+          if (pickupCity) {
+            callerCity = pickupCity;
+            console.log(`[${callId}] 🏙️ Primary city from last_pickup: ${callerCity} (most reliable)`);
+          }
+        }
+        
+        // Fallback to known_areas highest count if no city from last_pickup
+        if (!callerCity && Object.keys(callerKnownAreas).length > 0) {
           const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
           if (topCity) {
             callerCity = topCity[0];
@@ -932,11 +945,11 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         if (Object.keys(callerAddressAliases).length > 0) {
           console.log(`[${callId}] 🏠 Loaded address aliases: ${JSON.stringify(callerAddressAliases)}`);
         }
-        if (!callerCity && callerLastPickup) {
-          callerCity = extractCityFromAddress(callerLastPickup);
-        }
+        
+        // Final fallback: try destination
         if (!callerCity && callerLastDestination) {
           callerCity = extractCityFromAddress(callerLastDestination);
+          if (callerCity) console.log(`[${callId}] 🏙️ Primary city from last_destination: ${callerCity}`);
         }
         
         // If still no city, geocode the history address to get city from Google
@@ -1166,11 +1179,15 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         updatedTrusted = updatedTrusted.slice(-MAX_TRUSTED_ADDRESSES);
       }
       
+      // Enrich last_pickup and last_destination with city for future lookups
+      const enrichedPickup = ensureAddressHasCity(booking.pickup);
+      const enrichedDestination = ensureAddressHasCity(booking.destination);
+      
       if (existing) {
         // Update existing caller
         const { error } = await supabase.from("callers").update({
-          last_pickup: booking.pickup,
-          last_destination: booking.destination,
+          last_pickup: enrichedPickup,
+          last_destination: enrichedDestination,
           total_bookings: (existing.total_bookings || 0) + 1,
           trusted_addresses: updatedTrusted,
           updated_at: new Date().toISOString()
@@ -1183,8 +1200,8 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         const { error } = await supabase.from("callers").insert({
           phone_number: userPhone,
           name: callerName || null,
-          last_pickup: booking.pickup,
-          last_destination: booking.destination,
+          last_pickup: enrichedPickup,
+          last_destination: enrichedDestination,
           total_bookings: 1,
           trusted_addresses: updatedTrusted
         });
