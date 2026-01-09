@@ -1638,9 +1638,8 @@ Rules:
             output_audio_format: "pcm16",
             input_audio_transcription: { 
               model: "whisper-1",
-              // Auto-detect language (Whisper supports 99+ languages)
-              // Prompt with taxi vocabulary and multi-digit house numbers for accuracy
-              prompt: "247 Radio Carz taxi booking. House numbers: 52A, 1214A, 18B, 234C, 1567, 2345A. Streets: David Road, Warwick Road, Bradford Road, Coventry, Manchester, Leeds, Birmingham. Passengers: one, two, three, four, five, six. Spelling: Alpha Bravo Charlie Delta Echo Foxtrot."
+              // Minimal context prompt - let Whisper transcribe naturally
+              prompt: "247 Radio Carz taxi booking, Coventry."
             },
             // Server VAD - balanced for natural conversation flow
             // Give user more time to respond after Ada asks a question
