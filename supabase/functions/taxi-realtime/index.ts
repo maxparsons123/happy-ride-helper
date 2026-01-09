@@ -26,7 +26,8 @@ YOUR INTRODUCTION - GREETING FLOW:
 - For RETURNING customers WITH a usual destination (but NO active booking): "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
 - For RETURNING customers WITHOUT a usual destination: "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
 - For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
-- After they give their name, say: "Lovely to meet you [NAME]! How can I help with your travels today?"
+- After they give their name, ask for their area: "Lovely to meet you [NAME]! And what area are you calling from - Coventry, Birmingham, or somewhere else?"
+- After they give their area, say: "Great, thanks [NAME]! How can I help with your travels today?"
 - ALWAYS use their name when addressing them throughout the call (e.g., "Right then [NAME], where would you like to be picked up from?")
 - Adapt greetings to the customer's language while keeping the same warm tone
 - If returning customer accepts quick rebooking ("yes", "yeah", "please"), skip asking for destination and confirm: "Brilliant! And same pickup from [LAST_PICKUP]?" or ask "Where shall I pick you up from?"
@@ -269,6 +270,7 @@ serve(async (req) => {
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
   let callerCity = ""; // City extracted from caller's last addresses or phone area
+  let callerKnownAreas: Record<string, number> = {}; // {"Coventry": 5, "Birmingham": 1} - city mention counts
   let callerTrustedAddresses: string[] = []; // Array of addresses the caller has successfully used before
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
@@ -336,11 +338,31 @@ serve(async (req) => {
 
   // If the customer mentions a city anywhere (e.g. "...in Coventry"), use it as location context.
   // This stabilizes geocoding + fares for ambiguous streets/venues.
-  const maybeUpdateCallerCityFromText = (text: string) => {
+  const maybeUpdateCallerCityFromText = async (text: string) => {
     const hintedCity = extractCityFromAddress(text);
-    if (hintedCity && (!callerCity || callerCity.toLowerCase() !== hintedCity.toLowerCase())) {
-      callerCity = hintedCity;
-      console.log(`[${callId}] 🏙️ City context updated from transcript: ${callerCity}`);
+    if (hintedCity) {
+      // Always increment the count for this city in known_areas
+      callerKnownAreas[hintedCity] = (callerKnownAreas[hintedCity] || 0) + 1;
+      
+      // Update callerCity if this is now the most common city
+      const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
+      if (topCity && topCity[0] !== callerCity) {
+        callerCity = topCity[0];
+        console.log(`[${callId}] 🏙️ Primary city updated: ${callerCity} (${topCity[1]} mentions)`);
+      }
+      
+      // Persist to database (fire-and-forget)
+      if (userPhone) {
+        const phoneNorm = normalizePhone(userPhone);
+        supabase
+          .from("callers")
+          .update({ known_areas: callerKnownAreas })
+          .eq("phone_number", phoneNorm)
+          .then(({ error }) => {
+            if (error) console.error(`[${callId}] Failed to update known_areas:`, error);
+            else console.log(`[${callId}] 🏙️ Saved known_areas: ${JSON.stringify(callerKnownAreas)}`);
+          });
+      }
     }
   };
 
@@ -756,7 +778,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Lookup caller info (including trusted addresses)
       const { data, error } = await supabase
         .from("callers")
-        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses")
+        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas")
         .in("phone_number", phoneCandidates)
         .maybeSingle();
 
@@ -773,19 +795,29 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         callerTotalBookings = data.total_bookings || 0;
         callerLastPickup = data.last_pickup || "";
         callerLastDestination = data.last_destination || "";
+        
+        // Load known_areas and derive primary city from highest count
+        callerKnownAreas = (data.known_areas as Record<string, number>) || {};
+        if (Object.keys(callerKnownAreas).length > 0) {
+          const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
+          if (topCity) {
+            callerCity = topCity[0];
+            console.log(`[${callId}] 🏙️ Primary city from known_areas: ${callerCity} (${topCity[1]} mentions)`);
+          }
+        }
 
-        // Extract city from last addresses for location-biased geocoding
-        if (callerLastPickup) {
+        // Fallback: Extract city from last addresses if no known_areas
+        if (!callerCity && callerLastPickup) {
           callerCity = extractCityFromAddress(callerLastPickup);
         }
         if (!callerCity && callerLastDestination) {
           callerCity = extractCityFromAddress(callerLastDestination);
         }
         
-        // If no city found in text, geocode the history address to get city from Google
+        // If still no city, geocode the history address to get city from Google
         if (!callerCity && (callerLastPickup || callerLastDestination)) {
           const historyAddr = callerLastPickup || callerLastDestination;
-          console.log(`[${callId}] 🏙️ No city in address text, geocoding history: "${historyAddr}"`);
+          console.log(`[${callId}] 🏙️ No city in known_areas or address text, geocoding history: "${historyAddr}"`);
           try {
             const geoResp = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
               method: "POST",
@@ -798,11 +830,23 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
             const geoData = await geoResp.json();
             if (geoData.found && geoData.city) {
               callerCity = geoData.city;
+              // Also add to known_areas for future calls
+              callerKnownAreas[callerCity] = (callerKnownAreas[callerCity] || 0) + 1;
               console.log(`[${callId}] 🏙️ Got caller city from geocoding: ${callerCity}`);
+              
+              // Persist the discovered city
+              const phoneNorm = normalizePhone(userPhone);
+              if (phoneNorm) {
+                supabase
+                  .from("callers")
+                  .update({ known_areas: callerKnownAreas })
+                  .eq("phone_number", phoneNorm)
+                  .then(({ error }) => {
+                    if (error) console.error(`[${callId}] Failed to save discovered city:`, error);
+                  });
+              }
             }
-            // Also store coordinates for stronger biasing
             if (geoData.found && geoData.lat && geoData.lon) {
-              // These will be used as fallback bias in geocodeAddress
               console.log(`[${callId}] 📍 Caller history coordinates: ${geoData.lat}, ${geoData.lon}`);
             }
           } catch (e) {
@@ -816,6 +860,9 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         }
         if (callerCity) {
           console.log(`[${callId}] 🏙️ Caller city: ${callerCity}`);
+        }
+        if (Object.keys(callerKnownAreas).length > 0) {
+          console.log(`[${callId}] 🗺️ Known areas: ${JSON.stringify(callerKnownAreas)}`);
         }
         
         // Load trusted addresses for auto-verification
