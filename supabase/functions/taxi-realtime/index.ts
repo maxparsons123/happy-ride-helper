@@ -1027,12 +1027,30 @@ Rules:
           });
         } else {
           const newPickup = extracted.pickup_location;
-          if (newPickup !== knownBooking.pickup) {
-            // Reset verification flags when the address changes
-            knownBooking.pickupVerified = false;
-            knownBooking.highFareVerified = false;
+          
+          // GUARD: Don't let garbage overwrite a verified address
+          // If we have a verified pickup and the new one looks suspicious, reject it
+          if (knownBooking.pickupVerified && knownBooking.pickup) {
+            const looksLegit = /\d/.test(newPickup) || // Has a house number
+                              /\b(road|street|avenue|lane|drive|close|way|place|station|airport|hospital)\b/i.test(newPickup) ||
+                              newPickup.toLowerCase().includes(knownBooking.pickup.toLowerCase().split(' ')[0]); // Contains part of old address
+            if (!looksLegit) {
+              console.log(`[${callId}] 🛡️ Blocking pickup overwrite: verified="${knownBooking.pickup}" → suspicious="${newPickup}"`);
+              // Don't update
+            } else {
+              if (newPickup !== knownBooking.pickup) {
+                knownBooking.pickupVerified = false;
+                knownBooking.highFareVerified = false;
+              }
+              knownBooking.pickup = newPickup;
+            }
+          } else {
+            if (newPickup !== knownBooking.pickup) {
+              knownBooking.pickupVerified = false;
+              knownBooking.highFareVerified = false;
+            }
+            knownBooking.pickup = newPickup;
           }
-          knownBooking.pickup = newPickup;
         }
       }
 
@@ -1048,12 +1066,29 @@ Rules:
           });
         } else {
           const newDestination = extracted.dropoff_location;
-          if (newDestination !== knownBooking.destination) {
-            // Reset verification flags when the address changes
-            knownBooking.destinationVerified = false;
-            knownBooking.highFareVerified = false;
+          
+          // GUARD: Don't let garbage overwrite a verified destination
+          if (knownBooking.destinationVerified && knownBooking.destination) {
+            const looksLegit = /\d/.test(newDestination) || // Has a house number
+                              /\b(road|street|avenue|lane|drive|close|way|place|station|airport|hospital|hotel|centre|center)\b/i.test(newDestination) ||
+                              newDestination.toLowerCase().includes(knownBooking.destination.toLowerCase().split(' ')[0]); // Contains part of old address
+            if (!looksLegit) {
+              console.log(`[${callId}] 🛡️ Blocking destination overwrite: verified="${knownBooking.destination}" → suspicious="${newDestination}"`);
+              // Don't update
+            } else {
+              if (newDestination !== knownBooking.destination) {
+                knownBooking.destinationVerified = false;
+                knownBooking.highFareVerified = false;
+              }
+              knownBooking.destination = newDestination;
+            }
+          } else {
+            if (newDestination !== knownBooking.destination) {
+              knownBooking.destinationVerified = false;
+              knownBooking.highFareVerified = false;
+            }
+            knownBooking.destination = newDestination;
           }
-          knownBooking.destination = newDestination;
         }
       }
       if (extracted.number_of_passengers) {
@@ -1611,6 +1646,12 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             /\[applause\]/i,
             /subtitles by/i,
             /transcribed by/i,
+            /transcript by/i,
+            /rev\.com/i,
+            /transcription\.ca/i,
+            /document\s+\w+\.transcription/i,
+            /page\s+\d+\s+following/i,
+            /msrtn\./i,
             /^\.+$/,  // Just dots
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
           ];
@@ -1627,6 +1668,30 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           // If we get 50+ words, it's likely a hallucination
           if (wordCount > 50) {
             console.log(`[${callId}] 🚫 Hallucination detected: too long (${wordCount} words)`);
+            return true;
+          }
+          
+          // Detect nonsense/garbage: random short words with no real meaning
+          // "House spread" is unlikely to be a real address if we already have a confirmed one
+          const seemsLikeGibberish = (text: string): boolean => {
+            const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+            if (words.length < 2 || words.length > 4) return false; // Only check short phrases
+            
+            // If it's 2-4 random words with no address indicators, could be gibberish
+            const addressIndicators = /\d|road|street|avenue|lane|drive|close|way|place|court|station|airport|hospital|hotel|centre|center|park|square|building|house|flat/i;
+            if (!addressIndicators.test(text)) {
+              // Check if it sounds like a command/action vs. gibberish
+              const actionWords = /yes|no|please|cancel|book|taxi|pick|from|to|going|thank|okay|fine|great|right|correct|asap|now|later|three|two|one|four|five|six|passenger|people/i;
+              if (!actionWords.test(text)) {
+                // Random words with no context
+                console.log(`[${callId}] 🚫 Possible gibberish: "${text}" (no address or action indicators)`);
+                return true;
+              }
+            }
+            return false;
+          };
+          
+          if (seemsLikeGibberish(t)) {
             return true;
           }
           
