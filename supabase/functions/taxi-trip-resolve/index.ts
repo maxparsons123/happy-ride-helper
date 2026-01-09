@@ -226,6 +226,10 @@ async function geocodeAddress(
     return geocodeCache.get(cacheKey)!;
   }
   
+  // Check if input looks like a street address (has numbers) vs a place name
+  const hasStreetNumber = /\d+[A-Za-z]?\s/.test(trimmed) || /^\d+/.test(trimmed);
+  const looksLikeBusinessName = !hasStreetNumber && !/\d/.test(trimmed);
+  
   // Build address with city bias if not already included
   let addressParam = trimmed;
   const textCity = extractCityFromText(trimmed);
@@ -234,8 +238,29 @@ async function geocodeAddress(
     addressParam = `${trimmed}, ${cityHint}`;
   }
   
-  // Try Google Places Text Search first (better for landmarks)
-  const textSearchResult = await googleTextSearch(addressParam, coordsHint, country);
+  // For business names without street numbers, try city-specific search FIRST
+  // This prevents "Sweetspot" in Coventry from matching "Sweetspot" in London
+  if (looksLikeBusinessName && cityHint) {
+    console.log(`🏢 Business name detected: "${trimmed}" - searching in ${cityHint} first`);
+    
+    // Get city coordinates for tight radius search
+    const cityCoords = coordsHint || getCityCoords(cityHint);
+    
+    // Try city-specific search with tight radius
+    const citySpecificQuery = `${trimmed} ${cityHint}`;
+    const cityResult = await googleTextSearch(citySpecificQuery, cityCoords, country, true);
+    if (cityResult) {
+      console.log(`✅ Found business in ${cityHint}: ${cityResult.formatted_address}`);
+      geocodeCache.set(cacheKey, cityResult);
+      return cityResult;
+    }
+    
+    // If not found in city, log warning and fall through to broader search
+    console.log(`⚠️ "${trimmed}" not found in ${cityHint}, trying broader UK search`);
+  }
+  
+  // Try Google Places Text Search (for landmarks/addresses)
+  const textSearchResult = await googleTextSearch(addressParam, coordsHint, country, false);
   if (textSearchResult) {
     geocodeCache.set(cacheKey, textSearchResult);
     return textSearchResult;
@@ -287,7 +312,8 @@ async function geocodeAddress(
 async function googleTextSearch(
   query: string,
   coordsHint?: { lat: number; lng: number },
-  country: string = "GB"
+  country: string = "GB",
+  tightRadius: boolean = false
 ): Promise<ResolvedLocation | null> {
   if (!GOOGLE_API_KEY) return null;
   
@@ -304,9 +330,11 @@ async function googleTextSearch(
   });
   
   // If we have coords, use them for location bias
+  // Use tight radius (10km) for city-specific business searches
+  // Use wider radius for general UK searches
   if (coordsHint) {
     params.append("location", `${coordsHint.lat},${coordsHint.lng}`);
-    params.append("radius", "50000"); // 50km bias for UK-sized searches
+    params.append("radius", tightRadius ? "10000" : "50000"); // 10km for tight, 50km for normal
   } else {
     // Default to UK center (Birmingham area) for bias
     params.append("location", "52.4862,-1.8904");
