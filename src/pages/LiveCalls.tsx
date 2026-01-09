@@ -801,20 +801,35 @@ export default function LiveCalls() {
                     selectedCallData.transcripts.map((t, i) => (
                       <div
                         key={i}
-                        className={`flex ${t.role === "user" ? "justify-end" : "justify-start"}`}
+                        className={`flex ${
+                          t.role === "user" 
+                            ? "justify-end" 
+                            : t.role === "system" 
+                              ? "justify-center" 
+                              : "justify-start"
+                        }`}
                       >
-                        <div
-                          className={`max-w-[80%] p-3 rounded-xl ${
-                            t.role === "user"
-                              ? "bg-primary text-primary-foreground"
-                              : "bg-muted"
-                          }`}
-                        >
-                          <p className="text-sm">{t.text}</p>
-                          <p className="text-xs opacity-60 mt-1">
-                            {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp)}
-                          </p>
-                        </div>
+                        {t.role === "system" ? (
+                          <div className="max-w-[90%] px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                            <p className="text-xs font-mono">{t.text}</p>
+                            <p className="text-xs opacity-60 mt-0.5 text-center">
+                              {formatTime(t.timestamp)}
+                            </p>
+                          </div>
+                        ) : (
+                          <div
+                            className={`max-w-[80%] p-3 rounded-xl ${
+                              t.role === "user"
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted"
+                            }`}
+                          >
+                            <p className="text-sm">{t.text}</p>
+                            <p className="text-xs opacity-60 mt-1">
+                              {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp)}
+                            </p>
+                          </div>
+                        )}
                       </div>
                     ))
                   )}

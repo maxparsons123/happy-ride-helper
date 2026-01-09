@@ -1300,6 +1300,15 @@ Rules:
               // If extracted fails but Ada has a different interpretation, try that
               if (!pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
                 console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed, trying Ada's interpretation: "${adaPickup}"`);
+                
+                // Add debug entry to transcript
+                transcriptHistory.push({
+                  role: "system",
+                  text: `🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed → trying Ada's interpretation "${adaPickup}"`,
+                  timestamp: new Date().toISOString()
+                });
+                broadcastLiveCall({});
+                
                 const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
                 if (adaResult.found) {
                   pickupResult = adaResult;
@@ -1307,6 +1316,14 @@ Rules:
                   // Update knownBooking with Ada's corrected version
                   knownBooking.pickup = adaPickup;
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaPickup}" succeeded! Updating booking.`);
+                  
+                  // Add success entry to transcript
+                  transcriptHistory.push({
+                    role: "system",
+                    text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaPickup}" (STT had "${extractedPickup}")`,
+                    timestamp: new Date().toISOString()
+                  });
+                  broadcastLiveCall({});
                 }
               }
               
@@ -1374,6 +1391,15 @@ Rules:
               // If extracted fails but Ada has a different interpretation, try that
               if (!destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
                 console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed, trying Ada's interpretation: "${adaDest}"`);
+                
+                // Add debug entry to transcript
+                transcriptHistory.push({
+                  role: "system",
+                  text: `🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed → trying Ada's interpretation "${adaDest}"`,
+                  timestamp: new Date().toISOString()
+                });
+                broadcastLiveCall({});
+                
                 const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
                 if (adaResult.found) {
                   destResult = adaResult;
@@ -1381,6 +1407,14 @@ Rules:
                   // Update knownBooking with Ada's corrected version
                   knownBooking.destination = adaDest;
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaDest}" succeeded! Updating booking.`);
+                  
+                  // Add success entry to transcript
+                  transcriptHistory.push({
+                    role: "system",
+                    text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaDest}" (STT had "${extractedDest}")`,
+                    timestamp: new Date().toISOString()
+                  });
+                  broadcastLiveCall({});
                 }
               }
               
