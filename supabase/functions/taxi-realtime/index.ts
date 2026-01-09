@@ -1640,8 +1640,8 @@ Rules:
             output_audio_format: "pcm16",
             input_audio_transcription: { 
               model: "whisper-1",
-              // Minimal context prompt - let Whisper transcribe naturally
-              prompt: "247 Radio Carz taxi booking, Coventry."
+              // Keep auto-detect for multilingual support (Polish, Urdu, Punjabi callers)
+              prompt: "247 Radio Carz taxi booking, Coventry, UK."
             },
             // Server VAD - balanced for natural conversation flow
             // Give user more time to respond after Ada asks a question
@@ -2025,6 +2025,22 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             /^\.+$/,  // Just dots
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
           ];
+          
+          // Detect Welsh hallucinations (common Whisper artifact on noisy audio)
+          // Welsh words that appear in hallucinated taxi booking phrases
+          const welshPatterns = [
+            /\bgallaf\b/i,     // "I can"
+            /\bbwcio\b/i,      // "book" 
+            /\bdiolch\b/i,     // "thank you"
+            /\bie\b.*\bie\b/i, // "yes, yes" in Welsh
+            /\bo\s+\d+\w*\s+\w+\s+i\s+\d+/i, // "o [address] i [address]" pattern
+          ];
+          for (const pattern of welshPatterns) {
+            if (pattern.test(t)) {
+              console.log(`[${callId}] 🚫 Welsh hallucination detected: "${t}"`);
+              return true;
+            }
+          }
           
           for (const pattern of hallucinationPhrases) {
             if (pattern.test(t)) {
