@@ -2726,6 +2726,42 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           // Save booking to bookings table for persistence
           if (userPhone) {
             const phoneKey = normalizePhone(userPhone) || userPhone;
+            
+            // Generate a short reference number (e.g., "ABC123")
+            const generateReference = () => {
+              const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+              const numbers = '0123456789';
+              let ref = '';
+              for (let i = 0; i < 3; i++) ref += letters[Math.floor(Math.random() * letters.length)];
+              for (let i = 0; i < 3; i++) ref += numbers[Math.floor(Math.random() * numbers.length)];
+              return ref;
+            };
+            const bookingRef = generateReference();
+            
+            // Build complete booking_details JSON
+            const bookingDetails = {
+              reference: bookingRef,
+              pickup: {
+                address: finalBooking.pickup,
+                time: finalBooking.pickupTime || "ASAP",
+                verified: knownBooking.pickupVerified || false
+              },
+              destination: {
+                address: finalBooking.destination,
+                verified: knownBooking.destinationVerified || false
+              },
+              passengers: finalBooking.passengers,
+              vehicle_type: finalBooking.vehicleType || null,
+              luggage: null,
+              special_requests: null,
+              fare: `£${fare}`,
+              eta: isAsap ? eta : null,
+              status: "active",
+              history: [
+                { at: new Date().toISOString(), action: "created", by: "phone" }
+              ]
+            };
+            
             const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
               call_id: callId,
               caller_phone: phoneKey,
@@ -2737,14 +2773,15 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               eta: isAsap ? eta : null,
               scheduled_for: scheduledTime,
               status: "active",
-              booked_at: new Date().toISOString()
+              booked_at: new Date().toISOString(),
+              booking_details: bookingDetails
             }).select().single();
             
             if (bookingInsertError) {
               console.error(`[${callId}] Failed to save booking:`, bookingInsertError);
             } else {
               activeBooking = newBooking;
-              console.log(`[${callId}] 📋 Booking saved to DB: ${newBooking.id} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
+              console.log(`[${callId}] 📋 Booking saved: ${bookingRef} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
             }
           }
 
@@ -3026,6 +3063,52 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                   console.error(`[${callId}] Trip resolve error:`, e);
                 }
               }
+              
+              // Build booking_details update with history entry
+              // We need to fetch current booking_details first to append history
+              const { data: currentBooking } = await supabase
+                .from("bookings")
+                .select("booking_details")
+                .eq("id", bookingToModify.id)
+                .single();
+              
+              const existingDetails = (currentBooking?.booking_details as Record<string, any>) || {};
+              const existingHistory = Array.isArray(existingDetails.history) ? existingDetails.history : [];
+              
+              // Build updated booking_details
+              const updatedDetails = {
+                ...existingDetails,
+                pickup: args.new_pickup ? { 
+                  address: updates.pickup || finalPickup, 
+                  time: existingDetails.pickup?.time || "ASAP",
+                  verified: true 
+                } : existingDetails.pickup,
+                destination: args.new_destination ? { 
+                  address: updates.destination || finalDestination, 
+                  verified: true 
+                } : existingDetails.destination,
+                passengers: updates.passengers ?? existingDetails.passengers,
+                vehicle_type: args.new_vehicle_type ?? existingDetails.vehicle_type,
+                fare: newFare,
+                status: "active",
+                history: [
+                  ...existingHistory,
+                  { 
+                    at: new Date().toISOString(), 
+                    action: "modified", 
+                    changes: Object.fromEntries(
+                      Object.entries({
+                        pickup: args.new_pickup,
+                        destination: args.new_destination,
+                        passengers: args.new_passengers,
+                        vehicle_type: args.new_vehicle_type
+                      }).filter(([_, v]) => v !== undefined)
+                    )
+                  }
+                ]
+              };
+              
+              updates.booking_details = updatedDetails;
               
               // Update the booking in database
               const { error: updateError } = await supabase
