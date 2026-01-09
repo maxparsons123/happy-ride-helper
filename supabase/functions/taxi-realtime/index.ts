@@ -821,16 +821,35 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         return;
       }
 
-      // Avoid duplicates by call_id
+      // Avoid duplicates by call_id - but ONLY load if still ACTIVE (not cancelled)
       const { data: existingBooking } = await supabase
         .from("bookings")
-        .select("id, pickup, destination, passengers, fare, booked_at")
+        .select("id, pickup, destination, passengers, fare, booked_at, status")
         .eq("call_id", lastConfirmed.call_id)
         .maybeSingle();
 
       if (existingBooking) {
+        // If booking exists but was cancelled, don't treat it as active
+        if (existingBooking.status === "cancelled") {
+          console.log(`[${callId}] ⚠️ Found booking ${existingBooking.id} but it was CANCELLED - not loading as active`);
+          return;
+        }
         activeBooking = existingBooking;
         console.log(`[${callId}] 📋 Active booking loaded from existing bookings row: ${existingBooking.id}`);
+        return;
+      }
+      
+      // Before creating a new backfill, check if there's a cancelled booking for this call_id
+      // If so, don't re-create it (customer cancelled it intentionally)
+      const { data: cancelledBooking } = await supabase
+        .from("bookings")
+        .select("id")
+        .eq("call_id", lastConfirmed.call_id)
+        .eq("status", "cancelled")
+        .maybeSingle();
+      
+      if (cancelledBooking) {
+        console.log(`[${callId}] ⚠️ Booking for call ${lastConfirmed.call_id} was previously cancelled - not re-creating`);
         return;
       }
 
@@ -2529,14 +2548,18 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           }
           
           if (bookingToCancel) {
-            // DELETE the booking from database (not just update status)
-            const { error: deleteError } = await supabase
+            // Mark the booking as CANCELLED (keep for history, but exclude from lookups)
+            const { error: cancelError } = await supabase
               .from("bookings")
-              .delete()
+              .update({
+                status: "cancelled",
+                cancelled_at: new Date().toISOString(),
+                cancellation_reason: args.reason || "customer_request"
+              })
               .eq("id", bookingToCancel.id);
             
-            if (deleteError) {
-              console.error(`[${callId}] Failed to delete booking:`, deleteError);
+            if (cancelError) {
+              console.error(`[${callId}] Failed to cancel booking:`, cancelError);
               openaiWs?.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -2549,7 +2572,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 }
               }));
             } else {
-              console.log(`[${callId}] ✅ Booking ${bookingToCancel.id} DELETED from database`);
+              console.log(`[${callId}] ✅ Booking ${bookingToCancel.id} marked as CANCELLED`);
               
               // Clear active booking
               const cancelledBooking = { ...bookingToCancel };
