@@ -37,6 +37,14 @@ CANCELLATION INTENT - CRITICAL:
   - If they have NO active booking: Say "I don't see any active bookings for your number. Would you like me to book you a taxi?"
 - NEVER ask for confirmation before cancelling - just do it immediately when they ask
 
+MODIFICATION INTENT - CRITICAL:
+- If customer says "change my booking", "different pickup", "different destination", "change the address", or similar:
+  - Use the modify_booking tool to update the specific field they want to change
+  - You can change: pickup, destination, or passengers
+  - After modifying, confirm the updated booking details
+  - Example: "I've updated your pickup to [NEW_ADDRESS]. Your booking is now from [PICKUP] to [DESTINATION]."
+- If they want to change MULTIPLE things, call modify_booking with all the changes at once
+
 PERSONALITY:
 - Warm, welcoming personality (British in English, culturally appropriate in other languages)
 - Use casual friendly phrases appropriate to the language
@@ -914,6 +922,20 @@ Rules:
                   },
                   required: ["reason"]
                 }
+              },
+              {
+                type: "function",
+                name: "modify_booking",
+                description: "Modify an active booking. Use this when the customer wants to change their pickup, destination, or number of passengers without cancelling the entire booking.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    new_pickup: { type: "string", description: "New pickup address (only if customer wants to change it)" },
+                    new_destination: { type: "string", description: "New destination address (only if customer wants to change it)" },
+                    new_passengers: { type: "integer", description: "New number of passengers (only if customer wants to change it)" }
+                  },
+                  required: []
+                }
               }
             ],
             tool_choice: "auto",
@@ -1599,6 +1621,169 @@ If they want to cancel, use the cancel_booking tool IMMEDIATELY. If they want to
                   success: false,
                   message: "No active booking found for this customer.",
                   next_action: "Tell the customer you don't see any active bookings and ask if they'd like to book a taxi."
+                })
+              }
+            }));
+          }
+          
+          // Trigger response
+          openaiWs?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
+        
+        // Handle modify_booking function
+        if (data.name === "modify_booking") {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] ✏️ Modify booking requested:`, args);
+          
+          if (activeBooking) {
+            const updates: Record<string, any> = {};
+            const changes: string[] = [];
+            
+            // Apply requested changes
+            if (args.new_pickup) {
+              updates.pickup = args.new_pickup;
+              changes.push(`pickup to "${args.new_pickup}"`);
+            }
+            if (args.new_destination) {
+              updates.destination = args.new_destination;
+              changes.push(`destination to "${args.new_destination}"`);
+            }
+            if (args.new_passengers !== undefined) {
+              updates.passengers = args.new_passengers;
+              changes.push(`passengers to ${args.new_passengers}`);
+            }
+            
+            if (Object.keys(updates).length === 0) {
+              // No actual changes requested
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message: "No changes specified. Ask the customer what they'd like to change: pickup, destination, or number of passengers?"
+                  })
+                }
+              }));
+            } else {
+              // Recalculate fare if pickup or destination changed
+              let newFare = activeBooking.fare;
+              const finalPickup = updates.pickup || activeBooking.pickup;
+              const finalDestination = updates.destination || activeBooking.destination;
+              
+              if (args.new_pickup || args.new_destination) {
+                // Recalculate fare
+                const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
+                const BASE_FARE = 3.50;
+                const PER_MILE_RATE = 1.00;
+                let distanceMiles = 0;
+                
+                if (GOOGLE_MAPS_API_KEY) {
+                  try {
+                    const distanceUrl = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                      `?origins=${encodeURIComponent(finalPickup + ", UK")}` +
+                      `&destinations=${encodeURIComponent(finalDestination + ", UK")}` +
+                      `&units=imperial` +
+                      `&key=${GOOGLE_MAPS_API_KEY}`;
+                    
+                    const distResponse = await fetch(distanceUrl);
+                    const distData = await distResponse.json();
+                    
+                    if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
+                      const element = distData.rows[0].elements[0];
+                      const distanceText = element.distance?.text || "";
+                      const distanceMatch = distanceText.match(/([\d.]+)\s*mi/);
+                      distanceMiles = distanceMatch ? parseFloat(distanceMatch[1]) : (element.distance?.value || 0) / 1609.34;
+                    }
+                  } catch (e) {
+                    console.error(`[${callId}] Distance calculation error:`, e);
+                  }
+                }
+                
+                if (distanceMiles > 0) {
+                  let fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
+                  const passengers = updates.passengers || activeBooking.passengers;
+                  if (passengers > 4) fare += 5;
+                  newFare = `£${Math.round(fare * 100) / 100}`;
+                  updates.fare = newFare;
+                  changes.push(`fare updated to ${newFare}`);
+                }
+              }
+              
+              // Update the booking in database
+              const { error: updateError } = await supabase
+                .from("bookings")
+                .update(updates)
+                .eq("id", activeBooking.id);
+              
+              if (updateError) {
+                console.error(`[${callId}] Failed to modify booking:`, updateError);
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      message: "Sorry, there was an error updating the booking. Please try again."
+                    })
+                  }
+                }));
+              } else {
+                // Update local activeBooking
+                activeBooking = {
+                  ...activeBooking,
+                  pickup: finalPickup,
+                  destination: finalDestination,
+                  passengers: updates.passengers || activeBooking.passengers,
+                  fare: newFare
+                };
+                
+                console.log(`[${callId}] ✅ Booking modified: ${changes.join(", ")}`);
+                
+                // Notify client
+                socket.send(JSON.stringify({
+                  type: "booking_modified",
+                  booking: activeBooking,
+                  changes: changes
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: true,
+                      message: `Booking updated: ${changes.join(", ")}`,
+                      updated_booking: {
+                        pickup: activeBooking.pickup,
+                        destination: activeBooking.destination,
+                        passengers: activeBooking.passengers,
+                        fare: activeBooking.fare
+                      },
+                      confirmation_script: `I've updated your booking. It's now from ${activeBooking.pickup} to ${activeBooking.destination} for ${activeBooking.passengers} passenger${activeBooking.passengers > 1 ? 's' : ''}, and the fare is ${activeBooking.fare}. Is there anything else?`
+                    })
+                  }
+                }));
+              }
+            }
+          } else {
+            // No active booking to modify
+            console.log(`[${callId}] ⚠️ No active booking to modify`);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  message: "No active booking found to modify.",
+                  next_action: "Tell the customer you don't see any active bookings. Would they like to book a new taxi?"
                 })
               }
             }));
