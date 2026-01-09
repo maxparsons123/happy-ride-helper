@@ -1640,31 +1640,6 @@ Rules:
           }
         }
       }
-          
-          // GUARD: Don't let garbage overwrite a verified destination
-          if (knownBooking.destinationVerified && knownBooking.destination) {
-            const looksLegit = /\d/.test(newDestination) || // Has a house number
-                              /\b(road|street|avenue|lane|drive|close|way|place|station|airport|hospital|hotel|centre|center)\b/i.test(newDestination) ||
-                              newDestination.toLowerCase().includes(knownBooking.destination.toLowerCase().split(' ')[0]); // Contains part of old address
-            if (!looksLegit) {
-              console.log(`[${callId}] 🛡️ Blocking destination overwrite: verified="${knownBooking.destination}" → suspicious="${newDestination}"`);
-              // Don't update
-            } else {
-              if (newDestination !== knownBooking.destination) {
-                knownBooking.destinationVerified = false;
-                knownBooking.highFareVerified = false;
-              }
-              knownBooking.destination = newDestination;
-            }
-          } else {
-            if (newDestination !== knownBooking.destination) {
-              knownBooking.destinationVerified = false;
-              knownBooking.highFareVerified = false;
-            }
-            knownBooking.destination = newDestination;
-          }
-        }
-      }
       if (extracted.number_of_passengers) {
         knownBooking.passengers = extracted.number_of_passengers;
       }
@@ -2026,6 +2001,7 @@ Rules:
             },
           }));
         }
+      }
     } catch (e) {
       console.error(`[${callId}] Extraction error:`, e);
       // Fallback to regex extraction if AI extraction fails
