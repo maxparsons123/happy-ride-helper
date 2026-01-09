@@ -141,6 +141,7 @@ export type Database = {
         Row: {
           created_at: string
           id: string
+          known_areas: Json | null
           last_destination: string | null
           last_pickup: string | null
           name: string | null
@@ -152,6 +153,7 @@ export type Database = {
         Insert: {
           created_at?: string
           id?: string
+          known_areas?: Json | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
@@ -163,6 +165,7 @@ export type Database = {
         Update: {
           created_at?: string
           id?: string
+          known_areas?: Json | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
