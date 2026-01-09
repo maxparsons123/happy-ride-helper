@@ -59,6 +59,7 @@ BOOKING FLOW - FOLLOW THIS EXACTLY:
 2. Ask: "When do you need the taxi, [NAME]? Is it for now or a later time?"
    - If they say "now", "asap", "straight away", "immediately" → pickup_time = "ASAP"
    - If they give a specific time like "5pm", "in 20 minutes", "tomorrow at 3" → extract and convert to proper format
+   - IMPORTANT: If they give PICKUP + DESTINATION in the same sentence ("pick me up from X going to Y"), assume pickup_time = "ASAP" and continue (do NOT get stuck on the time question).
 3. Ask: "Where would you like to be picked up from, [NAME]?"
 4. When they give pickup, acknowledge briefly and ask: "And where are you heading to?"
 5. When they give destination, ask: "How many passengers?"
@@ -104,6 +105,7 @@ You are in a CONVERSATION. When you ask a question, you MUST:
 - If you asked about PICKUP, the next valid response MUST be an address
 - If you asked about DESTINATION, the next valid response MUST be an address
 - Any other response = INVALID - repeat your question!
+- IMPORTANT EXCEPTION: If the customer is CORRECTING a detail (e.g. "that's wrong, it's 52A David Road"), accept the correction immediately even if you asked a different question, then continue with the next missing detail.
 
 **QUESTION VALIDATION RULES:**
 
@@ -1551,11 +1553,19 @@ Rules:
       const containsExplicitDestinationCue = /\b(to|going\s+to|heading\s+to|take\s+me\s+to|drop\s+me\s+at|destination)\b/.test(transcriptLower);
       const containsExplicitPickupCue = /\b(from|pick\s+me\s+up|pickup|collect\s+me\s+from)\b/.test(transcriptLower);
 
+      // Customers often correct an address even if Ada asked a different question.
+      // We MUST allow these corrections through or we end up ignoring the fix and confusing the caller.
+      const isAddressCorrection = /(address\s+.*wrong|got\s+.*wrong|that's\s+wrong|no\s*,?\s*(it'?s|its)\b|i\s+meant\b|i\s+said\b|actually\b)/i.test(transcriptLower);
+      const extractedHasBothAddresses = Boolean(extracted.pickup_location && extracted.dropoff_location);
+
       if (extracted.pickup_location) {
         // If Ada was asking for passengers/time and the user didn't provide passengers/time,
         // don't let a stray pickup overwrite the current booking.
-        if ((expectingPassengers && !extracted.number_of_passengers && !containsExplicitPickupCue) ||
-            (expectingTime && !extracted.pickup_time && !containsExplicitPickupCue)) {
+        // EXCEPTION: if the customer is clearly correcting an address, always accept the correction.
+        if (((expectingPassengers && !extracted.number_of_passengers) || (expectingTime && !extracted.pickup_time)) &&
+            !containsExplicitPickupCue &&
+            !isAddressCorrection &&
+            !extractedHasBothAddresses) {
           console.log(`[${callId}] 🛑 Ignoring pickup extraction (doesn't match last question):`, {
             lastAssistantText,
             transcript,
@@ -1563,7 +1573,7 @@ Rules:
           });
         } else {
           const newPickup = extracted.pickup_location;
-          
+
           // GUARD: Don't let garbage overwrite a verified address
           // If we have a verified pickup and the new one looks suspicious, reject it
           if (knownBooking.pickupVerified && knownBooking.pickup) {
@@ -1593,8 +1603,11 @@ Rules:
       if (extracted.dropoff_location) {
         // If Ada was asking for passengers/time and the user didn't provide passengers/time,
         // don't let a stray "location" answer overwrite destination.
-        if ((expectingPassengers && !extracted.number_of_passengers && !containsExplicitDestinationCue) ||
-            (expectingTime && !extracted.pickup_time && !containsExplicitDestinationCue)) {
+        // EXCEPTION: if the customer is clearly correcting an address, always accept the correction.
+        if (((expectingPassengers && !extracted.number_of_passengers) || (expectingTime && !extracted.pickup_time)) &&
+            !containsExplicitDestinationCue &&
+            !isAddressCorrection &&
+            !extractedHasBothAddresses) {
           console.log(`[${callId}] 🛑 Ignoring destination extraction (doesn't match last question):`, {
             lastAssistantText,
             transcript,
@@ -1602,6 +1615,31 @@ Rules:
           });
         } else {
           const newDestination = extracted.dropoff_location;
+
+          // GUARD: Don't let garbage overwrite a verified destination
+          if (knownBooking.destinationVerified && knownBooking.destination) {
+            const looksLegit = /\d/.test(newDestination) || // Has a house number
+                              /\b(road|street|avenue|lane|drive|close|way|place|station|airport|hospital|hotel|centre|center)\b/i.test(newDestination) ||
+                              newDestination.toLowerCase().includes(knownBooking.destination.toLowerCase().split(' ')[0]); // Contains part of old address
+            if (!looksLegit) {
+              console.log(`[${callId}] 🛡️ Blocking destination overwrite: verified="${knownBooking.destination}" → suspicious="${newDestination}"`);
+              // Don't update
+            } else {
+              if (newDestination !== knownBooking.destination) {
+                knownBooking.destinationVerified = false;
+                knownBooking.highFareVerified = false;
+              }
+              knownBooking.destination = newDestination;
+            }
+          } else {
+            if (newDestination !== knownBooking.destination) {
+              knownBooking.destinationVerified = false;
+              knownBooking.highFareVerified = false;
+            }
+            knownBooking.destination = newDestination;
+          }
+        }
+      }
           
           // GUARD: Don't let garbage overwrite a verified destination
           if (knownBooking.destinationVerified && knownBooking.destination) {
@@ -1983,12 +2021,11 @@ Rules:
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "assistant",  // Using assistant role so it doesn't trigger a new response
-              content: [{ type: "text", text: `[Internal note: ${contextUpdate}]` }]
-            }
+              role: "assistant", // Using assistant role so it doesn't trigger a new response
+              content: [{ type: "text", text: `[Internal note: ${contextUpdate}]` }],
+            },
           }));
         }
-      }
     } catch (e) {
       console.error(`[${callId}] Extraction error:`, e);
       // Fallback to regex extraction if AI extraction fails
@@ -3431,20 +3468,67 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               }
             }
           } else {
-            // No active booking to modify
-            console.log(`[${callId}] ⚠️ No active booking to modify`);
-            openaiWs?.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "function_call_output",
-                call_id: data.call_id,
-                output: JSON.stringify({
-                  success: false,
-                  message: "No active booking found to modify.",
-                  next_action: "Tell the customer you don't see any active bookings. Would they like to book a new taxi?"
-                })
+            // No active booking to modify.
+            // IMPORTANT: OpenAI sometimes calls modify_booking during a NEW booking flow when the customer is correcting an address.
+            // In that case, treat it as updating the in-progress (knownBooking) details instead of telling them "no active bookings".
+            const hasInProgressBooking = Boolean(knownBooking.pickup || knownBooking.destination || knownBooking.passengers);
+            const hasAnyUpdates = Boolean(args.new_pickup || args.new_destination || args.new_passengers !== undefined);
+
+            if (hasAnyUpdates && hasInProgressBooking) {
+              if (args.new_pickup) {
+                knownBooking.pickup = args.new_pickup;
+                knownBooking.pickupVerified = false;
+                knownBooking.highFareVerified = false;
               }
-            }));
+              if (args.new_destination) {
+                knownBooking.destination = args.new_destination;
+                knownBooking.destinationVerified = false;
+                knownBooking.highFareVerified = false;
+              }
+              if (args.new_passengers !== undefined) {
+                knownBooking.passengers = args.new_passengers;
+              }
+
+              console.log(`[${callId}] ✅ Applied modify_booking to in-progress booking:`, knownBooking);
+              queueLiveCallBroadcast({
+                pickup: knownBooking.pickup,
+                destination: knownBooking.destination,
+                passengers: knownBooking.passengers,
+              });
+
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: true,
+                    message: "Updated the new booking details.",
+                    updated_booking: {
+                      pickup: knownBooking.pickup,
+                      destination: knownBooking.destination,
+                      passengers: knownBooking.passengers,
+                      pickup_time: knownBooking.pickupTime || "ASAP",
+                    },
+                    next_action: "Continue the NEW booking flow. Ask for any missing detail (time, pickup, destination, passengers). Do NOT say there are no active bookings.",
+                  }),
+                },
+              }));
+            } else {
+              console.log(`[${callId}] ⚠️ No active booking to modify`);
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message: "No active booking found to modify.",
+                    next_action: "Tell the customer you don't see any active bookings. Would they like to book a new taxi?"
+                  })
+                }
+              }));
+            }
           }
           
           // Trigger response
