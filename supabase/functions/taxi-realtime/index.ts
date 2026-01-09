@@ -3475,9 +3475,10 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                         pickup: updatedBooking.pickup,
                         destination: updatedBooking.destination,
                         passengers: updatedBooking.passengers,
-                        fare: updatedBooking.fare
+                        fare: updatedBooking.fare,
+                        vehicle_type: updatedDetails.vehicle_type || null
                       },
-                      confirmation_script: `I've updated your booking. It's now from ${updatedBooking.pickup} to ${updatedBooking.destination} for ${updatedBooking.passengers} passenger${updatedBooking.passengers > 1 ? 's' : ''}, and the fare is ${updatedBooking.fare}. Is there anything else?`
+                      confirmation_script: `I've updated your booking.${updatedDetails.vehicle_type ? ` Vehicle type changed to ${updatedDetails.vehicle_type}.` : ''} It's now from ${updatedBooking.pickup} to ${updatedBooking.destination} for ${updatedBooking.passengers} passenger${updatedBooking.passengers > 1 ? 's' : ''}, and the fare is ${updatedBooking.fare}. Is there anything else?`
                     })
                   }
                 }));
@@ -3488,7 +3489,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             // IMPORTANT: OpenAI sometimes calls modify_booking during a NEW booking flow when the customer is correcting an address.
             // In that case, treat it as updating the in-progress (knownBooking) details instead of telling them "no active bookings".
             const hasInProgressBooking = Boolean(knownBooking.pickup || knownBooking.destination || knownBooking.passengers);
-            const hasAnyUpdates = Boolean(args.new_pickup || args.new_destination || args.new_passengers !== undefined);
+            const hasAnyUpdates = Boolean(args.new_pickup || args.new_destination || args.new_passengers !== undefined || args.new_vehicle_type);
 
             if (hasAnyUpdates && hasInProgressBooking) {
               if (args.new_pickup) {
@@ -3504,6 +3505,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               if (args.new_passengers !== undefined) {
                 knownBooking.passengers = args.new_passengers;
               }
+              if (args.new_vehicle_type) {
+                knownBooking.vehicleType = args.new_vehicle_type;
+              }
 
               console.log(`[${callId}] ✅ Applied modify_booking to in-progress booking:`, knownBooking);
               queueLiveCallBroadcast({
@@ -3517,17 +3521,18 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 item: {
                   type: "function_call_output",
                   call_id: data.call_id,
-                  output: JSON.stringify({
-                    success: true,
-                    message: "Updated the new booking details.",
-                    updated_booking: {
-                      pickup: knownBooking.pickup,
-                      destination: knownBooking.destination,
-                      passengers: knownBooking.passengers,
-                      pickup_time: knownBooking.pickupTime || "ASAP",
-                    },
-                    next_action: "Continue the NEW booking flow. Ask for any missing detail (time, pickup, destination, passengers). Do NOT say there are no active bookings.",
-                  }),
+                    output: JSON.stringify({
+                      success: true,
+                      message: `Updated the new booking details.${args.new_vehicle_type ? ` Vehicle type set to ${args.new_vehicle_type}.` : ''}`,
+                      updated_booking: {
+                        pickup: knownBooking.pickup,
+                        destination: knownBooking.destination,
+                        passengers: knownBooking.passengers,
+                        pickup_time: knownBooking.pickupTime || "ASAP",
+                        vehicle_type: knownBooking.vehicleType || null
+                      },
+                      next_action: "Continue the NEW booking flow. Ask for any missing detail (time, pickup, destination, passengers). Do NOT say there are no active bookings.",
+                    }),
                 },
               }));
             } else {
