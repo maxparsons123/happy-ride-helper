@@ -599,7 +599,7 @@ export default function LiveCalls() {
           {/* Call Details & Transcript */}
           <div className="col-span-8">
             {selectedCallData ? (
-              <Card className="h-[calc(100vh-180px)] flex flex-col">
+              <Card className="h-[calc(100vh-120px)] flex flex-col">
                 {/* Call Header */}
                 <div className="p-4 border-b border-border">
                   <div className="flex items-center justify-between">
@@ -836,7 +836,7 @@ export default function LiveCalls() {
                 </div>
               </Card>
             ) : (
-              <Card className="h-[calc(100vh-180px)] flex items-center justify-center">
+              <Card className="h-[calc(100vh-120px)] flex items-center justify-center">
                 <div className="text-center">
                   <Radio className="w-16 h-16 mx-auto text-muted-foreground mb-4" />
                   <p className="text-xl font-semibold text-muted-foreground">Select a call to monitor</p>
