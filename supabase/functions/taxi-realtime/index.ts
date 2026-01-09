@@ -315,6 +315,58 @@ serve(async (req) => {
     }
   };
 
+  // Extract destination or pickup from Ada's last response (she often interprets STT correctly)
+  // e.g., user says "Street spot" but Ada says "to Sweetspot" - we can extract "Sweetspot"
+  const extractAddressFromAdaResponse = (addressType: "pickup" | "destination"): string | null => {
+    // Get Ada's last response from transcript history
+    const adaResponses = transcriptHistory.filter(t => t.role === "assistant");
+    if (adaResponses.length === 0) return null;
+    
+    const lastAdaText = adaResponses[adaResponses.length - 1].text;
+    if (!lastAdaText) return null;
+    
+    // Common patterns Ada uses to reference addresses
+    if (addressType === "destination") {
+      // "to Sweetspot", "to the Sweetspot", "heading to Sweetspot", "destination is Sweetspot"
+      const destPatterns = [
+        /\bto\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
+        /\bdestination\s+(?:is\s+)?(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
+        /\bgoing\s+to\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
+        /\bheading\s+to\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
+      ];
+      
+      for (const pattern of destPatterns) {
+        const match = lastAdaText.match(pattern);
+        if (match && match[1]) {
+          const extracted = match[1].trim();
+          // Filter out common false positives
+          if (!['you', 'that', 'there', 'the', 'book', 'confirm', 'help'].includes(extracted.toLowerCase())) {
+            console.log(`[${callId}] 🔍 Extracted destination from Ada: "${extracted}"`);
+            return extracted;
+          }
+        }
+      }
+    } else {
+      // "from 52A David Road", "pickup at 52A David Road", "picking you up from..."
+      const pickupPatterns = [
+        /\bfrom\s+([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+to\s+|\s*,|\?|\.|\!|$)/i,
+        /\bpickup\s+(?:is\s+)?(?:at\s+)?([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+|\s*,|\?|\.|\!|$)/i,
+        /\bpicking\s+(?:you\s+)?up\s+(?:from\s+)?([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+|\s*,|\?|\.|\!|$)/i,
+      ];
+      
+      for (const pattern of pickupPatterns) {
+        const match = lastAdaText.match(pattern);
+        if (match && match[1]) {
+          const extracted = match[1].trim();
+          console.log(`[${callId}] 🔍 Extracted pickup from Ada: "${extracted}"`);
+          return extracted;
+        }
+      }
+    }
+    
+    return null;
+  };
+
   // Check if an address matches any of the caller's trusted addresses
   // Uses fuzzy matching to handle minor variations (e.g., "52A David Road" vs "52A David Road, Coventry")
   const matchesTrustedAddress = (address: string): string | null => {
@@ -1237,8 +1289,43 @@ Rules:
               knownBooking.pickupVerified = true;
               console.log(`[${callId}] 🏠 Pickup auto-verified (trusted): "${knownBooking.pickup}" → "${trustedPickup}"`);
             } else {
-              // Pass "pickup" as addressType so geocoder can use destination for location bias
-              const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous, "pickup");
+              // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
+              const extractedPickup = knownBooking.pickup!;
+              const adaPickup = extractAddressFromAdaResponse("pickup");
+              
+              // Try extracted address first
+              let pickupResult = await geocodeAddress(extractedPickup, shouldCheckAmbiguous, "pickup");
+              let usedAddress = extractedPickup;
+              
+              // If extracted fails but Ada has a different interpretation, try that
+              if (!pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
+                console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed, trying Ada's interpretation: "${adaPickup}"`);
+                const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
+                if (adaResult.found) {
+                  pickupResult = adaResult;
+                  usedAddress = adaPickup;
+                  // Update knownBooking with Ada's corrected version
+                  knownBooking.pickup = adaPickup;
+                  console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaPickup}" succeeded! Updating booking.`);
+                }
+              }
+              
+              // If extracted succeeds AND Ada has a different interpretation, also try Ada's
+              if (pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
+                console.log(`[${callId}] 🔍 DUAL-SOURCE: Both sources available, checking Ada's version too: "${adaPickup}"`);
+                const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
+                if (adaResult.found) {
+                  console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! Extracted="${extractedPickup}" Ada="${adaPickup}"`);
+                  // If Ada's version is cleaner (has house number, capitalized properly), prefer it
+                  if (/^\d/.test(adaPickup) && /^[A-Z]/.test(adaPickup.replace(/^\d+[A-Za-z]?\s+/, ''))) {
+                    usedAddress = adaPickup;
+                    knownBooking.pickup = adaPickup;
+                    pickupResult = adaResult;
+                    console.log(`[${callId}] 📝 Using Ada's cleaner version: "${adaPickup}"`);
+                  }
+                }
+              }
+              
               if (pickupResult.found) {
                 // Check if there are multiple matches and caller has no history AND no other address to use as bias
                 const hasLocationContext = knownBooking.destination || callerLastPickup || callerLastDestination;
@@ -1249,12 +1336,12 @@ Rules:
                 }
                 knownBooking.pickupVerified = true;
 
-                const normalizedPickup = normalize(knownBooking.pickup!);
+                const normalizedPickup = normalize(usedAddress);
                 if (geocodeClarificationSent.pickup === normalizedPickup) {
                   geocodeClarificationSent.pickup = undefined;
                   clearGeocodeClarification(
                     "pickup",
-                    knownBooking.pickup!,
+                    usedAddress,
                     pickupResult.formatted_address || pickupResult.display_name
                   );
                 }
@@ -1276,8 +1363,44 @@ Rules:
               knownBooking.destinationVerified = true;
               console.log(`[${callId}] 🏠 Destination auto-verified (trusted): "${knownBooking.destination}" → "${trustedDestination}"`);
             } else {
-              // Pass "destination" as addressType so geocoder can use pickup for location bias
-              const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous, "destination");
+              // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
+              const extractedDest = knownBooking.destination!;
+              const adaDest = extractAddressFromAdaResponse("destination");
+              
+              // Try extracted address first
+              let destResult = await geocodeAddress(extractedDest, shouldCheckAmbiguous, "destination");
+              let usedAddress = extractedDest;
+              
+              // If extracted fails but Ada has a different interpretation, try that
+              if (!destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
+                console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed, trying Ada's interpretation: "${adaDest}"`);
+                const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
+                if (adaResult.found) {
+                  destResult = adaResult;
+                  usedAddress = adaDest;
+                  // Update knownBooking with Ada's corrected version
+                  knownBooking.destination = adaDest;
+                  console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaDest}" succeeded! Updating booking.`);
+                }
+              }
+              
+              // If extracted succeeds AND Ada has a different interpretation, also try Ada's
+              // If both succeed, prefer the one that matches better (both working = high confidence)
+              if (destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
+                console.log(`[${callId}] 🔍 DUAL-SOURCE: Both sources available, checking Ada's version too: "${adaDest}"`);
+                const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
+                if (adaResult.found) {
+                  console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! Extracted="${extractedDest}" Ada="${adaDest}"`);
+                  // If Ada's version is cleaner (capitalized properly, etc.), prefer it
+                  if (adaDest.length >= extractedDest.length && /^[A-Z]/.test(adaDest)) {
+                    usedAddress = adaDest;
+                    knownBooking.destination = adaDest;
+                    destResult = adaResult;
+                    console.log(`[${callId}] 📝 Using Ada's cleaner version: "${adaDest}"`);
+                  }
+                }
+              }
+              
               if (destResult.found) {
                 // Check if there are multiple matches and no location context to help disambiguate
                 const hasLocationContext = knownBooking.pickup || callerLastPickup || callerLastDestination;
@@ -1288,12 +1411,12 @@ Rules:
                 }
                 knownBooking.destinationVerified = true;
 
-                const normalizedDestination = normalize(knownBooking.destination!);
+                const normalizedDestination = normalize(usedAddress);
                 if (geocodeClarificationSent.destination === normalizedDestination) {
                   geocodeClarificationSent.destination = undefined;
                   clearGeocodeClarification(
                     "destination",
-                    knownBooking.destination!,
+                    usedAddress,
                     destResult.formatted_address || destResult.display_name
                   );
                 }
