@@ -2529,18 +2529,14 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           }
           
           if (bookingToCancel) {
-            // Cancel the active booking in database
-            const { error: cancelError } = await supabase
+            // DELETE the booking from database (not just update status)
+            const { error: deleteError } = await supabase
               .from("bookings")
-              .update({
-                status: "cancelled",
-                cancelled_at: new Date().toISOString(),
-                cancellation_reason: args.reason
-              })
+              .delete()
               .eq("id", bookingToCancel.id);
             
-            if (cancelError) {
-              console.error(`[${callId}] Failed to cancel booking:`, cancelError);
+            if (deleteError) {
+              console.error(`[${callId}] Failed to delete booking:`, deleteError);
               openaiWs?.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -2553,7 +2549,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 }
               }));
             } else {
-              console.log(`[${callId}] ✅ Booking ${bookingToCancel.id} cancelled`);
+              console.log(`[${callId}] ✅ Booking ${bookingToCancel.id} DELETED from database`);
               
               // Clear active booking
               const cancelledBooking = { ...bookingToCancel };
