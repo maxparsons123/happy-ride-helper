@@ -1812,6 +1812,32 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               tripResolveResult = await tripResolveResponse.json();
               console.log(`[${callId}] 🚕 Trip resolve result:`, JSON.stringify(tripResolveResult, null, 2));
               
+              // Check for errors (non-UK addresses, trip too long, etc.)
+              if (tripResolveResult.error) {
+                console.warn(`[${callId}] ⚠️ Trip resolve error: ${tripResolveResult.error}`);
+                
+                // Tell Ada about the problem so she can inform the customer
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      error: tripResolveResult.error,
+                      message: `Sorry, there's a problem with this booking: ${tripResolveResult.error} Please ask the customer to provide a valid UK address.`
+                    })
+                  }
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] }
+                }));
+                
+                return; // Don't proceed with booking
+              }
+              
               if (tripResolveResult.ok) {
                 // Use the resolved addresses if available (more accurate geocoding)
                 if (tripResolveResult.pickup?.formatted_address) {

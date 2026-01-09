@@ -282,6 +282,7 @@ async function geocodeAddress(
 
 /**
  * Google Places Text Search (better for landmarks, businesses)
+ * Restricted to UK only
  */
 async function googleTextSearch(
   query: string,
@@ -290,19 +291,30 @@ async function googleTextSearch(
 ): Promise<ResolvedLocation | null> {
   if (!GOOGLE_API_KEY) return null;
   
+  // Add UK suffix if not already present to bias results
+  const UK_INDICATORS = ["uk", "united kingdom", "england", "scotland", "wales", "northern ireland"];
+  const queryLower = query.toLowerCase();
+  const hasUkIndicator = UK_INDICATORS.some(ind => queryLower.includes(ind));
+  const searchQuery = hasUkIndicator ? query : `${query}, UK`;
+  
   const params = new URLSearchParams({
-    query: query,
+    query: searchQuery,
     key: GOOGLE_API_KEY,
     region: country.toLowerCase(),
   });
   
+  // If we have coords, use them for location bias
   if (coordsHint) {
     params.append("location", `${coordsHint.lat},${coordsHint.lng}`);
-    params.append("radius", "10000"); // 10km bias
+    params.append("radius", "50000"); // 50km bias for UK-sized searches
+  } else {
+    // Default to UK center (Birmingham area) for bias
+    params.append("location", "52.4862,-1.8904");
+    params.append("radius", "300000"); // 300km covers most of UK
   }
   
   const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
-  console.log(`🔍 Text Search: ${query}`);
+  console.log(`🔍 Text Search: ${searchQuery}`);
   
   try {
     const resp = await fetch(url);
@@ -311,7 +323,15 @@ async function googleTextSearch(
     const data = await resp.json();
     if (data.status !== "OK" || !data.results?.length) return null;
     
-    const best = data.results[0];
+    // Filter results to UK only
+    const ukResults = data.results.filter((r: any) => {
+      const addr = (r.formatted_address || "").toLowerCase();
+      return addr.includes("uk") || addr.includes("united kingdom") || 
+             addr.includes("england") || addr.includes("scotland") || 
+             addr.includes("wales") || addr.includes("northern ireland");
+    });
+    
+    const best = ukResults[0] || data.results[0]; // Prefer UK, fallback to first result
     const loc = best.geometry?.location;
     if (!loc) return null;
     
@@ -321,6 +341,13 @@ async function googleTextSearch(
     const detailsData = await detailsResp.json();
     
     const components = detailsData.result?.address_components || [];
+    const countryCode = components.find((c: any) => c.types.includes("country"))?.short_name;
+    
+    // Verify it's actually in UK
+    if (countryCode && !["GB", "UK"].includes(countryCode.toUpperCase())) {
+      console.warn(`⚠️ Text Search found non-UK result: ${best.formatted_address} (${countryCode})`);
+      return null; // Reject non-UK results
+    }
     
     return {
       raw_input: query,
@@ -329,7 +356,7 @@ async function googleTextSearch(
       lng: loc.lng,
       city: extractCityFromComponents(components),
       postcode: extractPostcodeFromComponents(components),
-      country: components.find((c: any) => c.types.includes("country"))?.short_name,
+      country: countryCode,
     };
   } catch (e) {
     console.error("Text Search error:", e);
@@ -698,26 +725,70 @@ serve(async (req) => {
       coordsContext
     );
     
-    // Calculate distance and fare if we have both points
-    if (pickup && dropoff) {
+    // Validate addresses are in UK (reject international bookings)
+    const MAX_TRIP_DISTANCE_MILES = 200; // Maximum reasonable taxi distance
+    const UK_COUNTRY_CODES = ["GB", "UK"];
+    
+    const isUkAddress = (loc: ResolvedLocation | null): boolean => {
+      if (!loc) return false;
+      // Check country code
+      if (loc.country && UK_COUNTRY_CODES.includes(loc.country.toUpperCase())) return true;
+      // Check for UK postcode pattern
+      if (loc.postcode && /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(loc.postcode)) return true;
+      // Check for known UK cities
+      if (loc.city && UK_CITIES[loc.city.toLowerCase()]) return true;
+      return false;
+    };
+    
+    // Check if addresses are in UK
+    const pickupIsUk = isUkAddress(pickup);
+    const dropoffIsUk = isUkAddress(dropoff);
+    
+    if (pickup && !pickupIsUk) {
+      console.warn(`⚠️ Pickup not in UK: ${pickup.formatted_address} (country: ${pickup.country})`);
+      response.error = `Pickup address "${pickup_input}" appears to be outside the UK. We only serve UK locations.`;
+      response.pickup = undefined; // Clear invalid address
+    }
+    
+    if (dropoff && !dropoffIsUk) {
+      console.warn(`⚠️ Dropoff not in UK: ${dropoff.formatted_address} (country: ${dropoff.country})`);
+      response.error = `Destination "${dropoff_input}" appears to be outside the UK. We only serve UK locations.`;
+      response.dropoff = undefined; // Clear invalid address
+    }
+    
+    // Calculate distance and fare if we have both valid UK points
+    if (pickup && dropoff && pickupIsUk && dropoffIsUk) {
       const distance = await calculateDistance(pickup, dropoff);
       
       if (distance) {
-        response.distance = distance;
-        response.fare_estimate = calculateFare(distance.miles, passengers);
+        // Check if distance is reasonable for a taxi
+        if (distance.miles > MAX_TRIP_DISTANCE_MILES) {
+          console.warn(`⚠️ Trip too long: ${distance.miles} miles exceeds ${MAX_TRIP_DISTANCE_MILES} mile limit`);
+          response.distance = distance;
+          response.error = `This trip is ${distance.miles.toFixed(0)} miles - too far for a taxi. Maximum is ${MAX_TRIP_DISTANCE_MILES} miles.`;
+          response.fare_estimate = undefined;
+        } else {
+          response.distance = distance;
+          response.fare_estimate = calculateFare(distance.miles, passengers);
+        }
       } else {
         // Fallback to Haversine distance with road multiplier
         const straightLine = haversineDistance(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
         const estimatedMeters = straightLine * 1.3; // Road multiplier
         const estimatedMiles = estimatedMeters / 1609.34;
         
-        response.distance = {
-          meters: Math.round(estimatedMeters),
-          miles: parseFloat(estimatedMiles.toFixed(2)),
-          duration_seconds: Math.round(estimatedMiles * 120), // ~2 mins per mile estimate
-          duration_text: `~${Math.round(estimatedMiles * 2)} mins`,
-        };
-        response.fare_estimate = calculateFare(estimatedMiles, passengers);
+        if (estimatedMiles > MAX_TRIP_DISTANCE_MILES) {
+          console.warn(`⚠️ Trip too long (haversine): ${estimatedMiles.toFixed(0)} miles`);
+          response.error = `This trip is approximately ${estimatedMiles.toFixed(0)} miles - too far for a taxi.`;
+        } else {
+          response.distance = {
+            meters: Math.round(estimatedMeters),
+            miles: parseFloat(estimatedMiles.toFixed(2)),
+            duration_seconds: Math.round(estimatedMiles * 120), // ~2 mins per mile estimate
+            duration_text: `~${Math.round(estimatedMiles * 2)} mins`,
+          };
+          response.fare_estimate = calculateFare(estimatedMiles, passengers);
+        }
       }
     }
     
