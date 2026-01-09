@@ -442,6 +442,7 @@ serve(async (req) => {
 
   // Check if an address matches any of the caller's trusted addresses
   // Uses fuzzy matching to handle minor variations (e.g., "52A David Road" vs "52A David Road, Coventry")
+  // Returns the matched address WITH CITY appended if the trusted address doesn't already include it
   const matchesTrustedAddress = (address: string): string | null => {
     if (!address || callerTrustedAddresses.length === 0) return null;
     
@@ -452,12 +453,12 @@ serve(async (req) => {
       
       // Exact match
       if (normalizedInput === normalizedTrusted) {
-        return trusted;
+        return enrichAddressWithCity(trusted);
       }
       
       // Check if input contains the trusted address or vice versa
       if (normalizedInput.includes(normalizedTrusted) || normalizedTrusted.includes(normalizedInput)) {
-        return trusted;
+        return enrichAddressWithCity(trusted);
       }
       
       // Extract house number + street from both and compare
@@ -470,11 +471,31 @@ serve(async (req) => {
       const trustedCore = extractCore(normalizedTrusted);
       
       if (inputCore === trustedCore) {
-        return trusted;
+        return enrichAddressWithCity(trusted);
       }
     }
     
     return null;
+  };
+  
+  // Helper to add caller's city to an address if it doesn't already contain one
+  // This prevents geocoding from picking the wrong "Russell Street" in a different city
+  const enrichAddressWithCity = (address: string): string => {
+    if (!callerCity) return address;
+    
+    // Check if address already contains a city
+    const addressCity = extractCityFromAddress(address);
+    if (addressCity) return address; // Already has city
+    
+    // Check if address already ends with a city-like suffix (postcode, UK, etc.)
+    const hasLocationSuffix = /,\s*[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}\s*$/i.test(address) || // Postcode
+                               /,\s*UK\s*$/i.test(address) ||
+                               /,\s*United Kingdom\s*$/i.test(address);
+    if (hasLocationSuffix) return address;
+    
+    // Append caller's city
+    console.log(`[${callId}] 🏙️ Enriching address with city: "${address}" + "${callerCity}"`);
+    return `${address}, ${callerCity}`;
   };
 
   // Resolve address aliases like "home", "work", "office" etc.
@@ -649,7 +670,20 @@ serve(async (req) => {
         }
       }
       
-      console.log(`[${callId}] 🌍 Geocoding "${address}" (city: ${city || 'none'}, bias: ${biasSource}, check_ambiguous: ${checkAmbiguous})`);
+      // CRITICAL FIX: If we have a city and the address doesn't already contain it,
+      // append the city to improve geocoding accuracy (prevents wrong "Russell Street" matches)
+      let searchAddress = address;
+      if (city && !extractCityFromAddress(address)) {
+        // Check if address looks like it needs city context (no postcode, no city name)
+        const hasPostcode = /[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}/i.test(address);
+        const hasUkSuffix = /,\s*UK\s*$/i.test(address);
+        if (!hasPostcode && !hasUkSuffix) {
+          searchAddress = `${address}, ${city}`;
+          console.log(`[${callId}] 🏙️ Appending city for geocoding: "${address}" → "${searchAddress}"`);
+        }
+      }
+      
+      console.log(`[${callId}] 🌍 Geocoding "${searchAddress}" (original: "${address}", city: ${city || 'none'}, bias: ${biasSource}, check_ambiguous: ${checkAmbiguous})`);
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
         method: "POST",
@@ -658,7 +692,7 @@ serve(async (req) => {
           "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
         body: JSON.stringify({ 
-          address, 
+          address: searchAddress, 
           city, 
           country: "UK",
           lat: biasLat,
@@ -1091,19 +1125,40 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       const MAX_TRUSTED_ADDRESSES = 10; // Limit to prevent unbounded growth
       let updatedTrusted: string[] = existing?.trusted_addresses || callerTrustedAddresses || [];
       
-      // Normalize addresses for comparison
-      const normalizedTrusted = new Set(updatedTrusted.map(a => normalize(a).toLowerCase()));
+      // Normalize addresses for comparison (use core address without city for deduplication)
+      const normalizedTrusted = new Set(updatedTrusted.map(a => {
+        // Extract core address (house number + street) for comparison
+        const core = normalize(a).toLowerCase().split(',')[0].trim();
+        return core;
+      }));
       
-      // Add pickup if not already trusted
-      if (booking.pickup && !normalizedTrusted.has(normalize(booking.pickup).toLowerCase())) {
-        updatedTrusted.push(booking.pickup);
-        console.log(`[${callId}] 🏠 Adding pickup to trusted addresses: "${booking.pickup}"`);
+      // Helper to enrich address with city if missing
+      const ensureAddressHasCity = (addr: string): string => {
+        if (!addr) return addr;
+        const hasCity = extractCityFromAddress(addr);
+        if (hasCity) return addr; // Already has city
+        const hasPostcode = /[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}/i.test(addr);
+        if (hasPostcode) return addr; // Has postcode, good enough
+        if (callerCity) {
+          return `${addr}, ${callerCity}`;
+        }
+        return addr;
+      };
+      
+      // Add pickup if not already trusted (with city for future lookups)
+      const pickupCore = normalize(booking.pickup || "").toLowerCase().split(',')[0].trim();
+      if (booking.pickup && !normalizedTrusted.has(pickupCore)) {
+        const enrichedPickup = ensureAddressHasCity(booking.pickup);
+        updatedTrusted.push(enrichedPickup);
+        console.log(`[${callId}] 🏠 Adding pickup to trusted addresses: "${enrichedPickup}"`);
       }
       
-      // Add destination if not already trusted
-      if (booking.destination && !normalizedTrusted.has(normalize(booking.destination).toLowerCase())) {
-        updatedTrusted.push(booking.destination);
-        console.log(`[${callId}] 🏠 Adding destination to trusted addresses: "${booking.destination}"`);
+      // Add destination if not already trusted (with city for future lookups)
+      const destCore = normalize(booking.destination || "").toLowerCase().split(',')[0].trim();
+      if (booking.destination && !normalizedTrusted.has(destCore)) {
+        const enrichedDest = ensureAddressHasCity(booking.destination);
+        updatedTrusted.push(enrichedDest);
+        console.log(`[${callId}] 🏠 Adding destination to trusted addresses: "${enrichedDest}"`);
       }
       
       // Trim to max size (keep most recent)
