@@ -1429,6 +1429,24 @@ Rules:
                 }
                 knownBooking.pickupVerified = true;
 
+                // USE GOOGLE'S CORRECTED ADDRESS - fuzzy matching may have fixed spelling
+                // Extract a clean address from Google's response (strip country suffix)
+                const googleAddress = pickupResult.display_name || pickupResult.formatted_address;
+                if (googleAddress && googleAddress !== usedAddress) {
+                  // Google returned a different (corrected) address - use it!
+                  const cleanGoogleAddress = googleAddress.replace(/,\s*UK$/i, '').replace(/,\s*United Kingdom$/i, '').trim();
+                  console.log(`[${callId}] 🔧 Google fuzzy-corrected address: "${usedAddress}" → "${cleanGoogleAddress}"`);
+                  knownBooking.pickup = cleanGoogleAddress;
+                  usedAddress = cleanGoogleAddress;
+                  
+                  transcriptHistory.push({
+                    role: "system",
+                    text: `🔧 GOOGLE CORRECTED: "${extractedPickup}" → "${cleanGoogleAddress}"`,
+                    timestamp: new Date().toISOString()
+                  });
+                  queueLiveCallBroadcast({ pickup: cleanGoogleAddress });
+                }
+
                 const normalizedPickup = normalize(usedAddress);
                 if (geocodeClarificationSent.pickup === normalizedPickup) {
                   geocodeClarificationSent.pickup = undefined;
@@ -1537,6 +1555,23 @@ Rules:
                   return; // Wait for customer to clarify
                 }
                 knownBooking.destinationVerified = true;
+
+                // USE GOOGLE'S CORRECTED ADDRESS - fuzzy matching may have fixed spelling
+                const googleAddress = destResult.display_name || destResult.formatted_address;
+                if (googleAddress && googleAddress !== usedAddress) {
+                  // Google returned a different (corrected) address - use it!
+                  const cleanGoogleAddress = googleAddress.replace(/,\s*UK$/i, '').replace(/,\s*United Kingdom$/i, '').trim();
+                  console.log(`[${callId}] 🔧 Google fuzzy-corrected address: "${usedAddress}" → "${cleanGoogleAddress}"`);
+                  knownBooking.destination = cleanGoogleAddress;
+                  usedAddress = cleanGoogleAddress;
+                  
+                  transcriptHistory.push({
+                    role: "system",
+                    text: `🔧 GOOGLE CORRECTED: "${extractedDest}" → "${cleanGoogleAddress}"`,
+                    timestamp: new Date().toISOString()
+                  });
+                  queueLiveCallBroadcast({ destination: cleanGoogleAddress });
+                }
 
                 const normalizedDestination = normalize(usedAddress);
                 if (geocodeClarificationSent.destination === normalizedDestination) {
