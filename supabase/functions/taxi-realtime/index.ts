@@ -261,6 +261,8 @@ serve(async (req) => {
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
+  let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
+  const ECHO_GUARD_MS = 600; // Ignore transcripts within 600ms after AI stops speaking
   let lastFinalUserTranscript = ""; // Last finalized user transcript (safeguards for end_call)
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
@@ -1927,6 +1929,18 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         const rawTranscript = data.transcript || "";
         console.log(`[${callId}] Raw user transcript: ${rawTranscript}`);
         
+        // ECHO GUARD: Discard transcripts that arrive while AI is speaking or shortly after
+        // This prevents transcribing Ada's voice as user input (common on phone lines with echo)
+        const timeSinceAiStopped = Date.now() - aiStoppedSpeakingAt;
+        if (aiSpeaking) {
+          console.log(`[${callId}] 🔇 ECHO GUARD: Discarding transcript (AI is currently speaking): "${rawTranscript}"`);
+          return;
+        }
+        if (timeSinceAiStopped < ECHO_GUARD_MS) {
+          console.log(`[${callId}] 🔇 ECHO GUARD: Discarding transcript (${timeSinceAiStopped}ms after AI stopped, threshold=${ECHO_GUARD_MS}ms): "${rawTranscript}"`);
+          return;
+        }
+        
         // Filter Whisper hallucinations - common patterns when there's silence/noise
         const isHallucination = (text: string): boolean => {
           const t = text.trim();
@@ -2901,7 +2915,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
 
       // Response completed
       if (data.type === "response.done") {
-        aiSpeaking = false; socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+        aiSpeaking = false;
+        aiStoppedSpeakingAt = Date.now(); // Record when AI stopped for echo guard
+        socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
         socket.send(JSON.stringify({ type: "response_done" }));
       }
 
