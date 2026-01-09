@@ -3004,7 +3004,35 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           await waitForFreshTranscript();
 
           const t = (lastFinalUserTranscript || "").toLowerCase().trim();
+          
+          // Check if assistant already said goodbye in a previous turn
+          const assistantAlreadySaidGoodbye = (() => {
+            // Look at all assistant messages, not just the last one
+            const assistantMessages = transcriptHistory.filter((m) => m.role === "assistant");
+            for (const msg of assistantMessages) {
+              const a = (msg.text || "").toLowerCase();
+              if (a.includes("goodbye") || a.includes("have a great journey") || /\bbye\b/.test(a)) {
+                return true;
+              }
+            }
+            return false;
+          })();
+          
+          // If assistant has already said goodbye, accept any short acknowledgement from customer
+          const isFinalAcknowledgement = assistantAlreadySaidGoodbye && (
+            t === "ok" ||
+            t === "okay" ||
+            t === "bye" ||
+            t === "bye bye" ||
+            t === "cheers" ||
+            t === "thanks" ||
+            t === "thank you" ||
+            t === "ta" ||
+            t.length < 15 // Short responses after goodbye are almost always acknowledgements
+          );
+          
           const customerSaidNo =
+            isFinalAcknowledgement ||
             t === "no" ||
             t === "nope" ||
             t === "nah" ||
