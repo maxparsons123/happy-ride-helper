@@ -182,6 +182,11 @@ ADDRESS HANDLING:
 - If they confirm YES, call book_taxi again to complete the booking
 - If they correct an address, update it and start the confirmation flow again
 
+**MODIFY BOOKING RESPONSES:**
+- When modify_booking returns, it includes a "confirmation_script" - say it EXACTLY as written
+- The fare in the confirmation_script is calculated by the system - do NOT make up your own fare
+- NEVER say a different fare than what the function returned
+
 **CRITICAL - NEVER FAKE A BOOKING OR QUOTE FARES - THIS IS THE MOST IMPORTANT RULE:**
 - You can ONLY say "That's all booked" or confirm a booking AFTER you have called the book_taxi function AND received a SUCCESSFUL response (success: true)
 - If you have NOT called book_taxi, you MUST NOT say the booking is complete
@@ -2753,43 +2758,52 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               let newFare = bookingToModify.fare;
               const finalPickup = updates.pickup || bookingToModify.pickup;
               const finalDestination = updates.destination || bookingToModify.destination;
+              const finalPassengers = updates.passengers ?? bookingToModify.passengers ?? 1;
               
               if (args.new_pickup || args.new_destination) {
-                // Recalculate fare
-                const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
-                const BASE_FARE = 3.50;
-                const PER_MILE_RATE = 1.00;
-                let distanceMiles = 0;
+                // Use taxi-trip-resolve for consistent fare calculation (same as book_taxi)
+                console.log(`[${callId}] 🔄 Recalculating fare via trip-resolve for modified booking`);
                 
-                if (GOOGLE_MAPS_API_KEY) {
-                  try {
-                    const distanceUrl = `https://maps.googleapis.com/maps/api/distancematrix/json` +
-                      `?origins=${encodeURIComponent(finalPickup + ", UK")}` +
-                      `&destinations=${encodeURIComponent(finalDestination + ", UK")}` +
-                      `&units=imperial` +
-                      `&key=${GOOGLE_MAPS_API_KEY}`;
-                    
-                    const distResponse = await fetch(distanceUrl);
-                    const distData = await distResponse.json();
-                    
-                    if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
-                      const element = distData.rows[0].elements[0];
-                      const distanceText = element.distance?.text || "";
-                      const distanceMatch = distanceText.match(/([\d.]+)\s*mi/);
-                      distanceMiles = distanceMatch ? parseFloat(distanceMatch[1]) : (element.distance?.value || 0) / 1609.34;
+                try {
+                  const tripResolveUrl = `${SUPABASE_URL}/functions/v1/taxi-trip-resolve`;
+                  const tripResponse = await fetch(tripResolveUrl, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                    },
+                    body: JSON.stringify({
+                      pickup_input: finalPickup,
+                      dropoff_input: finalDestination,
+                      passengers: finalPassengers,
+                      city_hint: callerCity || "Coventry",
+                      country: "GB"
+                    })
+                  });
+                  
+                  if (tripResponse.ok) {
+                    const tripData = await tripResponse.json();
+                    if (tripData.ok && tripData.fare_estimate?.amount) {
+                      newFare = `£${tripData.fare_estimate.amount}`;
+                      updates.fare = newFare;
+                      changes.push(`fare updated to ${newFare}`);
+                      console.log(`[${callId}] ✅ Trip resolve returned fare: ${newFare}`);
+                      
+                      // Update addresses with resolved versions if better
+                      if (tripData.pickup?.formatted_address) {
+                        updates.pickup = tripData.pickup.name || finalPickup;
+                      }
+                      if (tripData.dropoff?.formatted_address) {
+                        updates.destination = tripData.dropoff.name || finalDestination;
+                      }
+                    } else {
+                      console.log(`[${callId}] ⚠️ Trip resolve did not return fare, keeping existing: ${newFare}`);
                     }
-                  } catch (e) {
-                    console.error(`[${callId}] Distance calculation error:`, e);
+                  } else {
+                    console.error(`[${callId}] Trip resolve failed:`, await tripResponse.text());
                   }
-                }
-                
-                if (distanceMiles > 0) {
-                  let fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
-                  const passengers = updates.passengers || bookingToModify.passengers;
-                  if (passengers > 4) fare += 5;
-                  newFare = `£${Math.round(fare * 100) / 100}`;
-                  updates.fare = newFare;
-                  changes.push(`fare updated to ${newFare}`);
+                } catch (e) {
+                  console.error(`[${callId}] Trip resolve error:`, e);
                 }
               }
               
