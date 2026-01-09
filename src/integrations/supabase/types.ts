@@ -308,6 +308,45 @@ export type Database = {
         }
         Relationships: []
       }
+      sip_trunks: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          is_active: boolean
+          name: string
+          sip_password: string | null
+          sip_server: string | null
+          sip_username: string | null
+          updated_at: string
+          webhook_token: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_active?: boolean
+          name: string
+          sip_password?: string | null
+          sip_server?: string | null
+          sip_username?: string | null
+          updated_at?: string
+          webhook_token?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_active?: boolean
+          name?: string
+          sip_password?: string | null
+          sip_server?: string | null
+          sip_username?: string | null
+          updated_at?: string
+          webhook_token?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

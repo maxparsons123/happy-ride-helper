@@ -32,3 +32,6 @@ verify_jwt = false
 
 [functions.taxi-trip-resolve]
 verify_jwt = false
+
+[functions.sip-incoming]
+verify_jwt = false
