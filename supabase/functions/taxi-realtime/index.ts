@@ -269,6 +269,8 @@ serve(async (req) => {
   let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   const ECHO_GUARD_MS = 100; // Ignore transcripts within 100ms after AI stops speaking (tight to avoid blocking real speech)
   let lastFinalUserTranscript = ""; // Last finalized user transcript (safeguards for end_call)
+  let lastFinalUserTranscriptAt = 0; // ms epoch for race-free end_call checks
+  let lastAudioCommitAt = 0; // ms epoch when last user turn was committed
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
@@ -2101,7 +2103,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         
         console.log(`[${callId}] User said: ${rawTranscript}`);
         lastFinalUserTranscript = rawTranscript;
-        // IMMEDIATE NAME INJECTION - for new callers, quickly extract and inject name BEFORE AI responds
+        lastFinalUserTranscriptAt = Date.now();
         // This prevents misheard names from being used in Ada's greeting
         if (!callerName) {
           const quickExtractName = (text: string): string | null => {
@@ -2249,6 +2251,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       // Audio buffer committed (server VAD auto-commits)
       if (data.type === "input_audio_buffer.committed") {
         console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
+        lastAudioCommitAt = Date.now();
         awaitingResponseAfterCommit = true;
         responseCreatedSinceCommit = false;
       }
@@ -2904,6 +2907,21 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         if (data.name === "end_call") {
           const args = JSON.parse(data.arguments);
 
+          // If OpenAI calls end_call before the transcription for the just-committed user turn arrives,
+          // lastFinalUserTranscript will still reflect the *previous* turn. Wait briefly for the new transcript.
+          const waitForFreshTranscript = async () => {
+            if (!awaitingResponseAfterCommit) return;
+            if (lastFinalUserTranscriptAt >= lastAudioCommitAt) return;
+
+            const start = Date.now();
+            while (Date.now() - start < 1500) {
+              await new Promise((r) => setTimeout(r, 150));
+              if (lastFinalUserTranscriptAt >= lastAudioCommitAt) return;
+            }
+          };
+
+          await waitForFreshTranscript();
+
           const t = (lastFinalUserTranscript || "").toLowerCase().trim();
           const customerSaidNo =
             t === "no" ||
@@ -2930,6 +2948,13 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             t.includes("thank you") ||
             t.includes("cheers");
 
+          const assistantSaidGoodbye = (() => {
+            const lastAssistant = [...transcriptHistory].reverse().find((m) => m.role === "assistant");
+            if (!lastAssistant?.text) return false;
+            const a = lastAssistant.text.toLowerCase();
+            return a.includes("goodbye") || a.includes("have a great journey") || /\bbye\b/.test(a);
+          })();
+
           // Safety: don't allow hanging up unless customer explicitly declined further help.
           if (!customerSaidNo) {
             console.log(
@@ -2950,6 +2975,44 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 },
               }),
             );
+
+            // Nudge the model to continue (otherwise it may stall after the tool rejection)
+            setTimeout(() => {
+              openaiWs?.send(
+                JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] },
+                }),
+              );
+            }, 50);
+            return;
+          }
+
+          // Enforce: say goodbye first, then call end_call (prevents silent hangups)
+          if (!assistantSaidGoodbye) {
+            openaiWs?.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message:
+                      "Customer has declined further help. Say a brief goodbye now, then call end_call immediately.",
+                  }),
+                },
+              }),
+            );
+
+            setTimeout(() => {
+              openaiWs?.send(
+                JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] },
+                }),
+              );
+            }, 50);
             return;
           }
 
@@ -2983,7 +3046,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 reason: args.reason,
               }),
             );
-            
+
             // Close the WebSocket connection shortly after
             setTimeout(() => {
               console.log(`[${callId}] 📞 Closing connection after end_call`);
