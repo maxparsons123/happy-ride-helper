@@ -80,10 +80,18 @@ You MUST NOT:
 You MUST return the EXACT text the user said.
 
 LOCATION EXTRACTION:
-• "from X" or "pick up from X" or "at X" → pickup_location = X
+• "from X" or "pick up from X" or "pick me up at X" or "collect me from X" → pickup_location = X
 • "to Y" or "going to Y" or "heading to Y" or "take me to Y" → dropoff_location = Y
 • If 'nearest' or 'closest' is mentioned, include in pickup_location
 • If no drop-off given or "as directed" → dropoff_location = "as directed"
+
+CRITICAL - "at X" CLARIFICATION RULE:
+• If user ONLY says "at X" or "the X" without "from", "to", "going", etc.:
+  - This is usually a CLARIFICATION of the PREVIOUS location mentioned, NOT a new pickup
+  - If it sounds like a business name, venue, or landmark (e.g., "at Phonopolis", "the Hilton", "at Tesco"):
+    - Return it as a SPECIAL REQUEST for clarification, NOT as pickup_location
+    - special_requests = "Location clarification: at X"
+  - Only treat "at X" as pickup if combined with pickup words like "pick me up at X", "from X"
 
 LOCATION CLEANING RULE:
 • If location begins with "the ", "a ", or "an ", remove ONLY that article
