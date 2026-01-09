@@ -184,7 +184,12 @@ ADDRESS HANDLING:
 - House numbers with letters (52A, 18B) - say naturally: "fifty-two A"
 - If an address sounds unclear, ask: "Could you repeat that for me please?"
 
-**MULTIPLE ADDRESSES - DISAMBIGUATION:**
+**ADDRESS ALIASES - IMPORTANT:**
+- Returning customers may have saved aliases like "home", "work", "office"
+- If they say "take me home" or "pick me up from work", the system will automatically resolve these
+- If a customer says "save this as home" or "call this my work address" after giving an address, use the save_address_alias tool
+- After saving, confirm: "Done! I've saved that as your [alias]. Next time just say 'take me [alias]'!"
+
 - If the system tells you there are MULTIPLE addresses with the same name (e.g., "2 David Roads found"), you MUST ask the customer to clarify
 - Say something like: "I've found a couple of streets with that name. Do you mean David Road in [Area 1] or David Road in [Area 2]?"
 - Wait for their answer before proceeding
@@ -279,6 +284,7 @@ serve(async (req) => {
   let callerCity = ""; // City extracted from caller's last addresses or phone area
   let callerKnownAreas: Record<string, number> = {}; // {"Coventry": 5, "Birmingham": 1} - city mention counts
   let callerTrustedAddresses: string[] = []; // Array of addresses the caller has successfully used before
+  let callerAddressAliases: Record<string, string> = {}; // {"home": "52A David Road", "work": "Coventry Train Station"}
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
@@ -463,7 +469,40 @@ serve(async (req) => {
     return null;
   };
 
-  // Geocode an address using Google Maps API (with city context and caller location biasing)
+  // Resolve address aliases like "home", "work", "office" etc.
+  // Returns the full address if alias found, or null if not an alias
+  const resolveAddressAlias = (address: string): string | null => {
+    if (!address || Object.keys(callerAddressAliases).length === 0) return null;
+    
+    const normalizedInput = normalize(address).toLowerCase();
+    
+    // Common alias patterns: "home", "my home", "take me home", "from home", "to work", etc.
+    const aliasPatterns = [
+      /^(?:my\s+)?home$/i,
+      /^(?:my\s+)?work$/i,
+      /^(?:my\s+)?office$/i,
+      /^(?:the\s+)?(?:usual|regular)$/i,
+    ];
+    
+    // Check direct alias match
+    for (const [alias, fullAddress] of Object.entries(callerAddressAliases)) {
+      const normalizedAlias = alias.toLowerCase();
+      
+      // Exact match
+      if (normalizedInput === normalizedAlias) {
+        console.log(`[${callId}] 🏠 ALIAS RESOLVED: "${address}" → "${fullAddress}"`);
+        return fullAddress;
+      }
+      
+      // "my home", "to home", "from home" patterns
+      if (normalizedInput.includes(normalizedAlias)) {
+        console.log(`[${callId}] 🏠 ALIAS RESOLVED (partial): "${address}" → "${fullAddress}"`);
+        return fullAddress;
+      }
+    }
+    
+    return null;
+  };
   // Returns disambiguation info if multiple similar addresses found
   interface GeocodeMatch {
     display_name: string;
@@ -486,6 +525,18 @@ serve(async (req) => {
   
   const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
     try {
+      // PRIORITY -1: Check if this is an alias like "home" or "work"
+      const aliasResolved = resolveAddressAlias(address);
+      if (aliasResolved) {
+        // Return the resolved alias address
+        return {
+          found: true,
+          display_name: aliasResolved,
+          formatted_address: aliasResolved,
+          city: extractCityFromAddress(aliasResolved) || callerCity
+        };
+      }
+      
       // PRIORITY 0: Check if caller has used this address before (trusted addresses from confirmed bookings)
       // This avoids re-geocoding and ensures consistency (e.g., "Cosy Club" → same "Cosy Club, Coventry" as before)
       const trustedMatch = matchesTrustedAddress(address);
@@ -802,7 +853,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Lookup caller info (including trusted addresses)
       const { data, error } = await supabase
         .from("callers")
-        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas")
+        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas, address_aliases")
         .in("phone_number", phoneCandidates)
         .maybeSingle();
 
@@ -829,8 +880,12 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
             console.log(`[${callId}] 🏙️ Primary city from known_areas: ${callerCity} (${topCity[1]} mentions)`);
           }
         }
-
-        // Fallback: Extract city from last addresses if no known_areas
+        
+        // Load address aliases (e.g., {"home": "52A David Road", "work": "Train Station"})
+        callerAddressAliases = (data.address_aliases as Record<string, string>) || {};
+        if (Object.keys(callerAddressAliases).length > 0) {
+          console.log(`[${callId}] 🏠 Loaded address aliases: ${JSON.stringify(callerAddressAliases)}`);
+        }
         if (!callerCity && callerLastPickup) {
           callerCity = extractCityFromAddress(callerLastPickup);
         }
@@ -1942,6 +1997,19 @@ Rules:
                     new_vehicle_type: { type: "string", description: "New vehicle type (e.g., '6 seater', 'MPV', 'estate') - only if customer requests it" }
                   },
                   required: []
+                }
+              },
+              {
+                type: "function",
+                name: "save_address_alias",
+                description: "Save an address alias for the customer (e.g., 'home', 'work', 'office'). Use when customer says 'call this home' or 'save this as work' or 'remember this as my office'.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    alias: { type: "string", description: "The alias name: 'home', 'work', 'office', 'gym', 'school', etc." },
+                    address: { type: "string", description: "The full address to save under this alias" }
+                  },
+                  required: ["alias", "address"]
                 }
               }
             ],
@@ -3201,6 +3269,71 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 })
               }
             }));
+          }
+          
+          // Trigger response
+          openaiWs?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
+        
+        // Handle save_address_alias function
+        if (data.name === "save_address_alias") {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] 🏠 Save alias requested: "${args.alias}" = "${args.address}"`);
+          
+          if (!userPhone) {
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  message: "Cannot save alias - no phone number associated with this call."
+                })
+              }
+            }));
+          } else {
+            // Update the aliases in memory and database
+            const aliasKey = normalize(args.alias).toLowerCase();
+            callerAddressAliases[aliasKey] = args.address;
+            
+            const phoneKey = normalizePhone(userPhone) || userPhone;
+            const { error: aliasError } = await supabase
+              .from("callers")
+              .update({ address_aliases: callerAddressAliases })
+              .eq("phone_number", phoneKey);
+            
+            if (aliasError) {
+              console.error(`[${callId}] Failed to save alias:`, aliasError);
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    message: "Sorry, couldn't save that alias. Please try again."
+                  })
+                }
+              }));
+            } else {
+              console.log(`[${callId}] ✅ Saved alias: "${aliasKey}" = "${args.address}"`);
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: true,
+                    message: `Saved! Next time you can just say "${args.alias}" and I'll know you mean ${args.address}.`,
+                    confirmation_script: `Done! I've saved ${args.address} as your ${args.alias}. Next time just say "take me ${args.alias}" or "pick me up from ${args.alias}" and I'll know exactly where you mean.`
+                  })
+                }
+              }));
+            }
           }
           
           // Trigger response

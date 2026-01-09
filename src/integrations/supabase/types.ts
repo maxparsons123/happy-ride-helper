@@ -181,6 +181,7 @@ export type Database = {
       }
       callers: {
         Row: {
+          address_aliases: Json | null
           created_at: string
           id: string
           known_areas: Json | null
@@ -193,6 +194,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          address_aliases?: Json | null
           created_at?: string
           id?: string
           known_areas?: Json | null
@@ -205,6 +207,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          address_aliases?: Json | null
           created_at?: string
           id?: string
           known_areas?: Json | null
