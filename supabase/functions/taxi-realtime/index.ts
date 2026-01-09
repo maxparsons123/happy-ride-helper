@@ -1643,15 +1643,15 @@ Rules:
               // Keep auto-detect for multilingual support (Polish, Urdu, Punjabi callers)
               prompt: "247 Radio Carz taxi booking, Coventry, UK."
             },
-            // Server VAD - balanced for natural conversation flow
-            // Give user more time to respond after Ada asks a question
+            // Server VAD - tuned for phone audio where pauses can be longer
+            // Give user more time to complete their response before committing
             turn_detection: {
               type: "server_vad",
-              threshold: 0.7,           // Higher threshold = only clear speech triggers barge-in
-              prefix_padding_ms: 350,   // Capture lead-in for smoother onset
-              silence_duration_ms: 900, // Wait longer (900ms) for user to respond
-              create_response: true,    // Auto-create response when speech ends
-              interrupt_response: true  // Allow user to interrupt Ada (prevents repetition)
+              threshold: 0.6,            // Slightly lower = catch softer speech on phone lines
+              prefix_padding_ms: 400,    // Capture more lead-in for phone audio
+              silence_duration_ms: 1200, // Wait 1.2s of silence (phone audio has more pauses)
+              create_response: true,     // Auto-create response when speech ends
+              interrupt_response: true   // Allow user to interrupt Ada
             },
             tools: [
               {
