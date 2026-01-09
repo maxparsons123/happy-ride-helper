@@ -486,6 +486,22 @@ serve(async (req) => {
   
   const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
     try {
+      // PRIORITY 0: Check if caller has used this address before (trusted addresses from confirmed bookings)
+      // This avoids re-geocoding and ensures consistency (e.g., "Cosy Club" → same "Cosy Club, Coventry" as before)
+      const trustedMatch = matchesTrustedAddress(address);
+      if (trustedMatch) {
+        console.log(`[${callId}] 🏆 TRUSTED ADDRESS MATCH: "${address}" → "${trustedMatch}" (skipping geocode)`);
+        
+        // Return the trusted address as if it was geocoded
+        // We don't have coords cached, but the display_name is the key part
+        return {
+          found: true,
+          display_name: trustedMatch,
+          formatted_address: trustedMatch,
+          city: extractCityFromAddress(trustedMatch) || callerCity
+        };
+      }
+      
       // INTELLIGENT LOCATION BIASING:
       // Priority 1: Use the OTHER address from current booking (if we have one)
       // Priority 2: Use caller's history (last pickup/destination)
