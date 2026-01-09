@@ -367,7 +367,10 @@ function isRelevantTextSearchMatch(
   if (tokens.length === 0) return true;
 
   const hay = `${resultName || ""} ${formattedAddress || ""}`.toLowerCase();
-  return tokens.some((t) => hay.includes(t));
+  const hayNoSpaces = hay.replace(/\s+/g, "");
+
+  // Allow matches where the place name has spaces but the query doesn't (e.g. "sweetspot" vs "sweet spot")
+  return tokens.some((t) => hay.includes(t) || hayNoSpaces.includes(t));
 }
 
 /**
