@@ -176,23 +176,25 @@ ADDRESS HANDLING:
 - Do NOT guess - always ask when there's ambiguity
 
 **HIGH FARE VERIFICATION:**
-- If the book_taxi function returns a "requires_verification" response with a high fare (over £50), you MUST verify with the customer
-- Say: "Just to make sure I have the right addresses - you're going from [PICKUP] to [DESTINATION]? That will be around [FARE]. Is that correct?"
+- If the book_taxi function returns a "requires_verification" response, read the "verification_script" and say it EXACTLY
+- Do NOT add extra fare quotes - the script already contains the correct fare
 - If they confirm YES, call book_taxi again to complete the booking
 - If they correct an address, update it and start the confirmation flow again
 
-**CRITICAL - NEVER FAKE A BOOKING:**
-- You can ONLY say "That's all booked" or confirm a booking AFTER you have called the book_taxi function AND received a successful response
+**CRITICAL - NEVER FAKE A BOOKING OR QUOTE FARES:**
+- You can ONLY say "That's all booked" or confirm a booking AFTER you have called the book_taxi function AND received a SUCCESSFUL response (success: true)
 - If you have NOT called book_taxi, you MUST NOT say the booking is complete
+- NEVER quote a fare amount until book_taxi returns - you don't know the fare until then!
+- Do NOT say "I'll book that" or "The fare will be £X" before calling the function
 - The book_taxi function will return fare and ETA - use THOSE values in your response
 - NEVER make up a fare or ETA without calling the function first
 
 WHEN THE book_taxi FUNCTION RETURNS:
-- The function output contains the VERIFIED pickup, destination, fare, and ETA
-- Use the function output values in your response
-- IMPORTANT: Do NOT ask "is that correct" again after booking. This is not a second confirmation.
-- For ASAP bookings: "Brilliant! That's all booked. The fare is £[X] and your driver will be with you in [ETA]."
-- For scheduled bookings: "Brilliant! That's all booked for [TIME]. The fare is £[X]. Is there anything else?"
+- If success: true → The booking is confirmed. Use the output values.
+- If requires_verification: true → Say the verification_script EXACTLY, then wait for response
+- IMPORTANT: Do NOT quote fares before calling book_taxi
+- For successful ASAP bookings: "Brilliant! That's all booked. The fare is £[X] and your driver will be with you in [ETA]."
+- For successful scheduled bookings: "Brilliant! That's all booked for [TIME]. The fare is £[X]. Is there anything else?"
 
 ENDING THE CALL - CRITICAL:
 - After booking is confirmed, ask: "Is there anything else I can help you with?"
@@ -1865,7 +1867,10 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             // Mark as verified so we don't loop forever
             knownBooking.highFareVerified = true;
             
-            // Send a verification request back to Ada to confirm with customer
+            // Store the calculated fare so we use the SAME value when they confirm
+            const verifiedFare = fare;
+            
+            // Send a verification request back to Ada - DON'T quote another fare, just confirm addresses
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -1874,10 +1879,10 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 output: JSON.stringify({
                   success: false,
                   requires_verification: true,
-                  fare: `£${fare}`,
+                  calculated_fare: `£${verifiedFare}`,
                   pickup: finalBooking.pickup,
                   destination: finalBooking.destination,
-                  message: `The fare is £${fare} which is quite high. Please confirm with the customer: "Just to make sure I have the right addresses - you're going from ${finalBooking.pickup} to ${finalBooking.destination}? That will be around £${fare}. Is that correct?" If they say yes, call book_taxi again. If they correct an address, update it and recalculate.`
+                  verification_script: `Just to double-check, you're going from ${finalBooking.pickup} to ${finalBooking.destination}? The fare will be £${verifiedFare}. Shall I confirm that booking?`
                 })
               }
             }));
