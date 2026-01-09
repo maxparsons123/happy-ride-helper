@@ -187,7 +187,15 @@ ADDRESS HANDLING:
 **ADDRESS ALIASES - IMPORTANT:**
 - Returning customers may have saved aliases like "home", "work", "office"
 - If they say "take me home" or "pick me up from work", the system will automatically resolve these
-- If a customer says "save this as home" or "call this my work address" after giving an address, use the save_address_alias tool
+- For returning customers WITHOUT an alias, "home" typically means their last known pickup address (from caller_last_pickup)
+- ONLY use save_address_alias when the customer EXPLICITLY asks to save an alias:
+  - ✅ "Save 52A David Road as my home" → save it
+  - ✅ "Call this my work address" → save current address as work
+  - ✅ "Remember this as home" → save it
+  - ❌ "Take me home" → do NOT save, just use existing alias or last_pickup
+  - ❌ "Pick me up from home" → do NOT save, just resolve the address
+- BEFORE saving, CONFIRM what they want: "Just to confirm, you want me to save [address] as your [alias]?"
+- If they already have that alias saved, warn them: "You currently have [old address] saved as [alias]. Would you like to update it to [new address]?"
 - After saving, confirm: "Done! I've saved that as your [alias]. Next time just say 'take me [alias]'!"
 
 - If the system tells you there are MULTIPLE addresses with the same name (e.g., "2 David Roads found"), you MUST ask the customer to clarify
@@ -472,33 +480,37 @@ serve(async (req) => {
   // Resolve address aliases like "home", "work", "office" etc.
   // Returns the full address if alias found, or null if not an alias
   const resolveAddressAlias = (address: string): string | null => {
-    if (!address || Object.keys(callerAddressAliases).length === 0) return null;
-    
     const normalizedInput = normalize(address).toLowerCase();
     
-    // Common alias patterns: "home", "my home", "take me home", "from home", "to work", etc.
-    const aliasPatterns = [
-      /^(?:my\s+)?home$/i,
-      /^(?:my\s+)?work$/i,
-      /^(?:my\s+)?office$/i,
-      /^(?:the\s+)?(?:usual|regular)$/i,
-    ];
+    // Check if this looks like an alias request
+    const homePatterns = /^(?:my\s+)?home$/i;
+    const workPatterns = /^(?:my\s+)?(?:work|office)$/i;
+    const isHomeRequest = homePatterns.test(normalizedInput) || normalizedInput.includes('home');
+    const isWorkRequest = workPatterns.test(normalizedInput) || normalizedInput.includes('work') || normalizedInput.includes('office');
     
-    // Check direct alias match
-    for (const [alias, fullAddress] of Object.entries(callerAddressAliases)) {
-      const normalizedAlias = alias.toLowerCase();
-      
-      // Exact match
-      if (normalizedInput === normalizedAlias) {
-        console.log(`[${callId}] 🏠 ALIAS RESOLVED: "${address}" → "${fullAddress}"`);
-        return fullAddress;
+    // First, check if they have saved aliases
+    if (Object.keys(callerAddressAliases).length > 0) {
+      for (const [alias, fullAddress] of Object.entries(callerAddressAliases)) {
+        const normalizedAlias = alias.toLowerCase();
+        
+        // Exact match
+        if (normalizedInput === normalizedAlias) {
+          console.log(`[${callId}] 🏠 ALIAS RESOLVED: "${address}" → "${fullAddress}"`);
+          return fullAddress;
+        }
+        
+        // "my home", "to home", "from home" patterns
+        if (normalizedInput.includes(normalizedAlias)) {
+          console.log(`[${callId}] 🏠 ALIAS RESOLVED (partial): "${address}" → "${fullAddress}"`);
+          return fullAddress;
+        }
       }
-      
-      // "my home", "to home", "from home" patterns
-      if (normalizedInput.includes(normalizedAlias)) {
-        console.log(`[${callId}] 🏠 ALIAS RESOLVED (partial): "${address}" → "${fullAddress}"`);
-        return fullAddress;
-      }
+    }
+    
+    // FALLBACK: If they said "home" but have no home alias, use their last known pickup
+    if (isHomeRequest && callerLastPickup) {
+      console.log(`[${callId}] 🏠 HOME FALLBACK: "${address}" → "${callerLastPickup}" (using last_pickup as implicit home)`);
+      return callerLastPickup;
     }
     
     return null;
@@ -2002,7 +2014,7 @@ Rules:
               {
                 type: "function",
                 name: "save_address_alias",
-                description: "Save an address alias for the customer (e.g., 'home', 'work', 'office'). Use when customer says 'call this home' or 'save this as work' or 'remember this as my office'.",
+                description: "Save an address alias for the customer (e.g., 'home', 'work', 'office'). ONLY use when customer EXPLICITLY asks to save: 'save this as home', 'call this my work', 'remember this as office'. Do NOT use just because they mentioned 'home' - that's for resolving existing aliases. Always confirm before saving: 'Just to confirm, save [address] as your [alias]?'",
                 parameters: {
                   type: "object",
                   properties: {
