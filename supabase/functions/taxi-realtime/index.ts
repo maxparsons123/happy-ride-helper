@@ -1663,9 +1663,7 @@ Rules:
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { 
-              model: "whisper-1",
-              // Keep auto-detect for multilingual support (Polish, Urdu, Punjabi callers)
-              prompt: "247 Radio Carz taxi booking, Coventry, UK."
+              model: "whisper-1"
             },
             // Server VAD - tuned for phone audio where pauses can be longer
             // Give user more time to complete their response before committing
