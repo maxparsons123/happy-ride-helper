@@ -272,6 +272,11 @@ serve(async (req) => {
   // then prefer it over the model's paraphrasing when the booking is confirmed.
   let knownBooking: KnownBooking = {};
 
+  // Track whether we've already asked Ada to clarify a given address.
+  // This prevents a "stuck" loop where an early failed geocode prompt keeps repeating
+  // even after the address later verifies successfully.
+  let geocodeClarificationSent: { pickup?: string; destination?: string } = {};
+
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
   const normalizePhone = (phone: string) => String(phone || "").replace(/\D/g, "");
 
@@ -547,6 +552,35 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     }
   };
 
+  // If we previously asked the customer to clarify an address (due to a transient geocode miss),
+  // and the address later verifies successfully, inject a silent "verified" update so Ada
+  // doesn't stay stuck asking for the same address again.
+  const clearGeocodeClarification = (
+    addressType: "pickup" | "destination",
+    address: string,
+    verifiedAs?: string
+  ) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+
+    const pretty = verifiedAs && normalize(verifiedAs) !== normalize(address)
+      ? ` Verified as: "${verifiedAs}".`
+      : " Verified successfully.";
+
+    const message = addressType === "pickup"
+      ? `[SYSTEM: UPDATE] The pickup address "${address}" has now been verified.${pretty} Do NOT ask the customer to repeat or clarify the pickup unless they change it. Continue with the next booking question.`
+      : `[SYSTEM: UPDATE] The destination address "${address}" has now been verified.${pretty} Do NOT ask the customer to repeat or clarify the destination unless they change it. Continue with the next booking question.`;
+
+    // IMPORTANT: We do NOT trigger response.create here; this is a silent context correction.
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }],
+      },
+    }));
+  };
+
   // Notify Ada about geocoding result and ask for correction if needed
   const notifyGeocodeResult = (addressType: "pickup" | "destination", address: string, found: boolean) => {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
@@ -556,7 +590,9 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // No need to say anything - address is valid
     } else {
       console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - but accepting it anyway`);
-      
+
+      // Remember we have prompted for this specific address (so we can clear it if it later verifies)
+      geocodeClarificationSent[addressType] = normalize(address);
       // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
       // Only ask for clarification if it's a residential address that sounds garbled
       const isLandmark = /\b(station|airport|hospital|university|college|school|shopping|centre|center|mall|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|hotel|inn|pub|restaurant|church|mosque|temple|gurdwara|park|library|museum|theatre|theater|cinema|gym|sports|leisure|pool|bus\s*stop|taxi\s*rank)\b/i.test(address);
@@ -1132,6 +1168,17 @@ Rules:
                 return; // Wait for customer to clarify
               }
               knownBooking.pickupVerified = true;
+
+              const normalizedPickup = normalize(knownBooking.pickup!);
+              if (geocodeClarificationSent.pickup === normalizedPickup) {
+                geocodeClarificationSent.pickup = undefined;
+                clearGeocodeClarification(
+                  "pickup",
+                  knownBooking.pickup!,
+                  pickupResult.formatted_address || pickupResult.display_name
+                );
+              }
+
               console.log(`[${callId}] ✅ Pickup verified: ${pickupResult.display_name}`);
             } else {
               // Address not found - ask Ada to request correction
@@ -1153,6 +1200,17 @@ Rules:
                 return; // Wait for customer to clarify
               }
               knownBooking.destinationVerified = true;
+
+              const normalizedDestination = normalize(knownBooking.destination!);
+              if (geocodeClarificationSent.destination === normalizedDestination) {
+                geocodeClarificationSent.destination = undefined;
+                clearGeocodeClarification(
+                  "destination",
+                  knownBooking.destination!,
+                  destResult.formatted_address || destResult.display_name
+                );
+              }
+
               console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
             } else {
               // Address not found - ask Ada to request correction
