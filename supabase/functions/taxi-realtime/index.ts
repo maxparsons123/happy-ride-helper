@@ -265,6 +265,7 @@ serve(async (req) => {
     pickupVerified?: boolean;
     destinationVerified?: boolean;
     highFareVerified?: boolean; // Track if high fare has been verified with customer
+    verifiedFare?: number; // Store the verified fare to use on confirmation
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -1790,6 +1791,15 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           let distanceSource = "none";
           let tripResolveResult: any = null;
           
+          // If high fare was already verified, use the stored fare - don't recalculate!
+          if (knownBooking.highFareVerified && knownBooking.verifiedFare) {
+            fare = knownBooking.verifiedFare;
+            distanceSource = "verified-cache";
+            console.log(`[${callId}] ✅ Using verified fare from cache: £${fare}`);
+          }
+          
+          // Only call trip-resolver if we don't already have a verified fare
+          if (fare === 0) {
           try {
             console.log(`[${callId}] 🚕 Calling taxi-trip-resolve for fare calculation...`);
             
@@ -1871,6 +1881,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           } catch (e) {
             console.error(`[${callId}] Trip resolve error:`, e);
           }
+          } // End of "if (fare === 0)" block for trip-resolver
           
           // Fallback: Calculate fare manually if trip-resolver didn't return results
           if (fare === 0 && finalBooking.pickup && finalBooking.destination) {
@@ -1944,6 +1955,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             knownBooking.highFareVerified = true;
             
             // Store the calculated fare so we use the SAME value when they confirm
+            knownBooking.verifiedFare = fare;
             const verifiedFare = fare;
             
             // Send a verification request back to Ada - DON'T quote another fare, just confirm addresses
