@@ -1784,99 +1784,124 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           bookingData = finalBooking;
           console.log(`[${callId}] Booking (final):`, finalBooking);
           
-          // Calculate fare based on distance
-          const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
-          const BASE_FARE = 3.50;
-          const PER_MILE_RATE = 1.00;
-          const ROAD_MULTIPLIER = 1.3; // Haversine to road distance approximation
+          // Calculate fare and distance using taxi-trip-resolve function
           let distanceMiles = 0;
           let fare = 0;
           let distanceSource = "none";
+          let tripResolveResult: any = null;
           
-          // Haversine formula for straight-line distance
-          const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-            const R = 3958.8; // Earth's radius in miles
-            const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
-            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            return R * c;
-          };
-          
-          // Try to get actual road distance via Google Distance Matrix API
-          if (GOOGLE_MAPS_API_KEY && finalBooking.pickup && finalBooking.destination) {
-            try {
-              const distanceUrl = `https://maps.googleapis.com/maps/api/distancematrix/json` +
-                `?origins=${encodeURIComponent(finalBooking.pickup + ", UK")}` +
-                `&destinations=${encodeURIComponent(finalBooking.destination + ", UK")}` +
-                `&units=imperial` +
-                `&key=${GOOGLE_MAPS_API_KEY}`;
+          try {
+            console.log(`[${callId}] 🚕 Calling taxi-trip-resolve for fare calculation...`);
+            
+            const tripResolveResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify({
+                pickup_input: finalBooking.pickup,
+                dropoff_input: finalBooking.destination,
+                caller_city_hint: callerCity || undefined,
+                passengers: finalBooking.passengers || 1,
+                country: "GB"
+              }),
+            });
+            
+            if (tripResolveResponse.ok) {
+              tripResolveResult = await tripResolveResponse.json();
+              console.log(`[${callId}] 🚕 Trip resolve result:`, JSON.stringify(tripResolveResult, null, 2));
               
-              console.log(`[${callId}] 📏 Calculating distance: ${finalBooking.pickup} → ${finalBooking.destination}`);
-              const distResponse = await fetch(distanceUrl);
-              const distData = await distResponse.json();
-              
-              if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
-                const element = distData.rows[0].elements[0];
-                const distanceText = element.distance?.text || "";
-                const distanceMatch = distanceText.match(/([\d.]+)\s*mi/);
-                if (distanceMatch) {
-                  distanceMiles = parseFloat(distanceMatch[1]);
-                } else {
-                  distanceMiles = (element.distance?.value || 0) / 1609.34;
+              if (tripResolveResult.ok) {
+                // Use the resolved addresses if available (more accurate geocoding)
+                if (tripResolveResult.pickup?.formatted_address) {
+                  console.log(`[${callId}] 📍 Pickup resolved: ${tripResolveResult.pickup.formatted_address}`);
                 }
-                distanceSource = "google";
-                console.log(`[${callId}] 📏 Google Distance: ${distanceMiles.toFixed(2)} miles`);
+                if (tripResolveResult.dropoff?.formatted_address) {
+                  console.log(`[${callId}] 📍 Dropoff resolved: ${tripResolveResult.dropoff.formatted_address}`);
+                }
+                
+                // Use trip resolver's distance and fare if available
+                if (tripResolveResult.distance) {
+                  distanceMiles = tripResolveResult.distance.miles;
+                  distanceSource = "trip-resolver";
+                  console.log(`[${callId}] 📏 Distance from trip-resolver: ${distanceMiles} miles (${tripResolveResult.distance.duration_text})`);
+                }
+                
+                if (tripResolveResult.fare_estimate) {
+                  fare = tripResolveResult.fare_estimate.amount;
+                  console.log(`[${callId}] 💷 Fare from trip-resolver: £${fare}`);
+                }
+                
+                // Update city context if inferred
+                if (tripResolveResult.inferred_area?.city && !callerCity) {
+                  callerCity = tripResolveResult.inferred_area.city;
+                  console.log(`[${callId}] 🏙️ City inferred from trip: ${callerCity} (${tripResolveResult.inferred_area.confidence})`);
+                }
               }
-            } catch (e) {
-              console.error(`[${callId}] Distance Matrix error:`, e);
+            } else {
+              console.error(`[${callId}] Trip resolve failed: ${tripResolveResponse.status}`);
             }
+          } catch (e) {
+            console.error(`[${callId}] Trip resolve error:`, e);
           }
           
-          // Fallback to Haversine if Google failed - geocode both addresses
-          if (distanceMiles === 0 && finalBooking.pickup && finalBooking.destination) {
-            try {
-              console.log(`[${callId}] 📏 Google failed, trying Haversine fallback...`);
-              
-              // Geocode pickup
-              const pickupGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({ address: finalBooking.pickup, country: "UK" })
-              });
-              const pickupData = await pickupGeo.json();
-              
-              // Geocode destination
-              const destGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
-                body: JSON.stringify({ address: finalBooking.destination, country: "UK" })
-              });
-              const destData = await destGeo.json();
-              
-              if (pickupData.found && destData.found && pickupData.lat && pickupData.lon && destData.lat && destData.lon) {
-                const straightLine = haversineDistance(pickupData.lat, pickupData.lon, destData.lat, destData.lon);
-                distanceMiles = straightLine * ROAD_MULTIPLIER; // Apply road multiplier
-                distanceSource = "haversine";
-                console.log(`[${callId}] 📏 Haversine: ${straightLine.toFixed(2)} mi straight × ${ROAD_MULTIPLIER} = ${distanceMiles.toFixed(2)} mi road estimate`);
+          // Fallback: Calculate fare manually if trip-resolver didn't return results
+          if (fare === 0 && finalBooking.pickup && finalBooking.destination) {
+            console.log(`[${callId}] 📏 Trip-resolver didn't return fare, using fallback calculation...`);
+            
+            const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
+            const BASE_FARE = 3.50;
+            const PER_MILE_RATE = 1.80;
+            const ROAD_MULTIPLIER = 1.3;
+            
+            // Haversine formula for straight-line distance
+            const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+              const R = 3958.8; // Earth's radius in miles
+              const dLat = (lat2 - lat1) * Math.PI / 180;
+              const dLon = (lon2 - lon1) * Math.PI / 180;
+              const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+              return R * c;
+            };
+            
+            // Try Google Distance Matrix
+            if (GOOGLE_MAPS_API_KEY) {
+              try {
+                const distanceUrl = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                  `?origins=${encodeURIComponent(finalBooking.pickup + ", UK")}` +
+                  `&destinations=${encodeURIComponent(finalBooking.destination + ", UK")}` +
+                  `&units=imperial` +
+                  `&key=${GOOGLE_MAPS_API_KEY}`;
+                
+                const distResponse = await fetch(distanceUrl);
+                const distData = await distResponse.json();
+                
+                if (distData.status === "OK" && distData.rows?.[0]?.elements?.[0]?.status === "OK") {
+                  const element = distData.rows[0].elements[0];
+                  distanceMiles = (element.distance?.value || 0) / 1609.34;
+                  distanceSource = "google-fallback";
+                  console.log(`[${callId}] 📏 Google fallback: ${distanceMiles.toFixed(2)} miles`);
+                }
+              } catch (e) {
+                console.error(`[${callId}] Google fallback error:`, e);
               }
-            } catch (e) {
-              console.error(`[${callId}] Haversine fallback error:`, e);
             }
-          }
-          
-          // Calculate fare: base + per mile
-          if (distanceMiles > 0) {
-            fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
-            fare = Math.round(fare * 100) / 100; // Round to 2 decimal places
-            console.log(`[${callId}] 💷 Fare: £${fare} (£${BASE_FARE} + ${distanceMiles.toFixed(2)} mi × £${PER_MILE_RATE}) [${distanceSource}]`);
-          } else {
-            // Final fallback: estimate if all distance calculation failed
-            const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
-            fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
-            console.log(`[${callId}] 💷 Fare (random fallback): £${fare}`);
+            
+            // Calculate fare from distance
+            if (distanceMiles > 0) {
+              fare = BASE_FARE + (distanceMiles * PER_MILE_RATE);
+              fare = Math.round(fare * 2) / 2; // Round to nearest 50p
+              console.log(`[${callId}] 💷 Fallback fare: £${fare}`);
+            } else {
+              // Final fallback: random estimate
+              const isAirport = String(finalBooking.destination || "").toLowerCase().includes("airport");
+              fare = isAirport ? 45 : Math.floor(Math.random() * 10) + 15;
+              distanceSource = "random";
+              console.log(`[${callId}] 💷 Random fallback fare: £${fare}`);
+            }
           }
           
           // Add £5 for 6-seater van (5+ passengers)
