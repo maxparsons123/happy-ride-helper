@@ -2026,20 +2026,14 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
           ];
           
-          // Detect Welsh hallucinations (common Whisper artifact on noisy audio)
-          // Welsh words that appear in hallucinated taxi booking phrases
-          const welshPatterns = [
-            /\bgallaf\b/i,     // "I can"
-            /\bbwcio\b/i,      // "book" 
-            /\bdiolch\b/i,     // "thank you"
-            /\bie\b.*\bie\b/i, // "yes, yes" in Welsh
-            /\bo\s+\d+\w*\s+\w+\s+i\s+\d+/i, // "o [address] i [address]" pattern
-          ];
-          for (const pattern of welshPatterns) {
-            if (pattern.test(t)) {
-              console.log(`[${callId}] 🚫 Welsh hallucination detected: "${t}"`);
-              return true;
-            }
+          // Detect Welsh hallucinations - ONLY the specific pattern where Whisper
+          // outputs Welsh sentence structure mixed with English addresses
+          // This is a known Whisper artifact on noisy phone audio
+          // Pattern: "gallaf bwcio taxi o [address] i [address]" (I can book taxi from...to...)
+          const welshHallucinationPattern = /gallaf\s+bwcio\s+taxi\s+o\s+.+\s+i\s+/i;
+          if (welshHallucinationPattern.test(t)) {
+            console.log(`[${callId}] 🚫 Welsh hallucination detected (booking pattern): "${t}"`);
+            return true;
           }
           
           for (const pattern of hallucinationPhrases) {
