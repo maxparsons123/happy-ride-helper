@@ -247,6 +247,7 @@ serve(async (req) => {
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
   let callerCity = ""; // City extracted from caller's last addresses or phone area
+  let callerTrustedAddresses: string[] = []; // Array of addresses the caller has successfully used before
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
@@ -312,6 +313,43 @@ serve(async (req) => {
       callerCity = hintedCity;
       console.log(`[${callId}] 🏙️ City context updated from transcript: ${callerCity}`);
     }
+  };
+
+  // Check if an address matches any of the caller's trusted addresses
+  // Uses fuzzy matching to handle minor variations (e.g., "52A David Road" vs "52A David Road, Coventry")
+  const matchesTrustedAddress = (address: string): string | null => {
+    if (!address || callerTrustedAddresses.length === 0) return null;
+    
+    const normalizedInput = normalize(address).toLowerCase();
+    
+    for (const trusted of callerTrustedAddresses) {
+      const normalizedTrusted = normalize(trusted).toLowerCase();
+      
+      // Exact match
+      if (normalizedInput === normalizedTrusted) {
+        return trusted;
+      }
+      
+      // Check if input contains the trusted address or vice versa
+      if (normalizedInput.includes(normalizedTrusted) || normalizedTrusted.includes(normalizedInput)) {
+        return trusted;
+      }
+      
+      // Extract house number + street from both and compare
+      const extractCore = (addr: string) => {
+        const match = addr.match(/^(\d+[a-z]?\s+[a-z]+(?:\s+[a-z]+)?)/i);
+        return match ? match[1].toLowerCase() : addr.toLowerCase();
+      };
+      
+      const inputCore = extractCore(normalizedInput);
+      const trustedCore = extractCore(normalizedTrusted);
+      
+      if (inputCore === trustedCore) {
+        return trusted;
+      }
+    }
+    
+    return null;
   };
 
   // Geocode an address using Google Maps API (with city context and caller location biasing)
@@ -634,10 +672,10 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     const phoneCandidates = Array.from(new Set([phone, phoneNorm].filter(Boolean)));
 
     try {
-      // Lookup caller info
+      // Lookup caller info (including trusted addresses)
       const { data, error } = await supabase
         .from("callers")
-        .select("name, last_pickup, last_destination, total_bookings")
+        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses")
         .in("phone_number", phoneCandidates)
         .maybeSingle();
 
@@ -669,6 +707,12 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         }
         if (callerCity) {
           console.log(`[${callId}] 🏙️ Caller city: ${callerCity}`);
+        }
+        
+        // Load trusted addresses for auto-verification
+        callerTrustedAddresses = data.trusted_addresses || [];
+        if (callerTrustedAddresses.length > 0) {
+          console.log(`[${callId}] 🏠 Trusted addresses: ${callerTrustedAddresses.length} saved`);
         }
       } else {
         console.log(`[${callId}] 👤 New caller: ${phoneNorm || phone}`);
@@ -766,16 +810,40 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     }
   };
 
-  // Save or update caller info after booking
+  // Save or update caller info after booking (including trusted addresses)
   const saveCallerInfo = async (booking: { pickup: string; destination: string; passengers: number }): Promise<void> => {
     if (!userPhone) return;
     try {
       // Check if caller exists
       const { data: existing } = await supabase
         .from("callers")
-        .select("id, total_bookings")
+        .select("id, total_bookings, trusted_addresses")
         .eq("phone_number", userPhone)
         .maybeSingle();
+      
+      // Build updated trusted addresses list (add pickup and destination if not already present)
+      const MAX_TRUSTED_ADDRESSES = 10; // Limit to prevent unbounded growth
+      let updatedTrusted: string[] = existing?.trusted_addresses || callerTrustedAddresses || [];
+      
+      // Normalize addresses for comparison
+      const normalizedTrusted = new Set(updatedTrusted.map(a => normalize(a).toLowerCase()));
+      
+      // Add pickup if not already trusted
+      if (booking.pickup && !normalizedTrusted.has(normalize(booking.pickup).toLowerCase())) {
+        updatedTrusted.push(booking.pickup);
+        console.log(`[${callId}] 🏠 Adding pickup to trusted addresses: "${booking.pickup}"`);
+      }
+      
+      // Add destination if not already trusted
+      if (booking.destination && !normalizedTrusted.has(normalize(booking.destination).toLowerCase())) {
+        updatedTrusted.push(booking.destination);
+        console.log(`[${callId}] 🏠 Adding destination to trusted addresses: "${booking.destination}"`);
+      }
+      
+      // Trim to max size (keep most recent)
+      if (updatedTrusted.length > MAX_TRUSTED_ADDRESSES) {
+        updatedTrusted = updatedTrusted.slice(-MAX_TRUSTED_ADDRESSES);
+      }
       
       if (existing) {
         // Update existing caller
@@ -783,23 +851,29 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           last_pickup: booking.pickup,
           last_destination: booking.destination,
           total_bookings: (existing.total_bookings || 0) + 1,
+          trusted_addresses: updatedTrusted,
           updated_at: new Date().toISOString()
         }).eq("phone_number", userPhone);
         
         if (error) console.error(`[${callId}] Update caller error:`, error);
-        else console.log(`[${callId}] 💾 Updated caller ${userPhone} (${existing.total_bookings + 1} bookings)`);
+        else console.log(`[${callId}] 💾 Updated caller ${userPhone} (${existing.total_bookings + 1} bookings, ${updatedTrusted.length} trusted addresses)`);
       } else {
         // Insert new caller
         const { error } = await supabase.from("callers").insert({
           phone_number: userPhone,
+          name: callerName || null,
           last_pickup: booking.pickup,
           last_destination: booking.destination,
-          total_bookings: 1
+          total_bookings: 1,
+          trusted_addresses: updatedTrusted
         });
         
         if (error) console.error(`[${callId}] Insert caller error:`, error);
-        else console.log(`[${callId}] 💾 New caller saved: ${userPhone}`);
+        else console.log(`[${callId}] 💾 New caller saved: ${userPhone} with ${updatedTrusted.length} trusted addresses`);
       }
+      
+      // Update local cache for this session
+      callerTrustedAddresses = updatedTrusted;
     } catch (e) {
       console.error(`[${callId}] Save caller exception:`, e);
     }
@@ -1157,65 +1231,79 @@ Rules:
           
           // Geocode pickup if it changed and hasn't been verified yet
           if (pickupChanged && !knownBooking.pickupVerified) {
-            // Pass "pickup" as addressType so geocoder can use destination for location bias
-            const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous, "pickup");
-            if (pickupResult.found) {
-              // Check if there are multiple matches and caller has no history AND no other address to use as bias
-              const hasLocationContext = knownBooking.destination || callerLastPickup || callerLastDestination;
-              if (pickupResult.multiple_matches && pickupResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
-                console.log(`[${callId}] 🔀 Multiple pickup matches found (no context) - asking for clarification`);
-                askForAddressDisambiguation("pickup", pickupResult.multiple_matches);
-                return; // Wait for customer to clarify
-              }
+            // TRUSTED ADDRESS CHECK: Auto-verify if caller has used this pickup before
+            const trustedPickup = matchesTrustedAddress(knownBooking.pickup!);
+            if (trustedPickup) {
               knownBooking.pickupVerified = true;
-
-              const normalizedPickup = normalize(knownBooking.pickup!);
-              if (geocodeClarificationSent.pickup === normalizedPickup) {
-                geocodeClarificationSent.pickup = undefined;
-                clearGeocodeClarification(
-                  "pickup",
-                  knownBooking.pickup!,
-                  pickupResult.formatted_address || pickupResult.display_name
-                );
-              }
-
-              console.log(`[${callId}] ✅ Pickup verified: ${pickupResult.display_name}`);
+              console.log(`[${callId}] 🏠 Pickup auto-verified (trusted): "${knownBooking.pickup}" → "${trustedPickup}"`);
             } else {
-              // Address not found - ask Ada to request correction
-              notifyGeocodeResult("pickup", knownBooking.pickup!, false);
-              return; // Don't continue - wait for corrected address
+              // Pass "pickup" as addressType so geocoder can use destination for location bias
+              const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous, "pickup");
+              if (pickupResult.found) {
+                // Check if there are multiple matches and caller has no history AND no other address to use as bias
+                const hasLocationContext = knownBooking.destination || callerLastPickup || callerLastDestination;
+                if (pickupResult.multiple_matches && pickupResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
+                  console.log(`[${callId}] 🔀 Multiple pickup matches found (no context) - asking for clarification`);
+                  askForAddressDisambiguation("pickup", pickupResult.multiple_matches);
+                  return; // Wait for customer to clarify
+                }
+                knownBooking.pickupVerified = true;
+
+                const normalizedPickup = normalize(knownBooking.pickup!);
+                if (geocodeClarificationSent.pickup === normalizedPickup) {
+                  geocodeClarificationSent.pickup = undefined;
+                  clearGeocodeClarification(
+                    "pickup",
+                    knownBooking.pickup!,
+                    pickupResult.formatted_address || pickupResult.display_name
+                  );
+                }
+
+                console.log(`[${callId}] ✅ Pickup verified: ${pickupResult.display_name}`);
+              } else {
+                // Address not found - ask Ada to request correction
+                notifyGeocodeResult("pickup", knownBooking.pickup!, false);
+                return; // Don't continue - wait for corrected address
+              }
             }
           }
           
           // Geocode destination if it changed and hasn't been verified yet
           if (destinationChanged && !knownBooking.destinationVerified) {
-            // Pass "destination" as addressType so geocoder can use pickup for location bias
-            const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous, "destination");
-            if (destResult.found) {
-              // Check if there are multiple matches and no location context to help disambiguate
-              const hasLocationContext = knownBooking.pickup || callerLastPickup || callerLastDestination;
-              if (destResult.multiple_matches && destResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
-                console.log(`[${callId}] 🔀 Multiple destination matches found (no context) - asking for clarification`);
-                askForAddressDisambiguation("destination", destResult.multiple_matches);
-                return; // Wait for customer to clarify
-              }
+            // TRUSTED ADDRESS CHECK: Auto-verify if caller has used this destination before
+            const trustedDestination = matchesTrustedAddress(knownBooking.destination!);
+            if (trustedDestination) {
               knownBooking.destinationVerified = true;
-
-              const normalizedDestination = normalize(knownBooking.destination!);
-              if (geocodeClarificationSent.destination === normalizedDestination) {
-                geocodeClarificationSent.destination = undefined;
-                clearGeocodeClarification(
-                  "destination",
-                  knownBooking.destination!,
-                  destResult.formatted_address || destResult.display_name
-                );
-              }
-
-              console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
+              console.log(`[${callId}] 🏠 Destination auto-verified (trusted): "${knownBooking.destination}" → "${trustedDestination}"`);
             } else {
-              // Address not found - ask Ada to request correction
-              notifyGeocodeResult("destination", knownBooking.destination!, false);
-              return; // Don't continue - wait for corrected address
+              // Pass "destination" as addressType so geocoder can use pickup for location bias
+              const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous, "destination");
+              if (destResult.found) {
+                // Check if there are multiple matches and no location context to help disambiguate
+                const hasLocationContext = knownBooking.pickup || callerLastPickup || callerLastDestination;
+                if (destResult.multiple_matches && destResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
+                  console.log(`[${callId}] 🔀 Multiple destination matches found (no context) - asking for clarification`);
+                  askForAddressDisambiguation("destination", destResult.multiple_matches);
+                  return; // Wait for customer to clarify
+                }
+                knownBooking.destinationVerified = true;
+
+                const normalizedDestination = normalize(knownBooking.destination!);
+                if (geocodeClarificationSent.destination === normalizedDestination) {
+                  geocodeClarificationSent.destination = undefined;
+                  clearGeocodeClarification(
+                    "destination",
+                    knownBooking.destination!,
+                    destResult.formatted_address || destResult.display_name
+                  );
+                }
+
+                console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
+              } else {
+                // Address not found - ask Ada to request correction
+                notifyGeocodeResult("destination", knownBooking.destination!, false);
+                return; // Don't continue - wait for corrected address
+              }
             }
           }
         }

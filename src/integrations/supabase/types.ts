@@ -146,6 +146,7 @@ export type Database = {
           name: string | null
           phone_number: string
           total_bookings: number
+          trusted_addresses: string[] | null
           updated_at: string
         }
         Insert: {
@@ -156,6 +157,7 @@ export type Database = {
           name?: string | null
           phone_number: string
           total_bookings?: number
+          trusted_addresses?: string[] | null
           updated_at?: string
         }
         Update: {
@@ -166,6 +168,7 @@ export type Database = {
           name?: string | null
           phone_number?: string
           total_bookings?: number
+          trusted_addresses?: string[] | null
           updated_at?: string
         }
         Relationships: []
