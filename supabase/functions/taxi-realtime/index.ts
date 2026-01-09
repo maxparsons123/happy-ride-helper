@@ -214,7 +214,7 @@ ENDING THE CALL - CRITICAL:
 - After booking is confirmed, ask: "Is there anything else I can help you with?"
 - IMPORTANT: STOP speaking after you ask this question. Do NOT say goodbye in the same turn.
 - Wait for the customer's NEXT response.
-- ONLY if the customer clearly says "no", "that's all", "nothing else", "I'm good", etc:
+- ONLY if the customer clearly says "no", "that's all", "nothing else", "I'm good", "that's fine", "that's alright", "thanks", etc:
   - Say a brief goodbye ("You're welcome! Have a great journey, goodbye!")
   - Then IMMEDIATELY call the end_call function
 
@@ -980,12 +980,21 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         caller_last_destination: callerLastDestination || null,
         ...updates,
         transcripts: transcriptHistory,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       }, { onConflict: "call_id" });
       if (error) console.error(`[${callId}] Live call broadcast error:`, error);
     } catch (e) {
       console.error(`[${callId}] Live call broadcast exception:`, e);
     }
+  };
+
+  // Serialize writes to live_calls to prevent out-of-order transcript arrays.
+  // We keep it non-blocking (fire-and-forget) but guarantee ordering.
+  let liveCallBroadcastChain: Promise<void> = Promise.resolve();
+  const queueLiveCallBroadcast = (updates: Record<string, any>) => {
+    liveCallBroadcastChain = liveCallBroadcastChain
+      .then(() => broadcastLiveCall(updates))
+      .catch((e) => console.error(`[${callId}] Live call broadcast chain error:`, e));
   };
 
   // Extract customer name from transcript - improved with multi-word names and better patterns
@@ -1304,10 +1313,10 @@ Rules:
 
       if (pickupChanged || destinationChanged || passengersChanged || timeChanged) {
         console.log(`[${callId}] ✅ Known booking updated via AI extraction:`, knownBooking);
-        broadcastLiveCall({
+        queueLiveCallBroadcast({
           pickup: knownBooking.pickup,
           destination: knownBooking.destination,
-          passengers: knownBooking.passengers
+          passengers: knownBooking.passengers,
         });
 
         // GEOCODE NEW ADDRESSES (if geocoding is enabled)
@@ -1342,7 +1351,7 @@ Rules:
                   text: `🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed → trying Ada's interpretation "${adaPickup}"`,
                   timestamp: new Date().toISOString()
                 });
-                broadcastLiveCall({});
+                queueLiveCallBroadcast({});
                 
                 const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
                 if (adaResult.found) {
@@ -1358,7 +1367,7 @@ Rules:
                     text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaPickup}" (STT had "${extractedPickup}")`,
                     timestamp: new Date().toISOString()
                   });
-                  broadcastLiveCall({});
+                  queueLiveCallBroadcast({});
                 }
               }
               
@@ -1433,7 +1442,7 @@ Rules:
                   text: `🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed → trying Ada's interpretation "${adaDest}"`,
                   timestamp: new Date().toISOString()
                 });
-                broadcastLiveCall({});
+                queueLiveCallBroadcast({});
                 
                 const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
                 if (adaResult.found) {
@@ -1449,7 +1458,7 @@ Rules:
                     text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaDest}" (STT had "${extractedDest}")`,
                     timestamp: new Date().toISOString()
                   });
-                  broadcastLiveCall({});
+                  queueLiveCallBroadcast({});
                 }
               }
               
@@ -1603,10 +1612,10 @@ Rules:
       before.pickupTime !== knownBooking.pickupTime
     ) {
       console.log(`[${callId}] Known booking updated (fallback regex):`, knownBooking);
-      broadcastLiveCall({
+      queueLiveCallBroadcast({
         pickup: knownBooking.pickup,
         destination: knownBooking.destination,
-        passengers: knownBooking.passengers
+        passengers: knownBooking.passengers,
       });
     }
   };
@@ -1915,8 +1924,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             text: data.transcript,
             timestamp: new Date().toISOString()
           });
-          // Broadcast transcript update (await to preserve order)
-          await broadcastLiveCall({});
+          // Broadcast transcript update (queued to preserve order)
+          queueLiveCallBroadcast({});
         }
       }
 
@@ -2204,8 +2213,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             text: rawTranscript,
             timestamp: new Date().toISOString()
           });
-          // Broadcast transcript update (await to preserve order)
-          await broadcastLiveCall({});
+          // Broadcast transcript update (queued to preserve order)
+          queueLiveCallBroadcast({});
         }
         
         socket.send(
@@ -2909,7 +2918,17 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             t.includes("i'm good") ||
             t.includes("im good") ||
             t.includes("no thanks") ||
-            t.includes("no thank you");
+            t.includes("no thank you") ||
+            t.includes("that's fine") ||
+            t.includes("thats fine") ||
+            t.includes("that's alright") ||
+            t.includes("thats alright") ||
+            t.includes("that's okay") ||
+            t.includes("thats ok") ||
+            t.includes("that's ok") ||
+            t.includes("thanks") ||
+            t.includes("thank you") ||
+            t.includes("cheers");
 
           // Safety: don't allow hanging up unless customer explicitly declined further help.
           if (!customerSaidNo) {
@@ -3087,9 +3106,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         transcriptHistory.push({
           role: "user",
           text: message.text,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         });
-        broadcastLiveCall({});
+        queueLiveCallBroadcast({});
         
         console.log(`[${callId}] Text mode input: ${message.text}`);
         if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
