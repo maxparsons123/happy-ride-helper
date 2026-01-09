@@ -14,6 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
+      address_cache: {
+        Row: {
+          city: string | null
+          created_at: string | null
+          display_name: string
+          id: string
+          last_used_at: string | null
+          lat: number | null
+          lon: number | null
+          normalized: string
+          raw_input: string
+          use_count: number | null
+        }
+        Insert: {
+          city?: string | null
+          created_at?: string | null
+          display_name: string
+          id?: string
+          last_used_at?: string | null
+          lat?: number | null
+          lon?: number | null
+          normalized: string
+          raw_input: string
+          use_count?: number | null
+        }
+        Update: {
+          city?: string | null
+          created_at?: string | null
+          display_name?: string
+          id?: string
+          last_used_at?: string | null
+          lat?: number | null
+          lon?: number | null
+          normalized?: string
+          raw_input?: string
+          use_count?: number | null
+        }
+        Relationships: []
+      }
       bookings: {
         Row: {
           booked_at: string
@@ -268,7 +307,8 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      show_limit: { Args: never; Returns: number }
+      show_trgm: { Args: { "": string }; Returns: string[] }
     }
     Enums: {
       [_ in never]: never

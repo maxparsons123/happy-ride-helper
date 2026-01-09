@@ -1,9 +1,41 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.89.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+// Simple trigram-based similarity calculation
+function calculateSimilarity(str1: string, str2: string): number {
+  if (!str1 || !str2) return 0;
+  if (str1 === str2) return 1;
+  
+  const s1 = str1.toLowerCase();
+  const s2 = str2.toLowerCase();
+  
+  // Generate trigrams
+  const getTrigrams = (s: string): Set<string> => {
+    const trigrams = new Set<string>();
+    const padded = `  ${s} `;
+    for (let i = 0; i < padded.length - 2; i++) {
+      trigrams.add(padded.slice(i, i + 3));
+    }
+    return trigrams;
+  };
+  
+  const t1 = getTrigrams(s1);
+  const t2 = getTrigrams(s2);
+  
+  // Calculate Jaccard similarity
+  let intersection = 0;
+  for (const t of t1) {
+    if (t2.has(t)) intersection++;
+  }
+  
+  const union = t1.size + t2.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
 
 interface GeocodeResult {
   found: boolean;
@@ -38,7 +70,7 @@ serve(async (req) => {
   }
 
   try {
-    const { address, city, country = "UK", lat, lon, check_ambiguous = false } = await req.json();
+    const { address, city, country = "UK", lat, lon, check_ambiguous = false, skip_cache = false } = await req.json();
     
     if (!address) {
       return new Response(
@@ -48,6 +80,109 @@ serve(async (req) => {
     }
 
     const GOOGLE_MAPS_API_KEY = Deno.env.get("GOOGLE_MAPS_API_KEY");
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    
+    // Initialize Supabase client for cache operations
+    const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY 
+      ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+      : null;
+    
+    // Normalize the address for cache lookup
+    const normalizedAddress = address.toLowerCase().trim().replace(/\s+/g, ' ');
+    
+    // === CACHE LOOKUP (fuzzy matching) ===
+    if (!skip_cache && supabase) {
+      try {
+        // Use trigram similarity for fuzzy matching, optionally filter by city
+        let cacheQuery = supabase
+          .from("address_cache")
+          .select("*")
+          .order("use_count", { ascending: false })
+          .limit(5);
+        
+        // If we have a city, prefer matches in that city
+        if (city) {
+          cacheQuery = cacheQuery.eq("city", city);
+        }
+        
+        const { data: cacheResults, error: cacheError } = await cacheQuery;
+        
+        if (!cacheError && cacheResults && cacheResults.length > 0) {
+          // Find best fuzzy match using simple similarity
+          for (const cached of cacheResults) {
+            const similarity = calculateSimilarity(normalizedAddress, cached.normalized);
+            if (similarity >= 0.7) {
+              console.log(`[Geocode] ✅ CACHE HIT: "${address}" → "${cached.display_name}" (similarity: ${similarity.toFixed(2)})`);
+              
+              // Update use_count and last_used_at (fire-and-forget)
+              supabase
+                .from("address_cache")
+                .update({ use_count: cached.use_count + 1, last_used_at: new Date().toISOString() })
+                .eq("id", cached.id)
+                .then(() => {});
+              
+              return new Response(
+                JSON.stringify({
+                  found: true,
+                  address: address,
+                  display_name: cached.display_name,
+                  lat: cached.lat,
+                  lon: cached.lon,
+                  city: cached.city,
+                  cached: true, // Flag indicating this came from cache
+                  map_link: `https://www.google.com/maps?q=${cached.lat},${cached.lon}`,
+                }),
+                { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
+          }
+        }
+        
+        // Also try without city filter if we didn't find a match
+        if (city) {
+          const { data: globalResults } = await supabase
+            .from("address_cache")
+            .select("*")
+            .order("use_count", { ascending: false })
+            .limit(10);
+          
+          if (globalResults) {
+            for (const cached of globalResults) {
+              const similarity = calculateSimilarity(normalizedAddress, cached.normalized);
+              if (similarity >= 0.8) { // Higher threshold for cross-city matches
+                console.log(`[Geocode] ✅ CACHE HIT (cross-city): "${address}" → "${cached.display_name}" (similarity: ${similarity.toFixed(2)})`);
+                
+                supabase
+                  .from("address_cache")
+                  .update({ use_count: cached.use_count + 1, last_used_at: new Date().toISOString() })
+                  .eq("id", cached.id)
+                  .then(() => {});
+                
+                return new Response(
+                  JSON.stringify({
+                    found: true,
+                    address: address,
+                    display_name: cached.display_name,
+                    lat: cached.lat,
+                    lon: cached.lon,
+                    city: cached.city,
+                    cached: true,
+                    map_link: `https://www.google.com/maps?q=${cached.lat},${cached.lon}`,
+                  }),
+                  { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+            }
+          }
+        }
+        
+        console.log(`[Geocode] 🔍 Cache miss for: "${address}"`);
+      } catch (cacheErr) {
+        console.error("[Geocode] Cache lookup error:", cacheErr);
+        // Continue to Google lookup
+      }
+    }
     
     if (!GOOGLE_MAPS_API_KEY) {
       console.error("[Geocode] GOOGLE_MAPS_API_KEY not configured, falling back to Nominatim");
@@ -68,12 +203,43 @@ serve(async (req) => {
       }
     }
 
-    console.log(`[Geocode] Searching: "${address}" (city: ${city || 'N/A'}, coords: ${searchLat},${searchLon})`);
+    console.log(`[Geocode] Searching Google: "${address}" (city: ${city || 'N/A'}, coords: ${searchLat},${searchLon})`);
+
+    // Helper to cache a successful result
+    const cacheResult = (result: GeocodeResult) => {
+      if (supabase && result.found && result.lat && result.lon && result.display_name) {
+        supabase
+          .from("address_cache")
+          .upsert({
+            raw_input: address,
+            normalized: normalizedAddress,
+            display_name: result.display_name,
+            city: result.city || city || null,
+            lat: result.lat,
+            lon: result.lon,
+            use_count: 1,
+            last_used_at: new Date().toISOString(),
+          }, { onConflict: 'normalized,city' })
+          .then(({ error }) => {
+            if (error) {
+              // Try without city constraint for null city
+              if (error.message?.includes('unique')) {
+                console.log(`[Geocode] Address already cached: "${address}"`);
+              } else {
+                console.error("[Geocode] Cache save error:", error);
+              }
+            } else {
+              console.log(`[Geocode] 💾 Cached: "${address}" → "${result.display_name}"`);
+            }
+          });
+      }
+    };
 
     // If we have caller coordinates, try nearby search first for local places
     if (searchLat && searchLon) {
       const nearbyResult = await googleNearbySearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
       if (nearbyResult.found) {
+        cacheResult(nearbyResult);
         return new Response(
           JSON.stringify(nearbyResult),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -84,6 +250,7 @@ serve(async (req) => {
     // Try text search with location bias (check for multiple matches if requested)
     const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
     if (textSearchResult.found) {
+      cacheResult(textSearchResult);
       return new Response(
         JSON.stringify(textSearchResult),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -93,6 +260,7 @@ serve(async (req) => {
     // Fall back to Google Geocoding API for street addresses
     const geocodeResult = await googleGeocode(address, city, country, GOOGLE_MAPS_API_KEY);
     if (geocodeResult.found) {
+      cacheResult(geocodeResult);
       return new Response(
         JSON.stringify(geocodeResult),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
