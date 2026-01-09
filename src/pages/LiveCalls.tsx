@@ -788,14 +788,16 @@ export default function LiveCalls() {
 
                 {/* Live Transcript */}
                 <div className="flex-1 overflow-y-auto p-4 flex flex-col-reverse">
-                  <div className="space-y-3">
+                    <div className="space-y-3">
                     {selectedCallData.transcripts.length === 0 ? (
                       <div className="text-center py-12 text-muted-foreground">
                         <Clock className="w-8 h-8 mx-auto mb-2 animate-spin" />
                         <p>Waiting for conversation...</p>
                       </div>
                     ) : (
-                      selectedCallData.transcripts.map((t, i) => (
+                      [...selectedCallData.transcripts]
+                        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+                        .map((t, i) => (
                         <div
                           key={i}
                           className={`flex ${
