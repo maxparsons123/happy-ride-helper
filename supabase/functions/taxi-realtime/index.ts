@@ -1460,31 +1460,50 @@ Rules:
               }
               
               // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
-              // If both geocode OK, auto-pick the "cleaner" one (better formatting, house number, etc.)
+              // GOOGLE ARBITER: Geocode both and pick based on Google's resolution quality
               if (pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
                 console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaPickup}"`);
                 const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
                 if (adaResult.found) {
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedPickup}" Ada="${adaPickup}"`);
-                  // Auto-pick the better one: prefer Ada if it has house number + proper capitalization
-                  const adaHasNumber = /^\d+[A-Za-z]?\s/.test(adaPickup);
-                  const sttHasNumber = /^\d+[A-Za-z]?\s/.test(extractedPickup);
-                  const adaProperCase = /^[A-Z]/.test(adaPickup.replace(/^\d+[A-Za-z]?\s+/, ''));
                   
-                  if ((adaHasNumber && !sttHasNumber) || (adaHasNumber && adaProperCase)) {
-                    // Ada's version is cleaner - use it silently
+                  // GOOGLE ARBITER: Compare what Google resolved each to
+                  const sttGoogleName = (pickupResult.display_name || pickupResult.formatted_address || '').toLowerCase();
+                  const adaGoogleName = (adaResult.display_name || adaResult.formatted_address || '').toLowerCase();
+                  const sttNorm = normalize(extractedPickup);
+                  const adaNorm = normalize(adaPickup);
+                  
+                  // Calculate similarity between input and Google's output
+                  // Higher similarity = Google understood the input better
+                  const sttMatchesStt = sttGoogleName.includes(sttNorm.split(' ')[0]) || sttNorm.includes(sttGoogleName.split(',')[0].trim());
+                  const adaMatchesAda = adaGoogleName.includes(adaNorm.split(' ')[0]) || adaNorm.includes(adaGoogleName.split(',')[0].trim());
+                  
+                  // Check if they resolve to the SAME place (same Google output)
+                  const samePlace = sttGoogleName === adaGoogleName;
+                  
+                  console.log(`[${callId}] 🔬 GOOGLE ARBITER: STT→"${sttGoogleName}" Ada→"${adaGoogleName}" same=${samePlace}`);
+                  
+                  if (samePlace) {
+                    // Both resolve to same place - prefer STT (what customer actually said)
+                    console.log(`[${callId}] 📝 Same place - keeping STT version: "${extractedPickup}"`);
+                  } else if (sttMatchesStt && !adaMatchesAda) {
+                    // STT's input matched Google better - keep STT
+                    console.log(`[${callId}] 📝 STT matched Google better - keeping: "${extractedPickup}"`);
+                  } else if (adaMatchesAda && !sttMatchesStt) {
+                    // Ada's input matched Google better - use Ada
                     usedAddress = adaPickup;
                     knownBooking.pickup = adaPickup;
                     pickupResult = adaResult;
-                    console.log(`[${callId}] 📝 Auto-picked Ada's cleaner version: "${adaPickup}" (STT had "${extractedPickup}")`);
+                    console.log(`[${callId}] 📝 Ada matched Google better - using: "${adaPickup}"`);
                     transcriptHistory.push({
                       role: "system",
-                      text: `📝 AUTO-PICK: Used Ada's "${adaPickup}" over STT's "${extractedPickup}"`,
+                      text: `📝 AUTO-PICK: Used Ada's "${adaPickup}" over STT's "${extractedPickup}" (Google validated)`,
                       timestamp: new Date().toISOString()
                     });
                     queueLiveCallBroadcast({});
                   } else {
-                    console.log(`[${callId}] 📝 Keeping STT version: "${extractedPickup}" (Ada had "${adaPickup}")`);
+                    // Neither clearly better - default to STT (what customer said)
+                    console.log(`[${callId}] 📝 Inconclusive - defaulting to STT: "${extractedPickup}"`);
                   }
                 } else {
                   // Ada's version failed geocoding - stick with STT (which succeeded)
@@ -1588,30 +1607,50 @@ Rules:
               }
               
               // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
-              // If both geocode OK, auto-pick the "cleaner" one (better formatting, capitalization, etc.)
+              // GOOGLE ARBITER: Geocode both and pick based on Google's resolution quality
               if (destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
                 console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaDest}"`);
                 const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
                 if (adaResult.found) {
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedDest}" Ada="${adaDest}"`);
-                  // Auto-pick the better one: prefer Ada if it has proper capitalization or is longer (more complete)
-                  const adaProperCase = /^[A-Z]/.test(adaDest);
-                  const adaLonger = adaDest.length > extractedDest.length;
                   
-                  if (adaProperCase && adaLonger) {
-                    // Ada's version is cleaner - use it silently
+                  // GOOGLE ARBITER: Compare what Google resolved each to
+                  const sttGoogleName = (destResult.display_name || destResult.formatted_address || '').toLowerCase();
+                  const adaGoogleName = (adaResult.display_name || adaResult.formatted_address || '').toLowerCase();
+                  const sttNorm = normalize(extractedDest);
+                  const adaNorm = normalize(adaDest);
+                  
+                  // Calculate similarity between input and Google's output
+                  // Higher similarity = Google understood the input better
+                  const sttMatchesStt = sttGoogleName.includes(sttNorm.split(' ')[0]) || sttNorm.includes(sttGoogleName.split(',')[0].trim());
+                  const adaMatchesAda = adaGoogleName.includes(adaNorm.split(' ')[0]) || adaNorm.includes(adaGoogleName.split(',')[0].trim());
+                  
+                  // Check if they resolve to the SAME place (same Google output)
+                  const samePlace = sttGoogleName === adaGoogleName;
+                  
+                  console.log(`[${callId}] 🔬 GOOGLE ARBITER: STT→"${sttGoogleName}" Ada→"${adaGoogleName}" same=${samePlace}`);
+                  
+                  if (samePlace) {
+                    // Both resolve to same place - prefer STT (what customer actually said)
+                    console.log(`[${callId}] 📝 Same place - keeping STT version: "${extractedDest}"`);
+                  } else if (sttMatchesStt && !adaMatchesAda) {
+                    // STT's input matched Google better - keep STT
+                    console.log(`[${callId}] 📝 STT matched Google better - keeping: "${extractedDest}"`);
+                  } else if (adaMatchesAda && !sttMatchesStt) {
+                    // Ada's input matched Google better - use Ada
                     usedAddress = adaDest;
                     knownBooking.destination = adaDest;
                     destResult = adaResult;
-                    console.log(`[${callId}] 📝 Auto-picked Ada's cleaner version: "${adaDest}" (STT had "${extractedDest}")`);
+                    console.log(`[${callId}] 📝 Ada matched Google better - using: "${adaDest}"`);
                     transcriptHistory.push({
                       role: "system",
-                      text: `📝 AUTO-PICK: Used Ada's "${adaDest}" over STT's "${extractedDest}"`,
+                      text: `📝 AUTO-PICK: Used Ada's "${adaDest}" over STT's "${extractedDest}" (Google validated)`,
                       timestamp: new Date().toISOString()
                     });
                     queueLiveCallBroadcast({});
                   } else {
-                    console.log(`[${callId}] 📝 Keeping STT version: "${extractedDest}" (Ada had "${adaDest}")`);
+                    // Neither clearly better - default to STT (what customer said)
+                    console.log(`[${callId}] 📝 Inconclusive - defaulting to STT: "${extractedDest}"`);
                   }
                 } else {
                   // Ada's version failed geocoding - stick with STT (which succeeded)
