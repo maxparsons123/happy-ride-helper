@@ -117,10 +117,12 @@ export default function LiveCalls() {
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [addressVerification, setAddressVerification] = useState(true);
+  const [useTripResolver, setUseTripResolver] = useState(true);
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
   const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
   const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
+  const [tripResolveResult, setTripResolveResult] = useState<any>(null);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<AudioQueue | null>(null);
@@ -259,49 +261,126 @@ export default function LiveCalls() {
     if (!addressVerification || !selectedCall) {
       setPickupGeocode(null);
       setDestinationGeocode(null);
+      setTripResolveResult(null);
       return;
     }
 
     const callData = calls.find(c => c.call_id === selectedCall);
     if (!callData) return;
 
-    const geocodeAddress = async (address: string, setter: (r: GeocodeResult) => void) => {
-      if (!address) {
-        setter({ found: false, address: "", error: "No address" });
-        return;
-      }
-      
-      setter({ found: false, address, loading: true });
-      
-      try {
-        const { data, error } = await supabase.functions.invoke("geocode", {
-          body: { address, country: "UK" }
-        });
-        
-        if (error) {
-          setter({ found: false, address, error: error.message });
-        } else {
-          setter(data);
+    // Use taxi-trip-resolve if enabled, otherwise fallback to basic geocode
+    if (useTripResolver) {
+      const resolveTripAddresses = async () => {
+        if (!callData.pickup && !callData.destination) {
+          setTripResolveResult(null);
+          setPickupGeocode(null);
+          setDestinationGeocode(null);
+          return;
         }
-      } catch (err) {
-        setter({ found: false, address, error: "Failed to verify" });
+
+        // Set loading states
+        if (callData.pickup) {
+          setPickupGeocode({ found: false, address: callData.pickup, loading: true });
+        }
+        if (callData.destination) {
+          setDestinationGeocode({ found: false, address: callData.destination, loading: true });
+        }
+
+        try {
+          const { data, error } = await supabase.functions.invoke("taxi-trip-resolve", {
+            body: {
+              pickup_input: callData.pickup || undefined,
+              dropoff_input: callData.destination || undefined,
+              caller_city_hint: callData.caller_last_pickup ? undefined : "Coventry", // Default hint
+              passengers: callData.passengers || 1,
+              country: "GB"
+            }
+          });
+
+          if (error) {
+            console.error("Trip resolve error:", error);
+            setTripResolveResult({ ok: false, error: error.message });
+            if (callData.pickup) setPickupGeocode({ found: false, address: callData.pickup, error: error.message });
+            if (callData.destination) setDestinationGeocode({ found: false, address: callData.destination, error: error.message });
+            return;
+          }
+
+          console.log("Trip resolve result:", data);
+          setTripResolveResult(data);
+
+          // Map to geocode result format for UI display
+          if (data.pickup) {
+            setPickupGeocode({
+              found: true,
+              address: callData.pickup!,
+              display_name: data.pickup.formatted_address,
+              lat: data.pickup.lat,
+              lon: data.pickup.lng
+            });
+          } else if (callData.pickup) {
+            setPickupGeocode({ found: false, address: callData.pickup, error: "Not found" });
+          }
+
+          if (data.dropoff) {
+            setDestinationGeocode({
+              found: true,
+              address: callData.destination!,
+              display_name: data.dropoff.formatted_address,
+              lat: data.dropoff.lat,
+              lon: data.dropoff.lng
+            });
+          } else if (callData.destination) {
+            setDestinationGeocode({ found: false, address: callData.destination, error: "Not found" });
+          }
+        } catch (err) {
+          console.error("Trip resolve exception:", err);
+          setTripResolveResult({ ok: false, error: "Request failed" });
+        }
+      };
+
+      resolveTripAddresses();
+    } else {
+      // Use basic geocode function
+      setTripResolveResult(null);
+      
+      const geocodeAddress = async (address: string, setter: (r: GeocodeResult) => void) => {
+        if (!address) {
+          setter({ found: false, address: "", error: "No address" });
+          return;
+        }
+        
+        setter({ found: false, address, loading: true });
+        
+        try {
+          const { data, error } = await supabase.functions.invoke("geocode", {
+            body: { address, country: "UK" }
+          });
+          
+          if (error) {
+            setter({ found: false, address, error: error.message });
+          } else {
+            setter(data);
+          }
+        } catch (err) {
+          setter({ found: false, address, error: "Failed to verify" });
+        }
+      };
+
+      // Geocode pickup if present
+      if (callData.pickup) {
+        geocodeAddress(callData.pickup, setPickupGeocode);
+      } else {
+        setPickupGeocode(null);
       }
-    };
 
-    // Geocode pickup if present
-    if (callData.pickup) {
-      geocodeAddress(callData.pickup, setPickupGeocode);
-    } else {
-      setPickupGeocode(null);
+      // Geocode destination if present
+      if (callData.destination) {
+        geocodeAddress(callData.destination, setDestinationGeocode);
+      } else {
+        setDestinationGeocode(null);
+      }
     }
-
-    // Geocode destination if present
-    if (callData.destination) {
-      geocodeAddress(callData.destination, setDestinationGeocode);
-    } else {
-      setDestinationGeocode(null);
-    }
-  }, [selectedCall, addressVerification, calls]);
+  }, [selectedCall, addressVerification, useTripResolver, calls]);
 
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
@@ -371,6 +450,22 @@ export default function LiveCalls() {
                 Verify Addresses
               </label>
             </div>
+            {/* Trip Resolver Toggle (uses taxi-trip-resolve function) */}
+            {addressVerification && (
+              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
+                <span className={`text-xs font-medium ${!useTripResolver ? 'text-primary' : 'text-muted-foreground'}`}>
+                  Basic
+                </span>
+                <Switch
+                  id="trip-resolver"
+                  checked={useTripResolver}
+                  onCheckedChange={setUseTripResolver}
+                />
+                <span className={`text-xs font-medium ${useTripResolver ? 'text-green-400' : 'text-muted-foreground'}`}>
+                  Trip Resolver
+                </span>
+              </div>
+            )}
             {/* Audio toggle */}
             <Button
               variant={audioEnabled ? "default" : "outline"}
@@ -647,6 +742,46 @@ export default function LiveCalls() {
                           <span>{selectedCallData.fare || "—"}</span>
                         </div>
                       </div>
+
+                      {/* Trip Resolver Results */}
+                      {addressVerification && useTripResolver && tripResolveResult?.ok && (
+                        <div className="mt-3 pt-3 border-t border-primary/20 space-y-2">
+                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                            📍 Trip Resolver
+                            {tripResolveResult.inferred_area?.city && (
+                              <Badge variant="outline" className="text-xs">
+                                {tripResolveResult.inferred_area.city} ({tripResolveResult.inferred_area.confidence})
+                              </Badge>
+                            )}
+                          </p>
+                          <div className="grid grid-cols-3 gap-3 text-sm">
+                            {tripResolveResult.distance && (
+                              <div className="bg-muted/50 rounded p-2 text-center">
+                                <p className="text-xs text-muted-foreground">Distance</p>
+                                <p className="font-semibold">{tripResolveResult.distance.miles} mi</p>
+                                <p className="text-xs text-muted-foreground">{tripResolveResult.distance.duration_text}</p>
+                              </div>
+                            )}
+                            {tripResolveResult.fare_estimate && (
+                              <div className="bg-muted/50 rounded p-2 text-center">
+                                <p className="text-xs text-muted-foreground">Est. Fare</p>
+                                <p className="font-semibold text-primary">£{tripResolveResult.fare_estimate.amount}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  £{tripResolveResult.fare_estimate.breakdown.base} + £{tripResolveResult.fare_estimate.breakdown.per_mile_rate}/mi
+                                </p>
+                              </div>
+                            )}
+                            {tripResolveResult.pickup?.city && tripResolveResult.dropoff?.city && (
+                              <div className="bg-muted/50 rounded p-2 text-center">
+                                <p className="text-xs text-muted-foreground">Route</p>
+                                <p className="font-semibold text-xs">
+                                  {tripResolveResult.pickup.city} → {tripResolveResult.dropoff.city}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
