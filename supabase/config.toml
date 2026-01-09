@@ -29,3 +29,6 @@ verify_jwt = false
 
 [functions.taxi-address-tts]
 verify_jwt = false
+
+[functions.taxi-trip-resolve]
+verify_jwt = false
