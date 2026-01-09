@@ -442,9 +442,21 @@ async function getPlaceDetails(
     // Build display name: prefer place name, fall back to street address
     let displayName = result.name || result.formatted_address;
     
-    // If we have a house number and street, include it
+    // If we have a house number and street, check if it's already in the name
     if (houseNumber && streetName) {
-      displayName = `${result.name || ''} ${houseNumber} ${streetName}`.trim();
+      const streetAddress = `${houseNumber} ${streetName}`;
+      // Only add address if name doesn't already contain it (avoid "7 Russell St 7 Russell Street")
+      const nameContainsAddress = displayName && (
+        displayName.toLowerCase().includes(streetName.toLowerCase()) ||
+        displayName.match(new RegExp(`^${houseNumber}\\s`, 'i'))
+      );
+      
+      if (!nameContainsAddress) {
+        displayName = `${displayName || ''} ${streetAddress}`.trim();
+      } else if (!displayName || displayName === result.formatted_address) {
+        // If we only have formatted_address, use clean street address
+        displayName = streetAddress;
+      }
     }
 
     console.log(`[Geocode] ✅ Found: "${displayName}" (${city}, ${postcode}) at ${latitude},${longitude}`);
