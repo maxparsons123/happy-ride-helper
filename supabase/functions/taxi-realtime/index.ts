@@ -1915,8 +1915,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             text: data.transcript,
             timestamp: new Date().toISOString()
           });
-          // Broadcast transcript update
-          broadcastLiveCall({});
+          // Broadcast transcript update (await to preserve order)
+          await broadcastLiveCall({});
         }
       }
 
@@ -2204,8 +2204,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             text: rawTranscript,
             timestamp: new Date().toISOString()
           });
-          // Broadcast transcript update
-          broadcastLiveCall({});
+          // Broadcast transcript update (await to preserve order)
+          await broadcastLiveCall({});
         }
         
         socket.send(
