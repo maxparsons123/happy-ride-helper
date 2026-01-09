@@ -781,6 +781,34 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         if (!callerCity && callerLastDestination) {
           callerCity = extractCityFromAddress(callerLastDestination);
         }
+        
+        // If no city found in text, geocode the history address to get city from Google
+        if (!callerCity && (callerLastPickup || callerLastDestination)) {
+          const historyAddr = callerLastPickup || callerLastDestination;
+          console.log(`[${callId}] 🏙️ No city in address text, geocoding history: "${historyAddr}"`);
+          try {
+            const geoResp = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify({ address: historyAddr, country: "UK" }),
+            });
+            const geoData = await geoResp.json();
+            if (geoData.found && geoData.city) {
+              callerCity = geoData.city;
+              console.log(`[${callId}] 🏙️ Got caller city from geocoding: ${callerCity}`);
+            }
+            // Also store coordinates for stronger biasing
+            if (geoData.found && geoData.lat && geoData.lon) {
+              // These will be used as fallback bias in geocodeAddress
+              console.log(`[${callId}] 📍 Caller history coordinates: ${geoData.lat}, ${geoData.lon}`);
+            }
+          } catch (e) {
+            console.error(`[${callId}] Failed to geocode caller history:`, e);
+          }
+        }
 
         console.log(`[${callId}] 👤 Known caller: ${callerName} (${callerTotalBookings} previous bookings)`);
         if (callerLastPickup) {
