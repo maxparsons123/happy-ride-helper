@@ -1927,7 +1927,13 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       // User transcript - extract booking info using AI
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         const rawTranscript = data.transcript || "";
-        console.log(`[${callId}] Raw user transcript: ${rawTranscript}`);
+        console.log(`[${callId}] Raw user transcript: "${rawTranscript}" (length: ${rawTranscript.length})`);
+        
+        // Log empty/very short transcripts for debugging
+        if (!rawTranscript || rawTranscript.trim().length < 2) {
+          console.log(`[${callId}] ⚠️ Empty or very short transcript received - likely audio quality issue`);
+          return;
+        }
         
         // CONTENT-BASED ECHO FILTER: Check if transcript matches what Ada just said
         // This is more reliable than time-based filtering on phone lines
@@ -2221,6 +2227,13 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
         awaitingResponseAfterCommit = true;
         responseCreatedSinceCommit = false;
+      }
+
+      // Handle transcription failures - important for debugging missed responses
+      if (data.type === "conversation.item.input_audio_transcription.failed") {
+        console.log(`[${callId}] ⚠️ TRANSCRIPTION FAILED:`, JSON.stringify(data.error || data));
+        // Notify frontend that transcription failed
+        socket.send(JSON.stringify({ type: "transcription_failed", error: data.error }));
       }
 
       // DEBUG: log response lifecycle events (helps diagnose missing audio)
