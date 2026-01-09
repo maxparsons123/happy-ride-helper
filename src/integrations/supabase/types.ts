@@ -56,6 +56,7 @@ export type Database = {
       bookings: {
         Row: {
           booked_at: string
+          booking_details: Json | null
           call_id: string
           caller_name: string | null
           caller_phone: string
@@ -75,6 +76,7 @@ export type Database = {
         }
         Insert: {
           booked_at?: string
+          booking_details?: Json | null
           call_id: string
           caller_name?: string | null
           caller_phone: string
@@ -94,6 +96,7 @@ export type Database = {
         }
         Update: {
           booked_at?: string
+          booking_details?: Json | null
           call_id?: string
           caller_name?: string | null
           caller_phone?: string
