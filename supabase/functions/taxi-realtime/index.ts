@@ -2548,23 +2548,26 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       }
 
       // Audio buffer committed (server VAD auto-commits)
-      // Trigger response.create here for speed - the model already has the audio
+      // We delay response.create slightly to let Whisper catch up with transcription
+      // This keeps responses fast while ensuring transcript ordering is correct
       if (data.type === "input_audio_buffer.committed") {
         console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
         lastAudioCommitAt = Date.now();
         awaitingResponseAfterCommit = true;
         responseCreatedSinceCommit = false;
         
-        // Trigger Ada's response immediately after audio is committed
-        // This is faster than waiting for transcription.completed
-        if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response: { modalities: ["audio", "text"] },
-          }));
-          responseCreatedSinceCommit = true;
-          console.log(`[${callId}] >>> response.create sent (on committed)`);
-        }
+        // Small delay (150ms) to let transcription complete before AI responds
+        // This prevents "out of order" transcripts where AI response appears before user input
+        setTimeout(() => {
+          if (sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }));
+            responseCreatedSinceCommit = true;
+            console.log(`[${callId}] >>> response.create sent (150ms after committed)`);
+          }
+        }, 150);
       }
 
       // Handle transcription failures - important for debugging missed responses
