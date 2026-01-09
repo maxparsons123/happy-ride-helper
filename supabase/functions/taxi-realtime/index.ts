@@ -1000,24 +1000,61 @@ Rules:
 
       // Only update fields that were extracted (non-null)
       const before = { ...knownBooking };
-      
+
+      // Lightweight "what was Ada asking" detection to avoid stray answers overwriting fields.
+      // Example: Ada asks "How many passengers?" and the user answers with a location.
+      const lastAssistantText = [...transcriptHistory]
+        .reverse()
+        .find((m) => m.role === "assistant")?.text
+        ?.toLowerCase() || "";
+
+      const expectingPassengers = /how\s+many\s+passengers|passengers\s+will\s+there\s+be|how\s+many\s+people/.test(lastAssistantText);
+      const expectingTime = /when\s+do\s+you\s+need\s+the\s+taxi|for\s+now\s+or\s+a\s+later\s+time/.test(lastAssistantText);
+
+      const transcriptLower = (transcript || "").toLowerCase();
+      const containsExplicitDestinationCue = /\b(to|going\s+to|heading\s+to|take\s+me\s+to|drop\s+me\s+at|destination)\b/.test(transcriptLower);
+      const containsExplicitPickupCue = /\b(from|pick\s+me\s+up|pickup|collect\s+me\s+from)\b/.test(transcriptLower);
+
       if (extracted.pickup_location) {
-        const newPickup = extracted.pickup_location;
-        if (newPickup !== knownBooking.pickup) {
-          // Reset verification flags when the address changes
-          knownBooking.pickupVerified = false;
-          knownBooking.highFareVerified = false;
+        // If Ada was asking for passengers/time and the user didn't provide passengers/time,
+        // don't let a stray pickup overwrite the current booking.
+        if ((expectingPassengers && !extracted.number_of_passengers && !containsExplicitPickupCue) ||
+            (expectingTime && !extracted.pickup_time && !containsExplicitPickupCue)) {
+          console.log(`[${callId}] 🛑 Ignoring pickup extraction (doesn't match last question):`, {
+            lastAssistantText,
+            transcript,
+            extractedPickup: extracted.pickup_location,
+          });
+        } else {
+          const newPickup = extracted.pickup_location;
+          if (newPickup !== knownBooking.pickup) {
+            // Reset verification flags when the address changes
+            knownBooking.pickupVerified = false;
+            knownBooking.highFareVerified = false;
+          }
+          knownBooking.pickup = newPickup;
         }
-        knownBooking.pickup = newPickup;
       }
+
       if (extracted.dropoff_location) {
-        const newDestination = extracted.dropoff_location;
-        if (newDestination !== knownBooking.destination) {
-          // Reset verification flags when the address changes
-          knownBooking.destinationVerified = false;
-          knownBooking.highFareVerified = false;
+        // If Ada was asking for passengers/time and the user didn't provide passengers/time,
+        // don't let a stray "location" answer overwrite destination.
+        if ((expectingPassengers && !extracted.number_of_passengers && !containsExplicitDestinationCue) ||
+            (expectingTime && !extracted.pickup_time && !containsExplicitDestinationCue)) {
+          console.log(`[${callId}] 🛑 Ignoring destination extraction (doesn't match last question):`, {
+            lastAssistantText,
+            transcript,
+            extractedDestination: extracted.dropoff_location,
+          });
+        } else {
+          const newDestination = extracted.dropoff_location;
+          if (newDestination !== knownBooking.destination) {
+            // Reset verification flags when the address changes
+            knownBooking.destinationVerified = false;
+            knownBooking.highFareVerified = false;
+          }
+          knownBooking.destination = newDestination;
         }
-        knownBooking.destination = newDestination;
       }
       if (extracted.number_of_passengers) {
         knownBooking.passengers = extracted.number_of_passengers;
