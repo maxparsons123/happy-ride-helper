@@ -1947,12 +1947,14 @@ Rules:
             },
             // Server VAD - tuned for phone audio where pauses can be longer
             // Give user more time to complete their response before committing
+            // IMPORTANT: We DO NOT auto-create responses; we trigger response.create only after STT completes.
+            // This prevents Ada responding before Whisper has finalized the user's words ("out-of-order" turns).
             turn_detection: {
               type: "server_vad",
               threshold: 0.6,            // Slightly lower = catch softer speech on phone lines
               prefix_padding_ms: 400,    // Capture more lead-in for phone audio
               silence_duration_ms: 1200, // Wait 1.2s of silence (phone audio has more pauses)
-              create_response: true,     // Auto-create response when speech ends
+              create_response: false,    // Manual response.create after transcription.completed
               interrupt_response: true   // Allow user to interrupt Ada
             },
             tools: [
@@ -2528,11 +2530,18 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           }),
         );
 
-        // NOTE: With create_response: true in VAD config, OpenAI auto-creates responses
-        // Removed manual fallback to prevent double-speak race condition
-        
+
+        // Manually trigger Ada's response AFTER we have the final transcript.
+        // This avoids "out-of-order" turns where the model starts responding before Whisper finishes.
+        if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] },
+          }));
+          responseCreatedSinceCommit = true;
+        }
+
         awaitingResponseAfterCommit = false;
-        responseCreatedSinceCommit = false;
       }
 
       // Speech started (barge-in detection) - CANCEL AI response for faster interruption
