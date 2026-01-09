@@ -13,6 +13,7 @@ const corsHeaders = {
 
 interface ResolvedLocation {
   raw_input: string;
+  name?: string;
   formatted_address: string;
   lat: number;
   lng: number;
@@ -321,6 +322,54 @@ async function resolveHouseAddress(
   }
 }
 
+function extractKeyTokens(query: string): string[] {
+  const stopwords = new Set([
+    "the",
+    "a",
+    "an",
+    "in",
+    "at",
+    "to",
+    "from",
+    "please",
+    "for",
+    "on",
+    "and",
+    "of",
+    "uk",
+    "united",
+    "kingdom",
+  ]);
+
+  const cityTokens = new Set<string>();
+  for (const [city, info] of Object.entries(UK_CITIES)) {
+    cityTokens.add(city.toLowerCase());
+    for (const a of info.aliases) cityTokens.add(a.toLowerCase());
+  }
+
+  return (query || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !stopwords.has(t))
+    .filter((t) => !cityTokens.has(t))
+    .filter((t) => t.length >= 4)
+    .slice(0, 8);
+}
+
+function isRelevantTextSearchMatch(
+  query: string,
+  resultName?: string,
+  formattedAddress?: string
+): boolean {
+  const tokens = extractKeyTokens(query);
+  if (tokens.length === 0) return true;
+
+  const hay = `${resultName || ""} ${formattedAddress || ""}`.toLowerCase();
+  return tokens.some((t) => hay.includes(t));
+}
+
 /**
  * TEXT SEARCH - Good for named places with local bias
  * Uses Text Search API with location bias (5km radius)
@@ -351,16 +400,24 @@ async function resolveTextSearch(
     const best = data.results[0];
     const loc = best.geometry?.location;
     if (!loc) return null;
-    
+
+    const bestName = best.name || "";
+    const bestAddr = best.formatted_address || "";
+    if (!isRelevantTextSearchMatch(query, bestName, bestAddr)) {
+      console.warn(`[TextSearch] Low relevance match rejected: query="${query}" best="${bestName}" addr="${bestAddr}"`);
+      return null;
+    }
+
     // Upgrade with Place Details for full address components
     if (best.place_id) {
       const detailed = await upgradeWithPlaceDetails(best.place_id, query);
       if (detailed) return detailed;
     }
-    
+
     return {
       raw_input: query,
-      formatted_address: best.formatted_address,
+      name: bestName || undefined,
+      formatted_address: bestAddr,
       lat: loc.lat,
       lng: loc.lng,
     };
@@ -399,22 +456,30 @@ async function resolveLooseLocal(
     const best = data.results[0];
     const loc = best.geometry?.location;
     if (!loc) return null;
-    
+
+    const bestName = best.name || "";
+    const bestAddr = best.formatted_address || "";
+    if (!isRelevantTextSearchMatch(query, bestName, bestAddr)) {
+      console.warn(`[LooseLocal] Low relevance match rejected: query="${query}" best="${bestName}" addr="${bestAddr}"`);
+      return null;
+    }
+
     // Verify it's actually within range (8km)
     const distanceMeters = haversineDistance(lat, lng, loc.lat, loc.lng);
     if (distanceMeters > 10000) { // 10km max for pickups
       console.warn(`[LooseLocal] Result too far: ${distanceMeters}m`);
       return null;
     }
-    
+
     if (best.place_id) {
       const detailed = await upgradeWithPlaceDetails(best.place_id, query);
       if (detailed) return detailed;
     }
-    
+
     return {
       raw_input: query,
-      formatted_address: best.formatted_address,
+      name: bestName || undefined,
+      formatted_address: bestAddr,
       lat: loc.lat,
       lng: loc.lng,
     };
@@ -454,7 +519,14 @@ async function resolveGlobalTextSearch(
     const best = data.results[0];
     const loc = best.geometry?.location;
     if (!loc) return null;
-    
+
+    const bestName = best.name || "";
+    const bestAddr = best.formatted_address || "";
+    if (!isRelevantTextSearchMatch(query, bestName, bestAddr)) {
+      console.warn(`[GlobalSearch] Low relevance match rejected: query="${query}" best="${bestName}" addr="${bestAddr}"`);
+      return null;
+    }
+
     // Upgrade with Place Details
     if (best.place_id) {
       const detailed = await upgradeWithPlaceDetails(best.place_id, query);
@@ -467,10 +539,11 @@ async function resolveGlobalTextSearch(
         return detailed;
       }
     }
-    
+
     return {
       raw_input: query,
-      formatted_address: best.formatted_address,
+      name: bestName || undefined,
+      formatted_address: bestAddr,
       lat: loc.lat,
       lng: loc.lng,
     };
@@ -512,6 +585,7 @@ async function upgradeWithPlaceDetails(
     
     return {
       raw_input: rawInput,
+      name: result.name || undefined,
       formatted_address: result.formatted_address,
       lat: loc.lat,
       lng: loc.lng,
@@ -888,6 +962,17 @@ serve(async (req) => {
     
     if (pickup) response.pickup = pickup;
     if (dropoff) response.dropoff = dropoff;
+
+    // If an input was provided but we couldn't resolve it, surface an error (prevents random/incorrect matches)
+    if (pickup_input && !pickup && !response.error) {
+      response.ok = false;
+      response.error = `Pickup "${pickup_input}" could not be found near ${cityContext || "your area"}. Please provide a house number and street, or a well-known landmark.`;
+    }
+
+    if (dropoff_input && !dropoff && !response.error) {
+      response.ok = false;
+      response.error = `Destination "${dropoff_input}" could not be found. If it's a venue name, please add the area/town (e.g., "${dropoff_input}, Coventry").`;
+    }
     
     // Update city context from resolved addresses
     if (!cityContext) {
