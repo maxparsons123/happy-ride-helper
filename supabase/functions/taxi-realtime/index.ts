@@ -1384,24 +1384,40 @@ Rules:
                 }
               }
               
-              // If extracted succeeds AND Ada has a different interpretation, store BOTH for Ada to choose
+              // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
+              // If both geocode OK, auto-pick the "cleaner" one (better formatting, house number, etc.)
               if (pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
-                console.log(`[${callId}] 🔍 DUAL-SOURCE: Both sources available, checking Ada's version too: "${adaPickup}"`);
+                console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaPickup}"`);
                 const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
                 if (adaResult.found) {
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedPickup}" Ada="${adaPickup}"`);
-                  // Store Ada's alternative so we can present both options
-                  knownBooking.pickupAlternative = adaPickup;
-                  // Keep the STT version as primary but Ada has the alternative
-                  console.log(`[${callId}] 📝 Storing both pickup options: STT="${extractedPickup}" Ada="${adaPickup}"`);
+                  // Auto-pick the better one: prefer Ada if it has house number + proper capitalization
+                  const adaHasNumber = /^\d+[A-Za-z]?\s/.test(adaPickup);
+                  const sttHasNumber = /^\d+[A-Za-z]?\s/.test(extractedPickup);
+                  const adaProperCase = /^[A-Z]/.test(adaPickup.replace(/^\d+[A-Za-z]?\s+/, ''));
+                  
+                  if ((adaHasNumber && !sttHasNumber) || (adaHasNumber && adaProperCase)) {
+                    // Ada's version is cleaner - use it silently
+                    usedAddress = adaPickup;
+                    knownBooking.pickup = adaPickup;
+                    pickupResult = adaResult;
+                    console.log(`[${callId}] 📝 Auto-picked Ada's cleaner version: "${adaPickup}" (STT had "${extractedPickup}")`);
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `📝 AUTO-PICK: Used Ada's "${adaPickup}" over STT's "${extractedPickup}"`,
+                      timestamp: new Date().toISOString()
+                    });
+                    queueLiveCallBroadcast({});
+                  } else {
+                    console.log(`[${callId}] 📝 Keeping STT version: "${extractedPickup}" (Ada had "${adaPickup}")`);
+                  }
                 } else {
-                  // Ada's version failed, clear any stale alternative
-                  knownBooking.pickupAlternative = undefined;
+                  // Ada's version failed geocoding - stick with STT (which succeeded)
+                  console.log(`[${callId}] ❌ Ada's version "${adaPickup}" failed geocoding, keeping STT's "${extractedPickup}"`);
                 }
-              } else {
-                // No alternative or same address - clear stale alternatives
-                knownBooking.pickupAlternative = undefined;
               }
+              // Clear any stale alternatives - we auto-pick now, no need to store
+              knownBooking.pickupAlternative = undefined;
               
               if (pickupResult.found) {
                 // Check if there are multiple matches and caller has no history AND no other address to use as bias
@@ -1478,23 +1494,39 @@ Rules:
                 }
               }
               
-              // If extracted succeeds AND Ada has a different interpretation, store BOTH for Ada to choose
+              // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
+              // If both geocode OK, auto-pick the "cleaner" one (better formatting, capitalization, etc.)
               if (destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
-                console.log(`[${callId}] 🔍 DUAL-SOURCE: Both sources available, checking Ada's version too: "${adaDest}"`);
+                console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaDest}"`);
                 const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
                 if (adaResult.found) {
                   console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedDest}" Ada="${adaDest}"`);
-                  // Store Ada's alternative so we can present both options
-                  knownBooking.destinationAlternative = adaDest;
-                  console.log(`[${callId}] 📝 Storing both destination options: STT="${extractedDest}" Ada="${adaDest}"`);
+                  // Auto-pick the better one: prefer Ada if it has proper capitalization or is longer (more complete)
+                  const adaProperCase = /^[A-Z]/.test(adaDest);
+                  const adaLonger = adaDest.length > extractedDest.length;
+                  
+                  if (adaProperCase && adaLonger) {
+                    // Ada's version is cleaner - use it silently
+                    usedAddress = adaDest;
+                    knownBooking.destination = adaDest;
+                    destResult = adaResult;
+                    console.log(`[${callId}] 📝 Auto-picked Ada's cleaner version: "${adaDest}" (STT had "${extractedDest}")`);
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `📝 AUTO-PICK: Used Ada's "${adaDest}" over STT's "${extractedDest}"`,
+                      timestamp: new Date().toISOString()
+                    });
+                    queueLiveCallBroadcast({});
+                  } else {
+                    console.log(`[${callId}] 📝 Keeping STT version: "${extractedDest}" (Ada had "${adaDest}")`);
+                  }
                 } else {
-                  // Ada's version failed, clear any stale alternative
-                  knownBooking.destinationAlternative = undefined;
+                  // Ada's version failed geocoding - stick with STT (which succeeded)
+                  console.log(`[${callId}] ❌ Ada's version "${adaDest}" failed geocoding, keeping STT's "${extractedDest}"`);
                 }
-              } else {
-                // No alternative or same address - clear stale alternatives
-                knownBooking.destinationAlternative = undefined;
               }
+              // Clear any stale alternatives - we auto-pick now, no need to store
+              knownBooking.destinationAlternative = undefined;
               
               if (destResult.found) {
                 // Check if there are multiple matches and no location context to help disambiguate
@@ -1534,32 +1566,16 @@ Rules:
         // 2. Or splice DURING her response (requires audio manipulation)
 
         // INJECT CORRECT DATA INTO ADA'S CONTEXT (silently - no response triggered)
-        // This ensures Ada uses the EXACT extracted addresses, not her hallucinated versions
-        // When STT and Ada differ, present BOTH options so Ada can choose the correct one
+        // This ensures Ada uses the EXACT extracted/verified addresses
+        // Address conflicts are auto-resolved by geocoding - the valid one wins
         if (openaiWs?.readyState === WebSocket.OPEN) {
           let contextUpdate = "INTERNAL MEMORY UPDATE (DO NOT RESPOND TO THIS MESSAGE - continue with your normal flow):\n";
           
           if (knownBooking.pickup) {
-            if (knownBooking.pickupAlternative && knownBooking.pickupAlternative !== knownBooking.pickup) {
-              // Present both options - STT heard one thing, Ada heard another
-              contextUpdate += `• Pickup address OPTIONS (choose the correct one):\n`;
-              contextUpdate += `  - STT heard: "${knownBooking.pickup}"\n`;
-              contextUpdate += `  - You heard: "${knownBooking.pickupAlternative}"\n`;
-              contextUpdate += `  → Confirm with customer which is correct${knownBooking.pickupVerified ? " (both geocoded OK)" : ""}\n`;
-            } else {
-              contextUpdate += `• Confirmed pickup: "${knownBooking.pickup}"${knownBooking.pickupVerified ? " ✓ VERIFIED" : ""}\n`;
-            }
+            contextUpdate += `• Confirmed pickup: "${knownBooking.pickup}"${knownBooking.pickupVerified ? " ✓ VERIFIED" : ""}\n`;
           }
           if (knownBooking.destination) {
-            if (knownBooking.destinationAlternative && knownBooking.destinationAlternative !== knownBooking.destination) {
-              // Present both options
-              contextUpdate += `• Destination address OPTIONS (choose the correct one):\n`;
-              contextUpdate += `  - STT heard: "${knownBooking.destination}"\n`;
-              contextUpdate += `  - You heard: "${knownBooking.destinationAlternative}"\n`;
-              contextUpdate += `  → Confirm with customer which is correct${knownBooking.destinationVerified ? " (both geocoded OK)" : ""}\n`;
-            } else {
-              contextUpdate += `• Confirmed destination: "${knownBooking.destination}"${knownBooking.destinationVerified ? " ✓ VERIFIED" : ""}\n`;
-            }
+            contextUpdate += `• Confirmed destination: "${knownBooking.destination}"${knownBooking.destinationVerified ? " ✓ VERIFIED" : ""}\n`;
           }
           if (knownBooking.passengers) {
             contextUpdate += `• Confirmed passengers: ${knownBooking.passengers}\n`;
@@ -1567,7 +1583,7 @@ Rules:
           if (knownBooking.pickupTime) {
             contextUpdate += `• Confirmed pickup time: ${knownBooking.pickupTime}\n`;
           }
-          contextUpdate += "Use these values when speaking. If there are OPTIONS, pick the one that makes most sense or briefly confirm with the customer. DO NOT acknowledge this message.";
+          contextUpdate += "Use these EXACT values when speaking. DO NOT acknowledge this message.";
           
           console.log(`[${callId}] 📢 Injecting correct data into Ada's context (silent)`);
           
