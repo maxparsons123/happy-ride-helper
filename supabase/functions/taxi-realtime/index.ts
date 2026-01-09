@@ -1929,15 +1929,35 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         const rawTranscript = data.transcript || "";
         console.log(`[${callId}] Raw user transcript: ${rawTranscript}`);
         
-        // ECHO GUARD: Discard transcripts that arrive while AI is speaking or shortly after
-        // This prevents transcribing Ada's voice as user input (common on phone lines with echo)
-        const timeSinceAiStopped = Date.now() - aiStoppedSpeakingAt;
-        if (aiSpeaking) {
-          console.log(`[${callId}] 🔇 ECHO GUARD: Discarding transcript (AI is currently speaking): "${rawTranscript}"`);
-          return;
-        }
-        if (timeSinceAiStopped < ECHO_GUARD_MS) {
-          console.log(`[${callId}] 🔇 ECHO GUARD: Discarding transcript (${timeSinceAiStopped}ms after AI stopped, threshold=${ECHO_GUARD_MS}ms): "${rawTranscript}"`);
+        // CONTENT-BASED ECHO FILTER: Check if transcript matches what Ada just said
+        // This is more reliable than time-based filtering on phone lines
+        const isEchoOfAda = (transcript: string): boolean => {
+          if (!currentAssistantText) return false;
+          const t = transcript.toLowerCase().trim();
+          const ada = currentAssistantText.toLowerCase();
+          
+          // Check if user transcript is a substantial substring of Ada's recent speech
+          // (at least 20 chars and appears in Ada's text)
+          if (t.length >= 20 && ada.includes(t)) {
+            console.log(`[${callId}] 🔇 ECHO DETECTED: User transcript matches Ada's speech`);
+            return true;
+          }
+          
+          // Check for Ada's signature phrases being echoed back
+          const adaPhrases = ['247 radio carz', 'lovely to hear from you', 'shall i book that', 
+            'is there anything else', 'have a great journey', 'your driver will be with you'];
+          for (const phrase of adaPhrases) {
+            if (t.includes(phrase)) {
+              console.log(`[${callId}] 🔇 ECHO DETECTED: Ada phrase "${phrase}" in user transcript`);
+              return true;
+            }
+          }
+          
+          return false;
+        };
+        
+        if (isEchoOfAda(rawTranscript)) {
+          console.log(`[${callId}] 🔇 Discarding echo transcript: "${rawTranscript}"`);
           return;
         }
         
