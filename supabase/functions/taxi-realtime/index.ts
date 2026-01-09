@@ -336,6 +336,46 @@ serve(async (req) => {
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
   const normalizePhone = (phone: string) => String(phone || "").replace(/\D/g, "");
 
+  // Validate caller name from Asterisk or database - filter out garbage/placeholder names
+  const isValidCallerName = (name: string | null | undefined): boolean => {
+    if (!name) return false;
+    const n = name.trim().toLowerCase();
+    
+    // Must be at least 2 chars and max 50
+    if (n.length < 2 || n.length > 50) return false;
+    
+    // Reject common placeholders and system-generated values
+    const invalidNames = new Set([
+      'guest', 'unknown', 'anonymous', 'caller', 'user', 'customer', 'client',
+      'incoming', 'phone', 'mobile', 'cell', 'landline', 'test', 'testing',
+      'null', 'undefined', 'none', 'n/a', 'na', 'no name', 'noname',
+      'sip', 'voip', 'trunk', 'did', 'extension', 'ext', 'line',
+      'private', 'withheld', 'blocked', 'restricted', 'unavailable',
+      'number', 'call', 'asterisk', 'pbx', 'system', 'default',
+      'cid', 'callerid', 'caller id', 'id', 'name', 'new', 'new caller'
+    ]);
+    if (invalidNames.has(n)) return false;
+    
+    // Reject if it's all digits (phone number mistakenly used as name)
+    if (/^\d+$/.test(n)) return false;
+    
+    // Reject if it looks like a SIP URI or phone format
+    if (/^sip:|@|^\+?\d{7,}$|^\d{3,4}[-\s]?\d{3,4}[-\s]?\d{3,4}$/.test(n)) return false;
+    
+    // Reject if it's mostly numbers with a few letters (e.g., "447867438438")
+    const letterCount = (n.match(/[a-z]/gi) || []).length;
+    const digitCount = (n.match(/\d/g) || []).length;
+    if (digitCount > letterCount * 2) return false;
+    
+    // Must contain at least one vowel (basic name sanity check)
+    if (!/[aeiou]/i.test(n)) return false;
+    
+    // Reject very short single-letter "names" 
+    if (n.length === 1) return false;
+    
+    return true;
+  };
+
   // Extract city from an address string
   const extractCityFromAddress = (address: string): string => {
     if (!address) return "";
@@ -969,9 +1009,9 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         return;
       }
 
-      if (data?.name) {
-        // Only overwrite callerName if we don't already have a non-placeholder name from Asterisk
-        if (!callerName || callerName === "Guest" || callerName === "Unknown") {
+      if (data?.name && isValidCallerName(data.name)) {
+        // Only overwrite callerName if we don't already have a valid name from Asterisk
+        if (!isValidCallerName(callerName)) {
           callerName = data.name;
         }
         callerTotalBookings = data.total_bookings || 0;
@@ -1482,7 +1522,7 @@ Rules:
           extractedName = await extractNameWithAI(transcript);
         }
         
-        if (extractedName) {
+        if (extractedName && isValidCallerName(extractedName)) {
           callerName = extractedName;
           console.log(`[${callId}] 👤 Extracted customer name: ${callerName}`);
           
@@ -3827,8 +3867,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           console.log(`[${callId}] 🏙️ Caller city from Asterisk: ${callerCity}`);
         }
         
-        // If name provided directly from Asterisk, use it (but not "Guest" placeholder)
-        if (message.user_name && message.user_name !== "Guest" && message.user_name !== "Unknown") {
+        // If name provided directly from Asterisk, validate and use it
+        if (isValidCallerName(message.user_name)) {
           callerName = message.user_name;
           console.log(`[${callId}] 👤 Caller name from Asterisk: ${callerName}`);
           
@@ -3840,6 +3880,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               updated_at: new Date().toISOString()
             }, { onConflict: "phone_number" });
           }
+        } else if (message.user_name) {
+          console.log(`[${callId}] ⚠️ Rejected invalid name from Asterisk: "${message.user_name}"`);
         }
 
         // Detect Asterisk calls by call_id prefix
