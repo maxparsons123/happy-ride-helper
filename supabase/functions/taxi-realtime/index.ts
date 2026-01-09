@@ -482,21 +482,80 @@ serve(async (req) => {
   // This prevents geocoding from picking the wrong "Russell Street" in a different city
   const enrichAddressWithCity = (address: string): string => {
     if (!callerCity) return address;
-    
+
     // Check if address already contains a city
     const addressCity = extractCityFromAddress(address);
     if (addressCity) return address; // Already has city
-    
+
     // Check if address already ends with a city-like suffix (postcode, UK, etc.)
-    const hasLocationSuffix = /,\s*[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}\s*$/i.test(address) || // Postcode
-                               /,\s*UK\s*$/i.test(address) ||
-                               /,\s*United Kingdom\s*$/i.test(address);
+    const hasLocationSuffix =
+      /,\s*[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}\s*$/i.test(address) || // Postcode
+      /,\s*UK\s*$/i.test(address) ||
+      /,\s*United Kingdom\s*$/i.test(address);
     if (hasLocationSuffix) return address;
-    
+
     // Append caller's city
     console.log(`[${callId}] 🏙️ Enriching address with city: "${address}" + "${callerCity}"`);
     return `${address}, ${callerCity}`;
   };
+
+  // Guardrail: only accept Google "corrections" when the proposed address is plausibly the same place.
+  // Prevents disasters like "52A David Road" → "72 Bury New Road".
+  const isSafeAddressCorrection = (original: string, proposed: string): boolean => {
+    const o = normalize(original).toLowerCase();
+    const p = normalize(proposed).toLowerCase();
+
+    if (!o || !p) return false;
+
+    // If original has a house number, proposed must contain the same house number.
+    const oNum = o.match(/\b\d+[a-z]?\b/i)?.[0];
+    if (oNum && !p.includes(oNum)) return false;
+
+    // Require at least one "meaningful" word overlap (ignore common address words)
+    const stop = new Set([
+      "road",
+      "rd",
+      "street",
+      "st",
+      "avenue",
+      "ave",
+      "drive",
+      "dr",
+      "lane",
+      "ln",
+      "close",
+      "crescent",
+      "place",
+      "pl",
+      "the",
+      "a",
+      "an",
+      "of",
+      "in",
+      "uk",
+      "united",
+      "kingdom",
+    ]);
+
+    const tokens = (s: string) =>
+      s
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .filter((t) => !stop.has(t));
+
+    const oTokens = new Set(tokens(o));
+    const pTokens = new Set(tokens(p));
+
+    let overlap = 0;
+    for (const t of oTokens) {
+      if (pTokens.has(t)) overlap++;
+      if (overlap >= 1) return true;
+    }
+
+    return false;
+  };
+
 
   // Resolve address aliases like "home", "work", "office" etc.
   // Returns the full address if alias found, or null if not an alias
@@ -919,19 +978,44 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         
         // Load known_areas for reference
         callerKnownAreas = (data.known_areas as Record<string, number>) || {};
-        
-        // CRITICAL FIX: Derive primary city from last_pickup FIRST (caller's "home" area)
-        // This is more important than total mention counts, because a caller might travel
-        // TO Manchester often but LIVE in Coventry. Pickups are where they start from.
-        if (callerLastPickup) {
+
+        // Load address aliases (e.g., {"home": "52A David Road", "work": "Train Station"})
+        callerAddressAliases = (data.address_aliases as Record<string, string>) || {};
+        if (Object.keys(callerAddressAliases).length > 0) {
+          console.log(`[${callId}] 🏠 Loaded address aliases: ${JSON.stringify(callerAddressAliases)}`);
+        }
+
+        // Derive primary city (bias) with better priorities:
+        // 1) Any explicit city embedded in saved aliases (most reliable for "home" area)
+        // 2) last_pickup city
+        // 3) known_areas counts
+        // 4) last_destination city
+        const aliasCities = Object.values(callerAddressAliases)
+          .map((a) => extractCityFromAddress(a))
+          .filter(Boolean) as string[];
+
+        if (aliasCities.length > 0) {
+          const counts = aliasCities.reduce<Record<string, number>>((acc, c) => {
+            acc[c] = (acc[c] || 0) + 1;
+            return acc;
+          }, {});
+          const topAliasCity = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+          if (topAliasCity) {
+            callerCity = topAliasCity;
+            console.log(`[${callId}] 🏙️ Primary city from address_aliases: ${callerCity}`);
+          }
+        }
+
+        // 2) last_pickup city
+        if (!callerCity && callerLastPickup) {
           const pickupCity = extractCityFromAddress(callerLastPickup);
           if (pickupCity) {
             callerCity = pickupCity;
-            console.log(`[${callId}] 🏙️ Primary city from last_pickup: ${callerCity} (most reliable)`);
+            console.log(`[${callId}] 🏙️ Primary city from last_pickup: ${callerCity}`);
           }
         }
-        
-        // Fallback to known_areas highest count if no city from last_pickup
+
+        // 3) known_areas
         if (!callerCity && Object.keys(callerKnownAreas).length > 0) {
           const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
           if (topCity) {
@@ -939,18 +1023,13 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
             console.log(`[${callId}] 🏙️ Primary city from known_areas: ${callerCity} (${topCity[1]} mentions)`);
           }
         }
-        
-        // Load address aliases (e.g., {"home": "52A David Road", "work": "Train Station"})
-        callerAddressAliases = (data.address_aliases as Record<string, string>) || {};
-        if (Object.keys(callerAddressAliases).length > 0) {
-          console.log(`[${callId}] 🏠 Loaded address aliases: ${JSON.stringify(callerAddressAliases)}`);
-        }
-        
-        // Final fallback: try destination
+
+        // 4) last_destination city
         if (!callerCity && callerLastDestination) {
           callerCity = extractCityFromAddress(callerLastDestination);
           if (callerCity) console.log(`[${callId}] 🏙️ Primary city from last_destination: ${callerCity}`);
         }
+
         
         // If still no city, geocode the history address to get city from Google
         if (!callerCity && (callerLastPickup || callerLastDestination)) {
