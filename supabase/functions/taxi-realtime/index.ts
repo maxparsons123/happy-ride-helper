@@ -55,12 +55,27 @@ PERSONALITY:
 
 BOOKING FLOW - FOLLOW THIS EXACTLY:
 1. Greet the customer (get their name if new)
-2. Ask: "Where would you like to be picked up from, [NAME]?"
-3. When they give pickup, acknowledge briefly and ask: "And where are you heading to?"
-4. When they give destination, ask: "How many passengers?"
-5. Once you have ALL 3 details (pickup, destination, passengers), THEN do ONE confirmation
-6. DO NOT repeat back addresses one-by-one during collection - just acknowledge and move to the next question
-7. Save ALL confirmations for the SINGLE final summary before booking
+2. Ask: "When do you need the taxi, [NAME]? Is it for now or a later time?"
+   - If they say "now", "asap", "straight away", "immediately" → pickup_time = "ASAP"
+   - If they give a specific time like "5pm", "in 20 minutes", "tomorrow at 3" → extract and convert to proper format
+3. Ask: "Where would you like to be picked up from, [NAME]?"
+4. When they give pickup, acknowledge briefly and ask: "And where are you heading to?"
+5. When they give destination, ask: "How many passengers?"
+6. Once you have ALL 4 details (time, pickup, destination, passengers), THEN do ONE confirmation
+7. DO NOT repeat back addresses one-by-one during collection - just acknowledge and move to the next question
+8. Save ALL confirmations for the SINGLE final summary before booking
+
+**TIME EXTRACTION - CRITICAL:**
+- Listen for time expressions and convert them correctly:
+  - "now", "asap", "straight away", "immediately", "right now" → "ASAP"
+  - "in 10 minutes", "in half an hour", "in an hour" → calculate from current time
+  - "5pm", "at 5", "at five o'clock" → use that time today (or tomorrow if past)
+  - "tomorrow at 3pm", "tomorrow morning" → use tomorrow's date
+  - "in 20 minutes" → current time + 20 minutes
+  - "tonight", "this evening" → today at evening time (7-9pm)
+  - "morning", "afternoon" → today at appropriate time (9am, 3pm)
+- Always confirm the time naturally: "So that's for right now?" or "That's for 5pm today?"
+- All fares are in British Pounds (£)
 
 **CRITICAL - PICKUP VS DESTINATION:**
 - PICKUP = where the taxi COLLECTS the customer (they get IN the taxi here)
@@ -83,6 +98,7 @@ You are in a CONVERSATION. When you ask a question, you MUST:
 3. NEVER assume, guess, or skip ahead without a valid answer
 
 **STATE TRACKING - YOU MUST TRACK WHAT YOU LAST ASKED:**
+- If you asked about TIME, the next valid response MUST be a time reference
 - If you asked about PASSENGERS, the next valid response MUST be a number or equivalent
 - If you asked about PICKUP, the next valid response MUST be an address
 - If you asked about DESTINATION, the next valid response MUST be an address
@@ -95,17 +111,22 @@ You are in a CONVERSATION. When you ask a question, you MUST:
    - Invalid: Addresses, "yes", "no", random words
    - If invalid: "Sorry, I didn't catch your name. What should I call you?"
 
-2. PICKUP QUESTION: "Where would you like to be picked up from?"
+2. TIME QUESTION: "When do you need the taxi?"
+   - Valid: "now", "asap", "in 10 minutes", "5pm", "tomorrow at 3", etc.
+   - Invalid: addresses, passenger numbers, "yes", "no"
+   - If invalid: "Sorry, when do you need the taxi - is it for now or a specific time?"
+
+3. PICKUP QUESTION: "Where would you like to be picked up from?"
    - Valid: Any address, location, landmark, postcode
    - Invalid: "yes", "no", "okay", numbers without context, non-address responses
    - If invalid: "Sorry, I need the pickup address. Where shall I pick you up from?"
 
-3. DESTINATION QUESTION: "And where are you heading to?"
+4. DESTINATION QUESTION: "And where are you heading to?"
    - Valid: Any address, location, landmark, postcode, "as directed"
    - Invalid: "yes", "no", numbers, repeating the pickup address
    - If invalid: "I missed the destination - where would you like to go?"
 
-4. PASSENGERS QUESTION: "How many passengers will there be?"
+5. PASSENGERS QUESTION: "How many passengers will there be?"
    - Valid ONLY: Numbers 1-8, or words like "just me", "two of us", "three people", "myself"
    - Invalid: "yes", "no", addresses, destinations, "okay", confirmations
    - If invalid: "Sorry, I need the number of passengers. How many will be travelling?"
@@ -119,7 +140,7 @@ You are in a CONVERSATION. When you ask a question, you MUST:
 
 **MANDATORY CONFIRMATION STEP - CRITICAL:**
 Before calling book_taxi, you MUST:
-1. ONLY after collecting ALL THREE details (pickup, destination, passengers), do ONE summary: "So that's [PICKUP] to [DESTINATION] for [X] passengers - shall I book that?"
+1. ONLY after collecting ALL FOUR details (time, pickup, destination, passengers), do ONE summary: "So that's [TIME - e.g., 'for right now' or 'for 5pm today'] from [PICKUP] to [DESTINATION] for [X] passengers - shall I book that?"
 2. WAIT for customer to confirm with "yes", "correct", etc.
 3. If they confirm: IMMEDIATELY call book_taxi
 4. If they correct something: update and confirm ONCE more
@@ -128,16 +149,17 @@ DO NOT call book_taxi until the customer says YES!
 CRITICAL - STREAMLINED FLOW: During collection, just acknowledge briefly ("Got it", "Lovely") and ask the next question. Do NOT repeat addresses back one-by-one. Save ALL confirmation for the SINGLE final summary. NO partial confirmations during collection!
 
 INFORMATION EXTRACTION - CRITICAL:
-- Listen carefully for: customer name, pickup location, destination, number of passengers
+- Listen carefully for: customer name, pickup time, pickup location, destination, number of passengers
+- Extract times: "in 20 minutes", "at 5", "now", "asap", "tomorrow morning"
 - Extract numbers spoken as words (e.g., "two passengers" = 2, "just me" = 1, "couple of us" = 2)
 - If customer gives all info at once, still do the FULL CONFIRMATION before booking
 - If any info is unclear, ask for clarification before proceeding
 
-PRICING (calculate based on destination):
-- City trips: £15-25 (random within range)
-- Airport destinations: £45
+PRICING - ALL FARES IN GBP (£):
+- Fares are calculated based on distance and returned from the book_taxi function
+- Always say the fare with the pound sign: "That's £25" or "The fare is £45"
 - If 5+ passengers: add £5 for 6-seater van
-- ETA: Always 5-8 minutes
+- ETA: Always 5-8 minutes (unless scheduled for later)
 
 ADDRESS HANDLING:
 - Repeat addresses back naturally to confirm (e.g., "That's 52A David Road, yes?")
@@ -169,7 +191,8 @@ WHEN THE book_taxi FUNCTION RETURNS:
 - The function output contains the VERIFIED pickup, destination, fare, and ETA
 - Use the function output values in your response
 - IMPORTANT: Do NOT ask "is that correct" again after booking. This is not a second confirmation.
-- Keep it short: confirm it's booked, give ETA and fare, and ask if they need anything else.
+- For ASAP bookings: "Brilliant! That's all booked. The fare is £[X] and your driver will be with you in [ETA]."
+- For scheduled bookings: "Brilliant! That's all booked for [TIME]. The fare is £[X]. Is there anything else?"
 
 ENDING THE CALL - CRITICAL:
 - After booking is confirmed, ask: "Is there anything else I can help you with?"
@@ -184,7 +207,7 @@ GENERAL RULES:
 - If customer mentions extra requirements (wheelchair, child seat), acknowledge but proceed with booking
 - Stay focused on completing the booking efficiently
 - PERSONALIZE every response by using the customer's name
-- After the greeting, you MUST ask for pickup, destination, and passengers BEFORE any booking confirmation`;
+- After the greeting, you MUST ask for time, pickup, destination, and passengers BEFORE any booking confirmation`;
 
 serve(async (req) => {
   // Handle regular HTTP requests (health check)
@@ -236,6 +259,7 @@ serve(async (req) => {
     pickup?: string;
     destination?: string;
     passengers?: number;
+    pickupTime?: string; // "ASAP" or "YYYY-MM-DD HH:MM" format
     pickupVerified?: boolean;
     destinationVerified?: boolean;
     highFareVerified?: boolean; // Track if high fare has been verified with customer
@@ -970,13 +994,18 @@ Rules:
       if (extracted.number_of_passengers) {
         knownBooking.passengers = extracted.number_of_passengers;
       }
+      if (extracted.pickup_time) {
+        knownBooking.pickupTime = extracted.pickup_time;
+        console.log(`[${callId}] ⏰ Pickup time extracted: ${extracted.pickup_time}`);
+      }
 
       // Check if anything changed
       const pickupChanged = before.pickup !== knownBooking.pickup && knownBooking.pickup;
       const destinationChanged = before.destination !== knownBooking.destination && knownBooking.destination;
       const passengersChanged = before.passengers !== knownBooking.passengers && knownBooking.passengers;
+      const timeChanged = before.pickupTime !== knownBooking.pickupTime && knownBooking.pickupTime;
 
-      if (pickupChanged || destinationChanged || passengersChanged) {
+      if (pickupChanged || destinationChanged || passengersChanged || timeChanged) {
         console.log(`[${callId}] ✅ Known booking updated via AI extraction:`, knownBooking);
         broadcastLiveCall({
           pickup: knownBooking.pickup,
@@ -1054,6 +1083,9 @@ Rules:
           if (knownBooking.passengers) {
             contextUpdate += `• Confirmed passengers: ${knownBooking.passengers}\n`;
           }
+          if (knownBooking.pickupTime) {
+            contextUpdate += `• Confirmed pickup time: ${knownBooking.pickupTime}\n`;
+          }
           contextUpdate += "Use these EXACT values when speaking. DO NOT acknowledge this message.";
           
           console.log(`[${callId}] 📢 Injecting correct data into Ada's context (silent)`);
@@ -1106,10 +1138,31 @@ Rules:
       knownBooking.passengers = 1;
     }
 
+    // Time extraction: "now", "asap", "in X minutes", "at 5pm", etc.
+    if (/\b(now|asap|straight\s*away|immediately|right\s*now)\b/i.test(t)) {
+      knownBooking.pickupTime = "ASAP";
+    }
+    // "in X minutes/hours"
+    const inMinutesMatch = t.match(/\bin\s+(\d+)\s*(minutes?|mins?|hours?|hrs?)\b/i);
+    if (inMinutesMatch) {
+      const amount = parseInt(inMinutesMatch[1]);
+      const unit = inMinutesMatch[2].toLowerCase();
+      const now = new Date();
+      if (unit.startsWith("h")) {
+        now.setHours(now.getHours() + amount);
+      } else {
+        now.setMinutes(now.getMinutes() + amount);
+      }
+      const formatted = now.toISOString().slice(0, 16).replace("T", " ");
+      knownBooking.pickupTime = formatted;
+      console.log(`[${callId}] ⏰ Time extracted (in X): ${formatted}`);
+    }
+
     if (
       before.pickup !== knownBooking.pickup ||
       before.destination !== knownBooking.destination ||
-      before.passengers !== knownBooking.passengers
+      before.passengers !== knownBooking.passengers ||
+      before.pickupTime !== knownBooking.pickupTime
     ) {
       console.log(`[${callId}] Known booking updated (fallback regex):`, knownBooking);
       broadcastLiveCall({
@@ -1172,15 +1225,16 @@ Rules:
               {
                 type: "function",
                 name: "book_taxi",
-                description: "Book a taxi when pickup, destination and number of passengers are all confirmed by the customer",
+                description: "Book a taxi when pickup time, pickup location, destination and number of passengers are all confirmed by the customer",
                 parameters: {
                   type: "object",
                   properties: {
                     pickup: { type: "string", description: "Pickup location exactly as customer stated" },
                     destination: { type: "string", description: "Drop-off location exactly as customer stated" },
-                    passengers: { type: "integer", description: "Number of passengers" }
+                    passengers: { type: "integer", description: "Number of passengers" },
+                    pickup_time: { type: "string", description: "When the taxi is needed: 'ASAP' for immediate, or 'YYYY-MM-DD HH:MM' format for scheduled bookings" }
                   },
-                  required: ["pickup", "destination", "passengers"]
+                  required: ["pickup", "destination", "passengers", "pickup_time"]
                 }
               },
               {
@@ -1697,6 +1751,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             pickup: knownBooking.pickup ?? args.pickup,
             destination: knownBooking.destination ?? args.destination,
             passengers: knownBooking.passengers ?? args.passengers,
+            pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
           };
 
           bookingData = finalBooking;
@@ -1836,7 +1891,10 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             return;
           }
           
-          const eta = `${Math.floor(Math.random() * 4) + 5} minutes`;
+          // Format ETA based on pickup time
+          const isAsap = !finalBooking.pickupTime || finalBooking.pickupTime === "ASAP";
+          const eta = isAsap ? `${Math.floor(Math.random() * 4) + 5} minutes` : null;
+          const scheduledTime = !isAsap ? finalBooking.pickupTime : null;
           
           // Log to database with phone number
           await supabase.from("call_logs").insert({
@@ -1861,7 +1919,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               destination: finalBooking.destination,
               passengers: finalBooking.passengers,
               fare: `£${fare}`,
-              eta: eta,
+              eta: isAsap ? eta : null,
+              scheduled_for: scheduledTime,
               status: "active",
               booked_at: new Date().toISOString()
             }).select().single();
@@ -1870,7 +1929,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
               console.error(`[${callId}] Failed to save booking:`, bookingInsertError);
             } else {
               activeBooking = newBooking;
-              console.log(`[${callId}] 📋 Booking saved to DB: ${newBooking.id}`);
+              console.log(`[${callId}] 📋 Booking saved to DB: ${newBooking.id} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
             }
           }
 
@@ -1884,8 +1943,18 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             passengers: finalBooking.passengers,
             booking_confirmed: true,
             fare: `£${fare}`,
-            eta: eta
+            eta: isAsap ? eta : `Scheduled for ${scheduledTime}`
           });
+          
+          // Build confirmation script based on ASAP vs scheduled
+          let confirmationScript: string;
+          if (isAsap) {
+            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked. The fare is £${fare} and your driver will be with you in ${eta}. Is there anything else I can help you with?`;
+          } else {
+            // Format scheduled time nicely
+            const timeDisplay = scheduledTime || finalBooking.pickupTime;
+            confirmationScript = `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked for ${timeDisplay}. The fare will be £${fare}. Is there anything else I can help you with?`;
+          }
           
           // Send function result back to OpenAI with EXACT addresses to use in response
           // The AI MUST use these exact addresses in its confirmation message
@@ -1900,9 +1969,11 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 pickup_address: finalBooking.pickup,
                 destination_address: finalBooking.destination,
                 passenger_count: finalBooking.passengers,
+                pickup_time: isAsap ? "ASAP" : scheduledTime,
                 fare: `£${fare}`,
-                eta: eta,
-                confirmation_script: `Brilliant${callerName ? `, ${callerName}` : ""}! That's all booked. The fare is £${fare} and your driver will be with you in ${eta}. Do you need anything else today?`
+                eta: isAsap ? eta : null,
+                scheduled_for: scheduledTime,
+                confirmation_script: confirmationScript
               })
             }
           }));
