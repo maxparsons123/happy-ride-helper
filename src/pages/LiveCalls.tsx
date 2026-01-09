@@ -385,9 +385,18 @@ export default function LiveCalls() {
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
 
-  const formatTime = (dateStr: string) => {
+  const formatTime = (dateStr: string, opts?: { ms?: boolean }) => {
     const date = new Date(dateStr);
-    return date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const base = date.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+
+    if (!opts?.ms) return base;
+
+    const ms = date.getMilliseconds().toString().padStart(3, "0");
+    return `${base}.${ms}`;
   };
 
   const getDuration = (startedAt: string, endedAt?: string | null) => {
@@ -817,7 +826,7 @@ export default function LiveCalls() {
                             <div className="max-w-[90%] px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
                               <p className="text-xs font-mono">{t.text}</p>
                               <p className="text-xs opacity-60 mt-0.5 text-center">
-                                {formatTime(t.timestamp)}
+                                {formatTime(t.timestamp, { ms: true })}
                               </p>
                             </div>
                           ) : (
@@ -830,7 +839,7 @@ export default function LiveCalls() {
                             >
                               <p className="text-sm">{t.text}</p>
                               <p className="text-xs opacity-60 mt-1">
-                                {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp)}
+                                {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp, { ms: true })}
                               </p>
                             </div>
                           )}
