@@ -65,6 +65,9 @@ interface TripResolveRequest {
   country?: string;
   passengers?: number;
   
+  // NEW: Flag to indicate if this is a pickup (strict local) vs dropoff (can be global)
+  is_pickup?: boolean;
+  
   // Nearby lookup mode
   nearby_query?: string;
 }
@@ -208,73 +211,135 @@ function inferCategoryFromQuery(query: string): { type: string; keyword?: string
 }
 
 /**
- * Geocode an address using Google Geocoding API with city biasing
+ * MAIN RESOLVE FUNCTION - Following the proven C# pattern:
+ * 1. House address (starts with number) → Autocomplete with types=address
+ * 2. Named place → Text Search with local bias  
+ * 3. Strict pickup → Must be local (reject if not found nearby)
+ * 4. Dropoff → Can search globally
  */
-async function geocodeAddress(
-  rawInput: string,
-  cityHint?: string,
-  coordsHint?: { lat: number; lng: number },
+async function resolveLocation(
+  query: string,
+  lat: number,
+  lng: number,
+  cityHint: string,
+  strictPickup: boolean,
   country: string = "GB"
 ): Promise<ResolvedLocation | null> {
-  const trimmed = rawInput.trim();
-  if (!trimmed || !GOOGLE_API_KEY) return null;
+  console.log(`[Resolve] START: '${query}', strict=${strictPickup}, city=${cityHint}`);
+  
+  query = query.trim();
+  if (!query || !GOOGLE_API_KEY) return null;
   
   // Check cache
-  const cacheKey = `${trimmed.toLowerCase()}|${cityHint || ""}`;
+  const cacheKey = `${query.toLowerCase()}|${cityHint}|${strictPickup}`;
   if (geocodeCache.has(cacheKey)) {
-    console.log(`📍 Cache hit for: ${trimmed}`);
+    console.log(`📍 Cache hit for: ${query}`);
     return geocodeCache.get(cacheKey)!;
   }
   
-  // Check if input looks like a street address (has numbers) vs a place name
-  const hasStreetNumber = /\d+[A-Za-z]?\s/.test(trimmed) || /^\d+/.test(trimmed);
-  const looksLikeBusinessName = !hasStreetNumber && !/\d/.test(trimmed);
+  const startsWithNumber = /^\d+/.test(query);
   
-  // Build address with city bias if not already included
-  let addressParam = trimmed;
-  const textCity = extractCityFromText(trimmed);
-  
-  if (cityHint && !textCity && !trimmed.toLowerCase().includes(cityHint.toLowerCase())) {
-    addressParam = `${trimmed}, ${cityHint}`;
-  }
-  
-  // For business names without street numbers, try city-specific search FIRST
-  // This prevents "Sweetspot" in Coventry from matching "Sweetspot" in London
-  if (looksLikeBusinessName && cityHint) {
-    console.log(`🏢 Business name detected: "${trimmed}" - searching in ${cityHint} first`);
-    
-    // Get city coordinates for tight radius search
-    const cityCoords = coordsHint || getCityCoords(cityHint);
-    
-    // Try city-specific search with tight radius
-    const citySpecificQuery = `${trimmed} ${cityHint}`;
-    const cityResult = await googleTextSearch(citySpecificQuery, cityCoords, country, true);
-    if (cityResult) {
-      console.log(`✅ Found business in ${cityHint}: ${cityResult.formatted_address}`);
-      geocodeCache.set(cacheKey, cityResult);
-      return cityResult;
+  // 1️⃣ HOUSE ADDRESS (best branch) - uses Autocomplete API
+  if (startsWithNumber) {
+    const r = await resolveHouseAddress(query, lat, lng, country);
+    if (r) {
+      console.log(`✅ HOUSE_OK: ${r.formatted_address}`);
+      geocodeCache.set(cacheKey, r);
+      return r;
     }
-    
-    // If not found in city, log warning and fall through to broader search
-    console.log(`⚠️ "${trimmed}" not found in ${cityHint}, trying broader UK search`);
   }
   
-  // Try Google Places Text Search (for landmarks/addresses)
-  const textSearchResult = await googleTextSearch(addressParam, coordsHint, country, false);
-  if (textSearchResult) {
-    geocodeCache.set(cacheKey, textSearchResult);
-    return textSearchResult;
+  // 2️⃣ TEXT SEARCH (for named places like "Sweetspot", "Tesco", etc.)
+  const textPlace = await resolveTextSearch(query, lat, lng);
+  if (textPlace) {
+    console.log(`✅ TEXT_OK: ${textPlace.formatted_address}`);
+    geocodeCache.set(cacheKey, textPlace);
+    return textPlace;
   }
   
-  // Fallback to Geocoding API
+  // 3️⃣ STRICT PICKUP → MUST be local (8km radius)
+  if (strictPickup) {
+    const local = await resolveLooseLocal(query, lat, lng);
+    if (local) {
+      console.log(`✅ LOCAL_PICKUP_OK: ${local.formatted_address}`);
+      geocodeCache.set(cacheKey, local);
+      return local;
+    }
+    // Strict pickup failed - don't fall through to global
+    console.warn(`❌ Pickup '${query}' not found locally`);
+    return null;
+  }
+  
+  // 4️⃣ DROPOFF → CAN search globally (for airports, destinations outside city)
+  const globalRes = await resolveGlobalTextSearch(query, country);
+  if (globalRes) {
+    console.log(`✅ GLOBAL_OK: ${globalRes.formatted_address}`);
+    geocodeCache.set(cacheKey, globalRes);
+    return globalRes;
+  }
+  
+  // ❌ Nothing found
+  console.warn(`❌ NO_RESULTS for: ${query}`);
+  return null;
+}
+
+/**
+ * HOUSE ADDRESS - Best for "52A David Road" type addresses
+ * Uses Place Autocomplete API with types=address
+ */
+async function resolveHouseAddress(
+  query: string,
+  lat: number,
+  lng: number,
+  country: string = "GB"
+): Promise<ResolvedLocation | null> {
+  console.log(`[HouseAddress] Autocomplete: '${query}'`);
+  
   const params = new URLSearchParams({
-    address: addressParam,
-    key: GOOGLE_API_KEY,
-    components: `country:${country}`,
+    input: query,
+    types: "address",
+    location: `${lat},${lng}`,
+    radius: "5000", // 5km - local only
+    components: `country:${country.toLowerCase()}`,
+    key: GOOGLE_API_KEY!,
   });
   
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?${params}`;
-  console.log(`🌍 Geocoding: ${addressParam}`);
+  const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params}`;
+  
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    
+    const data = await resp.json();
+    if (data.status !== "OK" || !data.predictions?.length) return null;
+    
+    const placeId = data.predictions[0].place_id;
+    return await upgradeWithPlaceDetails(placeId, query);
+  } catch (e) {
+    console.error("[HouseAddress] Error:", e);
+    return null;
+  }
+}
+
+/**
+ * TEXT SEARCH - Good for named places with local bias
+ * Uses Text Search API with location bias (5km radius)
+ */
+async function resolveTextSearch(
+  query: string,
+  lat: number,
+  lng: number
+): Promise<ResolvedLocation | null> {
+  console.log(`[TextSearch] '${query}'`);
+  
+  const params = new URLSearchParams({
+    query: query,
+    location: `${lat},${lng}`,
+    radius: "5000", // 5km local bias
+    key: GOOGLE_API_KEY!,
+  });
+  
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
   
   try {
     const resp = await fetch(url);
@@ -287,62 +352,42 @@ async function geocodeAddress(
     const loc = best.geometry?.location;
     if (!loc) return null;
     
-    const result: ResolvedLocation = {
-      raw_input: rawInput,
+    // Upgrade with Place Details for full address components
+    if (best.place_id) {
+      const detailed = await upgradeWithPlaceDetails(best.place_id, query);
+      if (detailed) return detailed;
+    }
+    
+    return {
+      raw_input: query,
       formatted_address: best.formatted_address,
       lat: loc.lat,
       lng: loc.lng,
-      city: extractCityFromComponents(best.address_components),
-      postcode: extractPostcodeFromComponents(best.address_components),
-      country: best.address_components?.find((c: any) => c.types.includes("country"))?.short_name,
     };
-    
-    geocodeCache.set(cacheKey, result);
-    return result;
   } catch (e) {
-    console.error("Geocode error:", e);
+    console.error("[TextSearch] Error:", e);
     return null;
   }
 }
 
 /**
- * Google Places Text Search (better for landmarks, businesses)
- * Restricted to UK only
+ * LOOSE LOCAL SEARCH - For strict pickups (8km radius)
  */
-async function googleTextSearch(
+async function resolveLooseLocal(
   query: string,
-  coordsHint?: { lat: number; lng: number },
-  country: string = "GB",
-  tightRadius: boolean = false
+  lat: number,
+  lng: number
 ): Promise<ResolvedLocation | null> {
-  if (!GOOGLE_API_KEY) return null;
-  
-  // Add UK suffix if not already present to bias results
-  const UK_INDICATORS = ["uk", "united kingdom", "england", "scotland", "wales", "northern ireland"];
-  const queryLower = query.toLowerCase();
-  const hasUkIndicator = UK_INDICATORS.some(ind => queryLower.includes(ind));
-  const searchQuery = hasUkIndicator ? query : `${query}, UK`;
+  console.log(`[LooseLocal] '${query}'`);
   
   const params = new URLSearchParams({
-    query: searchQuery,
-    key: GOOGLE_API_KEY,
-    region: country.toLowerCase(),
+    query: query,
+    location: `${lat},${lng}`,
+    radius: "8000", // 8km for pickups
+    key: GOOGLE_API_KEY!,
   });
   
-  // If we have coords, use them for location bias
-  // Use tight radius (10km) for city-specific business searches
-  // Use wider radius for general UK searches
-  if (coordsHint) {
-    params.append("location", `${coordsHint.lat},${coordsHint.lng}`);
-    params.append("radius", tightRadius ? "10000" : "50000"); // 10km for tight, 50km for normal
-  } else {
-    // Default to UK center (Birmingham area) for bias
-    params.append("location", "52.4862,-1.8904");
-    params.append("radius", "300000"); // 300km covers most of UK
-  }
-  
   const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
-  console.log(`🔍 Text Search: ${searchQuery}`);
   
   try {
     const resp = await fetch(url);
@@ -351,30 +396,20 @@ async function googleTextSearch(
     const data = await resp.json();
     if (data.status !== "OK" || !data.results?.length) return null;
     
-    // Filter results to UK only
-    const ukResults = data.results.filter((r: any) => {
-      const addr = (r.formatted_address || "").toLowerCase();
-      return addr.includes("uk") || addr.includes("united kingdom") || 
-             addr.includes("england") || addr.includes("scotland") || 
-             addr.includes("wales") || addr.includes("northern ireland");
-    });
-    
-    const best = ukResults[0] || data.results[0]; // Prefer UK, fallback to first result
+    const best = data.results[0];
     const loc = best.geometry?.location;
     if (!loc) return null;
     
-    // Get detailed address components
-    const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${best.place_id}&fields=address_components,formatted_address&key=${GOOGLE_API_KEY}`;
-    const detailsResp = await fetch(detailsUrl);
-    const detailsData = await detailsResp.json();
+    // Verify it's actually within range (8km)
+    const distanceMeters = haversineDistance(lat, lng, loc.lat, loc.lng);
+    if (distanceMeters > 10000) { // 10km max for pickups
+      console.warn(`[LooseLocal] Result too far: ${distanceMeters}m`);
+      return null;
+    }
     
-    const components = detailsData.result?.address_components || [];
-    const countryCode = components.find((c: any) => c.types.includes("country"))?.short_name;
-    
-    // Verify it's actually in UK
-    if (countryCode && !["GB", "UK"].includes(countryCode.toUpperCase())) {
-      console.warn(`⚠️ Text Search found non-UK result: ${best.formatted_address} (${countryCode})`);
-      return null; // Reject non-UK results
+    if (best.place_id) {
+      const detailed = await upgradeWithPlaceDetails(best.place_id, query);
+      if (detailed) return detailed;
     }
     
     return {
@@ -382,14 +417,126 @@ async function googleTextSearch(
       formatted_address: best.formatted_address,
       lat: loc.lat,
       lng: loc.lng,
-      city: extractCityFromComponents(components),
-      postcode: extractPostcodeFromComponents(components),
-      country: countryCode,
     };
   } catch (e) {
-    console.error("Text Search error:", e);
+    console.error("[LooseLocal] Error:", e);
     return null;
   }
+}
+
+/**
+ * GLOBAL SEARCH - For dropoffs that can be anywhere (airports, etc.)
+ * Uses Text Search without location constraint, but biased to UK
+ */
+async function resolveGlobalTextSearch(
+  query: string,
+  country: string = "GB"
+): Promise<ResolvedLocation | null> {
+  console.log(`[GlobalSearch] '${query}'`);
+  
+  // Add UK suffix for better results
+  const searchQuery = query.toLowerCase().includes("uk") ? query : `${query}, UK`;
+  
+  const params = new URLSearchParams({
+    query: searchQuery,
+    key: GOOGLE_API_KEY!,
+  });
+  
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
+  
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    
+    const data = await resp.json();
+    if (data.status !== "OK" || !data.results?.length) return null;
+    
+    const best = data.results[0];
+    const loc = best.geometry?.location;
+    if (!loc) return null;
+    
+    // Upgrade with Place Details
+    if (best.place_id) {
+      const detailed = await upgradeWithPlaceDetails(best.place_id, query);
+      if (detailed) {
+        // Verify it's in UK
+        if (detailed.country && !["GB", "UK"].includes(detailed.country.toUpperCase())) {
+          console.warn(`[GlobalSearch] Non-UK result rejected: ${detailed.formatted_address}`);
+          return null;
+        }
+        return detailed;
+      }
+    }
+    
+    return {
+      raw_input: query,
+      formatted_address: best.formatted_address,
+      lat: loc.lat,
+      lng: loc.lng,
+    };
+  } catch (e) {
+    console.error("[GlobalSearch] Error:", e);
+    return null;
+  }
+}
+
+/**
+ * UPGRADE WITH PLACE DETAILS - Get full address components from place_id
+ */
+async function upgradeWithPlaceDetails(
+  placeId: string,
+  rawInput: string
+): Promise<ResolvedLocation | null> {
+  if (!placeId) return null;
+  
+  const params = new URLSearchParams({
+    place_id: placeId,
+    fields: "name,formatted_address,geometry,address_components",
+    key: GOOGLE_API_KEY!,
+  });
+  
+  const url = `https://maps.googleapis.com/maps/api/place/details/json?${params}`;
+  
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    
+    const data = await resp.json();
+    if (data.status !== "OK" || !data.result) return null;
+    
+    const result = data.result;
+    const loc = result.geometry?.location;
+    if (!loc) return null;
+    
+    const components = result.address_components || [];
+    
+    return {
+      raw_input: rawInput,
+      formatted_address: result.formatted_address,
+      lat: loc.lat,
+      lng: loc.lng,
+      city: extractCityFromComponents(components),
+      postcode: extractPostcodeFromComponents(components),
+      country: components.find((c: any) => c.types.includes("country"))?.short_name,
+    };
+  } catch (e) {
+    console.error("[UpgradeDetails] Error:", e);
+    return null;
+  }
+}
+
+/**
+ * Legacy geocodeAddress wrapper - calls resolveLocation
+ */
+async function geocodeAddress(
+  rawInput: string,
+  cityHint?: string,
+  coordsHint?: { lat: number; lng: number },
+  country: string = "GB",
+  strictPickup: boolean = false
+): Promise<ResolvedLocation | null> {
+  const coords = coordsHint || getCityCoords(cityHint || "") || { lat: 52.4862, lng: -1.8904 }; // Default to Birmingham
+  return resolveLocation(rawInput, coords.lat, coords.lng, cityHint || "", strictPickup, country);
 }
 
 /**
@@ -732,9 +879,11 @@ serve(async (req) => {
     }
     
     // Geocode both addresses in parallel
+    // PICKUP = strictPickup (must be local)
+    // DROPOFF = not strict (can be global - airports, destinations outside city)
     const [pickup, dropoff] = await Promise.all([
-      pickup_input ? geocodeAddress(pickup_input, cityContext, coordsContext, country) : null,
-      dropoff_input ? geocodeAddress(dropoff_input, cityContext, coordsContext, country) : null,
+      pickup_input ? geocodeAddress(pickup_input, cityContext, coordsContext, country, true) : null,  // strictPickup = true
+      dropoff_input ? geocodeAddress(dropoff_input, cityContext, coordsContext, country, false) : null, // strictPickup = false (can be global)
     ]);
     
     if (pickup) response.pickup = pickup;
