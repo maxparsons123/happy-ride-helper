@@ -1774,10 +1774,20 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
 
-          // Prefer exact values we extracted from the user's transcript/text (prevents 52A -> 50A style drift)
+          // CRITICAL FIX: Ada has the full conversation context, so her args should be trusted
+          // for the DESTINATION field. The extraction layer can mistakenly pick up stray location
+          // mentions (e.g., user saying "Third Street" when Ada asked about passengers).
+          //
+          // Priority logic:
+          // - PICKUP: prefer knownBooking (user's exact words) over Ada's paraphrase
+          // - DESTINATION: prefer Ada's args (she confirmed with user) over stray extractions
+          // - PASSENGERS: prefer knownBooking (user's exact count)
+          // - TIME: prefer knownBooking (user's exact time)
+          //
+          // This prevents late/out-of-context utterances from overwriting confirmed bookings.
           const finalBooking = {
             pickup: knownBooking.pickup ?? args.pickup,
-            destination: knownBooking.destination ?? args.destination,
+            destination: args.destination ?? knownBooking.destination, // Ada's confirmed destination takes priority
             passengers: knownBooking.passengers ?? args.passengers,
             pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
           };
