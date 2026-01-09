@@ -293,15 +293,59 @@ serve(async (req) => {
     multiple_matches?: GeocodeMatch[];
   }
   
-  const geocodeAddress = async (address: string, checkAmbiguous: boolean = false): Promise<EnhancedGeocodeResult> => {
+  const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
     try {
-      // Use caller's last addresses for location biasing (smarter guessing)
+      // INTELLIGENT LOCATION BIASING:
+      // Priority 1: Use the OTHER address from current booking (if we have one)
+      // Priority 2: Use caller's history (last pickup/destination)
+      // Priority 3: Extract city from any address we have
+      
       let city = callerCity;
       let biasLat: number | undefined;
       let biasLon: number | undefined;
+      let biasSource = "none";
       
-      // If caller has history, try to get coordinates from their last addresses
-      if (callerLastPickup || callerLastDestination) {
+      // Priority 1: Use the other address from CURRENT booking for location context
+      // e.g., if destination is "Coventry Train Station", use that to find pickup near Coventry
+      const otherAddress = addressType === "pickup" ? knownBooking.destination : knownBooking.pickup;
+      
+      if (otherAddress) {
+        try {
+          // Extract city from the other address first
+          const otherCity = extractCityFromAddress(otherAddress);
+          if (otherCity && !city) {
+            city = otherCity;
+            console.log(`[${callId}] 📍 Extracted city from ${addressType === "pickup" ? "destination" : "pickup"}: ${city}`);
+          }
+          
+          // Get coordinates from the other address for precise biasing
+          console.log(`[${callId}] 📍 Using ${addressType === "pickup" ? "destination" : "pickup"} for location bias: "${otherAddress}"`);
+          const otherGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify({ address: otherAddress, city, country: "UK" }),
+          });
+          const otherData = await otherGeo.json();
+          if (otherData.found && otherData.lat && otherData.lon) {
+            biasLat = otherData.lat;
+            biasLon = otherData.lon;
+            biasSource = `current_${addressType === "pickup" ? "destination" : "pickup"}`;
+            // Also extract city from geocode result if not already set
+            if (!city && otherData.city) {
+              city = otherData.city;
+            }
+            console.log(`[${callId}] 📍 Location bias from current booking: ${biasLat}, ${biasLon} (${city || 'no city'})`);
+          }
+        } catch (e) {
+          console.error(`[${callId}] Failed to get current booking coordinates:`, e);
+        }
+      }
+      
+      // Priority 2: If no bias from current booking, try caller's history
+      if (!biasLat && !biasLon && (callerLastPickup || callerLastDestination)) {
         // Extract city from caller's history for search biasing
         if (!city && callerLastPickup) {
           city = extractCityFromAddress(callerLastPickup);
@@ -311,20 +355,22 @@ serve(async (req) => {
         }
         
         // Get coordinates from caller's last pickup for better location biasing
-        if (callerLastPickup) {
+        const historyAddress = callerLastPickup || callerLastDestination;
+        if (historyAddress) {
           try {
-            const lastPickupGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+            const historyGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
               },
-              body: JSON.stringify({ address: callerLastPickup, city, country: "UK" }),
+              body: JSON.stringify({ address: historyAddress, city, country: "UK" }),
             });
-            const lastPickupData = await lastPickupGeo.json();
-            if (lastPickupData.found && lastPickupData.lat && lastPickupData.lon) {
-              biasLat = lastPickupData.lat;
-              biasLon = lastPickupData.lon;
+            const historyData = await historyGeo.json();
+            if (historyData.found && historyData.lat && historyData.lon) {
+              biasLat = historyData.lat;
+              biasLon = historyData.lon;
+              biasSource = "caller_history";
               console.log(`[${callId}] 📍 Using caller history for location bias: ${biasLat}, ${biasLon}`);
             }
           } catch (e) {
@@ -333,7 +379,7 @@ serve(async (req) => {
         }
       }
       
-      console.log(`[${callId}] 🌍 Geocoding address: "${address}" (city: ${city || 'none'}, bias: ${biasLat ? 'yes' : 'no'}, check_ambiguous: ${checkAmbiguous})`);
+      console.log(`[${callId}] 🌍 Geocoding "${address}" (city: ${city || 'none'}, bias: ${biasSource}, check_ambiguous: ${checkAmbiguous})`);
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
         method: "POST",
@@ -946,11 +992,13 @@ Rules:
           
           // Geocode pickup if it changed and hasn't been verified yet
           if (pickupChanged && !knownBooking.pickupVerified) {
-            const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous);
+            // Pass "pickup" as addressType so geocoder can use destination for location bias
+            const pickupResult = await geocodeAddress(knownBooking.pickup!, shouldCheckAmbiguous, "pickup");
             if (pickupResult.found) {
-              // Check if there are multiple matches and caller has no history
-              if (pickupResult.multiple_matches && pickupResult.multiple_matches.length > 1 && shouldCheckAmbiguous) {
-                console.log(`[${callId}] 🔀 Multiple pickup matches found - asking for clarification`);
+              // Check if there are multiple matches and caller has no history AND no other address to use as bias
+              const hasLocationContext = knownBooking.destination || callerLastPickup || callerLastDestination;
+              if (pickupResult.multiple_matches && pickupResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
+                console.log(`[${callId}] 🔀 Multiple pickup matches found (no context) - asking for clarification`);
                 askForAddressDisambiguation("pickup", pickupResult.multiple_matches);
                 return; // Wait for customer to clarify
               }
@@ -965,11 +1013,13 @@ Rules:
           
           // Geocode destination if it changed and hasn't been verified yet
           if (destinationChanged && !knownBooking.destinationVerified) {
-            const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous);
+            // Pass "destination" as addressType so geocoder can use pickup for location bias
+            const destResult = await geocodeAddress(knownBooking.destination!, shouldCheckAmbiguous, "destination");
             if (destResult.found) {
-              // Check if there are multiple matches and caller has no history
-              if (destResult.multiple_matches && destResult.multiple_matches.length > 1 && shouldCheckAmbiguous) {
-                console.log(`[${callId}] 🔀 Multiple destination matches found - asking for clarification`);
+              // Check if there are multiple matches and no location context to help disambiguate
+              const hasLocationContext = knownBooking.pickup || callerLastPickup || callerLastDestination;
+              if (destResult.multiple_matches && destResult.multiple_matches.length > 1 && shouldCheckAmbiguous && !hasLocationContext) {
+                console.log(`[${callId}] 🔀 Multiple destination matches found (no context) - asking for clarification`);
                 askForAddressDisambiguation("destination", destResult.multiple_matches);
                 return; // Wait for customer to clarify
               }
