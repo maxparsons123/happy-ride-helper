@@ -796,14 +796,14 @@ export default function LiveCalls() {
                       </div>
                     ) : (
                       selectedCallData.transcripts
-                        .map((t, idx) => ({ t, idx }))
-                        // Sort newest->oldest in DOM so flex-col-reverse displays oldest->newest
+                        .slice() // copy to avoid mutating
                         .sort((a, b) => {
-                          const ta = new Date(a.t.timestamp).getTime();
-                          const tb = new Date(b.t.timestamp).getTime();
-                          return ta === tb ? b.idx - a.idx : tb - ta;
+                          // Sort by timestamp ascending (oldest first)
+                          const ta = new Date(a.timestamp).getTime();
+                          const tb = new Date(b.timestamp).getTime();
+                          return ta - tb;
                         })
-                        .map(({ t }, i) => (
+                        .map((t, i) => (
                           <div
                            key={i}
                            className={`flex ${
