@@ -230,6 +230,7 @@ serve(async (req) => {
   let knownBooking: KnownBooking = {};
 
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[\s,.;:!?]+$/g, "");
+  const normalizePhone = (phone: string) => String(phone || "").replace(/\D/g, "");
 
   // Extract city from an address string
   const extractCityFromAddress = (address: string): string => {
@@ -368,25 +369,32 @@ serve(async (req) => {
   // Look up caller by phone number and check for active bookings
   const lookupCaller = async (phone: string): Promise<void> => {
     if (!phone) return;
+
+    const phoneNorm = normalizePhone(phone);
+    const phoneCandidates = Array.from(new Set([phone, phoneNorm].filter(Boolean)));
+
     try {
       // Lookup caller info
       const { data, error } = await supabase
         .from("callers")
         .select("name, last_pickup, last_destination, total_bookings")
-        .eq("phone_number", phone)
+        .in("phone_number", phoneCandidates)
         .maybeSingle();
-      
+
       if (error) {
         console.error(`[${callId}] Caller lookup error:`, error);
         return;
       }
-      
+
       if (data?.name) {
-        callerName = data.name;
+        // Only overwrite callerName if we don't already have a non-placeholder name from Asterisk
+        if (!callerName || callerName === "Guest" || callerName === "Unknown") {
+          callerName = data.name;
+        }
         callerTotalBookings = data.total_bookings || 0;
         callerLastPickup = data.last_pickup || "";
         callerLastDestination = data.last_destination || "";
-        
+
         // Extract city from last addresses for location-biased geocoding
         if (callerLastPickup) {
           callerCity = extractCityFromAddress(callerLastPickup);
@@ -394,7 +402,7 @@ serve(async (req) => {
         if (!callerCity && callerLastDestination) {
           callerCity = extractCityFromAddress(callerLastDestination);
         }
-        
+
         console.log(`[${callId}] 👤 Known caller: ${callerName} (${callerTotalBookings} previous bookings)`);
         if (callerLastPickup) {
           console.log(`[${callId}] 📍 Last trip: ${callerLastPickup} → ${callerLastDestination}`);
@@ -403,27 +411,96 @@ serve(async (req) => {
           console.log(`[${callId}] 🏙️ Caller city: ${callerCity}`);
         }
       } else {
-        console.log(`[${callId}] 👤 New caller: ${phone}`);
+        console.log(`[${callId}] 👤 New caller: ${phoneNorm || phone}`);
       }
-      
+
       // Check for active bookings
       const { data: bookingData, error: bookingError } = await supabase
         .from("bookings")
         .select("id, pickup, destination, passengers, fare, booked_at")
-        .eq("caller_phone", phone)
+        .in("caller_phone", phoneCandidates)
         .eq("status", "active")
         .order("booked_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      
+
       if (bookingError) {
         console.error(`[${callId}] Active booking lookup error:`, bookingError);
-      } else if (bookingData) {
-        activeBooking = bookingData;
-        console.log(`[${callId}] 📋 Active booking found: ${activeBooking.pickup} → ${activeBooking.destination}`);
-      } else {
-        console.log(`[${callId}] 📋 No active bookings for ${phone}`);
+        return;
       }
+
+      if (bookingData) {
+        activeBooking = bookingData;
+        console.log(
+          `[${callId}] 📋 Active booking found: ${activeBooking.pickup} → ${activeBooking.destination}`,
+        );
+        return;
+      }
+
+      console.log(`[${callId}] 📋 No active bookings for ${phoneNorm || phone}`);
+
+      // Backfill: if no bookings row exists (older calls), infer from latest confirmed call log (recent only)
+      const { data: lastConfirmed, error: lastConfirmedError } = await supabase
+        .from("call_logs")
+        .select("call_id, pickup, destination, passengers, estimated_fare, created_at")
+        .in("user_phone", phoneCandidates)
+        .eq("booking_status", "confirmed")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastConfirmedError) {
+        console.error(`[${callId}] call_logs lookup error (backfill):`, lastConfirmedError);
+        return;
+      }
+
+      if (!lastConfirmed) return;
+
+      const createdAtMs = new Date(lastConfirmed.created_at).getTime();
+      const ageMs = Date.now() - createdAtMs;
+      const MAX_BACKFILL_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+      if (Number.isNaN(createdAtMs) || ageMs > MAX_BACKFILL_AGE_MS) {
+        console.log(`[${callId}] ⏳ Last confirmed booking too old to backfill (${Math.round(ageMs / 60000)} min)`);
+        return;
+      }
+
+      // Avoid duplicates by call_id
+      const { data: existingBooking } = await supabase
+        .from("bookings")
+        .select("id, pickup, destination, passengers, fare, booked_at")
+        .eq("call_id", lastConfirmed.call_id)
+        .maybeSingle();
+
+      if (existingBooking) {
+        activeBooking = existingBooking;
+        console.log(`[${callId}] 📋 Active booking loaded from existing bookings row: ${existingBooking.id}`);
+        return;
+      }
+
+      const { data: createdBooking, error: createBookingError } = await supabase
+        .from("bookings")
+        .insert({
+          call_id: lastConfirmed.call_id,
+          caller_phone: phoneNorm || phone,
+          caller_name: callerName || null,
+          pickup: lastConfirmed.pickup,
+          destination: lastConfirmed.destination,
+          passengers: lastConfirmed.passengers || 1,
+          fare: lastConfirmed.estimated_fare || null,
+          status: "active",
+          booked_at: lastConfirmed.created_at,
+        })
+        .select("id, pickup, destination, passengers, fare, booked_at")
+        .single();
+
+      if (createBookingError) {
+        console.error(`[${callId}] Backfill booking insert failed:`, createBookingError);
+        return;
+      }
+
+      activeBooking = createdBooking;
+      console.log(`[${callId}] 📋 Backfilled active booking: ${createdBooking.id}`);
     } catch (e) {
       console.error(`[${callId}] Caller lookup exception:`, e);
     }
@@ -1526,9 +1603,10 @@ CRITICAL: If they say "cancel" or "yes" to cancelling:
 
           // Save booking to bookings table for persistence
           if (userPhone) {
+            const phoneKey = normalizePhone(userPhone) || userPhone;
             const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
               call_id: callId,
-              caller_phone: userPhone,
+              caller_phone: phoneKey,
               caller_name: callerName || null,
               pickup: finalBooking.pickup,
               destination: finalBooking.destination,
@@ -2004,8 +2082,13 @@ CRITICAL: If they say "cancel" or "yes" to cancelling:
         
         // Extract phone number from Asterisk
         if (message.user_phone) {
-          userPhone = message.user_phone;
+          userPhone = normalizePhone(message.user_phone);
           console.log(`[${callId}] User phone: ${userPhone}`);
+        }
+
+        // Always load caller profile + active booking when we have a phone number
+        if (userPhone && userPhone !== "Unknown") {
+          await lookupCaller(userPhone);
         }
         
         // Enable/disable geocoding from client (default: true)
@@ -2039,11 +2122,8 @@ CRITICAL: If they say "cancel" or "yes" to cancelling:
               updated_at: new Date().toISOString()
             }, { onConflict: "phone_number" });
           }
-        } else if (userPhone && userPhone !== "Unknown") {
-          // Look up caller in database if no name provided
-          await lookupCaller(userPhone);
         }
-        
+
         // Detect Asterisk calls by call_id prefix
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
