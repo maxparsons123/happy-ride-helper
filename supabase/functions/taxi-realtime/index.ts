@@ -2940,19 +2940,23 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             }),
           );
 
-          // Notify client to end the call
-          socket.send(
-            JSON.stringify({
-              type: "call_ended",
-              reason: args.reason,
-            }),
-          );
-
-          // Close the WebSocket connection after a short delay to allow goodbye audio to finish
+          // Delay sending call_ended so Ada's goodbye audio finishes playing
+          // Asterisk bridge will hang up immediately on receiving this, so we wait
           setTimeout(() => {
-            console.log(`[${callId}] 📞 Closing connection after end_call`);
-            socket.close();
-          }, 3000);
+            console.log(`[${callId}] 📞 Sending call_ended after goodbye audio delay`);
+            socket.send(
+              JSON.stringify({
+                type: "call_ended",
+                reason: args.reason,
+              }),
+            );
+            
+            // Close the WebSocket connection shortly after
+            setTimeout(() => {
+              console.log(`[${callId}] 📞 Closing connection after end_call`);
+              socket.close();
+            }, 500);
+          }, 4000); // 4 seconds for goodbye audio to complete
         }
       }
 
