@@ -390,6 +390,7 @@ serve(async (req) => {
   const SILENCE_TIMEOUT_FAILSAFE_TRIGGER_MS = 12000;
 
   let followupAskedAt = 0; // ms epoch when Ada last asked "anything else"
+  let followupHangupRequested = false; // set true when silence timeout fires to prevent loops/re-arming
   let awaitingReplyAt = 0; // ms epoch when Ada last asked a question and is awaiting a reply
   let noReplyRepromptCount = 0;
   let awaitingQuestionText = ""; // Extracted last assistant question to repeat verbatim if no reply
@@ -452,6 +453,7 @@ serve(async (req) => {
 
     // Any real user activity cancels all "waiting for reply" timers.
     followupAskedAt = 0;
+    followupHangupRequested = false;
     awaitingReplyAt = 0;
     noReplyRepromptCount = 0;
 
@@ -473,6 +475,7 @@ serve(async (req) => {
     followupSilenceTimer = null;
     silenceHangupFailsafeTimer = null;
 
+    followupHangupRequested = false;
     followupAskedAt = Date.now();
 
     console.log(`[${callId}] ⏳ Armed follow-up silence timeout (${FOLLOWUP_SILENCE_TIMEOUT_MS}ms) context=${context}`);
@@ -483,6 +486,7 @@ serve(async (req) => {
       // If any user activity happened after we asked, do nothing.
       if (lastUserActivityAt > followupAskedAt) return;
 
+      followupHangupRequested = true;
       console.log(`[${callId}] ⏰ Follow-up silence timeout hit - requesting goodbye + end_call`);
 
       if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
@@ -491,7 +495,7 @@ serve(async (req) => {
           response: {
             modalities: ["audio", "text"],
             instructions:
-              "The customer has not replied. Politely say a short goodbye now, then call the end_call tool with reason 'silence_timeout'.",
+              "The customer has not replied. Say EXACTLY: \"Alright then. Thanks for calling. Goodbye.\" Then immediately call the end_call tool with reason 'silence_timeout'. Do NOT ask any further questions.",
           },
         }));
 
@@ -3084,9 +3088,11 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           const a = String(data.transcript).toLowerCase();
 
           // If Ada asked the "anything else" question, start a silence timeout so calls don't hang forever.
+          // IMPORTANT: if we've already triggered the silence-timeout hangup sequence, don't re-arm.
           if (
-            a.includes("is there anything else i can help") ||
-            a.includes("anything else i can help")
+            !followupHangupRequested &&
+            (a.includes("is there anything else i can help") ||
+              a.includes("anything else i can help"))
           ) {
             armFollowupSilenceTimeout("assistant_anything_else");
           }
