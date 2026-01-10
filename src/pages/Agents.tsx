@@ -13,7 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft, AudioLines, Timer, Volume2, Zap, Heart, Headphones, Phone, Wand2 } from "lucide-react";
+import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft, AudioLines, Timer, Volume2, Zap, Heart, Headphones, Phone, Wand2, RefreshCw } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -167,6 +167,7 @@ export default function Agents() {
   const [isCreating, setIsCreating] = useState(false);
   const [newAgentName, setNewAgentName] = useState("");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [isSyncingPrompt, setIsSyncingPrompt] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -350,6 +351,42 @@ export default function Agents() {
   const updateSelectedAgent = (updates: Partial<Agent>) => {
     if (!selectedAgent) return;
     setSelectedAgent({ ...selectedAgent, ...updates });
+  };
+
+  const syncLatestPrompt = async () => {
+    if (!selectedAgent) return;
+    
+    setIsSyncingPrompt(true);
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/taxi-realtime?get_prompt=true`
+      );
+      
+      if (!response.ok) {
+        throw new Error("Failed to fetch latest prompt");
+      }
+      
+      const data = await response.json();
+      
+      if (data.system_prompt) {
+        updateSelectedAgent({ system_prompt: data.system_prompt });
+        toast({
+          title: "Prompt Synced",
+          description: "Latest prompt loaded. Click Save to apply.",
+        });
+      } else {
+        throw new Error("No prompt found in response");
+      }
+    } catch (error) {
+      console.error("Error syncing prompt:", error);
+      toast({
+        title: "Sync Failed",
+        description: "Could not fetch latest prompt from edge function",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSyncingPrompt(false);
+    }
   };
 
   if (isLoading) {
@@ -608,10 +645,24 @@ export default function Agents() {
               <TabsContent value="prompt" className="space-y-4">
                 <Card className="bg-card/50 border-chat-border h-[calc(100vh-300px)]">
                   <CardHeader>
-                    <CardTitle className="text-base">System Prompt</CardTitle>
-                    <CardDescription>
-                      The full instructions given to the AI. Use {"{{agent_name}}"}, {"{{company_name}}"}, and {"{{personality_description}}"} as placeholders.
-                    </CardDescription>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <CardTitle className="text-base">System Prompt</CardTitle>
+                        <CardDescription>
+                          The full instructions given to the AI. Use {"{{agent_name}}"}, {"{{company_name}}"}, and {"{{personality_description}}"} as placeholders.
+                        </CardDescription>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={syncLatestPrompt}
+                        disabled={isSyncingPrompt}
+                        className="gap-2"
+                      >
+                        <RefreshCw className={`h-4 w-4 ${isSyncingPrompt ? 'animate-spin' : ''}`} />
+                        {isSyncingPrompt ? "Syncing..." : "Sync Latest"}
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <Textarea
