@@ -4419,8 +4419,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (tripHasTravelHub && !knownBooking.luggage) {
             console.log(`[${callId}] ⛔ BLOCKING book_taxi: Travel hub trip but luggage unknown`);
             
-            // Inject error message to Ada - she will ask naturally on her next turn
-            // DO NOT send response.create here - it causes duplicate/looping responses
+            // Mark luggage as asked to prevent duplicate questions
+            knownBooking.luggageAsked = true;
+            
+            // Inject system message to Ada instructing her to ask about luggage
             if (openaiWs?.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -4429,10 +4431,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                   role: "system",
                   content: [{ 
                     type: "input_text", 
-                    text: `[BOOKING BLOCKED: This trip involves a travel hub but luggage info is missing. Ask the customer how many bags they have before confirming.]` 
+                    text: `[BOOKING BLOCKED: This trip involves a travel hub but luggage info is missing. You MUST ask the customer how many bags they have right now. Say: "Before I confirm that, how many bags will you have?"]` 
                   }]
                 }
               }));
+              
+              // CRITICAL: Trigger Ada to respond to the blocking message
+              // Without this, she stays silent after the tool call fails
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["audio", "text"] }
+              }));
+              console.log(`[${callId}] ✈️ Triggered luggage question after book_taxi block`);
             }
             
             // Return early without processing the booking
