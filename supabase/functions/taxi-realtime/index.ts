@@ -3575,8 +3575,22 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
         // Use AI extraction for accurate booking data (AWAIT geocoding before responding)
         // This prevents Ada from asking passengers before geocoding completes
         // If we're about to end the call (e.g., user said "bye"), skip extraction entirely.
-        if (!forcedResponseInstructions) {
+        // OPTIMIZATION: Skip heavy extraction for simple confirmations/short responses
+        const simpleConfirmation = /^(yes|yeah|yep|no|nope|nah|ok|okay|sure|please|thanks|thank you|cheers|ta|one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b[!. ]*$/i.test(rawTranscript.trim());
+        
+        if (!forcedResponseInstructions && !simpleConfirmation) {
           await extractBookingFromTranscript(rawTranscript);
+        } else if (simpleConfirmation) {
+          // For simple responses, still extract basic info (like passenger count) but skip geocoding
+          const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
+          if (passengerMatch) {
+            const numMap: { [key: string]: number } = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8 };
+            const num = numMap[passengerMatch[1].toLowerCase()] || parseInt(passengerMatch[1]);
+            if (num >= 1 && num <= 8) {
+              knownBooking.passengers = num;
+              console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num} from simple response`);
+            }
+          }
         } else {
           console.log(`[${callId}] 📴 Skipping booking extraction (forcedResponseInstructions set)`);
         }
