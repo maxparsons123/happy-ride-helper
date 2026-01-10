@@ -4286,6 +4286,17 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }
           }
           
+          // If this is a travel-hub trip and luggage isn't known yet, force Ada to ask about bags now
+          if (!forcedResponseInstructions) {
+            const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+            if (tripHasTravelHubNow && !knownBooking.luggage) {
+              knownBooking.luggageAsked = true;
+              forcedResponseInstructions =
+                "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
+              console.log(`[${callId}] ✈️ Forcing luggage question (fast-path)`);
+            }
+          }
+
           // IMMEDIATE response.create - no waiting!
           if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
             const response = forcedResponseInstructions
@@ -4304,6 +4315,17 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           // ADDRESS-CONTAINING RESPONSE: Await extraction to ensure proper address flow
           console.log(`[${callId}] 🔍 Address-path: awaiting extraction for: "${rawTranscript}"`);
           await extractBookingFromTranscript(rawTranscript);
+          
+          // If this is a travel-hub trip and luggage isn't known yet, force Ada to ask about bags now
+          if (!forcedResponseInstructions) {
+            const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+            if (tripHasTravelHubNow && !knownBooking.luggage) {
+              knownBooking.luggageAsked = true;
+              forcedResponseInstructions =
+                "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
+              console.log(`[${callId}] ✈️ Forcing luggage question (after extraction)`);
+            }
+          }
           
           // Send response.create AFTER extraction completes
           if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
