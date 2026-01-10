@@ -262,9 +262,9 @@ serve(async (req) => {
     const looksLikeHouseAddress = /^\d+[a-z]?\s+[a-z]/i.test(address.trim());
     
     if (looksLikeHouseAddress && searchLat && searchLon) {
-      // Use "loose local" text search with tight 8km radius - more precise than Autocomplete
-      console.log(`[Geocode] House-number address detected: "${address}" - trying local Text Search (8km radius)`);
-      const looseLocalResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
+      // Use "loose local" text search with city-biased search - more precise than Autocomplete
+      console.log(`[Geocode] House-number address detected: "${address}" - trying local Text Search (city: ${city || 'N/A'})`);
+      const looseLocalResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous, city);
       if (looseLocalResult.found) {
         cacheResult(looseLocalResult);
         return new Response(
@@ -575,7 +575,8 @@ async function googleLooseLocalSearch(
   lat: number,
   lon: number,
   apiKey: string,
-  returnMultiple: boolean = false
+  returnMultiple: boolean = false,
+  city?: string
 ): Promise<GeocodeResult> {
   try {
     // Extract house number if present (e.g., "52A" from "52A David Road")
@@ -586,13 +587,17 @@ async function googleLooseLocalSearch(
     const queryRoadType = extractRoadType(query);
     const queryStreetName = extractStreetName(streetOnly);
     
-    console.log(`[Geocode] Loose local: query="${query}", street="${streetOnly}", streetName="${queryStreetName}", house="${queryHouseNumber}", roadType="${queryRoadType}"`);
+    console.log(`[Geocode] Loose local: query="${query}", street="${streetOnly}", streetName="${queryStreetName}", house="${queryHouseNumber}", roadType="${queryRoadType}", city="${city}"`);
+    
+    // If we have a city, include it in the search to help Google find the right location
+    // e.g., "David Road, Coventry" instead of just "David Road"
+    const streetSearchQuery = city ? `${streetOnly}, ${city}` : streetOnly;
     
     // FIRST: Search for the STREET only (without house number) - prevents fuzzy mismatches
     const streetSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
-      `?query=${encodeURIComponent(streetOnly)}` +
+      `?query=${encodeURIComponent(streetSearchQuery)}` +
       `&location=${lat},${lon}` +
-      `&radius=8000` +  // 8km radius - tight local search
+      `&radius=15000` +  // 15km radius when city specified (city name helps constrain)
       `&key=${apiKey}`;
 
     console.log(`[Geocode] Loose local search (street only): "${streetOnly}" near ${lat},${lon} (8km radius)`);
