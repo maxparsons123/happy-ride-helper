@@ -692,8 +692,75 @@ serve(async (req) => {
   };
 
   // Extract city from an address string
+  // UK outcode to city mapping (first part of postcode -> city)
+  const OUTCODE_TO_CITY: Record<string, string> = {
+    // Coventry
+    "CV1": "Coventry", "CV2": "Coventry", "CV3": "Coventry", "CV4": "Coventry", "CV5": "Coventry", "CV6": "Coventry",
+    // Birmingham
+    "B1": "Birmingham", "B2": "Birmingham", "B3": "Birmingham", "B4": "Birmingham", "B5": "Birmingham",
+    "B6": "Birmingham", "B7": "Birmingham", "B8": "Birmingham", "B9": "Birmingham", "B10": "Birmingham",
+    "B11": "Birmingham", "B12": "Birmingham", "B13": "Birmingham", "B14": "Birmingham", "B15": "Birmingham",
+    "B16": "Birmingham", "B17": "Birmingham", "B18": "Birmingham", "B19": "Birmingham", "B20": "Birmingham",
+    "B21": "Birmingham", "B23": "Birmingham", "B24": "Birmingham", "B25": "Birmingham", "B26": "Birmingham",
+    "B27": "Birmingham", "B28": "Birmingham", "B29": "Birmingham", "B30": "Birmingham", "B31": "Birmingham",
+    "B32": "Birmingham", "B33": "Birmingham", "B34": "Birmingham", "B35": "Birmingham", "B36": "Birmingham",
+    "B37": "Birmingham", "B38": "Birmingham", "B40": "Birmingham", "B42": "Birmingham", "B43": "Birmingham",
+    "B44": "Birmingham", "B45": "Birmingham", "B46": "Birmingham", "B47": "Birmingham", "B48": "Birmingham",
+    // Manchester
+    "M1": "Manchester", "M2": "Manchester", "M3": "Manchester", "M4": "Manchester", "M5": "Manchester",
+    "M6": "Manchester", "M7": "Manchester", "M8": "Manchester", "M9": "Manchester", "M11": "Manchester",
+    "M12": "Manchester", "M13": "Manchester", "M14": "Manchester", "M15": "Manchester", "M16": "Manchester",
+    "M17": "Manchester", "M18": "Manchester", "M19": "Manchester", "M20": "Manchester", "M21": "Manchester",
+    "M22": "Manchester", "M23": "Manchester", "M24": "Manchester", "M25": "Manchester", "M26": "Manchester",
+    "M27": "Manchester", "M28": "Manchester", "M29": "Manchester", "M30": "Manchester", "M31": "Manchester",
+    "M32": "Manchester", "M33": "Manchester", "M34": "Manchester", "M35": "Manchester", "M38": "Manchester",
+    "M40": "Manchester", "M41": "Manchester", "M43": "Manchester", "M44": "Manchester", "M45": "Manchester",
+    "M46": "Manchester",
+    // London (sample)
+    "E1": "London", "E2": "London", "E3": "London", "E4": "London", "E5": "London",
+    "W1": "London", "W2": "London", "W3": "London", "W4": "London", "W5": "London",
+    "N1": "London", "N2": "London", "N3": "London", "N4": "London", "N5": "London",
+    "NW1": "London", "NW2": "London", "NW3": "London", "NW4": "London", "NW5": "London",
+    "SE1": "London", "SE2": "London", "SE3": "London", "SE4": "London", "SE5": "London",
+    "SW1": "London", "SW2": "London", "SW3": "London", "SW4": "London", "SW5": "London",
+    "EC1": "London", "EC2": "London", "EC3": "London", "EC4": "London",
+    "WC1": "London", "WC2": "London",
+    // Liverpool
+    "L1": "Liverpool", "L2": "Liverpool", "L3": "Liverpool", "L4": "Liverpool", "L5": "Liverpool",
+    "L6": "Liverpool", "L7": "Liverpool", "L8": "Liverpool", "L9": "Liverpool", "L10": "Liverpool",
+    // Leeds  
+    "LS1": "Leeds", "LS2": "Leeds", "LS3": "Leeds", "LS4": "Leeds", "LS5": "Leeds",
+    "LS6": "Leeds", "LS7": "Leeds", "LS8": "Leeds", "LS9": "Leeds", "LS10": "Leeds",
+    // Cambridge
+    "CB1": "Cambridge", "CB2": "Cambridge", "CB3": "Cambridge", "CB4": "Cambridge", "CB5": "Cambridge",
+    // Nottingham
+    "NG1": "Nottingham", "NG2": "Nottingham", "NG3": "Nottingham", "NG4": "Nottingham", "NG5": "Nottingham",
+    "NG6": "Nottingham", "NG7": "Nottingham", "NG8": "Nottingham", "NG9": "Nottingham", "NG10": "Nottingham",
+    // Sheffield
+    "S1": "Sheffield", "S2": "Sheffield", "S3": "Sheffield", "S4": "Sheffield", "S5": "Sheffield",
+    "S6": "Sheffield", "S7": "Sheffield", "S8": "Sheffield", "S9": "Sheffield", "S10": "Sheffield",
+  };
+
+  // Extract city from an outcode (e.g., "CV1" → "Coventry", "B27" → "Birmingham")
+  const getCityFromOutcode = (outcode: string): string | null => {
+    if (!outcode) return null;
+    const normalized = outcode.toUpperCase().replace(/\s+/g, '');
+    return OUTCODE_TO_CITY[normalized] || null;
+  };
+
+  // Extract city from address text OR from a postcode within it
   const extractCityFromAddress = (address: string): string => {
     if (!address) return "";
+    
+    // First, check if address contains a postcode outcode we recognize
+    const postcodeMatch = address.toUpperCase().match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?)\s*\d?[A-Z]{0,2}\b/);
+    if (postcodeMatch) {
+      const outcode = postcodeMatch[1];
+      const cityFromOutcode = getCityFromOutcode(outcode);
+      if (cityFromOutcode) {
+        return cityFromOutcode;
+      }
+    }
     
     // Common UK city patterns - look for city names in the address
     const ukCities = [
@@ -1880,6 +1947,19 @@ Rules:
       if (awaitingClarificationFor && looksLikePostcodeOnly) {
         const postcode = transcript.trim().toUpperCase();
         console.log(`[${callId}] 📮 Postcode/outcode detected: "${postcode}" - routing to ${awaitingClarificationFor}`);
+        
+        // Extract city from the postcode outcode (e.g., CV1 → Coventry)
+        const outcodeMatch = postcode.match(/^([A-Z]{1,2}\d{1,2}[A-Z]?)/i);
+        if (outcodeMatch) {
+          const outcode = outcodeMatch[1].toUpperCase();
+          const cityFromPostcode = getCityFromOutcode(outcode);
+          if (cityFromPostcode && cityFromPostcode !== callerCity) {
+            console.log(`[${callId}] 🏙️ City detected from postcode ${outcode}: ${cityFromPostcode} (was: ${callerCity || 'none'})`);
+            callerCity = cityFromPostcode;
+            // Update known_areas for this city
+            callerKnownAreas[cityFromPostcode] = (callerKnownAreas[cityFromPostcode] || 0) + 1;
+          }
+        }
         
         if (awaitingClarificationFor === "pickup" && knownBooking.pickup) {
           // Append postcode to pickup address
