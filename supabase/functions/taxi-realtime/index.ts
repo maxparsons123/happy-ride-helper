@@ -2911,22 +2911,18 @@ Rules:
         queueLiveCallBroadcast({});
         
         if (openaiWs?.readyState === WebSocket.OPEN) {
+          // Just inject the system message - Ada will pick it up naturally on next turn
+          // DO NOT send response.create here - it causes duplicate responses
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "user",
+              role: "system",
               content: [{ 
                 type: "input_text", 
-                text: `[SYSTEM - MANDATORY QUESTION REQUIRED: The destination involves a travel hub (airport/station). You MUST ask: "Are you travelling with any bags today?" BEFORE offering to confirm the booking. This is a REQUIRED field for travel hub trips.]` 
+                text: `[IMPORTANT: This trip involves a travel hub. Before confirming, ask: "Are you travelling with any bags today?"]` 
               }]
             }
-          }));
-          
-          // Trigger Ada to respond with the luggage question
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response: { modalities: ["audio", "text"] }
           }));
         }
       }
