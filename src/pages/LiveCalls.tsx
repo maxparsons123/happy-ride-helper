@@ -199,8 +199,10 @@ export default function LiveCalls() {
       }
     };
 
-    // Fetch latest calls (polling fallback if realtime drops)
-    const refreshCalls = async () => {
+    // Fetch initial calls on mount
+    const fetchCalls = async () => {
+      await cleanupStaleCalls();
+
       const { data, error } = await supabase
         .from("live_calls")
         .select("*")
@@ -219,42 +221,19 @@ export default function LiveCalls() {
       })) as LiveCall[];
 
       setCalls(typedCalls);
-
-      // Follow the newest active call so operators always see *new* incoming calls
-      const newestActive = typedCalls.find((c) => c.status === "active");
-      const currentSelectedId = selectedCallRef.current;
-      const currentSelected = currentSelectedId
-        ? (typedCalls.find((c) => c.call_id === currentSelectedId) ||
-            callsRef.current.find((c) => c.call_id === currentSelectedId))
-        : null;
-
-      const hasNewerActiveCall =
-        !!newestActive &&
-        (!currentSelected || new Date(newestActive.started_at).getTime() > new Date(currentSelected.started_at).getTime());
-
-      if (newestActive && (hasNewerActiveCall || newestActive.call_id !== currentSelectedId)) {
-        setSelectedCall(newestActive.call_id);
-      } else if (!currentSelectedId && typedCalls.length > 0) {
+      if (typedCalls.length > 0 && !selectedCallRef.current) {
         setSelectedCall(typedCalls[0].call_id);
       }
     };
 
-    // Initial load
-    (async () => {
-      await cleanupStaleCalls();
-      await refreshCalls();
-    })();
+    fetchCalls();
 
-    // Subscribe to realtime updates
+    // Subscribe to realtime updates - this is the PRIMARY way we get new calls
     const channel = supabase
       .channel("live-calls-monitor")
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "live_calls",
-        },
+        { event: "*", schema: "public", table: "live_calls" },
         (payload) => {
           console.log("Live call update:", payload);
 
@@ -263,9 +242,8 @@ export default function LiveCalls() {
               ...payload.new,
               transcripts: (payload.new.transcripts as unknown as Transcript[]) || [],
             } as LiveCall;
-
-            setCalls((prev) => [newCall, ...prev.filter((c) => c.call_id !== newCall.call_id)].slice(0, 20));
-            setSelectedCall(newCall.call_id);
+            setCalls((prev) => [newCall, ...prev.slice(0, 19)]);
+            setSelectedCall(newCall.call_id); // Auto-select new call
           } else if (payload.eventType === "UPDATE") {
             setCalls((prev) =>
               prev.map((call) =>
@@ -282,25 +260,20 @@ export default function LiveCalls() {
           }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("[LiveCalls] Realtime subscription status:", status);
+      });
 
-    // Poll as a safety net (covers missed realtime events / disconnected WS)
-    const pollId = window.setInterval(() => {
-      refreshCalls();
-    }, 3000);
-
-    // Also refresh immediately when the tab becomes active again (intervals are throttled in background tabs)
-    const handleFocus = () => refreshCalls();
+    // Fallback: re-fetch only when tab regains focus (not on interval)
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") refreshCalls();
+      if (document.visibilityState === "visible") {
+        console.log("[LiveCalls] Tab visible again, refreshing calls");
+        fetchCalls();
+      }
     };
-
-    window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      window.clearInterval(pollId);
-      window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
       supabase.removeChannel(channel);
     };
