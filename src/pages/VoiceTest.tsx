@@ -1,9 +1,20 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Mic, Phone, PhoneOff } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Mic, Phone, PhoneOff, Bot } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
-const WS_URL = "wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime";
+const WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime";
+
+interface Agent {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  voice: string;
+  is_active: boolean;
+}
 
 interface Message {
   text: string;
@@ -27,6 +38,11 @@ export default function VoiceTest() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("Connect first...");
   const [textInput, setTextInput] = useState("");
+  
+  // Agent selection
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<string>("ada");
+  const [loadingAgents, setLoadingAgents] = useState(true);
   
   // Metrics
   const [lastLatency, setLastLatency] = useState<number | null>(null);
@@ -55,6 +71,30 @@ export default function VoiceTest() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, booking]);
+
+  // Fetch available agents
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("agents")
+          .select("id, name, slug, description, voice, is_active")
+          .eq("is_active", true)
+          .order("created_at", { ascending: true });
+
+        if (error) throw error;
+        setAgents(data || []);
+        if (data && data.length > 0) {
+          setSelectedAgent(data[0].slug);
+        }
+      } catch (error) {
+        console.error("Error fetching agents:", error);
+      } finally {
+        setLoadingAgents(false);
+      }
+    };
+    fetchAgents();
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -191,12 +231,14 @@ export default function VoiceTest() {
 
       ws.onopen = () => {
         console.log("WebSocket opened");
-        addMessage("Connected, initializing session...", "system");
+        const agentName = agents.find(a => a.slug === selectedAgent)?.name || selectedAgent;
+        addMessage(`Connected, initializing session with ${agentName}...`, "system");
         
         ws.send(JSON.stringify({
           type: "init",
           call_id: "voice-test-" + Date.now(),
           addressTtsSplicing: true,
+          agent: selectedAgent,
         }));
       };
 
@@ -277,7 +319,7 @@ export default function VoiceTest() {
       isConnectingRef.current = false;
       addMessage("Connection error", "system");
     };
-  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio]);
+  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents]);
 
   const disconnect = useCallback(() => {
     stopRecordingInternal();
@@ -446,7 +488,31 @@ export default function VoiceTest() {
         </div>
 
         {/* Controls */}
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3 items-center">
+          {/* Agent Selector */}
+          <div className="flex items-center gap-2">
+            <Bot className="w-4 h-4 text-muted-foreground" />
+            <Select
+              value={selectedAgent}
+              onValueChange={setSelectedAgent}
+              disabled={status !== "disconnected" || loadingAgents}
+            >
+              <SelectTrigger className="w-[180px] bg-card border-chat-border">
+                <SelectValue placeholder="Select agent..." />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-chat-border">
+                {agents.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.slug}>
+                    <div className="flex flex-col">
+                      <span className="font-medium">{agent.name}</span>
+                      <span className="text-xs text-muted-foreground">{agent.voice}</span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           <Button 
             onClick={connect} 
             disabled={status === "connected" || status === "connecting"} 
