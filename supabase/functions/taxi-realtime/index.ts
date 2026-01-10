@@ -672,11 +672,20 @@ serve(async (req) => {
 
   // --- Call lifecycle + "Ada didn't finish" safeguards ---
   // If Ada asks "Anything else?" and the customer goes silent, end the call reliably.
-  const FOLLOWUP_SILENCE_TIMEOUT_MS = 8000;
+  // NOTE: This is a fallback default - we prefer agentConfig.silence_timeout_ms when available
+  const FOLLOWUP_SILENCE_TIMEOUT_MS_DEFAULT = 12000;
+
+  // Helper to get the actual silence timeout (use agent config if loaded, else default)
+  const getFollowupSilenceTimeoutMs = (): number => {
+    return agentConfig?.silence_timeout_ms ?? FOLLOWUP_SILENCE_TIMEOUT_MS_DEFAULT;
+  };
 
   // If Ada asks any question and we get no detectable user activity (VAD/transcription),
   // reprompt once or twice so calls don't get "stuck" on the first question.
-  const NO_REPLY_REPROMPT_MS = 9000;
+  const NO_REPLY_REPROMPT_MS_DEFAULT = 10000;
+  const getNoReplyRepromptMs = (): number => {
+    return agentConfig?.no_reply_timeout_ms ?? NO_REPLY_REPROMPT_MS_DEFAULT;
+  };
   const MAX_NO_REPLY_REPROMPTS = 2;
 
   // When we do need to hang up without an explicit end_call tool completion,
@@ -780,7 +789,8 @@ serve(async (req) => {
     followupHangupRequested = false;
     followupAskedAt = Date.now();
 
-    console.log(`[${callId}] ⏳ Armed follow-up silence timeout (${FOLLOWUP_SILENCE_TIMEOUT_MS}ms) context=${context}`);
+    const silenceTimeoutMs = getFollowupSilenceTimeoutMs();
+    console.log(`[${callId}] ⏳ Armed follow-up silence timeout (${silenceTimeoutMs}ms) context=${context}`);
 
     followupSilenceTimer = setTimeout(() => {
       if (callEnded || endCallInProgress) return;
@@ -812,7 +822,7 @@ serve(async (req) => {
         // No OpenAI connection - just hang up.
         forceHangup("silence_timeout_no_ai", 0);
       }
-    }, FOLLOWUP_SILENCE_TIMEOUT_MS);
+    }, silenceTimeoutMs);
   };
 
   const extractLastQuestion = (assistantTranscript: string): string => {
@@ -844,7 +854,8 @@ serve(async (req) => {
     // Don't spam: cap reprompts per "waiting period"
     if (noReplyRepromptCount >= MAX_NO_REPLY_REPROMPTS) return;
 
-    console.log(`[${callId}] ⏳ Armed no-reply reprompt (${NO_REPLY_REPROMPT_MS}ms) context=${context}`);
+    const noReplyMs = getNoReplyRepromptMs();
+    console.log(`[${callId}] ⏳ Armed no-reply reprompt (${noReplyMs}ms) context=${context}`);
 
     noReplyRepromptTimer = setTimeout(() => {
       if (callEnded || endCallInProgress) return;
@@ -877,7 +888,7 @@ serve(async (req) => {
       if (noReplyRepromptCount < MAX_NO_REPLY_REPROMPTS) {
         armNoReplyReprompt("reprompt_again", q || undefined);
       }
-    }, NO_REPLY_REPROMPT_MS);
+    }, noReplyMs);
   };
 
   // Language handling (multilingual support)
@@ -5536,7 +5547,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           const silenceTimeoutEligible =
             String(args.reason || "") === "silence_timeout" &&
             followupAskedAt > 0 &&
-            Date.now() - followupAskedAt >= FOLLOWUP_SILENCE_TIMEOUT_MS - 250 &&
+            Date.now() - followupAskedAt >= getFollowupSilenceTimeoutMs() - 250 &&
             lastUserActivityAt <= followupAskedAt;
 
           if (silenceTimeoutEligible) {
