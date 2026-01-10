@@ -1652,21 +1652,29 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       const normalizedPickups = new Set(updatedPickupAddrs.map(normalizeForComparison));
       const normalizedDropoffs = new Set(updatedDropoffAddrs.map(normalizeForComparison));
       
-      // Helper to enrich address with city if missing
-      const ensureAddressHasCity = (addr: string): string => {
-        if (!addr) return addr;
+      // Helper to enrich address with city if missing - BUT track if we added it artificially
+      const ensureAddressHasCity = (addr: string, isPickup: boolean): { enriched: string; cityFromOriginal: boolean } => {
+        if (!addr) return { enriched: addr, cityFromOriginal: false };
         const hasCity = extractCityFromAddress(addr);
-        if (hasCity) return addr; // Already has city
+        if (hasCity) return { enriched: addr, cityFromOriginal: true }; // City was in the original address
         const hasPostcode = /[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}/i.test(addr);
-        if (hasPostcode) return addr; // Has postcode, good enough
-        if (callerCity) {
-          return `${addr}, ${callerCity}`;
+        if (hasPostcode) return { enriched: addr, cityFromOriginal: false }; // Has postcode, but no city
+        // IMPORTANT: Only add callerCity if it came from PICKUP history, not destination
+        // This prevents destination cities being used as pickup context
+        if (callerCity && isPickup) {
+          // Check if callerCity is from pickup_addresses history (legitimate local context)
+          const pickupCities = callerPickupAddresses.map(a => extractCityFromAddress(a)).filter(Boolean);
+          if (pickupCities.some(c => c?.toLowerCase() === callerCity.toLowerCase())) {
+            return { enriched: `${addr}, ${callerCity}`, cityFromOriginal: false };
+          }
         }
-        return addr;
+        return { enriched: addr, cityFromOriginal: false };
       };
       
-      const enrichedPickup = ensureAddressHasCity(booking.pickup);
-      const enrichedDestination = ensureAddressHasCity(booking.destination);
+      const pickupResult = ensureAddressHasCity(booking.pickup, true);
+      const enrichedPickup = pickupResult.enriched;
+      const destResult = ensureAddressHasCity(booking.destination, false);
+      const enrichedDestination = destResult.enriched;
       
       // Add pickup to pickup_addresses (separate from destinations)
       const pickupCore = normalizeForComparison(booking.pickup || "");
@@ -1701,11 +1709,16 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         updatedDropoffAddrs = updatedDropoffAddrs.slice(-MAX_ADDRESSES);
       }
       
-      // Update known_areas with the pickup city (NOT destination city!)
-      const pickupCity = extractCityFromAddress(enrichedPickup);
-      if (pickupCity) {
-        callerKnownAreas[pickupCity] = (callerKnownAreas[pickupCity] || 0) + 1;
-        console.log(`[${callId}] 🏙️ Updated known_areas with pickup city: ${pickupCity}`);
+      // Update known_areas with the pickup city ONLY if it was in the original address
+      // This prevents artificially enriched cities from polluting the area history
+      if (pickupResult.cityFromOriginal) {
+        const pickupCity = extractCityFromAddress(enrichedPickup);
+        if (pickupCity) {
+          callerKnownAreas[pickupCity] = (callerKnownAreas[pickupCity] || 0) + 1;
+          console.log(`[${callId}] 🏙️ Updated known_areas with pickup city: ${pickupCity}`);
+        }
+      } else {
+        console.log(`[${callId}] ⚠️ Pickup address has no verified city - not updating known_areas`);
       }
       
       if (existing) {
