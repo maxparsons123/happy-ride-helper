@@ -1478,25 +1478,13 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
 
         // Derive primary city (bias) with better priorities:
         // IMPORTANT: Only use PICKUP addresses for city bias, NOT destinations!
-        // REVISED ORDER: known_areas is most reliable since it stores verified cities
-        // 1) known_areas counts (MOST RELIABLE - explicitly stored city data)
-        // 2) Cities from saved pickup_addresses
-        // 3) Any explicit city embedded in saved aliases (home/work locations)
-        // 4) last_pickup city
+        // 1) Cities from saved pickup_addresses (most reliable for caller's local area)
+        // 2) Any explicit city embedded in saved aliases (home/work locations)
+        // 3) last_pickup city
+        // 4) known_areas counts
         // 5) Default to Coventry (service area)
         
-        console.log(`[${callId}] 🔍 Deriving callerCity... known_areas=${JSON.stringify(callerKnownAreas)}, pickup_addresses=${callerPickupAddresses.length}`);
-        
-        // 1) known_areas (MOST RELIABLE - verified city data)
-        if (!callerCity && Object.keys(callerKnownAreas).length > 0) {
-          const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
-          if (topCity) {
-            callerCity = topCity[0];
-            console.log(`[${callId}] 🏙️ Primary city from known_areas: ${callerCity} (${topCity[1]} mentions)`);
-          }
-        }
-        
-        // 2) Cities from pickup_addresses
+        // 1) Cities from pickup_addresses
         if (!callerCity && callerPickupAddresses.length > 0) {
           const pickupCities = callerPickupAddresses
             .map((a) => extractCityFromAddress(a))
@@ -1514,7 +1502,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           }
         }
 
-        // 3) Cities from address aliases (if not already set)
+        // 2) Cities from address aliases (if not already set from pickup_addresses)
         if (!callerCity) {
           const aliasCities = Object.values(callerAddressAliases)
             .map((a) => extractCityFromAddress(a))
@@ -1533,12 +1521,21 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           }
         }
 
-        // 4) last_pickup city
+        // 3) last_pickup city
         if (!callerCity && callerLastPickup) {
           const pickupCity = extractCityFromAddress(callerLastPickup);
           if (pickupCity) {
             callerCity = pickupCity;
             console.log(`[${callId}] 🏙️ Primary city from last_pickup: ${callerCity}`);
+          }
+        }
+
+        // 4) known_areas (pickup-derived, not destination)
+        if (!callerCity && Object.keys(callerKnownAreas).length > 0) {
+          const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
+          if (topCity) {
+            callerCity = topCity[0];
+            console.log(`[${callId}] 🏙️ Primary city from known_areas: ${callerCity} (${topCity[1]} mentions)`);
           }
         }
 
