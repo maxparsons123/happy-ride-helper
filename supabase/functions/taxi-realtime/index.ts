@@ -2931,9 +2931,19 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
 Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
         } else if (callerName) {
           // Returning customer without usual destination
-          greetingPrompt = `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}.${addressHistoryContext}
+          // CRITICAL: If they have NO pickup history, we need to ask for their area for geocoding context
+          const hasPickupHistory = callerPickupAddresses.length > 0;
+          if (hasPickupHistory) {
+            greetingPrompt = `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}.${addressHistoryContext}
 
 Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`;
+          } else {
+            // Caller has name but NO address history - need to get their area for geocoding
+            greetingPrompt = `[Call connected - greet the RETURNING customer by name BUT they have NO pickup history so we need their area. Their name is ${callerName}.
+
+Say: "Hello ${callerName}! Lovely to hear from you again. Just so I can find addresses near you, what area are you calling from - Coventry, Birmingham, or somewhere else?"
+CRITICAL: Wait for them to answer the area question BEFORE proceeding with any booking details. Their area is needed for accurate address lookups.]`;
+          }
         } else {
           // New customer
           greetingPrompt = `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
