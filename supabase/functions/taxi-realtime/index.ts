@@ -1055,10 +1055,14 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
 
   // Look up caller by phone number and check for active bookings
   const lookupCaller = async (phone: string): Promise<void> => {
-    if (!phone) return;
+    if (!phone) {
+      console.log(`[${callId}] ⚠️ lookupCaller called with no phone`);
+      return;
+    }
 
     const phoneNorm = normalizePhone(phone);
     const phoneCandidates = Array.from(new Set([phone, phoneNorm].filter(Boolean)));
+    console.log(`[${callId}] 🔍 Looking up caller: ${phone} (normalized: ${phoneNorm}, candidates: ${phoneCandidates.join(', ')})`);
 
     try {
       // Lookup caller info (including trusted addresses)
@@ -1069,9 +1073,11 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         .maybeSingle();
 
       if (error) {
-        console.error(`[${callId}] Caller lookup error:`, error);
+        console.error(`[${callId}] ❌ Caller lookup error:`, error);
         return;
       }
+
+      console.log(`[${callId}] 📋 Caller lookup result:`, data ? `Found: ${data.name || 'no name'}, bookings: ${data.total_bookings}` : 'No match');
 
       if (data?.name && isValidCallerName(data.name)) {
         // Only overwrite callerName if we don't already have a valid name from Asterisk
