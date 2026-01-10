@@ -944,6 +944,14 @@ serve(async (req) => {
     }
   };
 
+  // Travel hub detection - airports, train stations, coach stations
+  const TRAVEL_HUB_PATTERNS = /\b(airport|terminal|heathrow|gatwick|stansted|luton|manchester\s*airport|birmingham\s*airport|bristol\s*airport|east\s*midlands|london\s*city|southend|newcastle\s*airport|edinburgh\s*airport|glasgow\s*airport|train\s*station|railway\s*station|coach\s*station|bus\s*station|euston|kings\s*cross|paddington|victoria\s*station|waterloo|st\s*pancras|new\s*street|piccadilly)\b/i;
+  
+  const isTravelHub = (address: string | undefined): boolean => {
+    if (!address) return false;
+    return TRAVEL_HUB_PATTERNS.test(address);
+  };
+
   type KnownBooking = {
     pickup?: string;
     destination?: string;
@@ -957,6 +965,8 @@ serve(async (req) => {
     pickupAlternative?: string; // Ada's interpretation if different from STT
     destinationAlternative?: string; // Ada's interpretation if different from STT
     vehicleType?: string; // e.g., "6 seater", "saloon", "MPV", "estate" - captured from customer request
+    luggage?: string; // e.g., "2 bags", "1 suitcase", "no luggage"
+    luggageAsked?: boolean; // Track if we've asked about luggage for this trip
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -2857,12 +2867,43 @@ Rules:
         knownBooking.pickupTime = extracted.pickup_time;
         console.log(`[${callId}] ⏰ Pickup time extracted: ${extracted.pickup_time}`);
       }
+      // Track luggage extraction
+      if (extracted.luggage) {
+        if (extracted.luggage === "CLEAR") {
+          knownBooking.luggage = undefined;
+          console.log(`[${callId}] 🧳 Luggage cleared`);
+        } else {
+          knownBooking.luggage = extracted.luggage;
+          console.log(`[${callId}] 🧳 Luggage extracted: ${extracted.luggage}`);
+        }
+      }
 
       // Check if anything changed
       const pickupChanged = before.pickup !== knownBooking.pickup && knownBooking.pickup;
       const destinationChanged = before.destination !== knownBooking.destination && knownBooking.destination;
       const passengersChanged = before.passengers !== knownBooking.passengers && knownBooking.passengers;
       const timeChanged = before.pickupTime !== knownBooking.pickupTime && knownBooking.pickupTime;
+
+      // TRAVEL HUB LUGGAGE CHECK: If destination or pickup is an airport/station, inject mandatory luggage prompt
+      const tripHasTravelHub = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+      if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
+        console.log(`[${callId}] ✈️ Travel hub detected - injecting mandatory luggage prompt`);
+        knownBooking.luggageAsked = true;
+        
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ 
+                type: "input_text", 
+                text: `[SYSTEM MANDATORY: This trip involves an airport/station. You MUST ask about luggage BEFORE confirming the booking. Ask: "Are you travelling with any luggage today?" or "How many bags will you have?" Do NOT proceed to confirmation until you know their luggage situation.]` 
+              }]
+            }
+          }));
+        }
+      }
 
       if (pickupChanged || destinationChanged || passengersChanged || timeChanged) {
         console.log(`[${callId}] ✅ Known booking updated via AI extraction:`, knownBooking);
@@ -4231,6 +4272,39 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (data.name === "book_taxi") {
           const args = JSON.parse(data.arguments);
 
+          // TRAVEL HUB LUGGAGE CHECK: Block booking if trip involves airport/station but luggage unknown
+          const pickupForCheck = knownBooking.pickup ?? args.pickup;
+          const destinationForCheck = args.destination ?? knownBooking.destination;
+          const tripHasTravelHub = isTravelHub(pickupForCheck) || isTravelHub(destinationForCheck);
+          
+          if (tripHasTravelHub && !knownBooking.luggage) {
+            console.log(`[${callId}] ⛔ BLOCKING book_taxi: Travel hub trip but luggage unknown`);
+            
+            // Inject error message to Ada
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ 
+                    type: "input_text", 
+                    text: `[SYSTEM ERROR: Cannot complete booking - this trip involves an airport/station but you haven't asked about luggage yet. You MUST ask: "Are you travelling with any luggage today?" and wait for their answer before booking.]` 
+                  }]
+                }
+              }));
+              
+              // Trigger Ada to respond with the luggage question
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["audio", "text"] }
+              }));
+            }
+            
+            // Return early without processing the booking
+            return;
+          }
+
           // CRITICAL FIX: Ada has the full conversation context, so her args should be trusted
           // for the DESTINATION field. The extraction layer can mistakenly pick up stray location
           // mentions (e.g., user saying "Third Street" when Ada asked about passengers).
@@ -4248,6 +4322,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             passengers: knownBooking.passengers ?? args.passengers,
             pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
             vehicleType: knownBooking.vehicleType ?? args.vehicle_type ?? null, // e.g., "6 seater", "MPV"
+            luggage: knownBooking.luggage ?? args.luggage ?? null, // Include luggage in final booking
           };
 
           bookingData = finalBooking;
@@ -4534,7 +4609,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             },
             passengers: finalBooking.passengers,
             vehicle_type: finalBooking.vehicleType || null,
-            luggage: null,
+            luggage: finalBooking.luggage || null, // Include extracted luggage info
             special_requests: null,
             fare: `£${fare}`,
             eta: isAsap ? eta : null,
