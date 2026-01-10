@@ -2874,7 +2874,17 @@ Rules:
           console.log(`[${callId}] 🧳 Luggage cleared`);
         } else {
           knownBooking.luggage = extracted.luggage;
-          console.log(`[${callId}] 🧳 Luggage extracted: ${extracted.luggage}`);
+          console.log(`[${callId}] 🧳 LUGGAGE EXTRACTED: "${extracted.luggage}"`);
+          
+          // Add to transcript for visibility
+          transcriptHistory.push({
+            role: "system",
+            text: `🧳 Luggage: ${extracted.luggage}`,
+            timestamp: new Date().toISOString()
+          });
+          queueLiveCallBroadcast({
+            luggage: extracted.luggage
+          });
         }
       }
 
