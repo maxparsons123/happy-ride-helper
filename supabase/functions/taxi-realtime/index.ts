@@ -3170,19 +3170,27 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             a.includes("how many passengers") ||
             a.includes("shall i book");
           
-          // Check if this is a booking confirmation question
+          // Check if this is a question that should NOT be reprompted
           const isConfirmationQuestion = 
             a.includes("shall i book") || 
             a.includes("shall i confirm") ||
             a.includes("book that for you");
+          
+          // "Anything else?" already has its own dedicated timeout handler - don't double-arm
+          const isAnythingElseQuestion = 
+            a.includes("is there anything else") || 
+            a.includes("anything else i can help");
 
           // Only arm reprompt if user hasn't already replied recently (prevents double-fire)
           // If there's been user activity in the last 3 seconds, the user DID reply - don't reprompt
           const recentUserActivity = lastUserActivityAt > 0 && now - lastUserActivityAt < 3000;
           
-          // CRITICAL: Don't reprompt confirmation questions - they should only be asked ONCE
-          // If user doesn't respond, they're thinking - don't pressure them
-          if (looksLikeQuestion && !isConfirmationQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
+          // CRITICAL: Don't reprompt these questions:
+          // - Confirmation questions ("shall I book that?") - asked once only
+          // - "Anything else?" - has its own dedicated timeout handler
+          const skipReprompt = isConfirmationQuestion || isAnythingElseQuestion;
+          
+          if (looksLikeQuestion && !skipReprompt && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
             armNoReplyReprompt("assistant_question", transcriptText);
           }
 
