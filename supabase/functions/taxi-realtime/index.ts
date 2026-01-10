@@ -1161,40 +1161,52 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     if (found) {
       console.log(`[${callId}] ✅ ${addressType} address verified: "${address}"`);
       // No need to say anything - address is valid
-    } else {
-      console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - but accepting it anyway`);
-
-      // Remember we have prompted for this specific address (so we can clear it if it later verifies)
-      geocodeClarificationSent[addressType] = normalize(address);
-      // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
-      // Only ask for clarification if it's a residential address that sounds garbled
-      const isLandmark = /\b(station|airport|hospital|university|college|school|shopping|centre|center|mall|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|hotel|inn|pub|restaurant|church|mosque|temple|gurdwara|park|library|museum|theatre|theater|cinema|gym|sports|leisure|pool|bus\s*stop|taxi\s*rank)\b/i.test(address);
-      
-      if (isLandmark) {
-        console.log(`[${callId}] 📍 Landmark detected - accepting without clarification: "${address}"`);
-        return; // Don't ask for clarification on landmarks
-      }
-      
-      // Only ask for clarification on unclear residential addresses
-      const message = addressType === "pickup"
-        ? `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`
-        : `[SYSTEM: The destination address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that destination. Could you give me the full address or postcode please?"]`;
-      
-      openaiWs.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: message }]
-        }
-      }));
-      
-      // Trigger Ada to respond
-      openaiWs.send(JSON.stringify({
-        type: "response.create",
-        response: { modalities: ["audio", "text"] }
-      }));
+      return;
     }
+
+    console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - but accepting it anyway`);
+
+    // Remember we have prompted for this specific address (so we can clear it if it later verifies)
+    geocodeClarificationSent[addressType] = normalize(address);
+
+    // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
+    // Only ask for clarification if it's a residential address that sounds garbled
+    const isLandmark = /\b(station|airport|hospital|university|college|school|shopping|centre|center|mall|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|hotel|inn|pub|restaurant|church|mosque|temple|gurdwara|park|library|museum|theatre|theater|cinema|gym|sports|leisure|pool|bus\s*stop|taxi\s*rank)\b/i.test(address);
+
+    if (isLandmark) {
+      console.log(`[${callId}] 📍 Landmark detected - accepting without clarification: "${address}"`);
+      return; // Don't ask for clarification on landmarks
+    }
+
+    // Heuristic: if the customer already provided a specific street address, do NOT ask them to repeat it.
+    // Ask ONLY for postcode / area / nearby landmark so dispatch is safe but low-friction.
+    const looksLikeStreetAddress = /^\s*\d+[a-z]?\s+.+/i.test(address);
+
+    const message = (() => {
+      if (addressType === "pickup") {
+        return looksLikeStreetAddress
+          ? `[SYSTEM: The pickup address "${address}" could not be verified. The customer already gave the street name/house number. Ask ONLY for the POSTCODE (or a nearby landmark/area). Say: "Could you tell me the postcode for that pickup address, please?" ]`
+          : `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`;
+      }
+
+      // destination
+      return `[SYSTEM: The destination address "${address}" could not be verified. Ask for the POSTCODE / area (or a nearby landmark) to confirm it safely. Say something like "Could you tell me the postcode or the area for that destination, please?"]`;
+    })();
+
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }],
+      },
+    }));
+
+    // Trigger Ada to respond
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] },
+    }));
   };
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
