@@ -247,11 +247,23 @@ GENERAL RULES:
 - After the greeting, you MUST ask for time, pickup, destination, and passengers BEFORE any booking confirmation`;
 
 serve(async (req) => {
-  // Handle regular HTTP requests (health check)
+  // Handle regular HTTP requests (health check or prompt fetch)
   if (req.headers.get("upgrade") !== "websocket") {
     if (req.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
+    
+    // Check if this is a request for the system prompt
+    const url = new URL(req.url);
+    if (url.searchParams.get("get_prompt") === "true") {
+      return new Response(JSON.stringify({ 
+        system_prompt: SYSTEM_INSTRUCTIONS,
+        updated_at: new Date().toISOString()
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    
     return new Response(JSON.stringify({ 
       status: "ready",
       endpoint: "taxi-realtime",
