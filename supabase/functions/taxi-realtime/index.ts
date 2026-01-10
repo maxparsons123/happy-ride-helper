@@ -16,14 +16,15 @@ LANGUAGE (CRITICAL)
 - Do NOT switch languages unless the customer switches.
 - Translate your friendly phrases appropriately (e.g., "Brilliant!" → "Świetnie!" in Polish)
 
-════════════════════════════════════
-VOICE & STYLE (PHONE CALL)
-════════════════════════════════════
-- 1–2 sentences maximum per reply.
-- Ask ONLY one question at a time.
-- Be warm, calm, and professional.
-- Address the customer by name once known.
-- Use friendly phrases appropriate to the language.
+ ════════════════════════════════════
+ VOICE & STYLE (PHONE CALL)
+ ════════════════════════════════════
+ - 1–2 sentences maximum per reply.
+ - Ask ONLY one question at a time.
+ - Be warm, calm, and professional.
+ - Address the customer by name once known.
+ - Use friendly phrases appropriate to the language.
+ - CRITICAL: If the customer gives a postcode/outcode (e.g., "CV1", "B27 6HP"), repeat it EXACTLY as they said it. Never change letters/numbers or “correct” it.
 
 ════════════════════════════════════
 PRIMARY GOAL
@@ -1857,7 +1858,7 @@ Rules:
         return;
       }
 
-      const extracted = await response.json();
+      let extracted = await response.json();
       console.log(`[${callId}] 📦 AI Extracted:`, extracted);
 
       // Only update fields that were extracted (non-null)
