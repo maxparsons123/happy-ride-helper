@@ -320,7 +320,18 @@ serve(async (req) => {
   // --- Call lifecycle + "Ada didn't finish" safeguards ---
   // If Ada asks "Anything else?" and the customer goes silent, end the call reliably.
   const FOLLOWUP_SILENCE_TIMEOUT_MS = 8000;
-  const POST_GOODBYE_HANGUP_FAILSAFE_MS = 1200;
+
+  // When we do need to hang up without an explicit end_call tool completion,
+  // we MUST allow time for Ada's final audio to fully play down the line.
+  const GOODBYE_AUDIO_GRACE_MS = 4500;
+
+  // How soon after we detect a goodbye transcript we start the failsafe process.
+  // (The actual hangup is delayed by GOODBYE_AUDIO_GRACE_MS.)
+  const GOODBYE_FAILSAFE_TRIGGER_MS = 500;
+
+  // If we asked Ada to say goodbye due to silence, but she never calls end_call,
+  // wait this long before forcing a hangup (then still allow GOODBYE_AUDIO_GRACE_MS).
+  const SILENCE_TIMEOUT_FAILSAFE_TRIGGER_MS = 12000;
 
   let followupAskedAt = 0; // ms epoch when Ada last asked "anything else"
   let lastUserActivityAt = Date.now(); // ms epoch (speech_started OR finalized transcript)
@@ -345,22 +356,32 @@ serve(async (req) => {
     goodbyeFailsafeTimer = null;
   };
 
-  const forceHangup = (reason: string) => {
+  const forceHangup = (reason: string, delayMs = 0) => {
     if (callEnded) return;
     callEnded = true;
     clearAllCallTimers();
 
-    try {
-      socket.send(JSON.stringify({ type: "call_ended", reason }));
-    } catch (_) {
-      // ignore
-    }
+    // IMPORTANT: delay call_ended so any final audio already in-flight can be heard.
+    setTimeout(() => {
+      try {
+        socket.send(JSON.stringify({ type: "call_ended", reason }));
+      } catch (_) {
+        // ignore
+      }
 
-    try {
-      socket.close();
-    } catch (_) {
-      // ignore
-    }
+      try {
+        // Close shortly after signalling hangup.
+        setTimeout(() => {
+          try {
+            socket.close();
+          } catch (_) {
+            // ignore
+          }
+        }, 500);
+      } catch (_) {
+        // ignore
+      }
+    }, delayMs);
   };
 
   const noteUserActivity = (source: string) => {
@@ -406,14 +427,15 @@ serve(async (req) => {
         }));
 
         // Failsafe: if the model still doesn't end the call, hang up anyway.
+        // IMPORTANT: allow plenty of time so the goodbye audio can be heard.
         silenceHangupFailsafeTimer = setTimeout(() => {
           if (callEnded || endCallInProgress) return;
           console.log(`[${callId}] 🧯 Silence hangup failsafe firing`);
-          forceHangup("silence_timeout_failsafe");
-        }, 6500);
+          forceHangup("silence_timeout_failsafe", GOODBYE_AUDIO_GRACE_MS);
+        }, SILENCE_TIMEOUT_FAILSAFE_TRIGGER_MS);
       } else {
         // No OpenAI connection - just hang up.
-        forceHangup("silence_timeout_no_ai");
+        forceHangup("silence_timeout_no_ai", 0);
       }
     }, FOLLOWUP_SILENCE_TIMEOUT_MS);
   };
@@ -2637,14 +2659,15 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             armFollowupSilenceTimeout("assistant_anything_else");
           }
 
-          // Failsafe: if Ada says goodbye but forgets to call end_call, hang up shortly after audio finishes.
+          // Failsafe: if Ada says goodbye but forgets to call end_call, hang up reliably.
+          // IMPORTANT: we delay the actual hangup so the goodbye audio is heard.
           if (/(^|\b)(goodbye|bye)(\b|$)/.test(a) || a.includes("have a great journey")) {
             clearTimer(goodbyeFailsafeTimer);
             goodbyeFailsafeTimer = setTimeout(() => {
               if (callEnded || endCallInProgress) return;
               console.log(`[${callId}] 🧯 Goodbye failsafe firing (no end_call detected)`);
-              forceHangup("goodbye_failsafe");
-            }, POST_GOODBYE_HANGUP_FAILSAFE_MS);
+              forceHangup("goodbye_failsafe", GOODBYE_AUDIO_GRACE_MS);
+            }, GOODBYE_FAILSAFE_TRIGGER_MS);
           }
         }
       }
