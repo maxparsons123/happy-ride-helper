@@ -911,8 +911,90 @@ serve(async (req) => {
   };
 
 
-  // Resolve address aliases like "home", "work", "office" etc.
-  // Returns the full address if alias found, or null if not an alias
+  // Returns disambiguation info if multiple similar addresses found
+  interface GeocodeMatch {
+    display_name: string;
+    formatted_address: string;
+    lat: number;
+    lon: number;
+    city?: string;
+  }
+  
+  interface EnhancedGeocodeResult {
+    found: boolean;
+    display_name?: string;
+    formatted_address?: string;
+    lat?: number;
+    lon?: number;
+    city?: string;
+    error?: string;
+    multiple_matches?: GeocodeMatch[];
+    // New fields from address-verify
+    verified?: boolean;
+    confidence?: number;
+    correctionSafe?: boolean;
+    correctedAddress?: string;
+    needsDisambiguation?: boolean;
+    disambiguationOptions?: GeocodeMatch[];
+    userPrompt?: string;
+    source?: "alias" | "trusted" | "cache" | "geocode";
+  }
+  
+  // Main address verification function - calls the address-verify edge function
+  // This replaces the old geocodeAddress function with a more intelligent verifier
+  const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
+    try {
+      console.log(`[${callId}] 🌍 Verifying address: "${address}" (type: ${addressType || 'unknown'})`);
+      
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/address-verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          address,
+          addressType: addressType || "pickup",
+          // Caller context
+          callerCity,
+          trustedAddresses: callerTrustedAddresses,
+          addressAliases: callerAddressAliases,
+          lastPickup: callerLastPickup,
+          lastDestination: callerLastDestination,
+          // Current booking context for biasing
+          currentPickup: knownBooking.pickup,
+          currentDestination: knownBooking.destination,
+          // Debug
+          callId
+        }),
+      });
+
+      if (!response.ok) {
+        console.error(`[${callId}] Address verify API error: ${response.status}`);
+        return { found: false, error: "Address verification service unavailable" };
+      }
+
+      const result: EnhancedGeocodeResult = await response.json();
+      
+      // Log the verification result
+      if (result.verified) {
+        console.log(`[${callId}] ✅ Address verified: "${address}" → "${result.formatted_address || result.display_name}" (confidence: ${result.confidence}, source: ${result.source})`);
+      } else if (result.needsDisambiguation) {
+        console.log(`[${callId}] 🔀 Address needs disambiguation: ${result.disambiguationOptions?.length || 0} options`);
+      } else if (result.found && !result.correctionSafe) {
+        console.log(`[${callId}] ⚠️ Address found but correction unsafe: "${address}" → "${result.formatted_address}"`);
+      } else {
+        console.log(`[${callId}] ❌ Address not found: "${address}"`);
+      }
+      
+      return result;
+    } catch (e) {
+      console.error(`[${callId}] Address verify exception:`, e);
+      return { found: false, error: "Address verification failed" };
+    }
+  };
+  
+  // Legacy alias resolution for backwards compatibility - now mostly handled by address-verify
   const resolveAddressAlias = (address: string): string | null => {
     const normalizedInput = normalize(address).toLowerCase();
     
@@ -948,190 +1030,6 @@ serve(async (req) => {
     }
     
     return null;
-  };
-  // Returns disambiguation info if multiple similar addresses found
-  interface GeocodeMatch {
-    display_name: string;
-    formatted_address: string;
-    lat: number;
-    lon: number;
-    city?: string;
-  }
-  
-  interface EnhancedGeocodeResult {
-    found: boolean;
-    display_name?: string;
-    formatted_address?: string;
-    lat?: number;
-    lon?: number;
-    city?: string;
-    error?: string;
-    multiple_matches?: GeocodeMatch[];
-  }
-  
-  const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
-    try {
-      // PRIORITY -1: Check if this is an alias like "home" or "work"
-      const aliasResolved = resolveAddressAlias(address);
-      if (aliasResolved) {
-        // Return the resolved alias address
-        return {
-          found: true,
-          display_name: aliasResolved,
-          formatted_address: aliasResolved,
-          city: extractCityFromAddress(aliasResolved) || callerCity
-        };
-      }
-      
-      // PRIORITY 0: Check if caller has used this address before (trusted addresses from confirmed bookings)
-      // This avoids re-geocoding and ensures consistency (e.g., "Cosy Club" → same "Cosy Club, Coventry" as before)
-      const trustedMatch = matchesTrustedAddress(address);
-      if (trustedMatch) {
-        console.log(`[${callId}] 🏆 TRUSTED ADDRESS MATCH: "${address}" → "${trustedMatch}" (skipping geocode)`);
-        
-        // Return the trusted address as if it was geocoded
-        // We don't have coords cached, but the display_name is the key part
-        return {
-          found: true,
-          display_name: trustedMatch,
-          formatted_address: trustedMatch,
-          city: extractCityFromAddress(trustedMatch) || callerCity
-        };
-      }
-      
-      // INTELLIGENT LOCATION BIASING:
-      // Priority 1: Use the OTHER address from current booking (if we have one)
-      // Priority 2: Use caller's history (last pickup/destination)
-      // Priority 3: Extract city from any address we have
-      
-      let city = callerCity;
-      let biasLat: number | undefined;
-      let biasLon: number | undefined;
-      let biasSource = "none";
-      
-      // Priority 1: Use the other address from CURRENT booking for location context
-      // e.g., if destination is "Coventry Train Station", use that to find pickup near Coventry
-      const otherAddress = addressType === "pickup" ? knownBooking.destination : knownBooking.pickup;
-      
-      if (otherAddress) {
-        try {
-          // Extract city from the other address first
-          const otherCity = extractCityFromAddress(otherAddress);
-          if (otherCity && !city) {
-            city = otherCity;
-            console.log(`[${callId}] 📍 Extracted city from ${addressType === "pickup" ? "destination" : "pickup"}: ${city}`);
-          }
-          
-          // Get coordinates from the other address for precise biasing
-          console.log(`[${callId}] 📍 Using ${addressType === "pickup" ? "destination" : "pickup"} for location bias: "${otherAddress}"`);
-          const otherGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-            },
-            body: JSON.stringify({ address: otherAddress, city, country: "UK" }),
-          });
-          const otherData = await otherGeo.json();
-          if (otherData.found && otherData.lat && otherData.lon) {
-            biasLat = otherData.lat;
-            biasLon = otherData.lon;
-            biasSource = `current_${addressType === "pickup" ? "destination" : "pickup"}`;
-            // Also extract city from geocode result if not already set
-            if (!city && otherData.city) {
-              city = otherData.city;
-            }
-            console.log(`[${callId}] 📍 Location bias from current booking: ${biasLat}, ${biasLon} (${city || 'no city'})`);
-          }
-        } catch (e) {
-          console.error(`[${callId}] Failed to get current booking coordinates:`, e);
-        }
-      }
-      
-      // Priority 2: If no bias from current booking, try caller's history
-      if (!biasLat && !biasLon && (callerLastPickup || callerLastDestination)) {
-        // Extract city from caller's history for search biasing
-        if (!city && callerLastPickup) {
-          city = extractCityFromAddress(callerLastPickup);
-        }
-        if (!city && callerLastDestination) {
-          city = extractCityFromAddress(callerLastDestination);
-        }
-        
-        // Get coordinates from caller's last pickup for better location biasing
-        const historyAddress = callerLastPickup || callerLastDestination;
-        if (historyAddress) {
-          try {
-            const historyGeo = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-              },
-              body: JSON.stringify({ address: historyAddress, city, country: "UK" }),
-            });
-            const historyData = await historyGeo.json();
-            if (historyData.found && historyData.lat && historyData.lon) {
-              biasLat = historyData.lat;
-              biasLon = historyData.lon;
-              biasSource = "caller_history";
-              console.log(`[${callId}] 📍 Using caller history for location bias: ${biasLat}, ${biasLon}`);
-            }
-          } catch (e) {
-            console.error(`[${callId}] Failed to get caller history coordinates:`, e);
-          }
-        }
-      }
-      
-      // CRITICAL FIX: If we have a city and the address doesn't already contain it,
-      // append the city to improve geocoding accuracy (prevents wrong "Russell Street" matches)
-      let searchAddress = address;
-      if (city && !extractCityFromAddress(address)) {
-        // Check if address looks like it needs city context (no postcode, no city name)
-        const hasPostcode = /[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}/i.test(address);
-        const hasUkSuffix = /,\s*UK\s*$/i.test(address);
-        if (!hasPostcode && !hasUkSuffix) {
-          searchAddress = `${address}, ${city}`;
-          console.log(`[${callId}] 🏙️ Appending city for geocoding: "${address}" → "${searchAddress}"`);
-        }
-      }
-      
-      console.log(`[${callId}] 🌍 Geocoding "${searchAddress}" (original: "${address}", city: ${city || 'none'}, bias: ${biasSource}, check_ambiguous: ${checkAmbiguous})`);
-      
-      const response = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        },
-        body: JSON.stringify({ 
-          address: searchAddress, 
-          city, 
-          country: "UK",
-          lat: biasLat,
-          lon: biasLon,
-          check_ambiguous: checkAmbiguous 
-        }),
-      });
-
-      if (!response.ok) {
-        console.error(`[${callId}] Geocode API error: ${response.status}`);
-        return { found: false, error: "Geocoding service unavailable" };
-      }
-
-      const result = await response.json();
-      
-      // Log multiple matches if found
-      if (result.multiple_matches?.length > 1) {
-        console.log(`[${callId}] 🔍 Multiple address matches found:`, result.multiple_matches.map((m: GeocodeMatch) => m.formatted_address));
-      }
-      
-      console.log(`[${callId}] 🌍 Geocode result for "${address}":`, result.found ? `FOUND - ${result.formatted_address || result.display_name}` : "NOT FOUND");
-      return result;
-    } catch (e) {
-      console.error(`[${callId}] Geocode exception:`, e);
-      return { found: false, error: "Geocoding failed" };
-    }
   };
   
   // Ask Ada to disambiguate when multiple similar addresses are found
