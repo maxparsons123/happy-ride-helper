@@ -2969,6 +2969,13 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
         // Priority: Active booking > Quick rebooking > Normal greeting
         let greetingPrompt: string;
         
+        // Build address history context for AI to reference
+        const addressHistoryContext = (callerPickupAddresses.length > 0 || callerDropoffAddresses.length > 0)
+          ? `\n\nCALLER'S KNOWN ADDRESSES (use for matching - if they say an address that matches one of these, use the known version):
+PICKUPS: ${callerPickupAddresses.length > 0 ? callerPickupAddresses.slice(-5).join('; ') : 'none'}
+DROPOFFS: ${callerDropoffAddresses.length > 0 ? callerDropoffAddresses.slice(-5).join('; ') : 'none'}`
+          : '';
+        
         if (activeBooking) {
           // Customer has an outstanding booking - offer to cancel/keep
           greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. 
@@ -2978,16 +2985,21 @@ ACTIVE BOOKING DETAILS:
 - Destination: ${activeBooking.destination}
 - Passengers: ${activeBooking.passengers}
 - Fare: ${activeBooking.fare}
+${addressHistoryContext}
 
 Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
 
 Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "cancel" or "cancel it".]`;
         } else if (callerName && callerLastDestination) {
           // Returning customer with usual destination - offer quick rebooking
-          greetingPrompt = `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}. Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
+          greetingPrompt = `[Call connected - greet the RETURNING customer by name and OFFER QUICK REBOOKING. Their name is ${callerName}. Their usual destination is ${callerLastDestination}${callerLastPickup ? ` and usual pickup is ${callerLastPickup}` : ''}.${addressHistoryContext}
+
+Say: "Hello ${callerName}! Lovely to hear from you again. Shall I book you a taxi to ${callerLastDestination}, or are you heading somewhere different today?"]`;
         } else if (callerName) {
           // Returning customer without usual destination
-          greetingPrompt = `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}. Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`;
+          greetingPrompt = `[Call connected - greet the RETURNING customer by name. Their name is ${callerName}.${addressHistoryContext}
+
+Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with your travels today?"]`;
         } else {
           // New customer
           greetingPrompt = `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
