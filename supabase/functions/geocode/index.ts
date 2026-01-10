@@ -312,6 +312,47 @@ serve(async (req) => {
   }
 });
 
+// Road type patterns for validation
+const ROAD_TYPES: Record<string, string[]> = {
+  "road": ["road", "rd"],
+  "street": ["street", "st"],
+  "avenue": ["avenue", "ave"],
+  "drive": ["drive", "dr"],
+  "lane": ["lane", "ln"],
+  "close": ["close", "cl"],
+  "crescent": ["crescent", "cres"],
+  "way": ["way"],
+  "court": ["court", "ct"],
+  "place": ["place", "pl"],
+  "grove": ["grove", "gr"],
+  "terrace": ["terrace", "ter"],
+  "gardens": ["gardens", "gdns"],
+  "walk": ["walk"],
+  "rise": ["rise"],
+  "hill": ["hill"],
+};
+
+// Extract the road type from an address (e.g., "52A David Road" → "road")
+function extractRoadType(address: string): string | null {
+  const lower = address.toLowerCase();
+  for (const [canonical, variants] of Object.entries(ROAD_TYPES)) {
+    for (const variant of variants) {
+      // Match as a whole word (e.g., "road" but not "roadside")
+      const regex = new RegExp(`\\b${variant}\\b`, 'i');
+      if (regex.test(lower)) {
+        return canonical;
+      }
+    }
+  }
+  return null;
+}
+
+// Check if two road types are compatible (same canonical type)
+function roadTypesMatch(type1: string | null, type2: string | null): boolean {
+  if (!type1 || !type2) return true; // If we can't detect, allow it
+  return type1 === type2;
+}
+
 // Places Autocomplete - best for residential addresses with house numbers
 // This is more accurate than Text Search for "52A David Road" style queries
 async function googlePlacesAutocomplete(
@@ -343,19 +384,42 @@ async function googlePlacesAutocomplete(
       return { found: false, address: query };
     }
 
-    // Find the best match - prefer predictions that contain the house number
+    // Extract query components for validation
     const queryHouseNumber = query.match(/^(\d+[a-z]?)/i)?.[1]?.toLowerCase();
-    let bestPrediction = data.predictions[0];
+    const queryRoadType = extractRoadType(query);
     
-    if (queryHouseNumber) {
-      // Look for a prediction that contains the exact house number
-      for (const pred of data.predictions) {
-        const predText = (pred.description || "").toLowerCase();
-        if (predText.startsWith(queryHouseNumber) || predText.includes(` ${queryHouseNumber} `)) {
-          bestPrediction = pred;
-          break;
-        }
+    console.log(`[Geocode] Query analysis: house="${queryHouseNumber}", roadType="${queryRoadType}"`);
+    
+    // Find the best match - must match house number AND road type
+    let bestPrediction = null;
+    
+    for (const pred of data.predictions) {
+      const predText = (pred.description || "").toLowerCase();
+      const predRoadType = extractRoadType(predText);
+      
+      // Check house number match
+      let houseMatches = true;
+      if (queryHouseNumber) {
+        houseMatches = predText.startsWith(queryHouseNumber) || 
+                       predText.includes(` ${queryHouseNumber} `) ||
+                       predText.includes(`${queryHouseNumber},`);
       }
+      
+      // Check road type match (CRITICAL: Road ≠ Street)
+      const roadTypeMatches = roadTypesMatch(queryRoadType, predRoadType);
+      
+      if (houseMatches && roadTypeMatches) {
+        bestPrediction = pred;
+        console.log(`[Geocode] Autocomplete match: "${pred.description}" (roadType: ${predRoadType})`);
+        break;
+      } else if (houseMatches && !roadTypeMatches) {
+        console.log(`[Geocode] Autocomplete REJECTED: "${pred.description}" - road type mismatch (query: ${queryRoadType}, result: ${predRoadType})`);
+      }
+    }
+
+    if (!bestPrediction) {
+      console.log(`[Geocode] Autocomplete: no valid matches (road type or house number mismatch)`);
+      return { found: false, address: query };
     }
 
     const placeId = bestPrediction.place_id;
@@ -624,10 +688,19 @@ async function googleGeocode(
         return comp?.long_name;
       };
 
-      const city = getComponent("locality") || 
+      const resultCity = getComponent("locality") || 
                    getComponent("postal_town") || 
                    getComponent("administrative_area_level_2");
       const postcode = getComponent("postal_code");
+      
+      // Validate road type match (Road ≠ Street)
+      const queryRoadType = extractRoadType(query);
+      const resultRoadType = extractRoadType(result.formatted_address || "");
+      
+      if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
+        console.log(`[Geocode] Geocode REJECTED: road type mismatch - query "${queryRoadType}" vs result "${resultRoadType}" ("${result.formatted_address}")`);
+        return { found: false, address: query };
+      }
 
       console.log(`[Geocode] ✅ Geocode found: "${result.formatted_address}"`);
       
@@ -640,7 +713,7 @@ async function googleGeocode(
         lon: result.geometry.location.lng,
         type: result.types?.[0] || "address",
         place_id: result.place_id,
-        city: city,
+        city: resultCity,
         postcode: postcode,
         map_link: `https://maps.google.com/?q=${result.geometry.location.lat},${result.geometry.location.lng}`,
       };
