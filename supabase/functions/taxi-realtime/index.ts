@@ -3331,6 +3331,12 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             a.includes("shall i confirm") ||
             a.includes("book that for you");
           
+          // Active booking greeting questions - only ask once
+          const isActiveBookingQuestion =
+            a.includes("would you like to keep that booking") ||
+            a.includes("would you like to cancel it") ||
+            a.includes("keep that booking");
+          
           // "Anything else?" already has its own dedicated timeout handler - don't double-arm
           const isAnythingElseQuestion = 
             a.includes("is there anything else") || 
@@ -3342,8 +3348,9 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           
           // CRITICAL: Don't reprompt these questions:
           // - Confirmation questions ("shall I book that?") - asked once only
+          // - Active booking questions ("would you like to keep?") - asked once only
           // - "Anything else?" - has its own dedicated timeout handler
-          const skipReprompt = isConfirmationQuestion || isAnythingElseQuestion;
+          const skipReprompt = isConfirmationQuestion || isActiveBookingQuestion || isAnythingElseQuestion;
           
           if (looksLikeQuestion && !skipReprompt && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
             armNoReplyReprompt("assistant_question", transcriptText);
