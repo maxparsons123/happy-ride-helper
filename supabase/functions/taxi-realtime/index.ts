@@ -3169,11 +3169,20 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             a.includes("where are you heading") ||
             a.includes("how many passengers") ||
             a.includes("shall i book");
+          
+          // Check if this is a booking confirmation question
+          const isConfirmationQuestion = 
+            a.includes("shall i book") || 
+            a.includes("shall i confirm") ||
+            a.includes("book that for you");
 
           // Only arm reprompt if user hasn't already replied recently (prevents double-fire)
           // If there's been user activity in the last 3 seconds, the user DID reply - don't reprompt
           const recentUserActivity = lastUserActivityAt > 0 && now - lastUserActivityAt < 3000;
-          if (looksLikeQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
+          
+          // CRITICAL: Don't reprompt confirmation questions - they should only be asked ONCE
+          // If user doesn't respond, they're thinking - don't pressure them
+          if (looksLikeQuestion && !isConfirmationQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
             armNoReplyReprompt("assistant_question", transcriptText);
           }
 
