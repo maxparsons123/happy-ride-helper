@@ -2899,7 +2899,7 @@ Rules:
       console.log(`[${callId}] 🔍 Travel hub check: pickup="${knownBooking.pickup}" dest="${knownBooking.destination}" isTravelHub=${tripHasTravelHub} luggage="${knownBooking.luggage}" asked=${knownBooking.luggageAsked}`);
       
       if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
-        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - injecting mandatory luggage prompt`);
+        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - injecting IMMEDIATE luggage prompt`);
         knownBooking.luggageAsked = true;
         
         // Add to transcript for visibility
@@ -2911,18 +2911,26 @@ Rules:
         queueLiveCallBroadcast({});
         
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          // Just inject the system message - Ada will pick it up naturally on next turn
-          // DO NOT send response.create here - it causes duplicate responses
+          // Cancel any pending response so Ada asks about luggage FIRST
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          
+          // Inject as user message (higher priority) with IMMEDIATE instruction
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "system",
+              role: "user",
               content: [{ 
                 type: "input_text", 
-                text: `[IMPORTANT: This trip involves a travel hub. Before confirming, ask: "Are you travelling with any bags today?"]` 
+                text: `[SYSTEM INSTRUCTION - MUST FOLLOW: This trip involves an airport/station. You MUST ask "Are you travelling with any bags today?" IMMEDIATELY before confirming or proceeding with the booking. Do NOT offer to book until you know about luggage.]` 
               }]
             }
+          }));
+          
+          // Force Ada to respond NOW with the luggage question
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
           }));
         }
       }
