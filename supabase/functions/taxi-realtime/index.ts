@@ -2899,7 +2899,7 @@ Rules:
       console.log(`[${callId}] 🔍 Travel hub check: pickup="${knownBooking.pickup}" dest="${knownBooking.destination}" isTravelHub=${tripHasTravelHub} luggage="${knownBooking.luggage}" asked=${knownBooking.luggageAsked}`);
       
       if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
-        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - marking luggageAsked`);
+        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - FORCING luggage question NOW`);
         knownBooking.luggageAsked = true;
         
         // Add to transcript for visibility
@@ -2910,9 +2910,10 @@ Rules:
         });
         queueLiveCallBroadcast({});
         
-        // DON'T cancel/force response here - just inject context for Ada's next turn
-        // The book_taxi blocker will catch it if she tries to book without asking
+        // FORCE Ada to ask about luggage IMMEDIATELY by injecting STRONG instruction
+        // This must happen BEFORE she summarizes/confirms the booking
         if (openaiWs?.readyState === WebSocket.OPEN) {
+          // Inject as a high-priority instruction that Ada MUST follow
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
@@ -2920,10 +2921,11 @@ Rules:
               role: "system",
               content: [{ 
                 type: "input_text", 
-                text: `[This trip involves an airport/station. Ask about luggage before confirming the booking.]` 
+                text: `[STOP - MANDATORY LUGGAGE CHECK] This trip is to/from an airport or station. You MUST ask about luggage RIGHT NOW before doing anything else. Do NOT summarize the booking. Do NOT ask "shall I book?". Simply ask: "How many bags will you have for this trip?" Wait for their answer before proceeding.` 
               }]
             }
           }));
+          console.log(`[${callId}] ✈️ Injected mandatory luggage question`);
         }
       }
 
