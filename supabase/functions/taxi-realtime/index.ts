@@ -100,6 +100,34 @@ AMBIGUITY:
 If the memory system returns nothing, continue as normal without referencing memory.
 
 ════════════════════════════════════
+ADDRESS NORMALIZATION & FUZZY MATCHING
+════════════════════════════════════
+
+When a customer provides a pickup or destination address, the system checks against 
+their stored/usual addresses using fuzzy matching (handles STT errors like "5208" → "52A").
+
+FUZZY MATCH DETECTED:
+If the spoken address is similar to a stored address (same street, minor house number difference):
+→ ASK for clarification before proceeding:
+  "Just to check, did you mean 52A David Road (your usual pickup), or is 5208 David Road a new address?"
+
+If the customer confirms ("yes", "52A", "the usual"):
+→ Use the stored address and continue.
+
+If the customer says it's different ("no", "new address", "5208 is correct"):
+→ Use the spoken address and verify it normally.
+
+AUTOMATIC NORMALIZATION (no prompt needed):
+Only auto-correct WITHOUT asking if:
+- Edit distance on house number is ≤1 AND
+- Street name is identical AND  
+- Customer has used this exact address in their last 3 bookings
+
+MULTIPLE CANDIDATES:
+If multiple stored addresses could match, ask user to choose:
+"I have a few addresses on file — did you mean 52A David Road, or 18 Kings Road?"
+
+════════════════════════════════════
 REQUIRED INFORMATION TO BOOK
 ════════════════════════════════════
 
@@ -1232,6 +1260,62 @@ serve(async (req) => {
     return null;
   };
   
+  // FUZZY HOUSE NUMBER PATTERNS: Common STT mishearings
+  // "5208" → could be "52A", "520B", "52 8" etc.
+  // "528" → could be "52A", "52B" etc.
+  // MOVED OUTSIDE matchesKnownAddress so it can be shared with getFuzzyAddressMatch
+  const fuzzyHouseNumberVariants = (houseNum: string): string[] => {
+    const variants: string[] = [houseNum];
+    
+    // Pattern: digits followed by digits that could be letters (5208 → 52A, 520B)
+    // Common: last digit or two could be a letter suffix
+    const match = houseNum.match(/^(\d+)(\d)$/);
+    if (match) {
+      const base = match[1];
+      const lastDigit = match[2];
+      // Map digits to likely letter mishearings
+      const digitToLetter: Record<string, string[]> = {
+        "0": ["o"],
+        "1": ["i", "l"],
+        "2": ["z"],
+        "3": ["e"],
+        "4": ["a"],  // CRITICAL: "4" often heard as "A"
+        "5": ["s"],
+        "6": ["g", "b"],
+        "7": ["t"],
+        "8": ["a", "b"],  // CRITICAL: "8" often heard as "A" or "B" (5208 → 52A)
+        "9": ["g", "p"],
+      };
+      
+      if (digitToLetter[lastDigit]) {
+        for (const letter of digitToLetter[lastDigit]) {
+          variants.push(base + letter);
+        }
+      }
+    }
+    
+    // Pattern: 4-digit number where last two digits could be letter+something (5208 → 52 0 8)
+    const match2 = houseNum.match(/^(\d{2})(\d)(\d)$/);
+    if (match2) {
+      const base = match2[1];
+      const d1 = match2[2];
+      const d2 = match2[3];
+      // "5208" → base=52, d1=0, d2=8 → try "52A" (d2=8 → A)
+      const digitToLetter: Record<string, string[]> = {
+        "0": ["o"], "1": ["i", "l"], "2": ["z"], "3": ["e"], 
+        "4": ["a"], "5": ["s"], "6": ["g", "b"], "7": ["t"], 
+        "8": ["a", "b"], "9": ["g", "p"],
+      };
+      if (digitToLetter[d2]) {
+        for (const letter of digitToLetter[d2]) {
+          variants.push(base + letter);
+        }
+      }
+    }
+    
+    return [...new Set(variants)]; // Dedupe
+  };
+
   // Check if an address matches any in the caller's address history (BOTH pickups AND dropoffs)
   // This avoids unnecessary geocoding calls for addresses we've already verified
   // Returns the matched address WITH CITY appended if it doesn't already have one
@@ -1244,61 +1328,6 @@ serve(async (req) => {
     if (allKnownAddresses.length === 0) return null;
     
     const normalizedInput = normalize(address).toLowerCase();
-    
-    // FUZZY HOUSE NUMBER PATTERNS: Common STT mishearings
-    // "5208" → could be "52A", "520B", "52 8" etc.
-    // "528" → could be "52A", "52B" etc.
-    const fuzzyHouseNumberVariants = (houseNum: string): string[] => {
-      const variants: string[] = [houseNum];
-      
-      // Pattern: digits followed by digits that could be letters (5208 → 52A, 520B)
-      // Common: last digit or two could be a letter suffix
-      const match = houseNum.match(/^(\d+)(\d)$/);
-      if (match) {
-        const base = match[1];
-        const lastDigit = match[2];
-        // Map digits to likely letter mishearings
-        const digitToLetter: Record<string, string[]> = {
-          "0": ["o"],
-          "1": ["i", "l"],
-          "2": ["z"],
-          "3": ["e"],
-          "4": ["a"],  // CRITICAL: "4" often heard as "A"
-          "5": ["s"],
-          "6": ["g", "b"],
-          "7": ["t"],
-          "8": ["a", "b"],  // CRITICAL: "8" often heard as "A" or "B" (5208 → 52A)
-          "9": ["g", "p"],
-        };
-        
-        if (digitToLetter[lastDigit]) {
-          for (const letter of digitToLetter[lastDigit]) {
-            variants.push(base + letter);
-          }
-        }
-      }
-      
-      // Pattern: 4-digit number where last two digits could be letter+something (5208 → 52 0 8)
-      const match2 = houseNum.match(/^(\d{2})(\d)(\d)$/);
-      if (match2) {
-        const base = match2[1];
-        const d1 = match2[2];
-        const d2 = match2[3];
-        // "5208" → base=52, d1=0, d2=8 → try "52A" (d2=8 → A)
-        const digitToLetter: Record<string, string[]> = {
-          "0": ["o"], "1": ["i", "l"], "2": ["z"], "3": ["e"], 
-          "4": ["a"], "5": ["s"], "6": ["g", "b"], "7": ["t"], 
-          "8": ["a", "b"], "9": ["g", "p"],
-        };
-        if (digitToLetter[d2]) {
-          for (const letter of digitToLetter[d2]) {
-            variants.push(base + letter);
-          }
-        }
-      }
-      
-      return [...new Set(variants)]; // Dedupe
-    };
     
     for (const known of allKnownAddresses) {
       const normalizedKnown = normalize(known).toLowerCase();
@@ -1365,6 +1394,84 @@ serve(async (req) => {
           if (inputVariants.includes(knownHouseNum)) {
             console.log(`[${callId}] 📍 Address matched from history (FUZZY house number): "${address}" → "${known}" [${inputHouseNum} → ${knownHouseNum}]`);
             return enrichAddressWithCity(known);
+          }
+        }
+      }
+    }
+    
+    return null;
+  };
+  
+  // Extended version that returns match details for fuzzy matches requiring clarification
+  // Returns: { matched: string, matchType: "exact" | "partial" | "core" | "fuzzy", spokenAddress: string }
+  const getFuzzyAddressMatch = (address: string): { matched: string; matchType: string; spokenAddress: string; needsClarification: boolean } | null => {
+    if (!address) return null;
+    
+    const allKnownAddresses = [...callerPickupAddresses, ...callerDropoffAddresses];
+    if (allKnownAddresses.length === 0) return null;
+    
+    const normalizedInput = normalize(address).toLowerCase();
+    
+    for (const known of allKnownAddresses) {
+      const normalizedKnown = normalize(known).toLowerCase();
+      
+      // Exact match - no clarification needed
+      if (normalizedInput === normalizedKnown) {
+        return { matched: enrichAddressWithCity(known), matchType: "exact", spokenAddress: address, needsClarification: false };
+      }
+      
+      // Partial match - no clarification needed
+      if (normalizedInput.includes(normalizedKnown) || normalizedKnown.includes(normalizedInput)) {
+        return { matched: enrichAddressWithCity(known), matchType: "partial", spokenAddress: address, needsClarification: false };
+      }
+      
+      // Core match - no clarification needed
+      const extractCore = (addr: string) => {
+        const match = addr.match(/^(\d+[a-z]?\s+[a-z]+(?:\s+[a-z]+)?)/i);
+        return match ? match[1].toLowerCase() : addr.toLowerCase();
+      };
+      
+      if (extractCore(normalizedInput) === extractCore(normalizedKnown) && extractCore(normalizedInput).length > 5) {
+        return { matched: enrichAddressWithCity(known), matchType: "core", spokenAddress: address, needsClarification: false };
+      }
+      
+      // FUZZY match - NEEDS CLARIFICATION unless house numbers are very close
+      const extractHouseNumber = (addr: string): string | null => {
+        const match = addr.match(/^(\d+[a-z]?)/i);
+        return match ? match[1].toLowerCase() : null;
+      };
+      
+      const extractStreetName = (addr: string): string | null => {
+        const match = addr.match(/^\d+[a-z]?\s+(.+)/i);
+        return match ? match[1].toLowerCase().split(",")[0].trim() : null;
+      };
+      
+      const inputHouseNum = extractHouseNumber(normalizedInput);
+      const knownHouseNum = extractHouseNumber(normalizedKnown);
+      const inputStreet = extractStreetName(normalizedInput);
+      const knownStreet = extractStreetName(normalizedKnown);
+      
+      if (inputHouseNum && knownHouseNum && inputStreet && knownStreet) {
+        const streetBase = (s: string) => s.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '');
+        const streetsMatch = streetBase(inputStreet) === streetBase(knownStreet);
+        
+        if (streetsMatch) {
+          // Check if this is a fuzzy house number match
+          const fuzzyVariants = fuzzyHouseNumberVariants(inputHouseNum);
+          
+          if (fuzzyVariants.includes(knownHouseNum)) {
+            // Calculate "edit distance" - if house numbers differ significantly, need clarification
+            const houseNumDifferent = inputHouseNum !== knownHouseNum;
+            const significantDifference = Math.abs(inputHouseNum.length - knownHouseNum.length) > 1;
+            
+            console.log(`[${callId}] 🔍 Fuzzy match found: "${address}" ≈ "${known}" (clarification: ${houseNumDifferent})`);
+            
+            return { 
+              matched: enrichAddressWithCity(known), 
+              matchType: "fuzzy", 
+              spokenAddress: address, 
+              needsClarification: houseNumDifferent && significantDifference
+            };
           }
         }
       }
