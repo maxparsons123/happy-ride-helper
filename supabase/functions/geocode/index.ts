@@ -242,32 +242,18 @@ serve(async (req) => {
     // ═══════════════════════════════════════════════════════════════════════════
     // STRATEGY (matching C# PlaceResolver pattern):
     // ═══════════════════════════════════════════════════════════════════════════
-    // 1️⃣ HOUSE ADDRESS (starts with number) → Autocomplete types=address (5km)
-    // 2️⃣ NAMED PLACE / TEXT → Text Search with location bias (5km)
-    // 3️⃣ LOOSE LOCAL (pickup fallback) → Text Search (8km radius)
-    // 4️⃣ GLOBAL SEARCH (dropoff) → Text Search without location constraint
+    // 1️⃣ TEXT SEARCH (local, 5km) → Place search first (best for most queries)
+    // 2️⃣ AUTOCOMPLETE → Fallback for house addresses (types=address)
+    // 3️⃣ LOOSE LOCAL (8km) → Wider radius search
+    // 4️⃣ GLOBAL SEARCH → For dropoffs that may be far away
     // ═══════════════════════════════════════════════════════════════════════════
     
     // Detect house-number addresses (e.g., "52A David Road", "123 High Street")
     const startsWithNumber = /^\d+[a-z]?\s+/i.test(address.trim());
     
-    // 1️⃣ HOUSE ADDRESS → Autocomplete (best for residential addresses)
-    if (startsWithNumber && searchLat && searchLon) {
-      console.log(`[Geocode] 1️⃣ HOUSE ADDRESS: "${address}" - trying Autocomplete types=address`);
-      const autocompleteResult = await googlePlacesAutocomplete(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
-      if (autocompleteResult.found) {
-        console.log(`[Geocode] ✅ HOUSE_OK: "${autocompleteResult.display_name}"`);
-        cacheResult(autocompleteResult);
-        return new Response(
-          JSON.stringify({ ...autocompleteResult, raw_status: "HOUSE_OK" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-    }
-
-    // 2️⃣ TEXT SEARCH (local, 5km biased) → for named places & general lookups
+    // 1️⃣ TEXT SEARCH (local, 5km biased) → Try place search FIRST
     if (searchLat && searchLon) {
-      console.log(`[Geocode] 2️⃣ TEXT SEARCH (local): "${address}" biased to ${searchLat},${searchLon}`);
+      console.log(`[Geocode] 1️⃣ TEXT SEARCH (local): "${address}" biased to ${searchLat},${searchLon}${city ? ` (city: ${city})` : ''}`);
       const textResult = await googleTextSearchLocal(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
       if (textResult.found) {
         console.log(`[Geocode] ✅ TEXT_OK: "${textResult.display_name}"`);
@@ -279,7 +265,21 @@ serve(async (req) => {
       }
     }
 
-    // 3️⃣ LOOSE LOCAL (8km) → stricter local search for pickups
+    // 2️⃣ AUTOCOMPLETE → Fallback for house addresses
+    if (startsWithNumber && searchLat && searchLon) {
+      console.log(`[Geocode] 2️⃣ AUTOCOMPLETE: "${address}" - trying types=address`);
+      const autocompleteResult = await googlePlacesAutocomplete(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
+      if (autocompleteResult.found) {
+        console.log(`[Geocode] ✅ AUTOCOMPLETE_OK: "${autocompleteResult.display_name}"`);
+        cacheResult(autocompleteResult);
+        return new Response(
+          JSON.stringify({ ...autocompleteResult, raw_status: "AUTOCOMPLETE_OK" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // 3️⃣ LOOSE LOCAL (8km) → Wider radius search
     if (searchLat && searchLon) {
       console.log(`[Geocode] 3️⃣ LOOSE LOCAL: "${address}" 8km radius`);
       const looseResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous, city);
