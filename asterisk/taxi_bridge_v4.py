@@ -20,7 +20,7 @@ import websockets
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime"
+WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"
 
 AST_RATE = 8000
 AI_RATE = 24000
