@@ -559,8 +559,8 @@ export default function LiveCalls() {
           </div>
           <code className="text-xs bg-muted px-2 py-1 rounded font-mono text-muted-foreground">
             {useGeminiPipeline 
-              ? 'wss://xsdlzoyaosfbbwzmcinq.functions.supabase.co/functions/v1/taxi-realtime-gemini'
-              : 'wss://xsdlzoyaosfbbwzmcinq.functions.supabase.co/functions/v1/taxi-realtime'
+              ? 'wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime-gemini'
+              : 'wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime'
             }
           </code>
         </div>
