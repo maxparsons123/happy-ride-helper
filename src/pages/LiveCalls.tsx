@@ -5,7 +5,14 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot } from "lucide-react";
+
+interface Agent {
+  id: string;
+  name: string;
+  slug: string;
+}
 
 interface Transcript {
   role: string;
@@ -120,6 +127,8 @@ export default function LiveCalls() {
   const [useTripResolver, setUseTripResolver] = useState(true);
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
   const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
   const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
   const [tripResolveResult, setTripResolveResult] = useState<any>(null);
@@ -142,6 +151,20 @@ export default function LiveCalls() {
   const disableAudio = useCallback(() => {
     audioQueueRef.current?.clear();
     setAudioEnabled(false);
+  }, []);
+
+  // Fetch agents on mount
+  useEffect(() => {
+    const fetchAgents = async () => {
+      const { data, error } = await supabase
+        .from("agents")
+        .select("id, name, slug")
+        .order("name");
+      if (data && !error) {
+        setAgents(data);
+      }
+    };
+    fetchAgents();
   }, []);
 
   useEffect(() => {
@@ -423,6 +446,22 @@ export default function LiveCalls() {
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
           <div className="flex items-center gap-4">
+            {/* Agent Selector */}
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-muted-foreground" />
+              <Select value={selectedAgent} onValueChange={setSelectedAgent}>
+                <SelectTrigger className="w-32 h-8 text-sm bg-card border-border">
+                  <SelectValue placeholder="Select Agent" />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  {agents.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.slug}>
+                      {agent.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             {/* Pipeline Selector */}
             <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
               <span className={`text-xs font-medium ${!useGeminiPipeline ? 'text-primary' : 'text-muted-foreground'}`}>
