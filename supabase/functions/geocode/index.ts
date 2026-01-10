@@ -239,86 +239,92 @@ serve(async (req) => {
     const nearbyKeywords = /\b(nearby|nearest|closest|near me|around here)\b/i;
     const isNearbyQuery = nearbyKeywords.test(address);
 
-    // STRATEGY (updated):
-    // 1. For "nearby" queries with coordinates → use Nearby Search
-    // 2. For house-number addresses (e.g., "52A David Road") → use location-biased Text Search with tight radius (8km)
-    // 3. For regular addresses/places → use Text Search, then Geocoding API
-    // NOTE: Autocomplete is too fuzzy (matches "David Road" to "David Street") - avoid for residential addresses
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STRATEGY (matching C# PlaceResolver pattern):
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 1️⃣ HOUSE ADDRESS (starts with number) → Autocomplete types=address (5km)
+    // 2️⃣ NAMED PLACE / TEXT → Text Search with location bias (5km)
+    // 3️⃣ LOOSE LOCAL (pickup fallback) → Text Search (8km radius)
+    // 4️⃣ GLOBAL SEARCH (dropoff) → Text Search without location constraint
+    // ═══════════════════════════════════════════════════════════════════════════
     
-    if (isNearbyQuery && searchLat && searchLon) {
-      // User explicitly asked for nearby - use Nearby Search
-      console.log(`[Geocode] Nearby query detected: "${address}"`);
-      const nearbyResult = await googleNearbySearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
-      if (nearbyResult.found) {
-        cacheResult(nearbyResult);
-        return new Response(
-          JSON.stringify(nearbyResult),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-    }
-
     // Detect house-number addresses (e.g., "52A David Road", "123 High Street")
-    const looksLikeHouseAddress = /^\d+[a-z]?\s+[a-z]/i.test(address.trim());
+    const startsWithNumber = /^\d+[a-z]?\s+/i.test(address.trim());
     
-    if (looksLikeHouseAddress && searchLat && searchLon) {
-      // Use "loose local" text search with city-biased search - more precise than Autocomplete
-      console.log(`[Geocode] House-number address detected: "${address}" - trying local Text Search (city: ${city || 'N/A'})`);
-      const looseLocalResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous, city);
-      if (looseLocalResult.found) {
-        cacheResult(looseLocalResult);
-        return new Response(
-          JSON.stringify(looseLocalResult),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      console.log(`[Geocode] Local Text Search failed for "${address}", trying Geocoding API`);
-      
-      // Try Geocoding API next (more precise for exact addresses)
-      const geocodeResult = await googleGeocode(address, city, country, GOOGLE_MAPS_API_KEY);
-      if (geocodeResult.found) {
-        cacheResult(geocodeResult);
-        return new Response(
-          JSON.stringify(geocodeResult),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      
-      // Last resort: try Autocomplete (but with road type validation)
-      console.log(`[Geocode] Geocoding API failed for "${address}", trying Autocomplete as fallback`);
+    // 1️⃣ HOUSE ADDRESS → Autocomplete (best for residential addresses)
+    if (startsWithNumber && searchLat && searchLon) {
+      console.log(`[Geocode] 1️⃣ HOUSE ADDRESS: "${address}" - trying Autocomplete types=address`);
       const autocompleteResult = await googlePlacesAutocomplete(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
       if (autocompleteResult.found) {
+        console.log(`[Geocode] ✅ HOUSE_OK: "${autocompleteResult.display_name}"`);
         cacheResult(autocompleteResult);
         return new Response(
-          JSON.stringify(autocompleteResult),
+          JSON.stringify({ ...autocompleteResult, raw_status: "HOUSE_OK" }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
     }
 
-    // Try Text Search (best for business names and general places)
-    const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
-    if (textSearchResult.found) {
-      cacheResult(textSearchResult);
+    // 2️⃣ TEXT SEARCH (local, 5km biased) → for named places & general lookups
+    if (searchLat && searchLon) {
+      console.log(`[Geocode] 2️⃣ TEXT SEARCH (local): "${address}" biased to ${searchLat},${searchLon}`);
+      const textResult = await googleTextSearchLocal(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
+      if (textResult.found) {
+        console.log(`[Geocode] ✅ TEXT_OK: "${textResult.display_name}"`);
+        cacheResult(textResult);
+        return new Response(
+          JSON.stringify({ ...textResult, raw_status: "TEXT_OK" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // 3️⃣ LOOSE LOCAL (8km) → stricter local search for pickups
+    if (searchLat && searchLon) {
+      console.log(`[Geocode] 3️⃣ LOOSE LOCAL: "${address}" 8km radius`);
+      const looseResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous, city);
+      if (looseResult.found) {
+        console.log(`[Geocode] ✅ LOCAL_OK: "${looseResult.display_name}"`);
+        cacheResult(looseResult);
+        return new Response(
+          JSON.stringify({ ...looseResult, raw_status: "LOCAL_OK" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // 4️⃣ GLOBAL SEARCH → for dropoffs that may be far away
+    console.log(`[Geocode] 4️⃣ GLOBAL SEARCH: "${address}"`);
+    const globalResult = await googleTextSearch(address, undefined, undefined, GOOGLE_MAPS_API_KEY, check_ambiguous);
+    if (globalResult.found) {
+      console.log(`[Geocode] ✅ GLOBAL_OK: "${globalResult.display_name}"`);
+      cacheResult(globalResult);
       return new Response(
-        JSON.stringify(textSearchResult),
+        JSON.stringify({ ...globalResult, raw_status: "GLOBAL_OK" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Fall back to Google Geocoding API for street addresses
-    const geocodeResult = await googleGeocode(address, city, country, GOOGLE_MAPS_API_KEY);
-    if (geocodeResult.found) {
-      cacheResult(geocodeResult);
-      return new Response(
-        JSON.stringify(geocodeResult),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    // 5️⃣ NEARBY SEARCH → only for explicit "nearby" keywords
+    if (isNearbyQuery && searchLat && searchLon) {
+      console.log(`[Geocode] 5️⃣ NEARBY: "${address}"`);
+      const nearbyResult = await googleNearbySearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
+      if (nearbyResult.found) {
+        console.log(`[Geocode] ✅ NEARBY_OK: "${nearbyResult.display_name}"`);
+        cacheResult(nearbyResult);
+        return new Response(
+          JSON.stringify({ ...nearbyResult, raw_status: "NEARBY_OK" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
     }
 
-    // If Google fails, try Nominatim as last resort
-    console.log("[Geocode] Google APIs found nothing, trying Nominatim fallback");
-    return await nominatimFallback(address, city, country);
+    // ❌ Nothing found
+    console.log(`[Geocode] ❌ NO_RESULTS for: "${address}"`);
+    return new Response(
+      JSON.stringify({ found: false, address, error: "NO_RESULTS", raw_status: "NO_RESULTS" }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
 
   } catch (error) {
     console.error("[Geocode] Error:", error);
@@ -727,6 +733,51 @@ async function googleLooseLocalSearch(
 
   } catch (error) {
     console.error("[Geocode] Loose local search error:", error);
+    return { found: false, address: query, error: String(error) };
+  }
+}
+
+// Text Search (Local, 5km) - matches C# ResolveTextSearch pattern
+// Includes city in query for better accuracy
+async function googleTextSearchLocal(
+  query: string,
+  lat: number,
+  lon: number,
+  apiKey: string,
+  city?: string
+): Promise<GeocodeResult> {
+  try {
+    // Include city in search query if available (like your C# code)
+    const searchQuery = city ? `${query}, ${city}` : query;
+    
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+      `?query=${encodeURIComponent(searchQuery)}` +
+      `&location=${lat},${lon}` +
+      `&radius=5000` +  // 5km radius (matching C# ResolveTextSearch)
+      `&key=${apiKey}`;
+
+    console.log(`[Geocode] Text search (local 5km): "${searchQuery}" near ${lat},${lon}`);
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      console.log(`[Geocode] Text search local: no results (status: ${data.status})`);
+      return { found: false, address: query };
+    }
+
+    const best = data.results[0];
+    const placeId = best.place_id;
+    
+    if (!placeId) {
+      return { found: false, address: query };
+    }
+
+    // Get full details for complete address info
+    return await getPlaceDetails(placeId, query, apiKey);
+
+  } catch (error) {
+    console.error("[Geocode] Text search local error:", error);
     return { found: false, address: query, error: String(error) };
   }
 }
