@@ -941,6 +941,51 @@ serve(async (req) => {
     return null;
   };
   
+  // Check if an address matches any in the caller's address history (BOTH pickups AND dropoffs)
+  // This avoids unnecessary geocoding calls for addresses we've already verified
+  // Returns the matched address WITH CITY appended if it doesn't already have one
+  const matchesKnownAddress = (address: string): string | null => {
+    if (!address) return null;
+    
+    // Combine both pickup and dropoff history for matching
+    const allKnownAddresses = [...callerPickupAddresses, ...callerDropoffAddresses];
+    if (allKnownAddresses.length === 0) return null;
+    
+    const normalizedInput = normalize(address).toLowerCase();
+    
+    for (const known of allKnownAddresses) {
+      const normalizedKnown = normalize(known).toLowerCase();
+      
+      // Exact match
+      if (normalizedInput === normalizedKnown) {
+        console.log(`[${callId}] 📍 Address matched from history (exact): "${address}" → "${known}"`);
+        return enrichAddressWithCity(known);
+      }
+      
+      // Check if input contains the known address or vice versa
+      if (normalizedInput.includes(normalizedKnown) || normalizedKnown.includes(normalizedInput)) {
+        console.log(`[${callId}] 📍 Address matched from history (partial): "${address}" → "${known}"`);
+        return enrichAddressWithCity(known);
+      }
+      
+      // Extract house number + street from both and compare
+      const extractCore = (addr: string) => {
+        const match = addr.match(/^(\d+[a-z]?\s+[a-z]+(?:\s+[a-z]+)?)/i);
+        return match ? match[1].toLowerCase() : addr.toLowerCase();
+      };
+      
+      const inputCore = extractCore(normalizedInput);
+      const knownCore = extractCore(normalizedKnown);
+      
+      if (inputCore === knownCore && inputCore.length > 5) {
+        console.log(`[${callId}] 📍 Address matched from history (core): "${address}" → "${known}"`);
+        return enrichAddressWithCity(known);
+      }
+    }
+    
+    return null;
+  };
+  
   // Helper to add caller's city to an address if it doesn't already contain one
   // This prevents geocoding from picking the wrong "Russell Street" in a different city
   const enrichAddressWithCity = (address: string): string => {
@@ -1054,6 +1099,26 @@ serve(async (req) => {
   const geocodeAddress = async (address: string, checkAmbiguous: boolean = false, addressType?: "pickup" | "destination"): Promise<EnhancedGeocodeResult> => {
     try {
       console.log(`[${callId}] 🌍 Verifying address: "${address}" (type: ${addressType || 'unknown'})`);
+      
+      // ===== PRE-CHECK: Look in caller's address history FIRST (both pickups and dropoffs) =====
+      // This avoids unnecessary geocoding API calls for addresses we've already verified
+      const knownMatch = matchesKnownAddress(address);
+      if (knownMatch) {
+        console.log(`[${callId}] ✅ Address found in caller history - skipping geocoding: "${address}" → "${knownMatch}"`);
+        // Extract city from the matched address for the result
+        const matchedCity = extractCityFromAddress(knownMatch);
+        return {
+          found: true,
+          verified: true,
+          confidence: 1.0,
+          correctionSafe: true,
+          needsDisambiguation: false,
+          display_name: knownMatch,
+          formatted_address: knownMatch,
+          city: matchedCity || callerCity,
+          source: "trusted",
+        };
+      }
       
       const response = await fetch(`${SUPABASE_URL}/functions/v1/address-verify`, {
         method: "POST",
