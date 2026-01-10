@@ -257,6 +257,7 @@ serve(async (req) => {
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
+  let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   
   // DEDUPLICATION: Track last assistant transcript to avoid saving duplicates
   let lastSavedAssistantText = "";
@@ -1777,6 +1778,61 @@ Rules:
                 type: "message",
                 role: "assistant",
                 content: [{ type: "text", text: `[Internal note: Customer's name is ${callerName}. Address them by name from now on.]` }]
+              }
+            }));
+            
+            // NEW: If this is a new caller with no known city, ask for their area
+            // This allows us to bias geocoding for more accurate address resolution
+            if (!callerCity && Object.keys(callerKnownAreas).length === 0 && callerTotalBookings === 0) {
+              console.log(`[${callId}] 🏙️ New caller with no location history - will ask for their area`);
+              awaitingAreaResponse = true;
+              
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: `[SYSTEM: This is a NEW customer. After greeting them, ask what area they're calling from. Say: "Lovely to meet you ${callerName}! And what area are you calling from - Coventry, Birmingham, or somewhere else?" This helps us find their addresses accurately.]` }]
+                }
+              }));
+              
+              // Don't trigger response.create here - let the normal flow continue
+            }
+          }
+        }
+      }
+      
+      // CHECK: If we're awaiting an area response, try to extract the city from this transcript
+      if (awaitingAreaResponse && !callerCity) {
+        const mentionedCity = extractCityFromAddress(transcript);
+        if (mentionedCity) {
+          callerCity = mentionedCity;
+          callerKnownAreas[mentionedCity] = (callerKnownAreas[mentionedCity] || 0) + 1;
+          awaitingAreaResponse = false;
+          
+          console.log(`[${callId}] 🏙️ New caller's area captured: ${callerCity}`);
+          
+          // Persist to database
+          if (userPhone) {
+            const phoneNorm = normalizePhone(userPhone);
+            supabase
+              .from("callers")
+              .update({ known_areas: callerKnownAreas })
+              .eq("phone_number", phoneNorm)
+              .then(({ error }) => {
+                if (error) console.error(`[${callId}] Failed to save area:`, error);
+                else console.log(`[${callId}] 💾 Saved area ${callerCity} for ${userPhone}`);
+              });
+          }
+          
+          // Inject silent context update so Ada knows the area
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: `[INTERNAL: Customer is calling from ${callerCity}. Use this to help with address lookups. Do NOT mention this to the customer - just proceed with the booking.]` }]
               }
             }));
           }
