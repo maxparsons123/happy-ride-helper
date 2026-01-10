@@ -308,6 +308,69 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
 
+  // Language handling (multilingual support)
+  // We “lock” to the first detected non-English script so Ada reliably responds in the caller's language.
+  let languageLocked = false;
+  let detectedLanguageCode: string | null = null;
+  let detectedLanguageName: string | null = null;
+
+  const detectLanguageHint = (text: string): { code: string; name: string; lockInstruction: string } | null => {
+    const t = String(text || "");
+
+    // Arabic script (commonly Urdu). This also covers Arabic/Persian; we bias to Urdu because this app targets UK callers.
+    if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(t)) {
+      return {
+        code: "ur",
+        name: "Urdu",
+        lockInstruction:
+          "The customer is speaking Urdu. Respond ONLY in Urdu (اردو) using Urdu script. Do NOT respond in English unless the customer switches to English.",
+      };
+    }
+
+    // Punjabi (Gurmukhi)
+    if (/[\u0A00-\u0A7F]/.test(t)) {
+      return {
+        code: "pa",
+        name: "Punjabi",
+        lockInstruction:
+          "The customer is speaking Punjabi. Respond ONLY in Punjabi using the customer's script. Do NOT respond in English unless the customer switches to English.",
+      };
+    }
+
+    // Hindi (Devanagari)
+    if (/[\u0900-\u097F]/.test(t)) {
+      return {
+        code: "hi",
+        name: "Hindi",
+        lockInstruction:
+          "The customer is speaking Hindi. Respond ONLY in Hindi. Do NOT respond in English unless the customer switches to English.",
+      };
+    }
+
+    return null;
+  };
+
+  const applyLanguageLock = (hint: { code: string; name: string; lockInstruction: string }) => {
+    if (languageLocked) return;
+
+    languageLocked = true;
+    detectedLanguageCode = hint.code;
+    detectedLanguageName = hint.name;
+
+    console.log(`[${callId}] 🌐 Language lock: ${hint.name} (${hint.code})`);
+
+    // Update session instructions so the model MUST respond in the caller's language.
+    if (openaiWs?.readyState === WebSocket.OPEN) {
+      openaiWs.send(
+        JSON.stringify({
+          type: "session.update",
+          session: {
+            instructions: `${SYSTEM_INSTRUCTIONS}\n\n**LANGUAGE LOCK (SERVER-ENFORCED):**\n- ${hint.lockInstruction}\n`,
+          },
+        }),
+      );
+    }
+  };
 
   type KnownBooking = {
     pickup?: string;
@@ -2577,6 +2640,10 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           // Detect nonsense/garbage: random short words with no real meaning
           // "House spread" is unlikely to be a real address if we already have a confirmed one
           const seemsLikeGibberish = (text: string): boolean => {
+            // If the caller is speaking a non-English language/script (e.g., Urdu/Polish), don't discard it as "gibberish".
+            // This guard is critical for multilingual support.
+            if (/[^ -]/.test(text)) return false;
+
             const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 0);
             if (words.length < 2 || words.length > 4) return false; // Only check short phrases
             
@@ -2611,6 +2678,14 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         console.log(`[${callId}] User said: ${rawTranscript}`);
         lastFinalUserTranscript = rawTranscript;
         lastFinalUserTranscriptAt = Date.now();
+
+        // Detect and lock the customer's language from their FIRST valid transcript.
+        // This prevents Ada from defaulting to English when the caller speaks Urdu (or other non-English languages).
+        if (!languageLocked) {
+          const hint = detectLanguageHint(rawTranscript);
+          if (hint) applyLanguageLock(hint);
+        }
+
         // This prevents misheard names from being used in Ada's greeting
         if (!callerName) {
           const quickExtractName = (text: string): string | null => {
@@ -2733,6 +2808,17 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             role: "user",
         }),
         );
+
+        // Prefer sending response.create AFTER we have the finalized transcript processed.
+        // This helps multilingual language-locking and address/name injections take effect before Ada replies.
+        if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] },
+          }));
+          responseCreatedSinceCommit = true;
+          console.log(`[${callId}] >>> response.create sent (after transcription.completed)`);
+        }
 
         awaitingResponseAfterCommit = false;
       }
