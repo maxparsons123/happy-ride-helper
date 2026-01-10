@@ -524,6 +524,7 @@ async function googleNearbySearch(
 
 // Loose Local Search - location-biased text search with tight 8km radius
 // Best for residential addresses like "52A David Road" - more precise than Autocomplete
+// STRATEGY: Strip house number, search for STREET only, then verify house number in result
 async function googleLooseLocalSearch(
   query: string,
   lat: number,
@@ -532,32 +533,36 @@ async function googleLooseLocalSearch(
   returnMultiple: boolean = false
 ): Promise<GeocodeResult> {
   try {
-    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
-      `?query=${encodeURIComponent(query)}` +
+    // Extract house number if present (e.g., "52A" from "52A David Road")
+    const houseNumberMatch = query.match(/^(\d+[a-z]?)\s+(.+)$/i);
+    const queryHouseNumber = houseNumberMatch?.[1]?.toLowerCase();
+    const streetOnly = houseNumberMatch?.[2] || query; // Search without house number
+    
+    const queryRoadType = extractRoadType(query);
+    
+    console.log(`[Geocode] Loose local: query="${query}", street="${streetOnly}", house="${queryHouseNumber}", roadType="${queryRoadType}"`);
+    
+    // FIRST: Search for the STREET only (without house number) - prevents fuzzy mismatches
+    const streetSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+      `?query=${encodeURIComponent(streetOnly)}` +
       `&location=${lat},${lon}` +
       `&radius=8000` +  // 8km radius - tight local search
       `&key=${apiKey}`;
 
-    console.log(`[Geocode] Loose local search: "${query}" near ${lat},${lon} (8km radius)`);
+    console.log(`[Geocode] Loose local search (street only): "${streetOnly}" near ${lat},${lon} (8km radius)`);
 
-    const response = await fetch(url);
-    const data = await response.json();
+    const streetResponse = await fetch(streetSearchUrl);
+    const streetData = await streetResponse.json();
 
-    if (data.status !== "OK" || !data.results || data.results.length === 0) {
-      console.log(`[Geocode] Loose local search: no results (status: ${data.status})`);
+    if (streetData.status !== "OK" || !streetData.results || streetData.results.length === 0) {
+      console.log(`[Geocode] Loose local search: no results for street "${streetOnly}" (status: ${streetData.status})`);
       return { found: false, address: query };
     }
-
-    // Extract query road type for validation
-    const queryRoadType = extractRoadType(query);
-    const queryHouseNumber = query.match(/^(\d+[a-z]?)/i)?.[1]?.toLowerCase();
-    
-    console.log(`[Geocode] Query analysis: house="${queryHouseNumber}", roadType="${queryRoadType}"`);
 
     // Find a valid match with road type validation
     let validResult = null;
     
-    for (const result of data.results) {
+    for (const result of streetData.results) {
       const resultAddress = result.formatted_address || result.name || "";
       const resultRoadType = extractRoadType(resultAddress);
       
@@ -567,30 +572,60 @@ async function googleLooseLocalSearch(
         continue;
       }
       
-      // Check house number if present
-      if (queryHouseNumber) {
-        const resultLower = resultAddress.toLowerCase();
-        if (!resultLower.includes(queryHouseNumber)) {
-          console.log(`[Geocode] Loose local REJECTED: "${resultAddress}" - house number "${queryHouseNumber}" not found`);
-          continue;
-        }
-      }
-      
+      // This result has the correct road type!
       validResult = result;
+      console.log(`[Geocode] Loose local ACCEPTED: "${resultAddress}" (road type: ${resultRoadType})`);
       break;
     }
 
     if (!validResult) {
-      console.log(`[Geocode] Loose local search: no valid matches after validation`);
+      console.log(`[Geocode] Loose local search: no valid matches after road type validation`);
       return { found: false, address: query };
     }
 
+    // NOW: If we had a house number, search for the FULL address using the street's location as bias
+    if (queryHouseNumber && validResult.geometry?.location) {
+      const streetLat = validResult.geometry.location.lat;
+      const streetLon = validResult.geometry.location.lng;
+      
+      // Search for full address (with house number) biased to the correct street's location
+      const fullSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+        `?query=${encodeURIComponent(query)}` +
+        `&location=${streetLat},${streetLon}` +
+        `&radius=1000` +  // Very tight 1km radius around the correct street
+        `&key=${apiKey}`;
+      
+      console.log(`[Geocode] Loose local: now searching full address "${query}" near street location ${streetLat},${streetLon}`);
+      
+      const fullResponse = await fetch(fullSearchUrl);
+      const fullData = await fullResponse.json();
+      
+      if (fullData.status === "OK" && fullData.results && fullData.results.length > 0) {
+        for (const result of fullData.results) {
+          const resultAddress = (result.formatted_address || "").toLowerCase();
+          const resultRoadType = extractRoadType(resultAddress);
+          
+          // Verify road type still matches
+          if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
+            continue;
+          }
+          
+          // Verify house number is in the result
+          if (resultAddress.includes(queryHouseNumber)) {
+            console.log(`[Geocode] Loose local FULL MATCH: "${result.formatted_address}" (house: ${queryHouseNumber})`);
+            validResult = result;
+            break;
+          }
+        }
+      }
+    }
+
     // Handle multiple matches for disambiguation
-    if (returnMultiple && data.results.length > 1) {
+    if (returnMultiple && streetData.results.length > 1) {
       const uniqueAreas = new Set<string>();
       const matches: GeocodeMatch[] = [];
       
-      for (const result of data.results.slice(0, 5)) {
+      for (const result of streetData.results.slice(0, 5)) {
         const resultAddress = result.formatted_address || "";
         const resultRoadType = extractRoadType(resultAddress);
         
