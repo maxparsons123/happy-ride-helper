@@ -3832,19 +3832,7 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
           const eta = isAsap ? `${Math.floor(Math.random() * 4) + 5} minutes` : null;
           const scheduledTime = !isAsap ? finalBooking.pickupTime : null;
           
-          // Log to database with phone number
-          await supabase.from("call_logs").insert({
-            call_id: callId,
-            pickup: finalBooking.pickup,
-            destination: finalBooking.destination,
-            passengers: finalBooking.passengers,
-            estimated_fare: `£${fare}`,
-            booking_status: "confirmed",
-            call_start_at: callStartAt,
-            user_phone: userPhone || null
-          });
-
-          // Save booking to bookings table for persistence (always save, even without phone for web tests)
+          // OPTIMIZATION: Parallelize all database operations (they don't depend on each other)
           const phoneKey = userPhone ? (normalizePhone(userPhone) || userPhone) : "web-test";
           
           // Generate a short reference number (e.g., "ABC123")
@@ -3857,8 +3845,6 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             return ref;
           };
           const bookingRef = generateReference();
-          
-          console.log(`[${callId}] 💾 Attempting to save booking: ${finalBooking.pickup} → ${finalBooking.destination}`);
           
           // Build complete booking_details JSON
           const bookingDetails = {
@@ -3884,41 +3870,64 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             ]
           };
           
-          const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
-            call_id: callId,
-            caller_phone: phoneKey,
-            caller_name: callerName || null,
-            pickup: finalBooking.pickup,
-            destination: finalBooking.destination,
-            passengers: finalBooking.passengers,
-            fare: `£${fare}`,
-            eta: isAsap ? eta : null,
-            scheduled_for: scheduledTime,
-            status: "active",
-            booked_at: new Date().toISOString(),
-            booking_details: bookingDetails
-          }).select().single();
+          // Run all database operations in PARALLEL (don't await sequentially)
+          const dbPromises = Promise.all([
+            // 1. Log to call_logs
+            supabase.from("call_logs").insert({
+              call_id: callId,
+              pickup: finalBooking.pickup,
+              destination: finalBooking.destination,
+              passengers: finalBooking.passengers,
+              estimated_fare: `£${fare}`,
+              booking_status: "confirmed",
+              call_start_at: callStartAt,
+              user_phone: userPhone || null
+            }),
+            
+            // 2. Save booking to bookings table
+            supabase.from("bookings").insert({
+              call_id: callId,
+              caller_phone: phoneKey,
+              caller_name: callerName || null,
+              pickup: finalBooking.pickup,
+              destination: finalBooking.destination,
+              passengers: finalBooking.passengers,
+              fare: `£${fare}`,
+              eta: isAsap ? eta : null,
+              scheduled_for: scheduledTime,
+              status: "active",
+              booked_at: new Date().toISOString(),
+              booking_details: bookingDetails
+            }).select().single(),
+            
+            // 3. Save/update caller info
+            saveCallerInfo(finalBooking),
+            
+            // 4. Broadcast booking confirmed
+            broadcastLiveCall({
+              pickup: finalBooking.pickup,
+              destination: finalBooking.destination,
+              passengers: finalBooking.passengers,
+              booking_confirmed: true,
+              fare: `£${fare}`,
+              eta: isAsap ? eta : `Scheduled for ${scheduledTime}`
+            })
+          ]);
           
-          if (bookingInsertError) {
-            console.error(`[${callId}] ❌ CRITICAL: Failed to save booking:`, bookingInsertError);
-            console.error(`[${callId}] Booking data was:`, { pickup: finalBooking.pickup, destination: finalBooking.destination, passengers: finalBooking.passengers, fare, phoneKey });
-          } else {
-            activeBooking = newBooking;
-            console.log(`[${callId}] ✅ Booking saved successfully: ${bookingRef} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
-            console.log(`[${callId}] 📋 Booking ID: ${newBooking.id}`);
-          }
-
-          // Save/update caller info for future calls
-          await saveCallerInfo(finalBooking);
-
-          // Broadcast booking confirmed
-          await broadcastLiveCall({
-            pickup: finalBooking.pickup,
-            destination: finalBooking.destination,
-            passengers: finalBooking.passengers,
-            booking_confirmed: true,
-            fare: `£${fare}`,
-            eta: isAsap ? eta : `Scheduled for ${scheduledTime}`
+          // Don't wait for DB operations - send confirmation to AI immediately
+          // This cuts ~200-400ms from user-perceived latency
+          console.log(`[${callId}] 🚀 Sending booking confirmation (DB ops running in background)`);
+          
+          // Handle DB results in background (for logging/error handling)
+          dbPromises.then(([callLogResult, bookingResult]) => {
+            if (bookingResult.error) {
+              console.error(`[${callId}] ❌ Failed to save booking:`, bookingResult.error);
+            } else {
+              activeBooking = bookingResult.data;
+              console.log(`[${callId}] ✅ Booking saved: ${bookingRef}`);
+            }
+          }).catch(err => {
+            console.error(`[${callId}] ❌ DB operations failed:`, err);
           });
           
           // Build confirmation script based on ASAP vs scheduled
