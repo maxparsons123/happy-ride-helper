@@ -321,6 +321,11 @@ serve(async (req) => {
   // If Ada asks "Anything else?" and the customer goes silent, end the call reliably.
   const FOLLOWUP_SILENCE_TIMEOUT_MS = 8000;
 
+  // If Ada asks any question and we get no detectable user activity (VAD/transcription),
+  // reprompt once or twice so calls don't get "stuck" on the first question.
+  const NO_REPLY_REPROMPT_MS = 9000;
+  const MAX_NO_REPLY_REPROMPTS = 2;
+
   // When we do need to hang up without an explicit end_call tool completion,
   // we MUST allow time for Ada's final audio to fully play down the line.
   const GOODBYE_AUDIO_GRACE_MS = 4500;
@@ -334,11 +339,15 @@ serve(async (req) => {
   const SILENCE_TIMEOUT_FAILSAFE_TRIGGER_MS = 12000;
 
   let followupAskedAt = 0; // ms epoch when Ada last asked "anything else"
+  let awaitingReplyAt = 0; // ms epoch when Ada last asked a question and is awaiting a reply
+  let noReplyRepromptCount = 0;
+
   let lastUserActivityAt = Date.now(); // ms epoch (speech_started OR finalized transcript)
 
   let followupSilenceTimer: number | null = null;
   let silenceHangupFailsafeTimer: number | null = null;
   let goodbyeFailsafeTimer: number | null = null;
+  let noReplyRepromptTimer: number | null = null;
 
   let endCallInProgress = false;
   let callEnded = false;
@@ -351,9 +360,11 @@ serve(async (req) => {
     clearTimer(followupSilenceTimer);
     clearTimer(silenceHangupFailsafeTimer);
     clearTimer(goodbyeFailsafeTimer);
+    clearTimer(noReplyRepromptTimer);
     followupSilenceTimer = null;
     silenceHangupFailsafeTimer = null;
     goodbyeFailsafeTimer = null;
+    noReplyRepromptTimer = null;
   };
 
   const forceHangup = (reason: string, delayMs = 0) => {
@@ -386,14 +397,20 @@ serve(async (req) => {
 
   const noteUserActivity = (source: string) => {
     lastUserActivityAt = Date.now();
-    if (followupAskedAt) {
-      console.log(`[${callId}] 🕒 User activity (${source}) - cancelling follow-up silence timer`);
-    }
+
+    // Any real user activity cancels all "waiting for reply" timers.
     followupAskedAt = 0;
+    awaitingReplyAt = 0;
+    noReplyRepromptCount = 0;
+
     clearTimer(followupSilenceTimer);
     followupSilenceTimer = null;
     clearTimer(silenceHangupFailsafeTimer);
     silenceHangupFailsafeTimer = null;
+    clearTimer(noReplyRepromptTimer);
+    noReplyRepromptTimer = null;
+
+    console.log(`[${callId}] 🕒 User activity (${source}) - cleared reply timers`);
   };
 
   const armFollowupSilenceTimeout = (context: string) => {
@@ -438,6 +455,50 @@ serve(async (req) => {
         forceHangup("silence_timeout_no_ai", 0);
       }
     }, FOLLOWUP_SILENCE_TIMEOUT_MS);
+  };
+
+  const armNoReplyReprompt = (context: string) => {
+    if (callEnded || endCallInProgress) return;
+
+    // Reset and arm
+    clearTimer(noReplyRepromptTimer);
+    noReplyRepromptTimer = null;
+
+    awaitingReplyAt = Date.now();
+
+    // Don't spam: cap reprompts per "waiting period"
+    if (noReplyRepromptCount >= MAX_NO_REPLY_REPROMPTS) return;
+
+    console.log(`[${callId}] ⏳ Armed no-reply reprompt (${NO_REPLY_REPROMPT_MS}ms) context=${context}`);
+
+    noReplyRepromptTimer = setTimeout(() => {
+      if (callEnded || endCallInProgress) return;
+
+      // If the user did anything since we armed, do nothing.
+      if (lastUserActivityAt > awaitingReplyAt) return;
+
+      if (!sessionReady || openaiWs?.readyState !== WebSocket.OPEN) return;
+      if (aiSpeaking) return; // don't talk over ourselves
+
+      noReplyRepromptCount += 1;
+      console.log(`[${callId}] 🔁 No-reply reprompt firing (#${noReplyRepromptCount})`);
+
+      openaiWs.send(
+        JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions:
+              "You did not hear a reply from the customer. Briefly repeat your last question, clearly and politely, and wait for their answer.",
+          },
+        }),
+      );
+
+      // Re-arm for a second attempt if needed
+      if (noReplyRepromptCount < MAX_NO_REPLY_REPROMPTS) {
+        armNoReplyReprompt("reprompt_again");
+      }
+    }, NO_REPLY_REPROMPT_MS);
   };
 
   // Language handling (multilingual support)
@@ -2356,8 +2417,8 @@ Rules:
             // This prevents Ada responding before Whisper has finalized the user's words ("out-of-order" turns).
             turn_detection: {
               type: "server_vad",
-              threshold: 0.6,            // Slightly lower = catch softer speech on phone lines
-              prefix_padding_ms: 500,    // Capture more lead-in for phone audio
+              threshold: 0.45,           // More sensitive for quieter phone lines
+              prefix_padding_ms: 650,    // Capture more lead-in for phone audio
               silence_duration_ms: 1800, // Wait 1.8s of silence - gives passengers more time to finish
               create_response: false,    // Manual response.create after transcription.completed
               interrupt_response: true   // Allow user to interrupt Ada
@@ -2657,6 +2718,21 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             a.includes("anything else i can help")
           ) {
             armFollowupSilenceTimeout("assistant_anything_else");
+          }
+
+          // If Ada asked a question and we get no detectable user activity, reprompt.
+          // This fixes cases where VAD/STT doesn't pick up the customer's reply (quiet lines / mic issues).
+          const looksLikeQuestion =
+            a.includes("?") ||
+            a.includes("what's your name") ||
+            a.includes("when do you need") ||
+            a.includes("where would you like") ||
+            a.includes("where are you heading") ||
+            a.includes("how many passengers") ||
+            a.includes("shall i book");
+
+          if (looksLikeQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a)) {
+            armNoReplyReprompt("assistant_question");
           }
 
           // Failsafe: if Ada says goodbye but forgets to call end_call, hang up reliably.
