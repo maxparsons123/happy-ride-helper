@@ -8,6 +8,292 @@ const corsHeaders = {
 
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 
+// ============================================================
+// FUZZY ADDRESS MATCHING UTILITIES
+// ============================================================
+
+/**
+ * Normalize an address for comparison:
+ * - lowercase
+ * - remove extra whitespace
+ * - standardize common abbreviations
+ */
+function normalizeAddress(addr: string): string {
+  if (!addr) return "";
+  return addr
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\bstreet\b/g, "st")
+    .replace(/\broad\b/g, "rd")
+    .replace(/\bavenue\b/g, "ave")
+    .replace(/\bdrive\b/g, "dr")
+    .replace(/\blane\b/g, "ln")
+    .replace(/\bcourt\b/g, "ct")
+    .replace(/\bplace\b/g, "pl");
+}
+
+/**
+ * Extract house number from an address (e.g., "52A", "1214", "18B")
+ */
+function extractHouseNumber(addr: string): string | null {
+  const match = addr.match(/^(\d+[a-zA-Z]?)\s/);
+  return match ? match[1].toUpperCase() : null;
+}
+
+/**
+ * Extract street name from an address (without house number)
+ */
+function extractStreetName(addr: string): string {
+  // Remove house number prefix
+  return addr.replace(/^\d+[a-zA-Z]?\s+/, "").toLowerCase().trim();
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ */
+function levenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = [];
+  
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  
+  return matrix[b.length][a.length];
+}
+
+/**
+ * Generate fuzzy house number variants that could be misheard
+ * Examples: "52A" could be heard as "5208", "520A", etc.
+ */
+function fuzzyHouseNumberVariants(houseNum: string): string[] {
+  const variants: string[] = [houseNum.toUpperCase()];
+  const upper = houseNum.toUpperCase();
+  
+  // Handle letter suffixes that could be misheard as numbers
+  // "52A" might be heard as "528" or "5208"
+  const letterMatch = upper.match(/^(\d+)([A-Z])$/);
+  if (letterMatch) {
+    const num = letterMatch[1];
+    const letter = letterMatch[2];
+    
+    // A=8, B=3, C=3, D=3, E=3, etc. (phonetic confusion)
+    const letterToDigit: Record<string, string[]> = {
+      'A': ['8', '08'],
+      'B': ['3', '03', '13'],
+      'C': ['3', '03'],
+      'D': ['3', '03'],
+      'E': ['3', '03'],
+      'F': ['4', '04'],
+      'G': ['3', '03'],
+    };
+    
+    if (letterToDigit[letter]) {
+      for (const digit of letterToDigit[letter]) {
+        variants.push(num + digit);
+      }
+    }
+  }
+  
+  // Handle numbers that could be letters
+  // "5208" might be "52-oh-8" or "52A" (0 sounds like "oh")
+  const numMatch = upper.match(/^(\d+)(0)(\d*)$/);
+  if (numMatch) {
+    // "520" -> "52O" (letter O)
+    variants.push(numMatch[1] + 'O' + numMatch[3]);
+  }
+  
+  // Handle "08" suffix as "A" - "5208" -> "52A"
+  const suffixMatch = upper.match(/^(\d+)(08|8)$/);
+  if (suffixMatch) {
+    variants.push(suffixMatch[1] + 'A');
+  }
+  
+  return [...new Set(variants)];
+}
+
+interface FuzzyMatchResult {
+  isExactMatch: boolean;
+  isFuzzyMatch: boolean;
+  matchedAddress: string | null;
+  extractedAddress: string;
+  needsClarification: boolean;
+  clarificationReason: string | null;
+  confidence: number;
+}
+
+/**
+ * Check if an extracted address fuzzy-matches any address in caller history
+ */
+function checkFuzzyMatch(
+  extractedAddr: string,
+  addressHistory: string[]
+): FuzzyMatchResult {
+  if (!extractedAddr || !addressHistory || addressHistory.length === 0) {
+    return {
+      isExactMatch: false,
+      isFuzzyMatch: false,
+      matchedAddress: null,
+      extractedAddress: extractedAddr,
+      needsClarification: false,
+      clarificationReason: null,
+      confidence: 1.0,
+    };
+  }
+
+  const normalizedExtracted = normalizeAddress(extractedAddr);
+  const extractedHouseNum = extractHouseNumber(extractedAddr);
+  const extractedStreet = extractStreetName(extractedAddr);
+
+  for (const historyAddr of addressHistory) {
+    const normalizedHistory = normalizeAddress(historyAddr);
+    
+    // Check for exact match
+    if (normalizedExtracted === normalizedHistory) {
+      return {
+        isExactMatch: true,
+        isFuzzyMatch: false,
+        matchedAddress: historyAddr,
+        extractedAddress: extractedAddr,
+        needsClarification: false,
+        clarificationReason: null,
+        confidence: 1.0,
+      };
+    }
+
+    // Check for fuzzy house number match on same street
+    const historyHouseNum = extractHouseNumber(historyAddr);
+    const historyStreet = extractStreetName(historyAddr);
+    
+    // Same street name (or very close)
+    const streetDistance = levenshteinDistance(extractedStreet, historyStreet);
+    const streetSimilar = streetDistance <= 2 || 
+      extractedStreet.includes(historyStreet) || 
+      historyStreet.includes(extractedStreet);
+
+    if (streetSimilar && extractedHouseNum && historyHouseNum) {
+      // Check if house numbers are fuzzy variants of each other
+      const extractedVariants = fuzzyHouseNumberVariants(extractedHouseNum);
+      const historyVariants = fuzzyHouseNumberVariants(historyHouseNum);
+      
+      // Check if any variants match
+      const variantMatch = extractedVariants.some(v => historyVariants.includes(v)) ||
+        historyVariants.some(v => extractedVariants.includes(v));
+      
+      if (variantMatch && extractedHouseNum !== historyHouseNum) {
+        // Fuzzy match found - needs clarification
+        return {
+          isExactMatch: false,
+          isFuzzyMatch: true,
+          matchedAddress: historyAddr,
+          extractedAddress: extractedAddr,
+          needsClarification: true,
+          clarificationReason: `Possible confusion between "${extractedHouseNum}" and "${historyHouseNum}" on ${historyStreet}`,
+          confidence: 0.6,
+        };
+      }
+      
+      // Check Levenshtein distance between house numbers
+      const houseNumDistance = levenshteinDistance(
+        extractedHouseNum.toLowerCase(), 
+        historyHouseNum.toLowerCase()
+      );
+      
+      if (houseNumDistance === 1) {
+        // Very close house numbers on same street - likely typo or mishearing
+        return {
+          isExactMatch: false,
+          isFuzzyMatch: true,
+          matchedAddress: historyAddr,
+          extractedAddress: extractedAddr,
+          needsClarification: true,
+          clarificationReason: `House number "${extractedHouseNum}" is very close to known address "${historyHouseNum}" on same street`,
+          confidence: 0.7,
+        };
+      }
+    }
+  }
+
+  // No match found
+  return {
+    isExactMatch: false,
+    isFuzzyMatch: false,
+    matchedAddress: null,
+    extractedAddress: extractedAddr,
+    needsClarification: false,
+    clarificationReason: null,
+    confidence: 1.0,
+  };
+}
+
+/**
+ * Process extracted booking and check addresses against caller history
+ */
+function enrichWithFuzzyMatches(
+  extracted: any,
+  pickupHistory: string[],
+  dropoffHistory: string[]
+): any {
+  const result = { ...extracted };
+  
+  // Check pickup location
+  if (extracted.pickup_location && extracted.pickup_location !== "by_gps") {
+    const pickupMatch = checkFuzzyMatch(extracted.pickup_location, pickupHistory);
+    
+    if (pickupMatch.isExactMatch) {
+      // Use the stored address (better formatting)
+      result.pickup_location = pickupMatch.matchedAddress;
+      result.pickup_match_type = "exact";
+      console.log(`[taxi-extract] Pickup exact match: "${extracted.pickup_location}" -> "${pickupMatch.matchedAddress}"`);
+    } else if (pickupMatch.needsClarification) {
+      // Flag for clarification
+      result.pickup_needs_clarification = true;
+      result.pickup_fuzzy_match = pickupMatch.matchedAddress;
+      result.pickup_clarification_reason = pickupMatch.clarificationReason;
+      result.pickup_match_type = "fuzzy";
+      console.log(`[taxi-extract] Pickup fuzzy match needs clarification: "${extracted.pickup_location}" vs "${pickupMatch.matchedAddress}"`);
+    }
+  }
+  
+  // Check dropoff location
+  if (extracted.dropoff_location && extracted.dropoff_location !== "as directed") {
+    const dropoffMatch = checkFuzzyMatch(extracted.dropoff_location, dropoffHistory);
+    
+    if (dropoffMatch.isExactMatch) {
+      // Use the stored address (better formatting)
+      result.dropoff_location = dropoffMatch.matchedAddress;
+      result.dropoff_match_type = "exact";
+      console.log(`[taxi-extract] Dropoff exact match: "${extracted.dropoff_location}" -> "${dropoffMatch.matchedAddress}"`);
+    } else if (dropoffMatch.needsClarification) {
+      // Flag for clarification
+      result.dropoff_needs_clarification = true;
+      result.dropoff_fuzzy_match = dropoffMatch.matchedAddress;
+      result.dropoff_clarification_reason = dropoffMatch.clarificationReason;
+      result.dropoff_match_type = "fuzzy";
+      console.log(`[taxi-extract] Dropoff fuzzy match needs clarification: "${extracted.dropoff_location}" vs "${dropoffMatch.matchedAddress}"`);
+    }
+  }
+  
+  return result;
+}
+
 // Get current London time in ISO format
 const getLondonTime = () => {
   const now = new Date();
@@ -386,7 +672,13 @@ serve(async (req) => {
   }
 
   try {
-    const { transcript, mode = "new", existing_booking = null } = await req.json();
+    const { 
+      transcript, 
+      mode = "new", 
+      existing_booking = null,
+      pickup_history = [],   // Caller's pickup address history
+      dropoff_history = []   // Caller's dropoff address history
+    } = await req.json();
     
     if (!transcript) {
       return new Response(
@@ -445,8 +737,12 @@ serve(async (req) => {
     const extracted = JSON.parse(jsonStr);
     console.log(`[taxi-extract] Extracted:`, extracted);
 
+    // Enrich with fuzzy matching against caller history
+    const enriched = enrichWithFuzzyMatches(extracted, pickup_history, dropoff_history);
+    console.log(`[taxi-extract] Enriched with fuzzy matching:`, enriched);
+
     return new Response(
-      JSON.stringify(extracted),
+      JSON.stringify(enriched),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 
