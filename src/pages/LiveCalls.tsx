@@ -138,6 +138,13 @@ export default function LiveCalls() {
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null);
 
+  // Refs to avoid stale closures in timers/realtime callbacks
+  const callsRef = useRef<LiveCall[]>([]);
+  const selectedCallRef = useRef<string | null>(null);
+
+  // Used to keep the transcript feeling "fresh" when switching calls
+  const suppressAutoScrollRef = useRef(false);
+
   // Initialize audio context on user interaction
   const enableAudio = useCallback(() => {
     if (!audioContextRef.current) {
@@ -170,6 +177,12 @@ export default function LiveCalls() {
   }, []);
 
   useEffect(() => {
+    // Keep refs in sync
+    callsRef.current = calls;
+    selectedCallRef.current = selectedCall;
+  }, [calls, selectedCall]);
+
+  useEffect(() => {
     // Cleanup stale active calls older than 10 minutes
     const cleanupStaleCalls = async () => {
       const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
@@ -178,7 +191,7 @@ export default function LiveCalls() {
         .update({ status: "completed", ended_at: new Date().toISOString() })
         .eq("status", "active")
         .lt("started_at", tenMinutesAgo);
-      
+
       if (error) {
         console.error("Error cleaning up stale calls:", error);
       } else {
@@ -186,11 +199,8 @@ export default function LiveCalls() {
       }
     };
 
-    // Fetch initial active calls
-    const fetchCalls = async () => {
-      // First cleanup stale calls
-      await cleanupStaleCalls();
-
+    // Fetch latest calls (polling fallback if realtime drops)
+    const refreshCalls = async () => {
       const { data, error } = await supabase
         .from("live_calls")
         .select("*")
@@ -203,18 +213,37 @@ export default function LiveCalls() {
         return;
       }
 
-      // Cast the transcripts field properly
-      const typedCalls = (data || []).map(call => ({
+      const typedCalls = (data || []).map((call) => ({
         ...call,
-        transcripts: (call.transcripts as unknown as Transcript[]) || []
-      }));
+        transcripts: (call.transcripts as unknown as Transcript[]) || [],
+      })) as LiveCall[];
+
       setCalls(typedCalls);
-      if (typedCalls.length > 0 && !selectedCall) {
+
+      // Follow the newest active call so operators always see *new* incoming calls
+      const newestActive = typedCalls.find((c) => c.status === "active");
+      const currentSelectedId = selectedCallRef.current;
+      const currentSelected = currentSelectedId
+        ? (typedCalls.find((c) => c.call_id === currentSelectedId) ||
+            callsRef.current.find((c) => c.call_id === currentSelectedId))
+        : null;
+
+      const hasNewerActiveCall =
+        !!newestActive &&
+        (!currentSelected || new Date(newestActive.started_at).getTime() > new Date(currentSelected.started_at).getTime());
+
+      if (newestActive && (hasNewerActiveCall || newestActive.call_id !== currentSelectedId)) {
+        setSelectedCall(newestActive.call_id);
+      } else if (!currentSelectedId && typedCalls.length > 0) {
         setSelectedCall(typedCalls[0].call_id);
       }
     };
 
-    fetchCalls();
+    // Initial load
+    (async () => {
+      await cleanupStaleCalls();
+      await refreshCalls();
+    })();
 
     // Subscribe to realtime updates
     const channel = supabase
@@ -224,35 +253,55 @@ export default function LiveCalls() {
         {
           event: "*",
           schema: "public",
-          table: "live_calls"
+          table: "live_calls",
         },
         (payload) => {
           console.log("Live call update:", payload);
-          
+
           if (payload.eventType === "INSERT") {
             const newCall = {
               ...payload.new,
-              transcripts: (payload.new.transcripts as unknown as Transcript[]) || []
+              transcripts: (payload.new.transcripts as unknown as Transcript[]) || [],
             } as LiveCall;
-            setCalls(prev => [newCall, ...prev.slice(0, 19)]);
+
+            setCalls((prev) => [newCall, ...prev.filter((c) => c.call_id !== newCall.call_id)].slice(0, 20));
             setSelectedCall(newCall.call_id);
           } else if (payload.eventType === "UPDATE") {
-            setCalls(prev => prev.map(call => 
-              call.call_id === payload.new.call_id 
-                ? { 
-                    ...payload.new, 
-                    transcripts: (payload.new.transcripts as unknown as Transcript[]) || [] 
-                  } as LiveCall
-                : call
-            ));
+            setCalls((prev) =>
+              prev.map((call) =>
+                call.call_id === payload.new.call_id
+                  ? ({
+                      ...payload.new,
+                      transcripts: (payload.new.transcripts as unknown as Transcript[]) || [],
+                    } as LiveCall)
+                  : call
+              )
+            );
           } else if (payload.eventType === "DELETE") {
-            setCalls(prev => prev.filter(call => call.id !== payload.old.id));
+            setCalls((prev) => prev.filter((call) => call.id !== payload.old.id));
           }
         }
       )
       .subscribe();
 
+    // Poll as a safety net (covers missed realtime events / disconnected WS)
+    const pollId = window.setInterval(() => {
+      refreshCalls();
+    }, 3000);
+
+    // Also refresh immediately when the tab becomes active again (intervals are throttled in background tabs)
+    const handleFocus = () => refreshCalls();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshCalls();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+
     return () => {
+      window.clearInterval(pollId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
       supabase.removeChannel(channel);
     };
   }, []);
@@ -431,16 +480,24 @@ export default function LiveCalls() {
 
   // When switching to a new call, reset the transcript scroll so the log feels "fresh"
   useEffect(() => {
+    suppressAutoScrollRef.current = true;
+
     requestAnimationFrame(() => {
       transcriptScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
     });
+
+    const t = window.setTimeout(() => {
+      suppressAutoScrollRef.current = false;
+    }, 400);
+
+    return () => window.clearTimeout(t);
   }, [selectedCall]);
 
-  // Auto-scroll transcript to the latest message
+  // Auto-scroll transcript to the latest message (but not immediately after switching calls)
   useEffect(() => {
     if (!selectedCallData) return;
+    if (suppressAutoScrollRef.current) return;
 
-    // Wait for DOM paint
     requestAnimationFrame(() => {
       transcriptBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     });
