@@ -2604,6 +2604,9 @@ Rules:
           transcript,
           mode: knownBooking.pickup || knownBooking.destination ? "update" : "new",
           existing_booking: knownBooking,
+          // Pass caller's address history for fuzzy matching
+          pickup_history: callerPickupAddresses || [],
+          dropoff_history: callerDropoffAddresses || [],
         }),
       });
 
@@ -2614,6 +2617,68 @@ Rules:
 
       let extracted = await response.json();
       console.log(`[${callId}] 📦 AI Extracted:`, extracted);
+
+      // FUZZY MATCH CLARIFICATION: If taxi-extract flagged addresses as needing clarification,
+      // inject a prompt for Ada to ask the customer to confirm
+      if (extracted.pickup_needs_clarification && extracted.pickup_fuzzy_match) {
+        console.log(`[${callId}] 🔍 Pickup needs fuzzy clarification: "${extracted.pickup_location}" vs known "${extracted.pickup_fuzzy_match}"`);
+        
+        // Store the fuzzy match info for Ada to use
+        const spokenAddr = extracted.pickup_location;
+        const knownAddr = extracted.pickup_fuzzy_match;
+        
+        // Inject clarification prompt into Ada's context
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ 
+                type: "input_text", 
+                text: `[SYSTEM CLARIFICATION REQUIRED: The customer said "${spokenAddr}" but this looks like a fuzzy match to their known address "${knownAddr}". Ask: "Just to check - did you mean ${knownAddr} (your usual address), or is ${spokenAddr} a different location?" Wait for confirmation before proceeding.]` 
+              }]
+            }
+          }));
+          
+          // Set state to await clarification
+          awaitingClarificationFor = "pickup";
+          
+          // Don't update knownBooking.pickup yet - wait for clarification
+          extracted.pickup_location = null;
+        }
+      }
+      
+      if (extracted.dropoff_needs_clarification && extracted.dropoff_fuzzy_match) {
+        console.log(`[${callId}] 🔍 Dropoff needs fuzzy clarification: "${extracted.dropoff_location}" vs known "${extracted.dropoff_fuzzy_match}"`);
+        
+        // Store the fuzzy match info for Ada to use
+        const spokenAddr = extracted.dropoff_location;
+        const knownAddr = extracted.dropoff_fuzzy_match;
+        
+        // Inject clarification prompt into Ada's context
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ 
+                type: "input_text", 
+                text: `[SYSTEM CLARIFICATION REQUIRED: The customer said "${spokenAddr}" but this looks like a fuzzy match to their known destination "${knownAddr}". Ask: "Just to confirm - did you mean ${knownAddr}, or is ${spokenAddr} somewhere different?" Wait for confirmation before proceeding.]` 
+              }]
+            }
+          }));
+          
+          // Set state to await clarification (only if not already awaiting pickup)
+          if (!awaitingClarificationFor) {
+            awaitingClarificationFor = "destination";
+          }
+          
+          // Don't update knownBooking.destination yet - wait for clarification
+          extracted.dropoff_location = null;
+        }
+      }
 
       // CRITICAL: If we're awaiting clarification for a specific address, route postcode/outcode answers correctly
       // This prevents "CV12BW" from becoming destination when we asked for pickup postcode
