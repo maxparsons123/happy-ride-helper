@@ -4078,13 +4078,19 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }
           }));
           
-          // Trigger response
+          // Trigger response - CRITICAL: instruct AI to use EXACT confirmation script, nothing more
           openaiWs?.send(
             JSON.stringify({
               type: "response.create",
-              response: { modalities: ["audio", "text"] },
+              response: { 
+                modalities: ["audio", "text"],
+                instructions: `Say EXACTLY this confirmation (do not add anything, do not repeat the "anything else" question): "${confirmationScript}"`
+              },
             }),
           );
+          
+          // Arm follow-up silence timeout since confirmation asks "anything else?"
+          armFollowupSilenceTimeout("booking_confirmed");
           
           // Notify client
           socket.send(JSON.stringify({
