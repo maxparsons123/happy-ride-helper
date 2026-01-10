@@ -375,6 +375,51 @@ function roadTypesMatch(type1: string | null, type2: string | null): boolean {
   return type1 === type2;
 }
 
+// Extract the core street name without house number and road type
+// e.g., "52A David Road" → "david", "Davids Rd" → "davids"
+function extractStreetName(address: string): string | null {
+  // Remove house number at start
+  let cleaned = address.replace(/^\d+[a-z]?\s+/i, '').toLowerCase().trim();
+  
+  // Remove road type suffix
+  for (const variants of Object.values(ROAD_TYPES)) {
+    for (const variant of variants) {
+      const regex = new RegExp(`\\s+${variant}\\b.*$`, 'i');
+      cleaned = cleaned.replace(regex, '');
+    }
+  }
+  
+  // Remove common suffixes/city info after comma
+  cleaned = cleaned.split(',')[0].trim();
+  
+  return cleaned || null;
+}
+
+// Check if street names match (strict - "David" ≠ "Davids")
+function streetNamesMatch(queryStreet: string | null, resultStreet: string | null): boolean {
+  if (!queryStreet || !resultStreet) return true; // If we can't detect, allow it
+  
+  // Normalize: remove apostrophes, trim
+  const q = queryStreet.replace(/['']/g, '').trim();
+  const r = resultStreet.replace(/['']/g, '').trim();
+  
+  // Exact match
+  if (q === r) return true;
+  
+  // Allow minor spelling variations (1 character difference) only if both are 6+ chars
+  if (q.length >= 6 && r.length >= 6) {
+    const shorter = q.length <= r.length ? q : r;
+    const longer = q.length > r.length ? q : r;
+    
+    // Check if one is a prefix of the other (with max 1 char difference)
+    if (longer.startsWith(shorter) && (longer.length - shorter.length) <= 1) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 // Places Autocomplete - best for residential addresses with house numbers
 // This is more accurate than Text Search for "52A David Road" style queries
 async function googlePlacesAutocomplete(
@@ -539,8 +584,9 @@ async function googleLooseLocalSearch(
     const streetOnly = houseNumberMatch?.[2] || query; // Search without house number
     
     const queryRoadType = extractRoadType(query);
+    const queryStreetName = extractStreetName(streetOnly);
     
-    console.log(`[Geocode] Loose local: query="${query}", street="${streetOnly}", house="${queryHouseNumber}", roadType="${queryRoadType}"`);
+    console.log(`[Geocode] Loose local: query="${query}", street="${streetOnly}", streetName="${queryStreetName}", house="${queryHouseNumber}", roadType="${queryRoadType}"`);
     
     // FIRST: Search for the STREET only (without house number) - prevents fuzzy mismatches
     const streetSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
@@ -559,12 +605,13 @@ async function googleLooseLocalSearch(
       return { found: false, address: query };
     }
 
-    // Find a valid match with road type validation
+    // Find a valid match with road type AND street name validation
     let validResult = null;
     
     for (const result of streetData.results) {
       const resultAddress = result.formatted_address || result.name || "";
       const resultRoadType = extractRoadType(resultAddress);
+      const resultStreetName = extractStreetName(resultAddress);
       
       // Check road type match (CRITICAL: Road ≠ Street)
       if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
@@ -572,14 +619,20 @@ async function googleLooseLocalSearch(
         continue;
       }
       
-      // This result has the correct road type!
+      // Check street name match (CRITICAL: "David" ≠ "Davids")
+      if (queryStreetName && resultStreetName && !streetNamesMatch(queryStreetName, resultStreetName)) {
+        console.log(`[Geocode] Loose local REJECTED: "${resultAddress}" - street name mismatch (query: "${queryStreetName}", result: "${resultStreetName}")`);
+        continue;
+      }
+      
+      // This result has the correct road type AND street name!
       validResult = result;
-      console.log(`[Geocode] Loose local ACCEPTED: "${resultAddress}" (road type: ${resultRoadType})`);
+      console.log(`[Geocode] Loose local ACCEPTED: "${resultAddress}" (street: "${resultStreetName}", roadType: ${resultRoadType})`);
       break;
     }
 
     if (!validResult) {
-      console.log(`[Geocode] Loose local search: no valid matches after road type validation`);
+      console.log(`[Geocode] Loose local search: no valid matches after street name + road type validation`);
       return { found: false, address: query };
     }
 
@@ -628,9 +681,13 @@ async function googleLooseLocalSearch(
       for (const result of streetData.results.slice(0, 5)) {
         const resultAddress = result.formatted_address || "";
         const resultRoadType = extractRoadType(resultAddress);
+        const resultStreetName = extractStreetName(resultAddress);
         
-        // Only include matches with correct road type
+        // Only include matches with correct road type AND street name
         if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
+          continue;
+        }
+        if (queryStreetName && resultStreetName && !streetNamesMatch(queryStreetName, resultStreetName)) {
           continue;
         }
         
