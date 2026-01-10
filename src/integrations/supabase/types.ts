@@ -258,12 +258,14 @@ export type Database = {
         Row: {
           address_aliases: Json | null
           created_at: string
+          dropoff_addresses: string[] | null
           id: string
           known_areas: Json | null
           last_destination: string | null
           last_pickup: string | null
           name: string | null
           phone_number: string
+          pickup_addresses: string[] | null
           total_bookings: number
           trusted_addresses: string[] | null
           updated_at: string
@@ -271,12 +273,14 @@ export type Database = {
         Insert: {
           address_aliases?: Json | null
           created_at?: string
+          dropoff_addresses?: string[] | null
           id?: string
           known_areas?: Json | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
           phone_number: string
+          pickup_addresses?: string[] | null
           total_bookings?: number
           trusted_addresses?: string[] | null
           updated_at?: string
@@ -284,12 +288,14 @@ export type Database = {
         Update: {
           address_aliases?: Json | null
           created_at?: string
+          dropoff_addresses?: string[] | null
           id?: string
           known_areas?: Json | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
           phone_number?: string
+          pickup_addresses?: string[] | null
           total_bookings?: number
           trusted_addresses?: string[] | null
           updated_at?: string
