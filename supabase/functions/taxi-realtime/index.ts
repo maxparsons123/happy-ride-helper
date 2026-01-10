@@ -344,6 +344,7 @@ serve(async (req) => {
   let followupAskedAt = 0; // ms epoch when Ada last asked "anything else"
   let awaitingReplyAt = 0; // ms epoch when Ada last asked a question and is awaiting a reply
   let noReplyRepromptCount = 0;
+  let awaitingQuestionText = ""; // Extracted last assistant question to repeat verbatim if no reply
 
   let lastUserActivityAt = Date.now(); // ms epoch (speech_started OR finalized transcript)
 
@@ -460,7 +461,21 @@ serve(async (req) => {
     }, FOLLOWUP_SILENCE_TIMEOUT_MS);
   };
 
-  const armNoReplyReprompt = (context: string) => {
+  const extractLastQuestion = (assistantTranscript: string): string => {
+    const t = String(assistantTranscript || "").trim();
+    if (!t) return "";
+    const qIdx = t.lastIndexOf("?");
+    if (qIdx < 0) return t;
+
+    // Try to return just the final question sentence (avoid repeating long confirmations).
+    const lastDot = t.lastIndexOf(".", qIdx);
+    const lastBang = t.lastIndexOf("!", qIdx);
+    const lastSep = Math.max(lastDot, lastBang);
+    const start = lastSep >= 0 ? lastSep + 1 : 0;
+    return t.slice(start, qIdx + 1).trim();
+  };
+
+  const armNoReplyReprompt = (context: string, lastQuestion?: string) => {
     if (callEnded || endCallInProgress) return;
 
     // Reset and arm
@@ -468,6 +483,9 @@ serve(async (req) => {
     noReplyRepromptTimer = null;
 
     awaitingReplyAt = Date.now();
+    if (typeof lastQuestion === "string") {
+      awaitingQuestionText = extractLastQuestion(lastQuestion);
+    }
 
     // Don't spam: cap reprompts per "waiting period"
     if (noReplyRepromptCount >= MAX_NO_REPLY_REPROMPTS) return;
@@ -486,20 +504,24 @@ serve(async (req) => {
       noReplyRepromptCount += 1;
       console.log(`[${callId}] 🔁 No-reply reprompt firing (#${noReplyRepromptCount})`);
 
+      const q = awaitingQuestionText?.trim();
+      const instructions = q
+        ? `You did not hear a reply from the customer. Repeat this exact question verbatim (no extra words): "${q}" Then STOP speaking and wait for their answer.`
+        : "You did not hear a reply from the customer. Briefly repeat your last question, clearly and politely, and wait for their answer.";
+
       openaiWs.send(
         JSON.stringify({
           type: "response.create",
           response: {
             modalities: ["audio", "text"],
-            instructions:
-              "You did not hear a reply from the customer. Briefly repeat your last question, clearly and politely, and wait for their answer.",
+            instructions,
           },
         }),
       );
 
       // Re-arm for a second attempt if needed
       if (noReplyRepromptCount < MAX_NO_REPLY_REPROMPTS) {
-        armNoReplyReprompt("reprompt_again");
+        armNoReplyReprompt("reprompt_again", q || undefined);
       }
     }, NO_REPLY_REPROMPT_MS);
   };
@@ -2735,7 +2757,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             a.includes("shall i book");
 
           if (looksLikeQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a)) {
-            armNoReplyReprompt("assistant_question");
+            armNoReplyReprompt("assistant_question", String(data.transcript || ""));
           }
 
           // Failsafe: if Ada says goodbye but forgets to call end_call, hang up reliably.
