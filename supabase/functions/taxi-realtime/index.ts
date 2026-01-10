@@ -259,6 +259,7 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
+  let awaitingClarificationFor: "pickup" | "destination" | null = null; // Which address are we awaiting clarification for?
   
   // DEDUPLICATION: Track last assistant transcript to avoid saving duplicates
   let lastSavedAssistantText = "";
@@ -1137,6 +1138,12 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
   ) => {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
 
+    // Clear the clarification tracking state
+    if (awaitingClarificationFor === addressType) {
+      awaitingClarificationFor = null;
+      console.log(`[${callId}] 📋 Cleared clarification state for: ${addressType}`);
+    }
+
     const pretty = verifiedAs && normalize(verifiedAs) !== normalize(address)
       ? ` Verified as: "${verifiedAs}".`
       : " Verified successfully.";
@@ -1166,10 +1173,14 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       return;
     }
 
-    console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - but accepting it anyway`);
+    console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - asking for clarification`);
 
     // Remember we have prompted for this specific address (so we can clear it if it later verifies)
     geocodeClarificationSent[addressType] = normalize(address);
+    
+    // CRITICAL: Track which field we're asking about so the next postcode/answer routes correctly
+    awaitingClarificationFor = addressType;
+    console.log(`[${callId}] 📋 Now awaiting clarification for: ${addressType}`);
 
     // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
     // Only ask for clarification if it's a residential address that sounds garbled
@@ -1860,6 +1871,45 @@ Rules:
 
       let extracted = await response.json();
       console.log(`[${callId}] 📦 AI Extracted:`, extracted);
+
+      // CRITICAL: If we're awaiting clarification for a specific address, route postcode/outcode answers correctly
+      // This prevents "CV12BW" from becoming destination when we asked for pickup postcode
+      const postcodePattern = /^[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d?[A-Z]*$/i;
+      const looksLikePostcodeOnly = postcodePattern.test(transcript.trim());
+      
+      if (awaitingClarificationFor && looksLikePostcodeOnly) {
+        const postcode = transcript.trim().toUpperCase();
+        console.log(`[${callId}] 📮 Postcode/outcode detected: "${postcode}" - routing to ${awaitingClarificationFor}`);
+        
+        if (awaitingClarificationFor === "pickup" && knownBooking.pickup) {
+          // Append postcode to pickup address
+          const updatedPickup = `${knownBooking.pickup}, ${postcode}`;
+          console.log(`[${callId}] 📮 Appending postcode to pickup: "${knownBooking.pickup}" → "${updatedPickup}"`);
+          knownBooking.pickup = updatedPickup;
+          knownBooking.pickupVerified = false; // Re-verify with full address
+          extracted.pickup_location = updatedPickup;
+          // Clear any destination extraction that might have been wrong
+          if (extracted.dropoff_location && postcodePattern.test(extracted.dropoff_location)) {
+            console.log(`[${callId}] 📮 Clearing mis-extracted destination: "${extracted.dropoff_location}"`);
+            extracted.dropoff_location = null;
+          }
+        } else if (awaitingClarificationFor === "destination" && knownBooking.destination) {
+          // Append postcode to destination address
+          const updatedDest = `${knownBooking.destination}, ${postcode}`;
+          console.log(`[${callId}] 📮 Appending postcode to destination: "${knownBooking.destination}" → "${updatedDest}"`);
+          knownBooking.destination = updatedDest;
+          knownBooking.destinationVerified = false; // Re-verify with full address
+          extracted.dropoff_location = updatedDest;
+          // Clear any pickup extraction that might have been wrong
+          if (extracted.pickup_location && postcodePattern.test(extracted.pickup_location)) {
+            console.log(`[${callId}] 📮 Clearing mis-extracted pickup: "${extracted.pickup_location}"`);
+            extracted.pickup_location = null;
+          }
+        }
+        
+        // Clear the clarification state since we got an answer
+        awaitingClarificationFor = null;
+      }
 
       // Only update fields that were extracted (non-null)
       const before = { ...knownBooking };
