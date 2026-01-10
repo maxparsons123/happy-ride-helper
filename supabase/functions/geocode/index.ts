@@ -242,6 +242,7 @@ serve(async (req) => {
     // ═══════════════════════════════════════════════════════════════════════════
     // STRATEGY (matching C# PlaceResolver pattern):
     // ═══════════════════════════════════════════════════════════════════════════
+    // 0️⃣ ROAD EXISTENCE CHECK → Verify the road actually exists before searching
     // 1️⃣ TEXT SEARCH (local, 5km) → Place search first (best for most queries)
     // 2️⃣ AUTOCOMPLETE → Fallback for house addresses (types=address)
     // 3️⃣ LOOSE LOCAL (8km) → Wider radius search
@@ -250,6 +251,26 @@ serve(async (req) => {
     
     // Detect house-number addresses (e.g., "52A David Road", "123 High Street")
     const startsWithNumber = /^\d+[a-z]?\s+/i.test(address.trim());
+    
+    // 0️⃣ ROAD EXISTENCE CHECK → For house addresses, verify the road exists first
+    // This prevents matching wrong streets like "David St" when user says "David Road"
+    if (startsWithNumber && searchLat && searchLon) {
+      const roadExists = await doesRoadExist(address, GOOGLE_MAPS_API_KEY, searchLat, searchLon, city);
+      if (!roadExists) {
+        console.log(`[Geocode] ⚠️ ROAD_NOT_FOUND: "${address}" does not exist in ${city || 'local area'} - returning not found`);
+        return new Response(
+          JSON.stringify({ 
+            found: false, 
+            address, 
+            error: "ROAD_NOT_FOUND", 
+            raw_status: "ROAD_NOT_FOUND",
+            message: `The road "${extractStreetNameWithType(address)}" could not be found in ${city || 'the local area'}. Please check the street name or provide a postcode.`
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.log(`[Geocode] ✅ Road verified: "${extractStreetNameWithType(address)}" exists in ${city || 'local area'}`);
+    }
     
     // 1️⃣ TEXT SEARCH (local, 5km biased) → Try place search FIRST
     if (searchLat && searchLon) {
@@ -424,6 +445,90 @@ function streetNamesMatch(queryStreet: string | null, resultStreet: string | nul
   }
   
   return false;
+}
+
+// Extract just the street name portion (without house number) for road existence check
+// e.g., "52A David Road" → "David Road"
+function extractStreetNameWithType(input: string): string {
+  // Remove house number at start: "52A David Road" → "David Road"
+  const cleaned = input.replace(/^\s*\d+[a-zA-Z]?\s*/i, '');
+  return cleaned.trim();
+}
+
+// Check if a road actually exists in the given area using Google Places Autocomplete
+// This prevents matching wrong streets like "David St" when user says "David Road"
+async function doesRoadExist(
+  userInput: string,
+  apiKey: string,
+  lat: number,
+  lon: number,
+  city?: string
+): Promise<boolean> {
+  if (!userInput || userInput.trim().length === 0) {
+    return false;
+  }
+
+  // 1️⃣ Extract street name (remove house number)
+  const street = extractStreetNameWithType(userInput);
+  if (!street || street.length < 3) {
+    console.log(`[Geocode] doesRoadExist: no valid street extracted from "${userInput}"`);
+    return false;
+  }
+
+  const queryRoadType = extractRoadType(userInput);
+  const queryStreetName = extractStreetName(userInput);
+
+  // 2️⃣ Build autocomplete query (address-only)
+  const searchQuery = city ? `${street}, ${city}` : street;
+
+  const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
+    `?input=${encodeURIComponent(searchQuery)}` +
+    `&types=address` +
+    `&location=${lat},${lon}` +
+    `&radius=8000` +
+    `&components=country:gb` +
+    `&key=${apiKey}`;
+
+  console.log(`[Geocode] doesRoadExist: checking "${searchQuery}" near ${lat},${lon}`);
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.predictions || data.predictions.length === 0) {
+      console.log(`[Geocode] doesRoadExist: no predictions found for "${street}"`);
+      return false;
+    }
+
+    // 3️⃣ Compare street names safely - must match BOTH road type AND street name
+    for (const pred of data.predictions) {
+      const description = pred.description || "";
+      if (!description) continue;
+
+      const predRoadType = extractRoadType(description);
+      const predStreetName = extractStreetName(description);
+
+      // Check road type match (Road ≠ Street)
+      const roadTypeOk = roadTypesMatch(queryRoadType, predRoadType);
+      
+      // Check street name match (David ≠ Davids)
+      const streetNameOk = streetNamesMatch(queryStreetName, predStreetName);
+
+      if (roadTypeOk && streetNameOk) {
+        console.log(`[Geocode] doesRoadExist: ✅ FOUND "${description}" matches "${street}" (roadType: ${predRoadType}, streetName: ${predStreetName})`);
+        return true;
+      } else {
+        console.log(`[Geocode] doesRoadExist: ❌ REJECTED "${description}" - roadType: ${queryRoadType}→${predRoadType} (${roadTypeOk ? 'OK' : 'MISMATCH'}), streetName: ${queryStreetName}→${predStreetName} (${streetNameOk ? 'OK' : 'MISMATCH'})`);
+      }
+    }
+
+    console.log(`[Geocode] doesRoadExist: no matching road found for "${street}"`);
+    return false;
+
+  } catch (error) {
+    console.error(`[Geocode] doesRoadExist error:`, error);
+    return false;
+  }
 }
 
 // Places Autocomplete - best for residential addresses with house numbers
