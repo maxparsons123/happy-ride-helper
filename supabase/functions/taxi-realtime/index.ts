@@ -3691,6 +3691,41 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           queueLiveCallBroadcast({});
 
           const a = String(data.transcript).toLowerCase();
+          
+          // LUGGAGE STATE TRACKING: If Ada asks about luggage, mark it
+          if (!knownBooking.luggageAsked && 
+              (a.includes("how many bags") || 
+               a.includes("any luggage") || 
+               a.includes("luggage today") ||
+               a.includes("bags will you have"))) {
+            knownBooking.luggageAsked = true;
+            console.log(`[${callId}] 🧳 Ada asked about luggage - luggageAsked=true`);
+          }
+          
+          // LUGGAGE EXTRACTION FROM ADA: If Ada confirms a luggage count, extract and save it
+          // This catches cases where Ada infers/confirms luggage from user's partial response
+          if (!knownBooking.luggage) {
+            // Match patterns like "with 3 bags", "for 2 bags", "3 pieces of luggage"
+            const adaLuggageMatch = a.match(/(?:with|for|have|carrying)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:bag|bags|piece|pieces|luggage)/i);
+            if (adaLuggageMatch) {
+              const numMap: { [key: string]: number } = { 
+                'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 
+                'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10 
+              };
+              const num = numMap[adaLuggageMatch[1].toLowerCase()] ?? parseInt(adaLuggageMatch[1]);
+              if (num >= 0 && num <= 10) {
+                knownBooking.luggage = num === 0 ? "no luggage" : `${num} bag${num > 1 ? 's' : ''}`;
+                console.log(`[${callId}] 🧳 LUGGAGE EXTRACTED FROM ADA: "${knownBooking.luggage}"`);
+                queueLiveCallBroadcast({ luggage: knownBooking.luggage });
+              }
+            }
+            // Also check for "no luggage" confirmation
+            if (a.includes("no luggage") || a.includes("no bags") || a.includes("without luggage")) {
+              knownBooking.luggage = "no luggage";
+              console.log(`[${callId}] 🧳 LUGGAGE EXTRACTED FROM ADA: "no luggage"`);
+              queueLiveCallBroadcast({ luggage: knownBooking.luggage });
+            }
+          }
 
           // If Ada asked the "anything else" question, start a silence timeout so calls don't hang forever.
           // IMPORTANT: if we've already triggered the silence-timeout hangup sequence, don't re-arm.
