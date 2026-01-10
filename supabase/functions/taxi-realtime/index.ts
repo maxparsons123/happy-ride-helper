@@ -4312,22 +4312,26 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           }
           
         } else if (!forcedResponseInstructions) {
-          // ADDRESS-CONTAINING RESPONSE: Await extraction to ensure proper address flow
-          console.log(`[${callId}] 🔍 Address-path: awaiting extraction for: "${rawTranscript}"`);
-          await extractBookingFromTranscript(rawTranscript);
+          // ADDRESS-CONTAINING RESPONSE: Run extraction in BACKGROUND (non-blocking)
+          // This restores the original fast-response behavior where response.create fires immediately
+          // Geocoding/clarifications will inject context for Ada's NEXT turn if needed
+          console.log(`[${callId}] 🔍 Address-path: starting extraction in background for: "${rawTranscript}"`);
           
-          // If this is a travel-hub trip and luggage isn't known yet, force Ada to ask about bags now
-          if (!forcedResponseInstructions) {
-            const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
-            if (tripHasTravelHubNow && !knownBooking.luggage) {
-              knownBooking.luggageAsked = true;
-              forcedResponseInstructions =
-                "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
-              console.log(`[${callId}] ✈️ Forcing luggage question (after extraction)`);
-            }
+          // Fire-and-forget extraction (don't await)
+          extractBookingFromTranscript(rawTranscript).catch(err => {
+            console.error(`[${callId}] Background extraction error:`, err);
+          });
+          
+          // Check travel hub for luggage question BEFORE sending response
+          const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+          if (tripHasTravelHubNow && !knownBooking.luggage && !knownBooking.luggageAsked) {
+            knownBooking.luggageAsked = true;
+            forcedResponseInstructions =
+              "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
+            console.log(`[${callId}] ✈️ Forcing luggage question (address-path)`);
           }
           
-          // Send response.create AFTER extraction completes
+          // Send response.create IMMEDIATELY (don't wait for extraction)
           if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
             const response = forcedResponseInstructions
               ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
@@ -4338,7 +4342,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               response,
             }));
             responseCreatedSinceCommit = true;
-            console.log(`[${callId}] >>> response.create sent (after extraction + geocoding)`);
+            console.log(`[${callId}] >>> response.create sent IMMEDIATELY (extraction in background)`);
           }
         } else {
           console.log(`[${callId}] 📴 Skipping extraction (forcedResponseInstructions set)`);
