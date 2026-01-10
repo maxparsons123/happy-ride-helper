@@ -168,7 +168,7 @@ ENDING THE CALL
 After booking:
 "Is there anything else I can help you with?"
 
-If customer says "no", "nope", "that's all", "nothing else":
+If customer says "no", "nope", "that's all", "nothing else" OR they say an explicit goodbye like "bye", "bye-bye", "goodbye":
 - Say a brief goodbye ("You're welcome! Have a great journey, goodbye!")
 - IMMEDIATELY call the end_call function
 
@@ -3205,6 +3205,7 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
 
         // If Ada asked "anything else?" and the customer clearly said NO,
         // force a clean goodbye + end_call (prevents looping the follow-up question).
+        // ALSO: if the customer explicitly says "bye/bye-bye/goodbye" at any time, end the call immediately.
         let forcedResponseInstructions: string | null = null;
         const lastAssistantTextLower = ([...transcriptHistory]
           .reverse()
@@ -3215,8 +3216,16 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
           lastAssistantTextLower.includes("is there anything else i can help") ||
           lastAssistantTextLower.includes("anything else i can help");
 
-        if (adaAskedAnythingElse) {
-          const t = rawTranscript.toLowerCase().trim();
+        const t = rawTranscript.toLowerCase().trim();
+
+        // Explicit farewells should always end the call (these are NOT ambiguous like "cheers")
+        const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya)\b[!. ]*$/.test(t);
+        if (explicitFarewellOnly) {
+          forcedResponseInstructions =
+            "The customer has said goodbye. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'customer_request'. Do NOT ask any further questions.";
+        }
+
+        if (!forcedResponseInstructions && adaAskedAnythingElse) {
           const saidNo =
             /^(no|nope|nah)\b/.test(t) ||
             /\b(no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|i'?m\s+good|im\s+good|i'?m\s+fine|im\s+fine)\b/.test(t);
@@ -3537,8 +3546,12 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
         
         // Use AI extraction for accurate booking data (AWAIT geocoding before responding)
         // This prevents Ada from asking passengers before geocoding completes
-        await extractBookingFromTranscript(rawTranscript);
-        
+        // If we're about to end the call (e.g., user said "bye"), skip extraction entirely.
+        if (!forcedResponseInstructions) {
+          await extractBookingFromTranscript(rawTranscript);
+        } else {
+          console.log(`[${callId}] 📴 Skipping booking extraction (forcedResponseInstructions set)`);
+        }
         // Save user message to history
         if (rawTranscript) {
           transcriptHistory.push({
