@@ -135,6 +135,7 @@ export default function LiveCalls() {
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<AudioQueue | null>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null);
 
   // Initialize audio context on user interaction
@@ -427,6 +428,13 @@ export default function LiveCalls() {
 
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
+
+  // When switching to a new call, reset the transcript scroll so the log feels "fresh"
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      transcriptScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    });
+  }, [selectedCall]);
 
   // Auto-scroll transcript to the latest message
   useEffect(() => {
@@ -865,7 +873,11 @@ export default function LiveCalls() {
                 </div>
 
                 {/* Live Transcript */}
-                <div className="flex-1 overflow-y-auto p-4 flex flex-col">
+                <div
+                  key={selectedCall || "no-call"}
+                  ref={transcriptScrollRef}
+                  className="flex-1 overflow-y-auto p-4 flex flex-col"
+                >
                   <div className="space-y-3">
                     {selectedCallData.transcripts.length === 0 ? (
                       <div className="text-center py-12 text-muted-foreground">
