@@ -66,8 +66,10 @@ serve(async (req) => {
     const fileName = `audio.${audioFormat === "ulaw" ? "wav" : audioFormat}`;
     formData.append("file", audioBlob, fileName);
     formData.append("model", "whisper-1");
-    formData.append("language", "en"); // Optimize for English
+    // No language specified - let Whisper auto-detect for multilingual support
     formData.append("response_format", "json");
+    // Add prompt for context - helps with taxi/address terminology
+    formData.append("prompt", "Taxi booking conversation. Common terms: pickup, destination, passengers, estate car, saloon, minibus, airport, train station. Addresses may include UK postcodes like SW1A 1AA, B1 1AA. Names of places and streets.");
 
     const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
