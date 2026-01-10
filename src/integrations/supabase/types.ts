@@ -55,48 +55,75 @@ export type Database = {
       }
       agents: {
         Row: {
+          allow_interruptions: boolean | null
           company_name: string
           created_at: string
           description: string | null
+          echo_guard_ms: number | null
+          goodbye_grace_ms: number | null
           greeting_style: string | null
           id: string
           is_active: boolean | null
           language: string | null
+          max_no_reply_reprompts: number | null
           name: string
+          no_reply_timeout_ms: number | null
           personality_traits: Json | null
+          silence_timeout_ms: number | null
           slug: string
           system_prompt: string
           updated_at: string
+          vad_prefix_padding_ms: number | null
+          vad_silence_duration_ms: number | null
+          vad_threshold: number | null
           voice: string
         }
         Insert: {
+          allow_interruptions?: boolean | null
           company_name?: string
           created_at?: string
           description?: string | null
+          echo_guard_ms?: number | null
+          goodbye_grace_ms?: number | null
           greeting_style?: string | null
           id?: string
           is_active?: boolean | null
           language?: string | null
+          max_no_reply_reprompts?: number | null
           name: string
+          no_reply_timeout_ms?: number | null
           personality_traits?: Json | null
+          silence_timeout_ms?: number | null
           slug: string
           system_prompt: string
           updated_at?: string
+          vad_prefix_padding_ms?: number | null
+          vad_silence_duration_ms?: number | null
+          vad_threshold?: number | null
           voice?: string
         }
         Update: {
+          allow_interruptions?: boolean | null
           company_name?: string
           created_at?: string
           description?: string | null
+          echo_guard_ms?: number | null
+          goodbye_grace_ms?: number | null
           greeting_style?: string | null
           id?: string
           is_active?: boolean | null
           language?: string | null
+          max_no_reply_reprompts?: number | null
           name?: string
+          no_reply_timeout_ms?: number | null
           personality_traits?: Json | null
+          silence_timeout_ms?: number | null
           slug?: string
           system_prompt?: string
           updated_at?: string
+          vad_prefix_padding_ms?: number | null
+          vad_silence_duration_ms?: number | null
+          vad_threshold?: number | null
           voice?: string
         }
         Relationships: []

@@ -329,6 +329,16 @@ serve(async (req) => {
     company_name: string;
     personality_traits: string[];
     greeting_style: string | null;
+    // VAD & Voice Settings
+    vad_threshold: number;
+    vad_prefix_padding_ms: number;
+    vad_silence_duration_ms: number;
+    allow_interruptions: boolean;
+    silence_timeout_ms: number;
+    no_reply_timeout_ms: number;
+    max_no_reply_reprompts: number;
+    echo_guard_ms: number;
+    goodbye_grace_ms: number;
   } | null = null;
   
   // Function to load agent configuration
@@ -337,7 +347,7 @@ serve(async (req) => {
       console.log(`[${callId}] 🤖 Loading agent config for: ${agentSlug}`);
       const { data, error } = await supabase
         .from("agents")
-        .select("name, slug, voice, system_prompt, company_name, personality_traits, greeting_style")
+        .select("name, slug, voice, system_prompt, company_name, personality_traits, greeting_style, vad_threshold, vad_prefix_padding_ms, vad_silence_duration_ms, allow_interruptions, silence_timeout_ms, no_reply_timeout_ms, max_no_reply_reprompts, echo_guard_ms, goodbye_grace_ms")
         .eq("slug", agentSlug)
         .eq("is_active", true)
         .single();
@@ -360,10 +370,20 @@ serve(async (req) => {
         personality_traits: Array.isArray(data.personality_traits) 
           ? data.personality_traits 
           : JSON.parse(data.personality_traits as string || "[]"),
-        greeting_style: data.greeting_style
+        greeting_style: data.greeting_style,
+        // VAD & Voice Settings with defaults
+        vad_threshold: data.vad_threshold ?? 0.45,
+        vad_prefix_padding_ms: data.vad_prefix_padding_ms ?? 650,
+        vad_silence_duration_ms: data.vad_silence_duration_ms ?? 1800,
+        allow_interruptions: data.allow_interruptions ?? true,
+        silence_timeout_ms: data.silence_timeout_ms ?? 8000,
+        no_reply_timeout_ms: data.no_reply_timeout_ms ?? 9000,
+        max_no_reply_reprompts: data.max_no_reply_reprompts ?? 2,
+        echo_guard_ms: data.echo_guard_ms ?? 100,
+        goodbye_grace_ms: data.goodbye_grace_ms ?? 4500
       };
       
-      console.log(`[${callId}] ✅ Agent loaded: ${agentConfig.name} (voice: ${agentConfig.voice})`);
+      console.log(`[${callId}] ✅ Agent loaded: ${agentConfig.name} (voice: ${agentConfig.voice}, VAD threshold: ${agentConfig.vad_threshold})`);
       return true;
     } catch (e) {
       console.error(`[${callId}] Failed to load agent:`, e);
@@ -2560,11 +2580,11 @@ Rules:
             // This prevents Ada responding before Whisper has finalized the user's words ("out-of-order" turns).
             turn_detection: {
               type: "server_vad",
-              threshold: 0.45,           // More sensitive for quieter phone lines
-              prefix_padding_ms: 650,    // Capture more lead-in for phone audio
-              silence_duration_ms: 1800, // Wait 1.8s of silence - gives passengers more time to finish
+              threshold: agentConfig?.vad_threshold ?? 0.45,           // Agent's VAD sensitivity
+              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 650,    // Agent's lead-in capture
+              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 1800, // Agent's silence wait
               create_response: false,    // Manual response.create after transcription.completed
-              interrupt_response: true   // Allow user to interrupt Ada
+              interrupt_response: agentConfig?.allow_interruptions ?? true   // Agent's barge-in setting
             },
             tools: [
               {
