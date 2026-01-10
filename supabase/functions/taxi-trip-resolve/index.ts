@@ -185,9 +185,13 @@ const STT_CORRECTIONS: Record<string, string> = {
 // Normalize address by fixing common STT mishearings
 function normalizeSTTAddress(address: string): string {
   let normalized = address.toLowerCase();
+
+  // Targeted fix: "David Rose" (STT) → "David Road" when it appears like a street suffix
+  normalized = normalized.replace(/(\b\d+[a-z]?\s+[\w']+\s+)rose\b/gi, "$1road");
+
   for (const [mishearing, correction] of Object.entries(STT_CORRECTIONS)) {
     // Use word boundary matching to avoid partial replacements
-    const regex = new RegExp(`\\b${mishearing}\\b`, 'gi');
+    const regex = new RegExp(`\\b${mishearing}\\b`, "gi");
     normalized = normalized.replace(regex, correction);
   }
   return normalized;
