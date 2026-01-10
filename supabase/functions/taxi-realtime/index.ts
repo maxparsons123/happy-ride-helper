@@ -317,6 +317,107 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
 
+  // --- Call lifecycle + "Ada didn't finish" safeguards ---
+  // If Ada asks "Anything else?" and the customer goes silent, end the call reliably.
+  const FOLLOWUP_SILENCE_TIMEOUT_MS = 8000;
+  const POST_GOODBYE_HANGUP_FAILSAFE_MS = 1200;
+
+  let followupAskedAt = 0; // ms epoch when Ada last asked "anything else"
+  let lastUserActivityAt = Date.now(); // ms epoch (speech_started OR finalized transcript)
+
+  let followupSilenceTimer: number | null = null;
+  let silenceHangupFailsafeTimer: number | null = null;
+  let goodbyeFailsafeTimer: number | null = null;
+
+  let endCallInProgress = false;
+  let callEnded = false;
+
+  const clearTimer = (t: number | null) => {
+    if (t !== null) clearTimeout(t);
+  };
+
+  const clearAllCallTimers = () => {
+    clearTimer(followupSilenceTimer);
+    clearTimer(silenceHangupFailsafeTimer);
+    clearTimer(goodbyeFailsafeTimer);
+    followupSilenceTimer = null;
+    silenceHangupFailsafeTimer = null;
+    goodbyeFailsafeTimer = null;
+  };
+
+  const forceHangup = (reason: string) => {
+    if (callEnded) return;
+    callEnded = true;
+    clearAllCallTimers();
+
+    try {
+      socket.send(JSON.stringify({ type: "call_ended", reason }));
+    } catch (_) {
+      // ignore
+    }
+
+    try {
+      socket.close();
+    } catch (_) {
+      // ignore
+    }
+  };
+
+  const noteUserActivity = (source: string) => {
+    lastUserActivityAt = Date.now();
+    if (followupAskedAt) {
+      console.log(`[${callId}] 🕒 User activity (${source}) - cancelling follow-up silence timer`);
+    }
+    followupAskedAt = 0;
+    clearTimer(followupSilenceTimer);
+    followupSilenceTimer = null;
+    clearTimer(silenceHangupFailsafeTimer);
+    silenceHangupFailsafeTimer = null;
+  };
+
+  const armFollowupSilenceTimeout = (context: string) => {
+    if (callEnded || endCallInProgress) return;
+
+    clearTimer(followupSilenceTimer);
+    clearTimer(silenceHangupFailsafeTimer);
+    followupSilenceTimer = null;
+    silenceHangupFailsafeTimer = null;
+
+    followupAskedAt = Date.now();
+
+    console.log(`[${callId}] ⏳ Armed follow-up silence timeout (${FOLLOWUP_SILENCE_TIMEOUT_MS}ms) context=${context}`);
+
+    followupSilenceTimer = setTimeout(() => {
+      if (callEnded || endCallInProgress) return;
+
+      // If any user activity happened after we asked, do nothing.
+      if (lastUserActivityAt > followupAskedAt) return;
+
+      console.log(`[${callId}] ⏰ Follow-up silence timeout hit - requesting goodbye + end_call`);
+
+      if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions:
+              "The customer has not replied. Politely say a short goodbye now, then call the end_call tool with reason 'silence_timeout'.",
+          },
+        }));
+
+        // Failsafe: if the model still doesn't end the call, hang up anyway.
+        silenceHangupFailsafeTimer = setTimeout(() => {
+          if (callEnded || endCallInProgress) return;
+          console.log(`[${callId}] 🧯 Silence hangup failsafe firing`);
+          forceHangup("silence_timeout_failsafe");
+        }, 6500);
+      } else {
+        // No OpenAI connection - just hang up.
+        forceHangup("silence_timeout_no_ai");
+      }
+    }, FOLLOWUP_SILENCE_TIMEOUT_MS);
+  };
+
   // Language handling (multilingual support)
   // We “lock” to the first detected non-English script so Ada reliably responds in the caller's language.
   let languageLocked = false;
@@ -2521,10 +2622,30 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           transcriptHistory.push({
             role: "assistant",
             text: data.transcript,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
           });
           // Broadcast transcript update (queued to preserve order)
           queueLiveCallBroadcast({});
+
+          const a = String(data.transcript).toLowerCase();
+
+          // If Ada asked the "anything else" question, start a silence timeout so calls don't hang forever.
+          if (
+            a.includes("is there anything else i can help") ||
+            a.includes("anything else i can help")
+          ) {
+            armFollowupSilenceTimeout("assistant_anything_else");
+          }
+
+          // Failsafe: if Ada says goodbye but forgets to call end_call, hang up shortly after audio finishes.
+          if (/(^|\b)(goodbye|bye)(\b|$)/.test(a) || a.includes("have a great journey")) {
+            clearTimer(goodbyeFailsafeTimer);
+            goodbyeFailsafeTimer = setTimeout(() => {
+              if (callEnded || endCallInProgress) return;
+              console.log(`[${callId}] 🧯 Goodbye failsafe firing (no end_call detected)`);
+              forceHangup("goodbye_failsafe");
+            }, POST_GOODBYE_HANGUP_FAILSAFE_MS);
+          }
         }
       }
 
@@ -2541,6 +2662,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         const rawTranscript = data.transcript || "";
         console.log(`[${callId}] Raw user transcript: "${rawTranscript}" (length: ${rawTranscript.length})`);
+        noteUserActivity("transcription.completed");
         
         // Log empty/very short transcripts for debugging
         if (!rawTranscript || rawTranscript.trim().length < 2) {
@@ -2895,6 +3017,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       // Speech started (barge-in detection) - CANCEL AI response for faster interruption
       if (data.type === "input_audio_buffer.speech_started") {
         console.log(`[${callId}] >>> User started speaking (barge-in)`);
+        noteUserActivity("speech_started");
         socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
         // If Ada is speaking, cancel the current response so the caller can answer.
         if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN) openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -3919,8 +4042,20 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             return a.includes("goodbye") || a.includes("have a great journey") || /\bbye\b/.test(a);
           })();
 
-          // Safety: don't allow hanging up unless customer explicitly declined further help.
-          if (!customerSaidNo) {
+          // Allow a silence-timeout hangup (customer didn't answer after "Anything else?")
+          const silenceTimeoutEligible =
+            String(args.reason || "") === "silence_timeout" &&
+            followupAskedAt > 0 &&
+            Date.now() - followupAskedAt >= FOLLOWUP_SILENCE_TIMEOUT_MS - 250 &&
+            lastUserActivityAt <= followupAskedAt;
+
+          if (silenceTimeoutEligible) {
+            console.log(`[${callId}] ✅ Allowing end_call due to silence_timeout (no user reply)`);
+          }
+
+          // Safety: don't allow hanging up unless customer explicitly declined further help,
+          // EXCEPT when we intentionally end due to silence_timeout.
+          if (!customerSaidNo && !silenceTimeoutEligible) {
             console.log(
               `[${callId}] 🚫 Rejecting end_call (customer hasn't declined further assistance). lastUser="${lastFinalUserTranscript}" reason=${args.reason}`,
             );
@@ -3981,6 +4116,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           }
 
           console.log(`[${callId}] 📞 End call requested: ${args.reason}`);
+          endCallInProgress = true;
+          clearAllCallTimers();
 
           // Update call status
           await broadcastLiveCall({
@@ -4003,6 +4140,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           // Delay sending call_ended so Ada's goodbye audio finishes playing
           // Asterisk bridge will hang up immediately on receiving this, so we wait
           setTimeout(() => {
+            if (callEnded) return;
+            callEnded = true;
             console.log(`[${callId}] 📞 Sending call_ended after goodbye audio delay`);
             socket.send(
               JSON.stringify({
@@ -4181,7 +4320,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
 
   socket.onclose = async () => {
     console.log(`[${callId}] Client disconnected`);
-    
+    callEnded = true;
+    clearAllCallTimers();
+
     // Update call end time
     await supabase.from("call_logs")
       .update({ call_end_at: new Date().toISOString() })
@@ -4192,7 +4333,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       status: "completed",
       ended_at: new Date().toISOString()
     });
-    
+
     openaiWs?.close();
   };
 
