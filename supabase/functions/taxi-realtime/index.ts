@@ -3718,6 +3718,36 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           try {
             console.log(`[${callId}] 🚕 Calling taxi-trip-resolve for fare calculation...`);
             
+            // If we know the caller's city but the pickup is a bare address (no city/postcode), append the city
+            let pickupForResolver = finalBooking.pickup;
+            let dropoffForResolver = finalBooking.destination;
+            
+            const hasCityOrPostcode = (addr: string): boolean => {
+              if (!addr) return false;
+              // Has UK postcode
+              if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(addr)) return true;
+              // Has UK outcode
+              if (/\b[A-Z]{1,2}\d[A-Z\d]?\b/i.test(addr)) return true;
+              // Has comma (likely includes area/city)
+              if (addr.includes(",")) return true;
+              // Check for known UK cities
+              const cities = ["Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Wolverhampton", "Solihull", "Walsall", "Dudley"];
+              for (const city of cities) {
+                if (addr.toLowerCase().includes(city.toLowerCase())) return true;
+              }
+              return false;
+            };
+            
+            // Append callerCity to bare addresses so geocoding is accurate
+            if (callerCity && pickupForResolver && !hasCityOrPostcode(pickupForResolver)) {
+              pickupForResolver = `${pickupForResolver}, ${callerCity}`;
+              console.log(`[${callId}] 🏙️ Appended callerCity to pickup: "${finalBooking.pickup}" → "${pickupForResolver}"`);
+            }
+            if (callerCity && dropoffForResolver && !hasCityOrPostcode(dropoffForResolver)) {
+              dropoffForResolver = `${dropoffForResolver}, ${callerCity}`;
+              console.log(`[${callId}] 🏙️ Appended callerCity to destination: "${finalBooking.destination}" → "${dropoffForResolver}"`);
+            }
+            
             const tripResolveResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
               method: "POST",
               headers: {
@@ -3725,8 +3755,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
               },
               body: JSON.stringify({
-                pickup_input: finalBooking.pickup,
-                dropoff_input: finalBooking.destination,
+                pickup_input: pickupForResolver,
+                dropoff_input: dropoffForResolver,
                 caller_city_hint: callerCity || undefined,
                 passengers: finalBooking.passengers || 1,
                 country: "GB"
@@ -4229,13 +4259,38 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             } else {
               // Recalculate fare if pickup or destination changed
               let newFare = bookingToModify.fare;
-              const finalPickup = updates.pickup || bookingToModify.pickup;
-              const finalDestination = updates.destination || bookingToModify.destination;
+              let finalPickup = updates.pickup || bookingToModify.pickup;
+              let finalDestination = updates.destination || bookingToModify.destination;
               const finalPassengers = updates.passengers ?? bookingToModify.passengers ?? 1;
               
               if (args.new_pickup || args.new_destination) {
                 // Use taxi-trip-resolve for consistent fare calculation (same as book_taxi)
                 console.log(`[${callId}] 🔄 Recalculating fare via trip-resolve for modified booking`);
+                
+                // If we know the caller's city but the address is bare (no city/postcode), append the city
+                const hasCityOrPostcode = (addr: string): boolean => {
+                  if (!addr) return false;
+                  if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(addr)) return true;
+                  if (/\b[A-Z]{1,2}\d[A-Z\d]?\b/i.test(addr)) return true;
+                  if (addr.includes(",")) return true;
+                  const cities = ["Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Wolverhampton", "Solihull", "Walsall", "Dudley"];
+                  for (const city of cities) {
+                    if (addr.toLowerCase().includes(city.toLowerCase())) return true;
+                  }
+                  return false;
+                };
+                
+                let pickupForResolver = finalPickup;
+                let dropoffForResolver = finalDestination;
+                
+                if (callerCity && pickupForResolver && !hasCityOrPostcode(pickupForResolver)) {
+                  pickupForResolver = `${pickupForResolver}, ${callerCity}`;
+                  console.log(`[${callId}] 🏙️ Appended callerCity to pickup: "${finalPickup}" → "${pickupForResolver}"`);
+                }
+                if (callerCity && dropoffForResolver && !hasCityOrPostcode(dropoffForResolver)) {
+                  dropoffForResolver = `${dropoffForResolver}, ${callerCity}`;
+                  console.log(`[${callId}] 🏙️ Appended callerCity to destination: "${finalDestination}" → "${dropoffForResolver}"`);
+                }
                 
                 try {
                   const tripResolveUrl = `${SUPABASE_URL}/functions/v1/taxi-trip-resolve`;
@@ -4246,10 +4301,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                       "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
                     },
                     body: JSON.stringify({
-                      pickup_input: finalPickup,
-                      dropoff_input: finalDestination,
+                      pickup_input: pickupForResolver,
+                      dropoff_input: dropoffForResolver,
                       passengers: finalPassengers,
-                      city_hint: callerCity || "Coventry",
+                      caller_city_hint: callerCity || undefined,
                       country: "GB"
                     })
                   });
