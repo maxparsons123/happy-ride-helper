@@ -2911,11 +2911,15 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 0);
             if (words.length < 2 || words.length > 4) return false; // Only check short phrases
             
-            // If it's 2-4 random words with no address indicators, could be gibberish
+            // If it's 2-4 short words with no address indicators, it could be gibberish.
             const addressIndicators = /\d|road|street|avenue|lane|drive|close|way|place|court|station|airport|hospital|hotel|centre|center|park|square|building|house|flat/i;
             if (!addressIndicators.test(text)) {
+              // Allow common "name" replies (these often look like short phrases and must NOT be discarded)
+              const nameLike = /\b(my name|name(?:'s| is)|i'?m|i am|it'?s|this is|call me|speaking)\b/i;
+              if (nameLike.test(text)) return false;
+
               // Check if it sounds like a command/action vs. gibberish
-              const actionWords = /yes|no|please|cancel|book|taxi|pick|from|to|going|thank|okay|fine|great|right|correct|asap|now|later|three|two|one|four|five|six|passenger|people/i;
+              const actionWords = /yes|no|please|cancel|book|taxi|pick|from|to|going|thank|okay|fine|great|right|correct|asap|now|later|three|two|one|four|five|six|passenger|people|name/i;
               if (!actionWords.test(text)) {
                 // Random words with no context
                 console.log(`[${callId}] 🚫 Possible gibberish: "${text}" (no address or action indicators)`);
