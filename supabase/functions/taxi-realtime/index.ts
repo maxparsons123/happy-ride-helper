@@ -3533,8 +3533,9 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
           }));
         }
         
-        // Use AI extraction for accurate booking data (async - will update knownBooking)
-        extractBookingFromTranscript(rawTranscript);
+        // Use AI extraction for accurate booking data (AWAIT geocoding before responding)
+        // This prevents Ada from asking passengers before geocoding completes
+        await extractBookingFromTranscript(rawTranscript);
         
         // Save user message to history
         if (rawTranscript) {
@@ -3555,8 +3556,10 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
         }),
         );
 
-        // Prefer sending response.create AFTER we have the finalized transcript processed.
-        // This helps multilingual language-locking and address/name injections take effect before Ada replies.
+        // CRITICAL: response.create is now sent AFTER geocoding completes (or returns early)
+        // This ensures Ada asks for postcode BEFORE moving on to passengers
+        // If geocoding triggered a clarification via notifyGeocodeResult(), it would have already
+        // sent response.create and returned early, so we won't double-trigger
         if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
           const response = forcedResponseInstructions
             ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
@@ -3567,7 +3570,7 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             response,
           }));
           responseCreatedSinceCommit = true;
-          console.log(`[${callId}] >>> response.create sent (after transcription.completed)`);
+          console.log(`[${callId}] >>> response.create sent (after transcription.completed + geocoding)`);
         }
 
         awaitingResponseAfterCommit = false;
