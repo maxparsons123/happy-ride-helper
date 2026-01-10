@@ -13,8 +13,9 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft, AudioLines, Timer, Volume2 } from "lucide-react";
+import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft, AudioLines, Timer, Volume2, Zap, Heart, Headphones, Phone, Wand2 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface Agent {
   id: string;
@@ -49,6 +50,94 @@ const VOICE_OPTIONS = [
   { value: "fable", label: "Fable", description: "British, expressive" },
   { value: "onyx", label: "Onyx", description: "Deep male voice" },
   { value: "nova", label: "Nova", description: "Friendly, upbeat female" },
+];
+
+const VOICE_PRESETS = [
+  {
+    id: "phone-optimized",
+    name: "Phone Optimized",
+    description: "Tuned for standard phone calls with moderate background noise",
+    icon: "Phone",
+    settings: {
+      vad_threshold: 0.45,
+      vad_prefix_padding_ms: 650,
+      vad_silence_duration_ms: 1800,
+      allow_interruptions: true,
+      echo_guard_ms: 100,
+      goodbye_grace_ms: 4500,
+      silence_timeout_ms: 8000,
+      no_reply_timeout_ms: 9000,
+      max_no_reply_reprompts: 2,
+    }
+  },
+  {
+    id: "noisy-environment",
+    name: "Noisy Environment",
+    description: "Higher threshold to filter out background noise",
+    icon: "Volume2",
+    settings: {
+      vad_threshold: 0.65,
+      vad_prefix_padding_ms: 500,
+      vad_silence_duration_ms: 2200,
+      allow_interruptions: false,
+      echo_guard_ms: 200,
+      goodbye_grace_ms: 5000,
+      silence_timeout_ms: 10000,
+      no_reply_timeout_ms: 10000,
+      max_no_reply_reprompts: 3,
+    }
+  },
+  {
+    id: "quick-responses",
+    name: "Quick Responses",
+    description: "Faster turn-taking for snappy conversations",
+    icon: "Zap",
+    settings: {
+      vad_threshold: 0.35,
+      vad_prefix_padding_ms: 400,
+      vad_silence_duration_ms: 1200,
+      allow_interruptions: true,
+      echo_guard_ms: 50,
+      goodbye_grace_ms: 3000,
+      silence_timeout_ms: 5000,
+      no_reply_timeout_ms: 6000,
+      max_no_reply_reprompts: 2,
+    }
+  },
+  {
+    id: "patient-listener",
+    name: "Patient Listener",
+    description: "Extra time for elderly or slow speakers",
+    icon: "Heart",
+    settings: {
+      vad_threshold: 0.30,
+      vad_prefix_padding_ms: 800,
+      vad_silence_duration_ms: 2500,
+      allow_interruptions: false,
+      echo_guard_ms: 150,
+      goodbye_grace_ms: 6000,
+      silence_timeout_ms: 12000,
+      no_reply_timeout_ms: 12000,
+      max_no_reply_reprompts: 3,
+    }
+  },
+  {
+    id: "high-quality",
+    name: "High Quality Audio",
+    description: "For clear VoIP or high-quality connections",
+    icon: "Headphones",
+    settings: {
+      vad_threshold: 0.50,
+      vad_prefix_padding_ms: 300,
+      vad_silence_duration_ms: 1400,
+      allow_interruptions: true,
+      echo_guard_ms: 50,
+      goodbye_grace_ms: 4000,
+      silence_timeout_ms: 7000,
+      no_reply_timeout_ms: 8000,
+      max_no_reply_reprompts: 2,
+    }
+  }
 ];
 
 const DEFAULT_PROMPT = `You are {{agent_name}}, a friendly and professional Taxi Dispatcher for "{{company_name}}" taking phone calls.
@@ -536,6 +625,47 @@ export default function Agents() {
               </TabsContent>
 
               <TabsContent value="voice" className="space-y-6">
+                {/* Preset Selector */}
+                <Card className="bg-card/50 border-chat-border">
+                  <CardHeader className="pb-3">
+                    <div className="flex items-center gap-2">
+                      <Wand2 className="h-5 w-5 text-primary" />
+                      <CardTitle className="text-base">Quick Presets</CardTitle>
+                    </div>
+                    <CardDescription>Apply optimized settings for common scenarios</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex flex-wrap gap-2">
+                      {VOICE_PRESETS.map((preset) => {
+                        const PresetIcon = preset.icon === "Phone" ? Phone 
+                          : preset.icon === "Volume2" ? Volume2 
+                          : preset.icon === "Zap" ? Zap 
+                          : preset.icon === "Heart" ? Heart 
+                          : Headphones;
+                        
+                        return (
+                          <Tooltip key={preset.id}>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="gap-2 hover:bg-primary/10 hover:border-primary/50"
+                                onClick={() => updateSelectedAgent(preset.settings)}
+                              >
+                                <PresetIcon className="h-4 w-4" />
+                                {preset.name}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom" className="max-w-[200px]">
+                              <p>{preset.description}</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+
                 <div className="grid gap-6 md:grid-cols-2">
                   <Card className="bg-card/50 border-chat-border">
                     <CardHeader>
