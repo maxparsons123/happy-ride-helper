@@ -3794,12 +3794,17 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               }
               
               if (tripResolveResult.ok) {
-                // Use the resolved addresses if available (more accurate geocoding)
+                // IMPORTANT: Update finalBooking with the VERIFIED addresses from trip resolver
+                // This ensures we save the geocoded/formatted addresses, not raw input
                 if (tripResolveResult.pickup?.formatted_address) {
                   console.log(`[${callId}] 📍 Pickup resolved: ${tripResolveResult.pickup.formatted_address}`);
+                  finalBooking.pickup = tripResolveResult.pickup.formatted_address;
+                  knownBooking.pickupVerified = true;
                 }
                 if (tripResolveResult.dropoff?.formatted_address) {
                   console.log(`[${callId}] 📍 Dropoff resolved: ${tripResolveResult.dropoff.formatted_address}`);
+                  finalBooking.destination = tripResolveResult.dropoff.formatted_address;
+                  knownBooking.destinationVerified = true;
                 }
                 
                 // Use trip resolver's distance and fare if available
