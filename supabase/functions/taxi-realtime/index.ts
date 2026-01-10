@@ -751,7 +751,7 @@ serve(async (req) => {
   // Extract city from address text OR from a postcode within it
   const extractCityFromAddress = (address: string): string => {
     if (!address) return "";
-    
+
     // First, check if address contains a postcode outcode we recognize
     const postcodeMatch = address.toUpperCase().match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?)\s*\d?[A-Z]{0,2}\b/);
     if (postcodeMatch) {
@@ -761,10 +761,10 @@ serve(async (req) => {
         return cityFromOutcode;
       }
     }
-    
+
     // Common UK city patterns - look for city names in the address
     const ukCities = [
-      "london", "birmingham", "manchester", "leeds", "liverpool", "newcastle", 
+      "london", "birmingham", "manchester", "leeds", "liverpool", "newcastle",
       "sheffield", "bristol", "nottingham", "leicester", "coventry", "bradford",
       "cardiff", "edinburgh", "glasgow", "belfast", "cambridge", "oxford",
       "southampton", "portsmouth", "brighton", "reading", "derby", "wolverhampton",
@@ -772,7 +772,7 @@ serve(async (req) => {
       "peterborough", "luton", "preston", "blackpool", "norwich", "exeter",
       "plymouth", "aberdeen", "dundee"
     ];
-    
+
     const lowerAddress = address.toLowerCase();
     for (const city of ukCities) {
       if (lowerAddress.includes(city)) {
@@ -782,21 +782,55 @@ serve(async (req) => {
     return "";
   };
 
-  // If the customer mentions a city anywhere (e.g. "...in Coventry"), use it as location context.
-  // This stabilizes geocoding + fares for ambiguous streets/venues.
+  // Extract a "caller area" hint from free text.
+  // IMPORTANT: Do NOT let destination cities ("going to Manchester") overwrite the caller's local city.
+  const extractCallerCityHintFromText = (text: string): string => {
+    const candidate = extractCityFromAddress(text);
+    if (!candidate) return "";
+
+    const t = (text || "").trim();
+    const lower = t.toLowerCase();
+    const candLower = candidate.toLowerCase();
+
+    // If user answers with just the city name, accept.
+    if (lower === candLower) return candidate;
+
+    // Strong origin-context phrases.
+    const originContext = new RegExp(
+      `\\b(calling\\s+from|i\\s*'?m\\s+in|i\\s+am\\s+in|from|in|here\\s+in|based\\s+in|near|around|at)\\s+${candLower}\\b`,
+      "i",
+    );
+    if (originContext.test(lower)) return candidate;
+
+    // If it's clearly a destination mention, ignore.
+    const destinationContext = new RegExp(
+      `\\b(to|going\\s+to|heading\\s+to|travell?ing\\s+to)\\s+(?:the\\s+)?${candLower}\\b`,
+      "i",
+    );
+    if (destinationContext.test(lower)) return "";
+
+    // If the user provides a postcode-only reply, accept the outcode-derived city.
+    const postcodeOnly = /^[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}$/i.test(t);
+    if (postcodeOnly) return candidate;
+
+    // Otherwise, be conservative: don't update callerCity.
+    return "";
+  };
+
+  // If the customer mentions their *local area* (e.g. "I'm in Coventry"), use it as location context.
   const maybeUpdateCallerCityFromText = async (text: string) => {
-    const hintedCity = extractCityFromAddress(text);
+    const hintedCity = extractCallerCityHintFromText(text);
     if (hintedCity) {
       // Always increment the count for this city in known_areas
       callerKnownAreas[hintedCity] = (callerKnownAreas[hintedCity] || 0) + 1;
-      
+
       // Update callerCity if this is now the most common city
       const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
       if (topCity && topCity[0] !== callerCity) {
         callerCity = topCity[0];
         console.log(`[${callId}] 🏙️ Primary city updated: ${callerCity} (${topCity[1]} mentions)`);
       }
-      
+
       // Persist to database (fire-and-forget)
       if (userPhone) {
         const phoneNorm = normalizePhone(userPhone);
@@ -1419,6 +1453,13 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           } catch (e) {
             console.error(`[${callId}] Failed to geocode caller history:`, e);
           }
+        }
+
+        // Default service area bias for new/unknown callers.
+        // Prevents early destination mentions (e.g. "to Manchester") from hijacking pickup geocoding.
+        if (!callerCity) {
+          callerCity = "Coventry";
+          console.log(`[${callId}] 🏙️ Defaulting caller city to service area: ${callerCity}`);
         }
 
         console.log(`[${callId}] 👤 Known caller: ${callerName} (${callerTotalBookings} previous bookings)`);
