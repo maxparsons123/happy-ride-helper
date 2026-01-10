@@ -648,7 +648,7 @@ serve(async (req) => {
     // Must be at least 2 chars and max 50
     if (n.length < 2 || n.length > 50) return false;
     
-    // Reject common placeholders and system-generated values
+    // Reject common placeholders, system-generated values, and Whisper hallucinations
     const invalidNames = new Set([
       'guest', 'unknown', 'anonymous', 'caller', 'user', 'customer', 'client',
       'incoming', 'phone', 'mobile', 'cell', 'landline', 'test', 'testing',
@@ -656,7 +656,10 @@ serve(async (req) => {
       'sip', 'voip', 'trunk', 'did', 'extension', 'ext', 'line',
       'private', 'withheld', 'blocked', 'restricted', 'unavailable',
       'number', 'call', 'asterisk', 'pbx', 'system', 'default',
-      'cid', 'callerid', 'caller id', 'id', 'name', 'new', 'new caller'
+      'cid', 'callerid', 'caller id', 'id', 'name', 'new', 'new caller',
+      // Whisper hallucination patterns that got saved as names
+      'bye', 'goodbye', 'hello', 'hi', 'hey', 'thanks', 'thank you', 'cheers',
+      'yes', 'no', 'yeah', 'yep', 'nope', 'ok', 'okay', 'alright'
     ]);
     if (invalidNames.has(n)) return false;
     
