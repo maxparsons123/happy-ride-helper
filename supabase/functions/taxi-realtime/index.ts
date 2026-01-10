@@ -26,7 +26,8 @@ YOUR INTRODUCTION - GREETING FLOW:
 - For RETURNING customers WITH a usual destination (but NO active booking): "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
 - For RETURNING customers WITHOUT a usual destination: "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
 - For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
-- After they give their name, ask for their area: "Lovely to meet you [NAME]! And what area are you calling from - Coventry, Birmingham, or somewhere else?"
+- **CRITICAL: When a NEW customer tells you their name, you MUST call the save_customer_name tool IMMEDIATELY with their EXACT name. Do NOT guess or make up names - only use the name they actually said.**
+- After they give their name and you've saved it, ask for their area: "Lovely to meet you [NAME]! And what area are you calling from - Coventry, Birmingham, or somewhere else?"
 - After they give their area, say: "Great, thanks [NAME]! How can I help with your travels today?"
 - ALWAYS use their name when addressing them throughout the call (e.g., "Right then [NAME], where would you like to be picked up from?")
 - Adapt greetings to the customer's language while keeping the same warm tone
@@ -2292,6 +2293,18 @@ Rules:
                   },
                   required: ["alias", "address"]
                 }
+              },
+              {
+                type: "function",
+                name: "save_customer_name",
+                description: "Save the customer's name when they tell you their name. Call this IMMEDIATELY after the customer tells you their name (e.g., 'My name is John', 'I'm Sarah', 'It's Max'). Use the EXACT name they said - do NOT guess or make up names. Only call this once per call when you first learn their name.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string", description: "The customer's first name EXACTLY as they said it. Do not guess - only use the name they actually spoke." }
+                  },
+                  required: ["name"]
+                }
               }
             ],
             tool_choice: "auto",
@@ -3701,6 +3714,76 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
                 }
               }));
             }
+          }
+          
+          // Trigger response
+          openaiWs?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
+        
+        // Handle save_customer_name function
+        if (data.name === "save_customer_name") {
+          const args = JSON.parse(data.arguments);
+          const providedName = (args.name || "").trim();
+          console.log(`[${callId}] 👤 save_customer_name called with: "${providedName}"`);
+          
+          // Validate the name before saving
+          if (!providedName || providedName.length < 2 || providedName.length > 30) {
+            console.log(`[${callId}] ⚠️ Invalid name rejected: "${providedName}"`);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  message: "Invalid name. Ask the customer for their name again."
+                })
+              }
+            }));
+          } else {
+            // Capitalize properly
+            const formattedName = providedName.charAt(0).toUpperCase() + providedName.slice(1).toLowerCase();
+            callerName = formattedName;
+            
+            console.log(`[${callId}] ✅ Customer name set to: "${callerName}"`);
+            
+            // Save to database if we have their phone
+            if (userPhone) {
+              const phoneKey = normalizePhone(userPhone) || userPhone;
+              const { error: nameError } = await supabase
+                .from("callers")
+                .upsert({
+                  phone_number: phoneKey,
+                  name: callerName,
+                  updated_at: new Date().toISOString()
+                }, { onConflict: "phone_number" });
+              
+              if (nameError) {
+                console.error(`[${callId}] Failed to save name to database:`, nameError);
+              } else {
+                console.log(`[${callId}] 💾 Saved name "${callerName}" to database for ${phoneKey}`);
+              }
+            }
+            
+            // Update live call with caller name
+            queueLiveCallBroadcast({});
+            
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: true,
+                  customer_name: callerName,
+                  message: `Customer name saved: ${callerName}. Use this name to address them throughout the call.`,
+                  next_action: `Say "Lovely to meet you ${callerName}!" and continue with the booking flow.`
+                })
+              }
+            }));
           }
           
           // Trigger response
