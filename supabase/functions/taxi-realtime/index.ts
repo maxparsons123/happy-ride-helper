@@ -258,6 +258,11 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   
+  // DEDUPLICATION: Track last assistant transcript to avoid saving duplicates
+  let lastSavedAssistantText = "";
+  let lastSavedAssistantAt = 0;
+  const ASSISTANT_DEDUP_WINDOW_MS = 2000; // Ignore same text within 2 seconds
+  
   // Agent configuration (loaded from database)
   let agentConfig: {
     name: string;
@@ -2819,9 +2824,22 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       if (data.type === "response.audio_transcript.done") {
         console.log(`[${callId}] >>> response.audio_transcript.done: "${data.transcript}"`);
         if (data.transcript) {
+          const now = Date.now();
+          const transcriptText = String(data.transcript);
+          
+          // DEDUPLICATION: Skip if this is the same text we just saved (within 2s)
+          // This prevents duplicates when OpenAI sends the same transcript multiple times
+          if (transcriptText === lastSavedAssistantText && now - lastSavedAssistantAt < ASSISTANT_DEDUP_WINDOW_MS) {
+            console.log(`[${callId}] 🔇 Skipping duplicate assistant transcript: "${transcriptText.substring(0, 50)}..."`);
+            return;
+          }
+          
+          lastSavedAssistantText = transcriptText;
+          lastSavedAssistantAt = now;
+          
           transcriptHistory.push({
             role: "assistant",
-            text: data.transcript,
+            text: transcriptText,
             timestamp: new Date().toISOString(),
           });
           // Broadcast transcript update (queued to preserve order)
@@ -2848,8 +2866,11 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             a.includes("how many passengers") ||
             a.includes("shall i book");
 
-          if (looksLikeQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a)) {
-            armNoReplyReprompt("assistant_question", String(data.transcript || ""));
+          // Only arm reprompt if user hasn't already replied recently (prevents double-fire)
+          // If there's been user activity in the last 3 seconds, the user DID reply - don't reprompt
+          const recentUserActivity = lastUserActivityAt > 0 && now - lastUserActivityAt < 3000;
+          if (looksLikeQuestion && !a.includes("goodbye") && !/\bbye\b/.test(a) && !recentUserActivity) {
+            armNoReplyReprompt("assistant_question", transcriptText);
           }
 
           // Failsafe: if Ada says goodbye but forgets to call end_call, hang up reliably.

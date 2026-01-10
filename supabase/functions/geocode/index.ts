@@ -241,7 +241,8 @@ serve(async (req) => {
 
     // STRATEGY:
     // 1. For "nearby" queries with coordinates → use Nearby Search
-    // 2. For regular addresses → use Text Search first, then Geocoding API
+    // 2. For house-number addresses (e.g., "52A David Road") → use Places Autocomplete first
+    // 3. For regular addresses/places → use Text Search, then Geocoding API
     
     if (isNearbyQuery && searchLat && searchLon) {
       // User explicitly asked for nearby - use Nearby Search
@@ -256,7 +257,24 @@ serve(async (req) => {
       }
     }
 
-    // Try Text Search first (best for addresses and place names)
+    // Detect house-number addresses (e.g., "52A David Road", "123 High Street")
+    // These need Autocomplete for accurate resolution, not Text Search
+    const looksLikeHouseAddress = /^\d+[a-z]?\s+[a-z]/i.test(address.trim());
+    
+    if (looksLikeHouseAddress) {
+      console.log(`[Geocode] House-number address detected: "${address}" - trying Autocomplete first`);
+      const autocompleteResult = await googlePlacesAutocomplete(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
+      if (autocompleteResult.found) {
+        cacheResult(autocompleteResult);
+        return new Response(
+          JSON.stringify(autocompleteResult),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.log(`[Geocode] Autocomplete failed for "${address}", falling back to Text Search`);
+    }
+
+    // Try Text Search (best for business names and general places)
     const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
     if (textSearchResult.found) {
       cacheResult(textSearchResult);
@@ -293,6 +311,68 @@ serve(async (req) => {
     );
   }
 });
+
+// Places Autocomplete - best for residential addresses with house numbers
+// This is more accurate than Text Search for "52A David Road" style queries
+async function googlePlacesAutocomplete(
+  query: string,
+  lat: number | undefined,
+  lon: number | undefined,
+  apiKey: string,
+  city?: string
+): Promise<GeocodeResult> {
+  try {
+    let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
+      `?input=${encodeURIComponent(query)}` +
+      `&types=address` +  // Restrict to addresses only
+      `&components=country:gb` +  // UK only
+      `&key=${apiKey}`;
+
+    // Add location bias if we have coordinates
+    if (lat && lon) {
+      url += `&location=${lat},${lon}&radius=20000`; // 20km radius
+    }
+
+    console.log(`[Geocode] Autocomplete: "${query}"${lat ? ` biased to ${lat},${lon}` : ''}`);
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.predictions || data.predictions.length === 0) {
+      console.log(`[Geocode] Autocomplete: no results (status: ${data.status})`);
+      return { found: false, address: query };
+    }
+
+    // Find the best match - prefer predictions that contain the house number
+    const queryHouseNumber = query.match(/^(\d+[a-z]?)/i)?.[1]?.toLowerCase();
+    let bestPrediction = data.predictions[0];
+    
+    if (queryHouseNumber) {
+      // Look for a prediction that contains the exact house number
+      for (const pred of data.predictions) {
+        const predText = (pred.description || "").toLowerCase();
+        if (predText.startsWith(queryHouseNumber) || predText.includes(` ${queryHouseNumber} `)) {
+          bestPrediction = pred;
+          break;
+        }
+      }
+    }
+
+    const placeId = bestPrediction.place_id;
+    if (!placeId) {
+      return { found: false, address: query };
+    }
+
+    console.log(`[Geocode] Autocomplete best match: "${bestPrediction.description}"`);
+
+    // Get full place details for coordinates
+    return await getPlaceDetails(placeId, query, apiKey);
+
+  } catch (error) {
+    console.error("[Geocode] Autocomplete error:", error);
+    return { found: false, address: query, error: String(error) };
+  }
+}
 
 // Nearby Search - finds places closest to the caller's location
 // IMPORTANT: Only use for business/POI lookups, NOT for street addresses
