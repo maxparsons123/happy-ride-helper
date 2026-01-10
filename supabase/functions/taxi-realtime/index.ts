@@ -2899,7 +2899,7 @@ Rules:
       console.log(`[${callId}] 🔍 Travel hub check: pickup="${knownBooking.pickup}" dest="${knownBooking.destination}" isTravelHub=${tripHasTravelHub} luggage="${knownBooking.luggage}" asked=${knownBooking.luggageAsked}`);
       
       if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
-        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - injecting IMMEDIATE luggage prompt`);
+        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - marking luggageAsked`);
         knownBooking.luggageAsked = true;
         
         // Add to transcript for visibility
@@ -2910,27 +2910,19 @@ Rules:
         });
         queueLiveCallBroadcast({});
         
+        // DON'T cancel/force response here - just inject context for Ada's next turn
+        // The book_taxi blocker will catch it if she tries to book without asking
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          // Cancel any pending response so Ada asks about luggage FIRST
-          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          
-          // Inject as user message (higher priority) with IMMEDIATE instruction
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
-              role: "user",
+              role: "system",
               content: [{ 
                 type: "input_text", 
-                text: `[SYSTEM INSTRUCTION - MUST FOLLOW: This trip involves an airport/station. You MUST ask "Are you travelling with any bags today?" IMMEDIATELY before confirming or proceeding with the booking. Do NOT offer to book until you know about luggage.]` 
+                text: `[This trip involves an airport/station. Ask about luggage before confirming the booking.]` 
               }]
             }
-          }));
-          
-          // Force Ada to respond NOW with the luggage question
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response: { modalities: ["audio", "text"] }
           }));
         }
       }
