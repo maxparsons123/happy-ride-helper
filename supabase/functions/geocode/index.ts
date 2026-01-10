@@ -293,9 +293,9 @@ serve(async (req) => {
       }
     }
 
-    // 4️⃣ GLOBAL SEARCH → for dropoffs that may be far away
-    console.log(`[Geocode] 4️⃣ GLOBAL SEARCH: "${address}"`);
-    const globalResult = await googleTextSearch(address, undefined, undefined, GOOGLE_MAPS_API_KEY, check_ambiguous);
+    // 4️⃣ GLOBAL SEARCH → for dropoffs that may be far away (still include city for bias)
+    console.log(`[Geocode] 4️⃣ GLOBAL SEARCH: "${address}"${city ? ` (with city: ${city})` : ''}`);
+    const globalResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous, city);
     if (globalResult.found) {
       console.log(`[Geocode] ✅ GLOBAL_OK: "${globalResult.display_name}"`);
       cacheResult(globalResult);
@@ -436,18 +436,21 @@ async function googlePlacesAutocomplete(
   city?: string
 ): Promise<GeocodeResult> {
   try {
+    // Include city in the input query for better accuracy (like C# ResolveHouseAddress)
+    const searchQuery = city ? `${query}, ${city}` : query;
+    
     let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
-      `?input=${encodeURIComponent(query)}` +
+      `?input=${encodeURIComponent(searchQuery)}` +
       `&types=address` +  // Restrict to addresses only
       `&components=country:gb` +  // UK only
       `&key=${apiKey}`;
 
     // Add location bias if we have coordinates
     if (lat && lon) {
-      url += `&location=${lat},${lon}&radius=20000`; // 20km radius
+      url += `&location=${lat},${lon}&radius=5000`; // 5km radius (matching C# pattern)
     }
 
-    console.log(`[Geocode] Autocomplete: "${query}"${lat ? ` biased to ${lat},${lon}` : ''}`);
+    console.log(`[Geocode] Autocomplete: "${searchQuery}"${lat ? ` biased to ${lat},${lon}` : ''}${city ? ` (city: ${city})` : ''}`);
 
     const response = await fetch(url);
     const data = await response.json();
@@ -788,19 +791,23 @@ async function googleTextSearch(
   lat: number | undefined,
   lon: number | undefined,
   apiKey: string,
-  returnMultiple: boolean = false
+  returnMultiple: boolean = false,
+  city?: string
 ): Promise<GeocodeResult> {
   try {
+    // Include city in query for better results (like C# pattern)
+    const searchQuery = city ? `${query}, ${city}` : query;
+    
     let url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
-      `?query=${encodeURIComponent(query)}` +
+      `?query=${encodeURIComponent(searchQuery)}` +
       `&key=${apiKey}`;
 
     // Add location bias if we have coordinates
     if (lat && lon) {
-      url += `&location=${lat},${lon}&radius=5000`;
+      url += `&location=${lat},${lon}&radius=10000`; // 10km radius with city bias
     }
 
-    console.log(`[Geocode] Text search: "${query}"${lat ? ` biased to ${lat},${lon}` : ''}`);
+    console.log(`[Geocode] Text search: "${searchQuery}"${lat ? ` biased to ${lat},${lon}` : ''}${city ? ` (city: ${city})` : ''}`);
 
     const response = await fetch(url);
     const data = await response.json();
