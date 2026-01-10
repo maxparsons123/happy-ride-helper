@@ -3576,11 +3576,28 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
         // This prevents Ada from asking passengers before geocoding completes
         // If we're about to end the call (e.g., user said "bye"), skip extraction entirely.
         // OPTIMIZATION: Skip heavy extraction for simple confirmations/short responses
-        const simpleConfirmation = /^(yes|yeah|yep|no|nope|nah|ok|okay|sure|please|thanks|thank you|cheers|ta|one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b[!. ]*$/i.test(rawTranscript.trim());
+        const transcriptLower = rawTranscript.trim().toLowerCase();
         
-        if (!forcedResponseInstructions && !simpleConfirmation) {
+        // Fast-path: Skip extraction for these patterns (no address info to extract)
+        const skipExtractionPatterns = [
+          // Simple confirmations
+          /^(yes|yeah|yep|yup|no|nope|nah|ok|okay|sure|please|right|correct|that's right|that's correct)\b/i,
+          // Thank you variations
+          /^(thanks|thank you|cheers|ta|lovely|great|perfect|brilliant)\b/i,
+          // Simple negatives (with filler words)
+          /^no[,.]?\s*(no[,.]?\s*)?(that'?s?\s*(fine|all|it|ok|okay)|i'?m\s*(good|fine|ok|okay)|nothing|thanks)/i,
+          // Passenger counts (with optional filler)
+          /^(just\s*)?(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|people|of us)?[!. ]*$/i,
+          // Short responses under 20 chars with no address-like content
+        ];
+        
+        const isSimpleResponse = skipExtractionPatterns.some(p => p.test(transcriptLower)) || 
+          (transcriptLower.length < 25 && !/\d{1,3}\s*[a-z]/i.test(transcriptLower) && !/road|street|avenue|lane|drive|close|way|court/i.test(transcriptLower));
+        
+        if (!forcedResponseInstructions && !isSimpleResponse) {
           await extractBookingFromTranscript(rawTranscript);
-        } else if (simpleConfirmation) {
+        } else if (isSimpleResponse) {
+          console.log(`[${callId}] ⚡ Fast-path: skipping extraction for simple response: "${rawTranscript}"`);
           // For simple responses, still extract basic info (like passenger count) but skip geocoding
           const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
           if (passengerMatch) {
@@ -3588,7 +3605,7 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             const num = numMap[passengerMatch[1].toLowerCase()] || parseInt(passengerMatch[1]);
             if (num >= 1 && num <= 8) {
               knownBooking.passengers = num;
-              console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num} from simple response`);
+              console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
             }
           }
         } else {
