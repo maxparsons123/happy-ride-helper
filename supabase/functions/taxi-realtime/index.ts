@@ -570,7 +570,10 @@ serve(async (req) => {
   let currentAssistantText = ""; // Buffer for assistant transcript
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
   let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
-  const ECHO_GUARD_MS = 100; // Ignore transcripts within 100ms after AI stops speaking (tight to avoid blocking real speech)
+  let aiPlaybackStartedAt = 0; // Timestamp when AI audio playback started
+  let aiPlaybackBytesTotal = 0; // Total base64 bytes in current response (for duration estimation)
+  let aiPlaybackTimeoutId: ReturnType<typeof setTimeout> | null = null; // Timeout to clear aiSpeaking after playback
+  const ECHO_GUARD_MS_DEFAULT = 100; // Default echo guard (overridden by agent config)
   let lastFinalUserTranscript = ""; // Last finalized user transcript (safeguards for end_call)
   let lastFinalUserTranscriptAt = 0; // ms epoch for race-free end_call checks
   let lastAudioCommitAt = 0; // ms epoch when last user turn was committed
@@ -3626,7 +3629,18 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
       // AI response started
       if (data.type === "response.created") {
         console.log(`[${callId}] >>> response.created - AI starting to generate`);
-        currentAssistantText = ""; aiSpeaking = true; // Reset buffer
+        
+        // Cancel any pending playback timeout from previous response
+        if (aiPlaybackTimeoutId) {
+          clearTimeout(aiPlaybackTimeoutId);
+          aiPlaybackTimeoutId = null;
+        }
+        
+        // Reset state for new response
+        currentAssistantText = "";
+        aiSpeaking = true;
+        aiPlaybackBytesTotal = 0;
+        aiPlaybackStartedAt = 0;
 
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
@@ -3663,7 +3677,15 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
 
       // Forward audio to client AND broadcast to monitoring channel
       if (data.type === "response.audio.delta") {
-        console.log(`[${callId}] >>> AUDIO DELTA received, length: ${data.delta?.length || 0}`);
+        const deltaLen = data.delta?.length || 0;
+        console.log(`[${callId}] >>> AUDIO DELTA received, length: ${deltaLen}`);
+        
+        // Track playback timing: mark start on first delta, accumulate bytes
+        if (aiPlaybackBytesTotal === 0) {
+          aiPlaybackStartedAt = Date.now();
+        }
+        aiPlaybackBytesTotal += deltaLen;
+        
         socket.send(
           JSON.stringify({
             type: "audio",
@@ -5690,9 +5712,44 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
       // Response completed
       if (data.type === "response.done") {
-        aiSpeaking = false;
-        aiStoppedSpeakingAt = Date.now(); // Record when AI stopped for echo guard
-        socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+        // Calculate estimated playback duration from accumulated audio bytes
+        // Base64 audio: 4 chars = 3 bytes, 24kHz 16-bit mono = 48000 bytes/sec
+        // So: (base64Len * 0.75) / 48000 = seconds of audio
+        const estimatedPlaybackMs = aiPlaybackBytesTotal > 0 
+          ? Math.ceil((aiPlaybackBytesTotal * 0.75 / 48000) * 1000) 
+          : 0;
+        const elapsedSinceStart = Date.now() - aiPlaybackStartedAt;
+        const remainingPlaybackMs = Math.max(0, estimatedPlaybackMs - elapsedSinceStart);
+        const echoGuardMs = agentConfig?.echo_guard_ms ?? ECHO_GUARD_MS_DEFAULT;
+        
+        console.log(`[${callId}] >>> response.done - playback: ~${estimatedPlaybackMs}ms, elapsed: ${elapsedSinceStart}ms, remaining: ${remainingPlaybackMs}ms, echo_guard: ${echoGuardMs}ms`);
+        
+        // Clear any existing timeout
+        if (aiPlaybackTimeoutId) {
+          clearTimeout(aiPlaybackTimeoutId);
+          aiPlaybackTimeoutId = null;
+        }
+        
+        // Delay aiSpeaking=false until playback completes + echo guard
+        const delayMs = remainingPlaybackMs + echoGuardMs;
+        if (delayMs > 50) {
+          console.log(`[${callId}] 🔇 Delaying aiSpeaking=false by ${delayMs}ms (playback+echo guard)`);
+          aiPlaybackTimeoutId = setTimeout(() => {
+            aiSpeaking = false;
+            aiStoppedSpeakingAt = Date.now();
+            console.log(`[${callId}] 🔇 aiSpeaking=false after playback delay`);
+            socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+          }, delayMs);
+        } else {
+          aiSpeaking = false;
+          aiStoppedSpeakingAt = Date.now();
+          socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+        }
+        
+        // Reset playback tracking for next response
+        aiPlaybackBytesTotal = 0;
+        aiPlaybackStartedAt = 0;
+        
         socket.send(JSON.stringify({ type: "response_done" }));
       }
 
