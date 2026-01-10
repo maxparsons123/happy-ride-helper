@@ -3135,66 +3135,68 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             user_phone: userPhone || null
           });
 
-          // Save booking to bookings table for persistence
-          if (userPhone) {
-            const phoneKey = normalizePhone(userPhone) || userPhone;
-            
-            // Generate a short reference number (e.g., "ABC123")
-            const generateReference = () => {
-              const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-              const numbers = '0123456789';
-              let ref = '';
-              for (let i = 0; i < 3; i++) ref += letters[Math.floor(Math.random() * letters.length)];
-              for (let i = 0; i < 3; i++) ref += numbers[Math.floor(Math.random() * numbers.length)];
-              return ref;
-            };
-            const bookingRef = generateReference();
-            
-            // Build complete booking_details JSON
-            const bookingDetails = {
-              reference: bookingRef,
-              pickup: {
-                address: finalBooking.pickup,
-                time: finalBooking.pickupTime || "ASAP",
-                verified: knownBooking.pickupVerified || false
-              },
-              destination: {
-                address: finalBooking.destination,
-                verified: knownBooking.destinationVerified || false
-              },
-              passengers: finalBooking.passengers,
-              vehicle_type: finalBooking.vehicleType || null,
-              luggage: null,
-              special_requests: null,
-              fare: `£${fare}`,
-              eta: isAsap ? eta : null,
-              status: "active",
-              history: [
-                { at: new Date().toISOString(), action: "created", by: "phone" }
-              ]
-            };
-            
-            const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
-              call_id: callId,
-              caller_phone: phoneKey,
-              caller_name: callerName || null,
-              pickup: finalBooking.pickup,
-              destination: finalBooking.destination,
-              passengers: finalBooking.passengers,
-              fare: `£${fare}`,
-              eta: isAsap ? eta : null,
-              scheduled_for: scheduledTime,
-              status: "active",
-              booked_at: new Date().toISOString(),
-              booking_details: bookingDetails
-            }).select().single();
-            
-            if (bookingInsertError) {
-              console.error(`[${callId}] Failed to save booking:`, bookingInsertError);
-            } else {
-              activeBooking = newBooking;
-              console.log(`[${callId}] 📋 Booking saved: ${bookingRef} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
-            }
+          // Save booking to bookings table for persistence (always save, even without phone for web tests)
+          const phoneKey = userPhone ? (normalizePhone(userPhone) || userPhone) : "web-test";
+          
+          // Generate a short reference number (e.g., "ABC123")
+          const generateReference = () => {
+            const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+            const numbers = '0123456789';
+            let ref = '';
+            for (let i = 0; i < 3; i++) ref += letters[Math.floor(Math.random() * letters.length)];
+            for (let i = 0; i < 3; i++) ref += numbers[Math.floor(Math.random() * numbers.length)];
+            return ref;
+          };
+          const bookingRef = generateReference();
+          
+          console.log(`[${callId}] 💾 Attempting to save booking: ${finalBooking.pickup} → ${finalBooking.destination}`);
+          
+          // Build complete booking_details JSON
+          const bookingDetails = {
+            reference: bookingRef,
+            pickup: {
+              address: finalBooking.pickup,
+              time: finalBooking.pickupTime || "ASAP",
+              verified: knownBooking.pickupVerified || false
+            },
+            destination: {
+              address: finalBooking.destination,
+              verified: knownBooking.destinationVerified || false
+            },
+            passengers: finalBooking.passengers,
+            vehicle_type: finalBooking.vehicleType || null,
+            luggage: null,
+            special_requests: null,
+            fare: `£${fare}`,
+            eta: isAsap ? eta : null,
+            status: "active",
+            history: [
+              { at: new Date().toISOString(), action: "created", by: callSource || "phone" }
+            ]
+          };
+          
+          const { data: newBooking, error: bookingInsertError } = await supabase.from("bookings").insert({
+            call_id: callId,
+            caller_phone: phoneKey,
+            caller_name: callerName || null,
+            pickup: finalBooking.pickup,
+            destination: finalBooking.destination,
+            passengers: finalBooking.passengers,
+            fare: `£${fare}`,
+            eta: isAsap ? eta : null,
+            scheduled_for: scheduledTime,
+            status: "active",
+            booked_at: new Date().toISOString(),
+            booking_details: bookingDetails
+          }).select().single();
+          
+          if (bookingInsertError) {
+            console.error(`[${callId}] ❌ CRITICAL: Failed to save booking:`, bookingInsertError);
+            console.error(`[${callId}] Booking data was:`, { pickup: finalBooking.pickup, destination: finalBooking.destination, passengers: finalBooking.passengers, fare, phoneKey });
+          } else {
+            activeBooking = newBooking;
+            console.log(`[${callId}] ✅ Booking saved successfully: ${bookingRef} (${isAsap ? 'ASAP' : `scheduled for ${scheduledTime}`})`);
+            console.log(`[${callId}] 📋 Booking ID: ${newBooking.id}`);
           }
 
           // Save/update caller info for future calls
