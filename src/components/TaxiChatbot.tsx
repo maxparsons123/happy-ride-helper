@@ -6,7 +6,7 @@ import { ChatInput } from "./ChatInput";
 import { TypingIndicator } from "./TypingIndicator";
 import { BookingStatus } from "./BookingStatus";
 import { useToast } from "@/hooks/use-toast";
-import { Car, RotateCcw, Mic, Radio, Server } from "lucide-react";
+import { Car, RotateCcw, Mic, Radio, Server, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface Message {
@@ -161,6 +161,17 @@ export function TaxiChatbot() {
               <Link to="/sip-config">
                 <Server className="mr-2 h-4 w-4" />
                 SIP Config
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              asChild
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <Link to="/agents">
+                <Users className="mr-2 h-4 w-4" />
+                Agents
               </Link>
             </Button>
             <Button

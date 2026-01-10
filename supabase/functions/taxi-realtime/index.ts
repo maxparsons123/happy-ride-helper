@@ -319,6 +319,71 @@ serve(async (req) => {
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
+  
+  // Agent configuration (loaded from database)
+  let agentConfig: {
+    name: string;
+    slug: string;
+    voice: string;
+    system_prompt: string;
+    company_name: string;
+    personality_traits: string[];
+    greeting_style: string | null;
+  } | null = null;
+  
+  // Function to load agent configuration
+  const loadAgentConfig = async (agentSlug: string = "ada"): Promise<boolean> => {
+    try {
+      console.log(`[${callId}] 🤖 Loading agent config for: ${agentSlug}`);
+      const { data, error } = await supabase
+        .from("agents")
+        .select("name, slug, voice, system_prompt, company_name, personality_traits, greeting_style")
+        .eq("slug", agentSlug)
+        .eq("is_active", true)
+        .single();
+      
+      if (error || !data) {
+        console.error(`[${callId}] Agent not found: ${agentSlug}, falling back to default`);
+        // Try loading default 'ada' agent
+        if (agentSlug !== "ada") {
+          return loadAgentConfig("ada");
+        }
+        return false;
+      }
+      
+      agentConfig = {
+        name: data.name,
+        slug: data.slug,
+        voice: data.voice || "shimmer",
+        system_prompt: data.system_prompt || SYSTEM_INSTRUCTIONS,
+        company_name: data.company_name || "247 Radio Carz",
+        personality_traits: Array.isArray(data.personality_traits) 
+          ? data.personality_traits 
+          : JSON.parse(data.personality_traits as string || "[]"),
+        greeting_style: data.greeting_style
+      };
+      
+      console.log(`[${callId}] ✅ Agent loaded: ${agentConfig.name} (voice: ${agentConfig.voice})`);
+      return true;
+    } catch (e) {
+      console.error(`[${callId}] Failed to load agent:`, e);
+      return false;
+    }
+  };
+  
+  // Get effective system prompt (replace placeholders)
+  const getEffectiveSystemPrompt = (): string => {
+    if (!agentConfig) return SYSTEM_INSTRUCTIONS;
+    
+    let prompt = agentConfig.system_prompt;
+    
+    // Replace placeholders
+    prompt = prompt.replace(/\{\{agent_name\}\}/g, agentConfig.name);
+    prompt = prompt.replace(/\{\{company_name\}\}/g, agentConfig.company_name);
+    prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig.personality_traits.join(", "));
+    
+    return prompt;
+  };
 
   // --- Call lifecycle + "Ada didn't finish" safeguards ---
   // If Ada asks "Anything else?" and the customer goes silent, end the call reliably.
@@ -2483,7 +2548,7 @@ Rules:
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            voice: "shimmer", // British female voice
+            voice: agentConfig?.voice || "shimmer", // Use agent's voice
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { 
@@ -2584,7 +2649,7 @@ Rules:
               }
             ],
             tool_choice: "auto",
-            instructions: SYSTEM_INSTRUCTIONS
+            instructions: getEffectiveSystemPrompt()
           }
         }));
       }
@@ -2623,7 +2688,7 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
           openaiWs?.send(JSON.stringify({
             type: "session.update",
             session: {
-              instructions: SYSTEM_INSTRUCTIONS + activeBookingContext
+              instructions: getEffectiveSystemPrompt() + activeBookingContext
             }
           }));
         }
@@ -4465,12 +4530,16 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         } else if (message.user_name) {
           console.log(`[${callId}] ⚠️ Rejected invalid name from Asterisk: "${message.user_name}"`);
         }
+        
+        // Load agent configuration (default to 'ada' if not specified)
+        const agentSlug = message.agent || "ada";
+        await loadAgentConfig(agentSlug);
 
         // Detect Asterisk calls by call_id prefix
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled}, agent: ${agentConfig?.name || 'default'})`);
         return;
       }
       

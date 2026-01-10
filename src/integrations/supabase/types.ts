@@ -53,6 +53,54 @@ export type Database = {
         }
         Relationships: []
       }
+      agents: {
+        Row: {
+          company_name: string
+          created_at: string
+          description: string | null
+          greeting_style: string | null
+          id: string
+          is_active: boolean | null
+          language: string | null
+          name: string
+          personality_traits: Json | null
+          slug: string
+          system_prompt: string
+          updated_at: string
+          voice: string
+        }
+        Insert: {
+          company_name?: string
+          created_at?: string
+          description?: string | null
+          greeting_style?: string | null
+          id?: string
+          is_active?: boolean | null
+          language?: string | null
+          name: string
+          personality_traits?: Json | null
+          slug: string
+          system_prompt: string
+          updated_at?: string
+          voice?: string
+        }
+        Update: {
+          company_name?: string
+          created_at?: string
+          description?: string | null
+          greeting_style?: string | null
+          id?: string
+          is_active?: boolean | null
+          language?: string | null
+          name?: string
+          personality_traits?: Json | null
+          slug?: string
+          system_prompt?: string
+          updated_at?: string
+          voice?: string
+        }
+        Relationships: []
+      }
       bookings: {
         Row: {
           booked_at: string
