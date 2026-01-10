@@ -140,11 +140,13 @@ export type Database = {
           completed_at: string | null
           created_at: string
           destination: string
+          destination_name: string | null
           eta: string | null
           fare: string | null
           id: string
           passengers: number
           pickup: string
+          pickup_name: string | null
           scheduled_for: string | null
           status: string
           updated_at: string
@@ -160,11 +162,13 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           destination: string
+          destination_name?: string | null
           eta?: string | null
           fare?: string | null
           id?: string
           passengers?: number
           pickup: string
+          pickup_name?: string | null
           scheduled_for?: string | null
           status?: string
           updated_at?: string
@@ -180,11 +184,13 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           destination?: string
+          destination_name?: string | null
           eta?: string | null
           fare?: string | null
           id?: string
           passengers?: number
           pickup?: string
+          pickup_name?: string | null
           scheduled_for?: string | null
           status?: string
           updated_at?: string

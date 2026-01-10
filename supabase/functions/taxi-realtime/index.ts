@@ -565,7 +565,7 @@ serve(async (req) => {
   let callerPickupAddresses: string[] = []; // Array of verified PICKUP addresses (for local area bias)
   let callerDropoffAddresses: string[] = []; // Array of verified DROPOFF addresses (for destination reference)
   let callerAddressAliases: Record<string, string> = {}; // {"home": "52A David Road", "work": "Coventry Train Station"}
-  let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
+  let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string; pickup_name?: string | null; destination_name?: string | null } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
@@ -978,6 +978,8 @@ serve(async (req) => {
     vehicleType?: string; // e.g., "6 seater", "saloon", "MPV", "estate" - captured from customer request
     luggage?: string; // e.g., "2 bags", "1 suitcase", "no luggage"
     luggageAsked?: boolean; // Track if we've asked about luggage for this trip
+    pickupName?: string; // Business/place name from Google (e.g., "Birmingham Airport")
+    destinationName?: string; // Business/place name from Google (e.g., "Sweet Spot Cafe")
   };
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
@@ -2115,7 +2117,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Check for active bookings
       const { data: bookingData, error: bookingError } = await supabase
         .from("bookings")
-        .select("id, pickup, destination, passengers, fare, booked_at")
+        .select("id, pickup, destination, passengers, fare, booked_at, pickup_name, destination_name")
         .in("caller_phone", phoneCandidates)
         .eq("status", "active")
         .order("booked_at", { ascending: false })
@@ -3534,17 +3536,21 @@ DROPOFFS: ${callerDropoffAddresses.length > 0 ? callerDropoffAddresses.slice(-5)
           : '';
         
         if (activeBooking) {
+          // Use friendly place names if available, otherwise fall back to addresses
+          const pickupDisplay = activeBooking.pickup_name || activeBooking.pickup;
+          const destDisplay = activeBooking.destination_name || activeBooking.destination;
+          
           // Customer has an outstanding booking - offer to cancel/keep
           greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. 
 ACTIVE BOOKING DETAILS:
 - Booking ID: ${activeBooking.id}
-- Pickup: ${activeBooking.pickup}
-- Destination: ${activeBooking.destination}
+- Pickup: ${activeBooking.pickup}${activeBooking.pickup_name ? ` (${activeBooking.pickup_name})` : ''}
+- Destination: ${activeBooking.destination}${activeBooking.destination_name ? ` (${activeBooking.destination_name})` : ''}
 - Passengers: ${activeBooking.passengers}
 - Fare: ${activeBooking.fare}
 ${addressHistoryContext}
 
-Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${activeBooking.pickup} to ${activeBooking.destination}. Would you like to keep that booking, or would you like to cancel it?"
+Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${pickupDisplay} to ${destDisplay}. Would you like to keep that booking, or would you like to cancel it?"
 
 Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "cancel" or "cancel it".]`;
         } else if (callerName && callerLastDestination) {
@@ -4480,6 +4486,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
             vehicleType: knownBooking.vehicleType ?? args.vehicle_type ?? null, // e.g., "6 seater", "MPV"
             luggage: knownBooking.luggage ?? args.luggage ?? null, // Include luggage in final booking
+            pickupName: knownBooking.pickupName ?? null, // Business name from Google (e.g., "Birmingham Airport")
+            destinationName: knownBooking.destinationName ?? null, // Business name from Google (e.g., "Sweet Spot Cafe")
           };
 
           bookingData = finalBooking;
@@ -4587,11 +4595,23 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                   console.log(`[${callId}] 📍 Pickup resolved: ${tripResolveResult.pickup.formatted_address}`);
                   finalBooking.pickup = tripResolveResult.pickup.formatted_address;
                   knownBooking.pickupVerified = true;
+                  // Extract place name if available (e.g., "Birmingham Airport", "Sweet Spot Cafe")
+                  if (tripResolveResult.pickup.name) {
+                    finalBooking.pickupName = tripResolveResult.pickup.name;
+                    knownBooking.pickupName = tripResolveResult.pickup.name;
+                    console.log(`[${callId}] 🏪 Pickup place name: ${tripResolveResult.pickup.name}`);
+                  }
                 }
                 if (tripResolveResult.dropoff?.formatted_address) {
                   console.log(`[${callId}] 📍 Dropoff resolved: ${tripResolveResult.dropoff.formatted_address}`);
                   finalBooking.destination = tripResolveResult.dropoff.formatted_address;
                   knownBooking.destinationVerified = true;
+                  // Extract place name if available
+                  if (tripResolveResult.dropoff.name) {
+                    finalBooking.destinationName = tripResolveResult.dropoff.name;
+                    knownBooking.destinationName = tripResolveResult.dropoff.name;
+                    console.log(`[${callId}] 🏪 Destination place name: ${tripResolveResult.dropoff.name}`);
+                  }
                 }
                 
                 // Use trip resolver's distance and fare if available
@@ -4790,13 +4810,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               user_phone: userPhone || null
             }),
             
-            // 2. Save booking to bookings table
+            // 2. Save booking to bookings table (include place names for friendly display)
             supabase.from("bookings").insert({
               call_id: callId,
               caller_phone: phoneKey,
               caller_name: callerName || null,
               pickup: finalBooking.pickup,
               destination: finalBooking.destination,
+              pickup_name: finalBooking.pickupName || null,
+              destination_name: finalBooking.destinationName || null,
               passengers: finalBooking.passengers,
               fare: `£${fare}`,
               eta: isAsap ? eta : null,
