@@ -13,7 +13,8 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft } from "lucide-react";
+import { Car, Plus, Save, Trash2, Radio, Server, Mic, Users, Bot, Sparkles, ArrowLeft, AudioLines, Timer, Volume2 } from "lucide-react";
+import { Slider } from "@/components/ui/slider";
 
 interface Agent {
   id: string;
@@ -29,6 +30,16 @@ interface Agent {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  // VAD & Voice Settings
+  vad_threshold: number;
+  vad_prefix_padding_ms: number;
+  vad_silence_duration_ms: number;
+  allow_interruptions: boolean;
+  silence_timeout_ms: number;
+  no_reply_timeout_ms: number;
+  max_no_reply_reprompts: number;
+  echo_guard_ms: number;
+  goodbye_grace_ms: number;
 }
 
 const VOICE_OPTIONS = [
@@ -175,6 +186,16 @@ export default function Agents() {
           greeting_style: selectedAgent.greeting_style,
           language: selectedAgent.language,
           is_active: selectedAgent.is_active,
+          // VAD & Voice Settings
+          vad_threshold: selectedAgent.vad_threshold,
+          vad_prefix_padding_ms: selectedAgent.vad_prefix_padding_ms,
+          vad_silence_duration_ms: selectedAgent.vad_silence_duration_ms,
+          allow_interruptions: selectedAgent.allow_interruptions,
+          silence_timeout_ms: selectedAgent.silence_timeout_ms,
+          no_reply_timeout_ms: selectedAgent.no_reply_timeout_ms,
+          max_no_reply_reprompts: selectedAgent.max_no_reply_reprompts,
+          echo_guard_ms: selectedAgent.echo_guard_ms,
+          goodbye_grace_ms: selectedAgent.goodbye_grace_ms,
           updated_at: new Date().toISOString(),
         })
         .eq("id", selectedAgent.id);
@@ -400,6 +421,7 @@ export default function Agents() {
               <TabsList className="mb-6">
                 <TabsTrigger value="personality">Personality</TabsTrigger>
                 <TabsTrigger value="prompt">System Prompt</TabsTrigger>
+                <TabsTrigger value="voice">Voice Detection</TabsTrigger>
                 <TabsTrigger value="settings">Settings</TabsTrigger>
               </TabsList>
 
@@ -511,6 +533,184 @@ export default function Agents() {
                     />
                   </CardContent>
                 </Card>
+              </TabsContent>
+
+              <TabsContent value="voice" className="space-y-6">
+                <div className="grid gap-6 md:grid-cols-2">
+                  <Card className="bg-card/50 border-chat-border">
+                    <CardHeader>
+                      <div className="flex items-center gap-2">
+                        <AudioLines className="h-5 w-5 text-primary" />
+                        <CardTitle className="text-base">Voice Activity Detection</CardTitle>
+                      </div>
+                      <CardDescription>Control how the AI detects when the user is speaking</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>VAD Threshold</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.vad_threshold}</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.vad_threshold]}
+                          onValueChange={([value]) => updateSelectedAgent({ vad_threshold: value })}
+                          min={0.1}
+                          max={0.9}
+                          step={0.05}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">Lower = more sensitive (picks up quiet speech). Default: 0.45</p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Prefix Padding</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.vad_prefix_padding_ms}ms</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.vad_prefix_padding_ms]}
+                          onValueChange={([value]) => updateSelectedAgent({ vad_prefix_padding_ms: value })}
+                          min={100}
+                          max={1500}
+                          step={50}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">Audio captured before speech is detected. Default: 650ms</p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Silence Duration</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.vad_silence_duration_ms}ms</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.vad_silence_duration_ms]}
+                          onValueChange={([value]) => updateSelectedAgent({ vad_silence_duration_ms: value })}
+                          min={500}
+                          max={4000}
+                          step={100}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">Silence needed to end user's turn. Default: 1800ms</p>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="bg-card/50 border-chat-border">
+                    <CardHeader>
+                      <div className="flex items-center gap-2">
+                        <Volume2 className="h-5 w-5 text-primary" />
+                        <CardTitle className="text-base">Interruption Settings</CardTitle>
+                      </div>
+                      <CardDescription>Control barge-in and echo handling</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <Label>Allow Interruptions (Barge-in)</Label>
+                          <p className="text-xs text-muted-foreground">Let users interrupt the AI while speaking</p>
+                        </div>
+                        <Switch
+                          checked={selectedAgent.allow_interruptions}
+                          onCheckedChange={(checked) => updateSelectedAgent({ allow_interruptions: checked })}
+                        />
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Echo Guard</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.echo_guard_ms}ms</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.echo_guard_ms]}
+                          onValueChange={([value]) => updateSelectedAgent({ echo_guard_ms: value })}
+                          min={0}
+                          max={500}
+                          step={10}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">Ignore transcripts within this time after AI stops. Default: 100ms</p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Goodbye Grace</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.goodbye_grace_ms}ms</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.goodbye_grace_ms]}
+                          onValueChange={([value]) => updateSelectedAgent({ goodbye_grace_ms: value })}
+                          min={1000}
+                          max={8000}
+                          step={250}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">Wait for goodbye audio to finish before ending. Default: 4500ms</p>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="bg-card/50 border-chat-border md:col-span-2">
+                    <CardHeader>
+                      <div className="flex items-center gap-2">
+                        <Timer className="h-5 w-5 text-primary" />
+                        <CardTitle className="text-base">Timeout Settings</CardTitle>
+                      </div>
+                      <CardDescription>Control how the agent handles silence and non-responses</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid gap-6 md:grid-cols-3">
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <Label>Silence Timeout</Label>
+                            <span className="text-sm font-mono text-muted-foreground">{(selectedAgent.silence_timeout_ms / 1000).toFixed(1)}s</span>
+                          </div>
+                          <Slider
+                            value={[selectedAgent.silence_timeout_ms]}
+                            onValueChange={([value]) => updateSelectedAgent({ silence_timeout_ms: value })}
+                            min={3000}
+                            max={15000}
+                            step={500}
+                            className="w-full"
+                          />
+                          <p className="text-xs text-muted-foreground">Timeout after "anything else?" Default: 8s</p>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <Label>No Reply Timeout</Label>
+                            <span className="text-sm font-mono text-muted-foreground">{(selectedAgent.no_reply_timeout_ms / 1000).toFixed(1)}s</span>
+                          </div>
+                          <Slider
+                            value={[selectedAgent.no_reply_timeout_ms]}
+                            onValueChange={([value]) => updateSelectedAgent({ no_reply_timeout_ms: value })}
+                            min={3000}
+                            max={15000}
+                            step={500}
+                            className="w-full"
+                          />
+                          <p className="text-xs text-muted-foreground">Time before reprompting silent user. Default: 9s</p>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <Label>Max Reprompts</Label>
+                            <span className="text-sm font-mono text-muted-foreground">{selectedAgent.max_no_reply_reprompts}</span>
+                          </div>
+                          <Slider
+                            value={[selectedAgent.max_no_reply_reprompts]}
+                            onValueChange={([value]) => updateSelectedAgent({ max_no_reply_reprompts: value })}
+                            min={1}
+                            max={5}
+                            step={1}
+                            className="w-full"
+                          />
+                          <p className="text-xs text-muted-foreground">Max times to reprompt before ending. Default: 2</p>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
               </TabsContent>
 
               <TabsContent value="settings" className="space-y-6">
