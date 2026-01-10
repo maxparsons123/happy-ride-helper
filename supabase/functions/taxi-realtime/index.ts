@@ -4223,12 +4223,14 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         const isSimpleResponse = skipExtractionPatterns.some(p => p.test(transcriptLower)) || 
           (transcriptLower.length < 25 && !/\d{1,3}\s*[a-z]/i.test(transcriptLower) && !/road|street|avenue|lane|drive|close|way|court/i.test(transcriptLower));
         
-        if (!forcedResponseInstructions && !isSimpleResponse) {
-          await extractBookingFromTranscript(rawTranscript);
-        } else if (isSimpleResponse) {
-          console.log(`[${callId}] ⚡ Fast-path: simple response: "${rawTranscript}" (luggageAsked=${knownBooking.luggageAsked}, luggage=${knownBooking.luggage})`);
+        // HYBRID LATENCY OPTIMIZATION:
+        // - Simple responses → Send response.create IMMEDIATELY (no waiting)
+        // - Address-containing responses → Await extraction first (preserve address flow)
+        
+        if (isSimpleResponse) {
+          console.log(`[${callId}] ⚡ FAST-PATH: simple response: "${rawTranscript}" - sending response.create IMMEDIATELY`);
           
-          // LUGGAGE FAST-PATH: If we just asked about luggage and user gives a number, treat it as luggage count
+          // Quick state extraction (passengers, luggage) without blocking
           if (knownBooking.luggageAsked && !knownBooking.luggage) {
             const luggageMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|none|zero|1|2|3|4|5|6|7|8|9|10|0)\b/i);
             const isYesResponse = /\b(yes|yeah|yep|yup|aye)\b/i.test(rawTranscript);
@@ -4265,45 +4267,53 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               }
             }
           }
+          
+          // IMMEDIATE response.create - no waiting!
+          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+            const response = forcedResponseInstructions
+              ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
+              : { modalities: ["audio", "text"] };
+
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response,
+            }));
+            responseCreatedSinceCommit = true;
+            console.log(`[${callId}] >>> response.create sent IMMEDIATELY (fast-path)`);
+          }
+          
+        } else if (!forcedResponseInstructions) {
+          // ADDRESS-CONTAINING RESPONSE: Await extraction to ensure proper address flow
+          console.log(`[${callId}] 🔍 Address-path: awaiting extraction for: "${rawTranscript}"`);
+          await extractBookingFromTranscript(rawTranscript);
+          
+          // Send response.create AFTER extraction completes
+          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+            const response = forcedResponseInstructions
+              ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
+              : { modalities: ["audio", "text"] };
+
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response,
+            }));
+            responseCreatedSinceCommit = true;
+            console.log(`[${callId}] >>> response.create sent (after extraction + geocoding)`);
+          }
         } else {
-          console.log(`[${callId}] 📴 Skipping booking extraction (forcedResponseInstructions set)`);
-        }
-        // Save user message to history
-        if (rawTranscript) {
-          transcriptHistory.push({
-            role: "user",
-            text: rawTranscript,
-            timestamp: new Date().toISOString()
-          });
-          // Broadcast transcript update (queued to preserve order)
-          queueLiveCallBroadcast({});
+          console.log(`[${callId}] 📴 Skipping extraction (forcedResponseInstructions set)`);
+          
+          // Still send response.create for forced instructions
+          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"], instructions: forcedResponseInstructions },
+            }));
+            responseCreatedSinceCommit = true;
+            console.log(`[${callId}] >>> response.create sent (forced instructions)`);
+          }
         }
         
-        socket.send(
-          JSON.stringify({
-            type: "transcript",
-            text: data.transcript,
-            role: "user",
-        }),
-        );
-
-        // CRITICAL: response.create is now sent AFTER geocoding completes (or returns early)
-        // This ensures Ada asks for postcode BEFORE moving on to passengers
-        // If geocoding triggered a clarification via notifyGeocodeResult(), it would have already
-        // sent response.create and returned early, so we won't double-trigger
-        if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
-          const response = forcedResponseInstructions
-            ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
-            : { modalities: ["audio", "text"] };
-
-          openaiWs.send(JSON.stringify({
-            type: "response.create",
-            response,
-          }));
-          responseCreatedSinceCommit = true;
-          console.log(`[${callId}] >>> response.create sent (after transcription.completed + geocoding)`);
-        }
-
         awaitingResponseAfterCommit = false;
       }
 
