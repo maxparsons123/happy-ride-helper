@@ -141,6 +141,9 @@ export default function LiveCalls() {
   // Refs to avoid stale closures in timers/realtime callbacks
   const callsRef = useRef<LiveCall[]>([]);
   const selectedCallRef = useRef<string | null>(null);
+  
+  // Track previous booking addresses to detect changes (for clearing stale geocode results)
+  const prevBookingRef = useRef<{ pickup: string | null; destination: string | null }>({ pickup: null, destination: null });
 
   // Used to keep the transcript feeling "fresh" when switching calls
   const suppressAutoScrollRef = useRef(false);
@@ -352,11 +355,30 @@ export default function LiveCalls() {
       setPickupGeocode(null);
       setDestinationGeocode(null);
       setTripResolveResult(null);
+      prevBookingRef.current = { pickup: null, destination: null };
       return;
     }
 
     const callData = calls.find(c => c.call_id === selectedCall);
     if (!callData) return;
+
+    // Detect when booking addresses change (e.g., new booking started after cancellation)
+    const prevPickup = prevBookingRef.current.pickup;
+    const prevDestination = prevBookingRef.current.destination;
+    const currentPickup = callData.pickup;
+    const currentDestination = callData.destination;
+    
+    // Clear stale geocode results when addresses change significantly
+    const pickupChanged = prevPickup !== currentPickup;
+    const destinationChanged = prevDestination !== currentDestination;
+    
+    if (pickupChanged || destinationChanged) {
+      console.log("[LiveCalls] Booking addresses changed - clearing stale geocode results");
+      if (pickupChanged) setPickupGeocode(null);
+      if (destinationChanged) setDestinationGeocode(null);
+      if (pickupChanged || destinationChanged) setTripResolveResult(null);
+      prevBookingRef.current = { pickup: currentPickup, destination: currentDestination };
+    }
 
     // Use taxi-trip-resolve if enabled, otherwise fallback to basic geocode
     if (useTripResolver) {
