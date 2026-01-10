@@ -8,6 +8,7 @@ import NotFound from "./pages/NotFound";
 import VoiceTest from "./pages/VoiceTest";
 import LiveCalls from "./pages/LiveCalls";
 import SipConfig from "./pages/SipConfig";
+import Agents from "./pages/Agents";
 
 const queryClient = new QueryClient();
 
@@ -22,6 +23,7 @@ const App = () => (
           <Route path="/voice-test" element={<VoiceTest />} />
           <Route path="/live" element={<LiveCalls />} />
           <Route path="/sip-config" element={<SipConfig />} />
+          <Route path="/agents" element={<Agents />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
