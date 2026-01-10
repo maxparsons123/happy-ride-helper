@@ -2545,6 +2545,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         // Log empty/very short transcripts for debugging
         if (!rawTranscript || rawTranscript.trim().length < 2) {
           console.log(`[${callId}] ⚠️ Empty or very short transcript received - likely audio quality issue`);
+          // Don't let any pending "committed" turn trigger an AI response.
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
           return;
         }
         
@@ -2577,6 +2580,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         
         if (isEchoOfAda(rawTranscript)) {
           console.log(`[${callId}] 🔇 Discarding echo transcript: "${rawTranscript}"`);
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
           return;
         }
         
@@ -2706,7 +2711,9 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         // Skip hallucinated transcripts
         if (isHallucination(rawTranscript)) {
           console.log(`[${callId}] 🚫 Skipping hallucinated transcript: "${rawTranscript.substring(0, 100)}..."`);
-          // Don't process, don't save, don't forward
+          // Don't process, don't save, don't forward, and don't trigger a reply.
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
           return;
         }
         
@@ -2732,6 +2739,8 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         
         if (isContextualPhantom(rawTranscript)) {
           console.log(`[${callId}] 🔇 Skipping contextual phantom: "${rawTranscript}"`);
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
           return;
         }
         
@@ -2898,26 +2907,14 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
       }
 
       // Audio buffer committed (server VAD auto-commits)
-      // We delay response.create slightly to let Whisper catch up with transcription
-      // This keeps responses fast while ensuring transcript ordering is correct
+      // IMPORTANT: Do NOT create a response here.
+      // We only create a response AFTER we have a finalized, non-empty transcription.
+      // This prevents Ada from speaking/acting (e.g., cancelling) when the line is silent/noisy.
       if (data.type === "input_audio_buffer.committed") {
         console.log(`[${callId}] >>> Audio buffer committed, item_id: ${data.item_id}`);
         lastAudioCommitAt = Date.now();
         awaitingResponseAfterCommit = true;
         responseCreatedSinceCommit = false;
-        
-        // Small delay (150ms) to let transcription complete before AI responds
-        // This prevents "out of order" transcripts where AI response appears before user input
-        setTimeout(() => {
-          if (sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response: { modalities: ["audio", "text"] },
-            }));
-            responseCreatedSinceCommit = true;
-            console.log(`[${callId}] >>> response.create sent (150ms after committed)`);
-          }
-        }, 150);
       }
 
       // Handle transcription failures - important for debugging missed responses
