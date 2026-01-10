@@ -143,6 +143,56 @@ const CATEGORY_MAP: Record<string, { type: string; keywords: string[] }> = {
 // Simple in-memory cache (per instance)
 const geocodeCache = new Map<string, ResolvedLocation>();
 
+// Common STT (speech-to-text) mishearings - normalize before matching
+const STT_CORRECTIONS: Record<string, string> = {
+  // Road type mishearings
+  "rhodes": "road",
+  "rode": "road",
+  "rowed": "road",
+  "rows": "road",
+  "treat": "street",
+  "treats": "street",
+  "strait": "street",
+  "straight": "street",
+  "streat": "street",
+  "stree": "street",
+  "avenue you": "avenue",
+  "have a new": "avenue",
+  "avnew": "avenue",
+  "lane's": "lane",
+  "lain": "lane",
+  "plains": "lane",
+  "drive's": "drive",
+  "drove": "drive",
+  "clothes": "close",
+  "closed": "close",
+  "crescent's": "crescent",
+  "present": "crescent",
+  "pleasant": "crescent",
+  "grace": "grove",
+  "groves": "grove",
+  "terris": "terrace",
+  "terrorists": "terrace",
+  "terrorist": "terrace",
+  "garden": "gardens",
+  "court's": "court",
+  "caught": "court",
+  "courts": "court",
+  "placed": "place",
+  "places": "place",
+};
+
+// Normalize address by fixing common STT mishearings
+function normalizeSTTAddress(address: string): string {
+  let normalized = address.toLowerCase();
+  for (const [mishearing, correction] of Object.entries(STT_CORRECTIONS)) {
+    // Use word boundary matching to avoid partial replacements
+    const regex = new RegExp(`\\b${mishearing}\\b`, 'gi');
+    normalized = normalized.replace(regex, correction);
+  }
+  return normalized;
+}
+
 // Road type patterns for validation
 const ROAD_TYPES: Record<string, string[]> = {
   "road": ["road", "rd"],
@@ -164,13 +214,16 @@ const ROAD_TYPES: Record<string, string[]> = {
 };
 
 // Extract the road type from an address (e.g., "52A David Road" → "road")
+// Applies STT normalization first to handle mishearings like "Rhodes" → "Road"
 function extractRoadType(address: string): string | null {
-  const lower = address.toLowerCase();
+  // First normalize STT mishearings
+  const normalized = normalizeSTTAddress(address);
+  
   for (const [canonical, variants] of Object.entries(ROAD_TYPES)) {
     for (const variant of variants) {
       // Match as a whole word (e.g., "road" but not "roadside")
       const regex = new RegExp(`\\b${variant}\\b`, 'i');
-      if (regex.test(lower)) {
+      if (regex.test(normalized)) {
         return canonical;
       }
     }
@@ -230,11 +283,17 @@ function streetNamesMatch(queryStreet: string | null, resultStreet: string | nul
 }
 
 // Validate that a geocode result matches the user's input for road type and street name
+// Applies STT normalization to user input to handle mishearings like "David Rhodes" → "David Road"
 function isValidAddressMatch(userInput: string, geocodedAddress: string): boolean {
-  const queryRoadType = extractRoadType(userInput);
+  // Normalize STT mishearings in user input before comparison
+  const normalizedInput = normalizeSTTAddress(userInput);
+  
+  const queryRoadType = extractRoadType(normalizedInput);
   const resultRoadType = extractRoadType(geocodedAddress);
-  const queryStreetName = extractStreetName(userInput);
+  const queryStreetName = extractStreetName(normalizedInput);
   const resultStreetName = extractStreetName(geocodedAddress);
+  
+  console.log(`[AddressValidation] Comparing: input="${userInput}" (normalized="${normalizedInput}") vs result="${geocodedAddress}"`);
   
   // Check road type match (Road vs Street)
   if (!roadTypesMatch(queryRoadType, resultRoadType)) {
