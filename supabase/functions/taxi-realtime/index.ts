@@ -2896,9 +2896,19 @@ Rules:
 
       // TRAVEL HUB LUGGAGE CHECK: If destination or pickup is an airport/station, inject mandatory luggage prompt
       const tripHasTravelHub = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+      console.log(`[${callId}] 🔍 Travel hub check: pickup="${knownBooking.pickup}" dest="${knownBooking.destination}" isTravelHub=${tripHasTravelHub} luggage="${knownBooking.luggage}" asked=${knownBooking.luggageAsked}`);
+      
       if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
-        console.log(`[${callId}] ✈️ Travel hub detected - injecting mandatory luggage prompt`);
+        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - injecting mandatory luggage prompt`);
         knownBooking.luggageAsked = true;
+        
+        // Add to transcript for visibility
+        transcriptHistory.push({
+          role: "system",
+          text: `✈️ Travel hub detected - asking about luggage`,
+          timestamp: new Date().toISOString()
+        });
+        queueLiveCallBroadcast({});
         
         if (openaiWs?.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({
@@ -2908,9 +2918,15 @@ Rules:
               role: "user",
               content: [{ 
                 type: "input_text", 
-                text: `[SYSTEM MANDATORY: This trip involves an airport/station. You MUST ask about luggage BEFORE confirming the booking. Ask: "Are you travelling with any luggage today?" or "How many bags will you have?" Do NOT proceed to confirmation until you know their luggage situation.]` 
+                text: `[SYSTEM - MANDATORY QUESTION REQUIRED: The destination involves a travel hub (airport/station). You MUST ask: "Are you travelling with any bags today?" BEFORE offering to confirm the booking. This is a REQUIRED field for travel hub trips.]` 
               }]
             }
+          }));
+          
+          // Trigger Ada to respond with the luggage question
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
           }));
         }
       }
