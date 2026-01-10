@@ -2363,57 +2363,10 @@ Rules:
                 }
               }
               
-              // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
-              // GOOGLE ARBITER: Geocode both and pick based on Google's resolution quality
-              if (pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
-                console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaPickup}"`);
-                const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
-                if (adaResult.found) {
-                  console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedPickup}" Ada="${adaPickup}"`);
-                  
-                  // GOOGLE ARBITER: Compare what Google resolved each to
-                  const sttGoogleName = (pickupResult.display_name || pickupResult.formatted_address || '').toLowerCase();
-                  const adaGoogleName = (adaResult.display_name || adaResult.formatted_address || '').toLowerCase();
-                  const sttNorm = normalize(extractedPickup);
-                  const adaNorm = normalize(adaPickup);
-                  
-                  // Calculate similarity between input and Google's output
-                  // Higher similarity = Google understood the input better
-                  const sttMatchesStt = sttGoogleName.includes(sttNorm.split(' ')[0]) || sttNorm.includes(sttGoogleName.split(',')[0].trim());
-                  const adaMatchesAda = adaGoogleName.includes(adaNorm.split(' ')[0]) || adaNorm.includes(adaGoogleName.split(',')[0].trim());
-                  
-                  // Check if they resolve to the SAME place (same Google output)
-                  const samePlace = sttGoogleName === adaGoogleName;
-                  
-                  console.log(`[${callId}] 🔬 GOOGLE ARBITER: STT→"${sttGoogleName}" Ada→"${adaGoogleName}" same=${samePlace}`);
-                  
-                  if (samePlace) {
-                    // Both resolve to same place - prefer STT (what customer actually said)
-                    console.log(`[${callId}] 📝 Same place - keeping STT version: "${extractedPickup}"`);
-                  } else if (sttMatchesStt && !adaMatchesAda) {
-                    // STT's input matched Google better - keep STT
-                    console.log(`[${callId}] 📝 STT matched Google better - keeping: "${extractedPickup}"`);
-                  } else if (adaMatchesAda && !sttMatchesStt) {
-                    // Ada's input matched Google better - use Ada
-                    usedAddress = adaPickup;
-                    knownBooking.pickup = adaPickup;
-                    pickupResult = adaResult;
-                    console.log(`[${callId}] 📝 Ada matched Google better - using: "${adaPickup}"`);
-                    transcriptHistory.push({
-                      role: "system",
-                      text: `📝 AUTO-PICK: Used Ada's "${adaPickup}" over STT's "${extractedPickup}" (Google validated)`,
-                      timestamp: new Date().toISOString()
-                    });
-                    queueLiveCallBroadcast({});
-                  } else {
-                    // Neither clearly better - default to STT (what customer said)
-                    console.log(`[${callId}] 📝 Inconclusive - defaulting to STT: "${extractedPickup}"`);
-                  }
-                } else {
-                  // Ada's version failed geocoding - stick with STT (which succeeded)
-                  console.log(`[${callId}] ❌ Ada's version "${adaPickup}" failed geocoding, keeping STT's "${extractedPickup}"`);
-                }
-              }
+              // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
+              // If STT succeeded, trust it - don't double-check with Ada's version
+              // This saves ~500-1000ms per address
+              
               // Clear any stale alternatives - we auto-pick now, no need to store
               knownBooking.pickupAlternative = undefined;
               
@@ -2538,57 +2491,10 @@ Rules:
                 }
               }
               
-              // If extracted succeeds AND Ada has a different interpretation, check if Ada's is ALSO valid
-              // GOOGLE ARBITER: Geocode both and pick based on Google's resolution quality
-              if (destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
-                console.log(`[${callId}] 🔍 DUAL-SOURCE: STT succeeded, checking Ada's version too: "${adaDest}"`);
-                const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
-                if (adaResult.found) {
-                  console.log(`[${callId}] ✅ DUAL-SOURCE: Both geocoded! STT="${extractedDest}" Ada="${adaDest}"`);
-                  
-                  // GOOGLE ARBITER: Compare what Google resolved each to
-                  const sttGoogleName = (destResult.display_name || destResult.formatted_address || '').toLowerCase();
-                  const adaGoogleName = (adaResult.display_name || adaResult.formatted_address || '').toLowerCase();
-                  const sttNorm = normalize(extractedDest);
-                  const adaNorm = normalize(adaDest);
-                  
-                  // Calculate similarity between input and Google's output
-                  // Higher similarity = Google understood the input better
-                  const sttMatchesStt = sttGoogleName.includes(sttNorm.split(' ')[0]) || sttNorm.includes(sttGoogleName.split(',')[0].trim());
-                  const adaMatchesAda = adaGoogleName.includes(adaNorm.split(' ')[0]) || adaNorm.includes(adaGoogleName.split(',')[0].trim());
-                  
-                  // Check if they resolve to the SAME place (same Google output)
-                  const samePlace = sttGoogleName === adaGoogleName;
-                  
-                  console.log(`[${callId}] 🔬 GOOGLE ARBITER: STT→"${sttGoogleName}" Ada→"${adaGoogleName}" same=${samePlace}`);
-                  
-                  if (samePlace) {
-                    // Both resolve to same place - prefer STT (what customer actually said)
-                    console.log(`[${callId}] 📝 Same place - keeping STT version: "${extractedDest}"`);
-                  } else if (sttMatchesStt && !adaMatchesAda) {
-                    // STT's input matched Google better - keep STT
-                    console.log(`[${callId}] 📝 STT matched Google better - keeping: "${extractedDest}"`);
-                  } else if (adaMatchesAda && !sttMatchesStt) {
-                    // Ada's input matched Google better - use Ada
-                    usedAddress = adaDest;
-                    knownBooking.destination = adaDest;
-                    destResult = adaResult;
-                    console.log(`[${callId}] 📝 Ada matched Google better - using: "${adaDest}"`);
-                    transcriptHistory.push({
-                      role: "system",
-                      text: `📝 AUTO-PICK: Used Ada's "${adaDest}" over STT's "${extractedDest}" (Google validated)`,
-                      timestamp: new Date().toISOString()
-                    });
-                    queueLiveCallBroadcast({});
-                  } else {
-                    // Neither clearly better - default to STT (what customer said)
-                    console.log(`[${callId}] 📝 Inconclusive - defaulting to STT: "${extractedDest}"`);
-                  }
-                } else {
-                  // Ada's version failed geocoding - stick with STT (which succeeded)
-                  console.log(`[${callId}] ❌ Ada's version "${adaDest}" failed geocoding, keeping STT's "${extractedDest}"`);
-                }
-              }
+              // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
+              // If STT succeeded, trust it - don't double-check with Ada's version
+              // This saves ~500-1000ms per address
+              
               // Clear any stale alternatives - we auto-pick now, no need to store
               knownBooking.destinationAlternative = undefined;
               
