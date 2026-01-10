@@ -4191,15 +4191,43 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (!forcedResponseInstructions && !isSimpleResponse) {
           await extractBookingFromTranscript(rawTranscript);
         } else if (isSimpleResponse) {
-          console.log(`[${callId}] ⚡ Fast-path: skipping extraction for simple response: "${rawTranscript}"`);
-          // For simple responses, still extract basic info (like passenger count) but skip geocoding
-          const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
-          if (passengerMatch) {
-            const numMap: { [key: string]: number } = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8 };
-            const num = numMap[passengerMatch[1].toLowerCase()] || parseInt(passengerMatch[1]);
-            if (num >= 1 && num <= 8) {
-              knownBooking.passengers = num;
-              console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
+          console.log(`[${callId}] ⚡ Fast-path: simple response: "${rawTranscript}" (luggageAsked=${knownBooking.luggageAsked}, luggage=${knownBooking.luggage})`);
+          
+          // LUGGAGE FAST-PATH: If we just asked about luggage and user gives a number, treat it as luggage count
+          if (knownBooking.luggageAsked && !knownBooking.luggage) {
+            const luggageMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|none|zero|1|2|3|4|5|6|7|8|9|10|0)\b/i);
+            const isYesResponse = /\b(yes|yeah|yep|yup|aye)\b/i.test(rawTranscript);
+            const isNoResponse = /\b(no|none|nope|nah|nothing)\b/i.test(rawTranscript);
+            
+            if (isNoResponse && !luggageMatch) {
+              knownBooking.luggage = "no luggage";
+              console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage" (no response)`);
+            } else if (luggageMatch) {
+              const numMap: { [key: string]: number } = { 
+                'none': 0, 'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 
+                'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10 
+              };
+              const num = numMap[luggageMatch[1].toLowerCase()] ?? parseInt(luggageMatch[1]);
+              if (num === 0) {
+                knownBooking.luggage = "no luggage";
+                console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage"`);
+              } else if (num >= 1 && num <= 10) {
+                knownBooking.luggage = `${num} bag${num > 1 ? 's' : ''}`;
+                console.log(`[${callId}] ⚡ Fast-path: luggage="${knownBooking.luggage}"`);
+              }
+            } else if (isYesResponse) {
+              console.log(`[${callId}] ⚡ Fast-path: luggage answer "yes" without count, waiting for follow-up`);
+            }
+          } else {
+            // Standard simple response handling - extract passenger count
+            const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
+            if (passengerMatch) {
+              const numMap: { [key: string]: number } = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8 };
+              const num = numMap[passengerMatch[1].toLowerCase()] || parseInt(passengerMatch[1]);
+              if (num >= 1 && num <= 8) {
+                knownBooking.passengers = num;
+                console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
+              }
             }
           }
         } else {
@@ -4302,24 +4330,19 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (tripHasTravelHub && !knownBooking.luggage) {
             console.log(`[${callId}] ⛔ BLOCKING book_taxi: Travel hub trip but luggage unknown`);
             
-            // Inject error message to Ada
+            // Inject error message to Ada - she will ask naturally on her next turn
+            // DO NOT send response.create here - it causes duplicate/looping responses
             if (openaiWs?.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
                   type: "message",
-                  role: "user",
+                  role: "system",
                   content: [{ 
                     type: "input_text", 
-                    text: `[SYSTEM ERROR: Cannot complete booking - this trip involves an airport/station but you haven't asked about luggage yet. You MUST ask: "Are you travelling with any luggage today?" and wait for their answer before booking.]` 
+                    text: `[BOOKING BLOCKED: This trip involves a travel hub but luggage info is missing. Ask the customer how many bags they have before confirming.]` 
                   }]
                 }
-              }));
-              
-              // Trigger Ada to respond with the luggage question
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response: { modalities: ["audio", "text"] }
               }));
             }
             
