@@ -322,6 +322,30 @@ export default function LiveCalls() {
     };
   }, [selectedCall, audioEnabled]);
 
+  const inferCityHintFromAddress = (address?: string | null): string | undefined => {
+    if (!address) return undefined;
+    const lower = address.toLowerCase();
+
+    const knownCities = [
+      "coventry",
+      "birmingham",
+      "solihull",
+      "warwick",
+      "leamington",
+      "kenilworth",
+      "nuneaton",
+      "rugby",
+    ];
+
+    for (const city of knownCities) {
+      if (lower.includes(city)) {
+        return city.charAt(0).toUpperCase() + city.slice(1);
+      }
+    }
+
+    return undefined;
+  };
+
   // Geocode addresses when they change and verification is enabled
   useEffect(() => {
     if (!addressVerification || !selectedCall) {
@@ -353,11 +377,18 @@ export default function LiveCalls() {
         }
 
         try {
+          const cityHint =
+            inferCityHintFromAddress(callData.pickup) ||
+            inferCityHintFromAddress(callData.caller_last_pickup) ||
+            inferCityHintFromAddress(callData.destination) ||
+            inferCityHintFromAddress(callData.caller_last_destination) ||
+            "Coventry";
+
           const { data, error } = await supabase.functions.invoke("taxi-trip-resolve", {
             body: {
               pickup_input: callData.pickup || undefined,
               dropoff_input: callData.destination || undefined,
-              caller_city_hint: callData.caller_last_pickup ? undefined : "Coventry", // Default hint
+              caller_city_hint: cityHint,
               passengers: callData.passengers || 1,
               country: "GB"
             }
