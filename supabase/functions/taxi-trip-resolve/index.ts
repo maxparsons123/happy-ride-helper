@@ -143,6 +143,114 @@ const CATEGORY_MAP: Record<string, { type: string; keywords: string[] }> = {
 // Simple in-memory cache (per instance)
 const geocodeCache = new Map<string, ResolvedLocation>();
 
+// Road type patterns for validation
+const ROAD_TYPES: Record<string, string[]> = {
+  "road": ["road", "rd"],
+  "street": ["street", "st"],
+  "avenue": ["avenue", "ave"],
+  "drive": ["drive", "dr"],
+  "lane": ["lane", "ln"],
+  "close": ["close", "cl"],
+  "crescent": ["crescent", "cres"],
+  "way": ["way"],
+  "court": ["court", "ct"],
+  "place": ["place", "pl"],
+  "grove": ["grove", "gr"],
+  "terrace": ["terrace", "ter"],
+  "gardens": ["gardens", "gdns"],
+  "walk": ["walk"],
+  "rise": ["rise"],
+  "hill": ["hill"],
+};
+
+// Extract the road type from an address (e.g., "52A David Road" → "road")
+function extractRoadType(address: string): string | null {
+  const lower = address.toLowerCase();
+  for (const [canonical, variants] of Object.entries(ROAD_TYPES)) {
+    for (const variant of variants) {
+      // Match as a whole word (e.g., "road" but not "roadside")
+      const regex = new RegExp(`\\b${variant}\\b`, 'i');
+      if (regex.test(lower)) {
+        return canonical;
+      }
+    }
+  }
+  return null;
+}
+
+// Check if two road types are compatible (same canonical type)
+function roadTypesMatch(type1: string | null, type2: string | null): boolean {
+  if (!type1 || !type2) return true; // If we can't detect, allow it
+  return type1 === type2;
+}
+
+// Extract the core street name without house number and road type
+// e.g., "52A David Road" → "david", "Davids Rd" → "davids"
+function extractStreetName(address: string): string | null {
+  // Remove house number at start
+  let cleaned = address.replace(/^\d+[a-z]?\s+/i, '').toLowerCase().trim();
+  
+  // Remove road type suffix
+  for (const variants of Object.values(ROAD_TYPES)) {
+    for (const variant of variants) {
+      const regex = new RegExp(`\\s+${variant}\\b.*$`, 'i');
+      cleaned = cleaned.replace(regex, '');
+    }
+  }
+  
+  // Remove common suffixes/city info after comma
+  cleaned = cleaned.split(',')[0].trim();
+  
+  return cleaned || null;
+}
+
+// Check if street names match (strict - "David" ≠ "Davids")
+function streetNamesMatch(queryStreet: string | null, resultStreet: string | null): boolean {
+  if (!queryStreet || !resultStreet) return true; // If we can't detect, allow it
+  
+  // Normalize: remove apostrophes, trim
+  const q = queryStreet.replace(/['']/g, '').trim();
+  const r = resultStreet.replace(/['']/g, '').trim();
+  
+  // Exact match
+  if (q === r) return true;
+  
+  // Allow minor spelling variations (1 character difference) only if both are 6+ chars
+  if (q.length >= 6 && r.length >= 6) {
+    const shorter = q.length <= r.length ? q : r;
+    const longer = q.length > r.length ? q : r;
+    
+    // Check if one is a prefix of the other (with max 1 char difference)
+    if (longer.startsWith(shorter) && (longer.length - shorter.length) <= 1) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Validate that a geocode result matches the user's input for road type and street name
+function isValidAddressMatch(userInput: string, geocodedAddress: string): boolean {
+  const queryRoadType = extractRoadType(userInput);
+  const resultRoadType = extractRoadType(geocodedAddress);
+  const queryStreetName = extractStreetName(userInput);
+  const resultStreetName = extractStreetName(geocodedAddress);
+  
+  // Check road type match (Road vs Street)
+  if (!roadTypesMatch(queryRoadType, resultRoadType)) {
+    console.warn(`[AddressValidation] Road type mismatch: query="${queryRoadType}" result="${resultRoadType}" (input="${userInput}", result="${geocodedAddress}")`);
+    return false;
+  }
+  
+  // Check street name match (David vs Davids)
+  if (!streetNamesMatch(queryStreetName, resultStreetName)) {
+    console.warn(`[AddressValidation] Street name mismatch: query="${queryStreetName}" result="${resultStreetName}" (input="${userInput}", result="${geocodedAddress}")`);
+    return false;
+  }
+  
+  return true;
+}
+
 /**
  * Extract city from text using known UK cities
  */
@@ -287,6 +395,7 @@ async function resolveLocation(
 /**
  * HOUSE ADDRESS - Best for "52A David Road" type addresses
  * Uses Place Autocomplete API with types=address
+ * Validates that road type (Road vs Street) and street name match
  */
 async function resolveHouseAddress(
   query: string,
@@ -314,8 +423,26 @@ async function resolveHouseAddress(
     const data = await resp.json();
     if (data.status !== "OK" || !data.predictions?.length) return null;
     
-    const placeId = data.predictions[0].place_id;
-    return await upgradeWithPlaceDetails(placeId, query);
+    // Try each prediction until we find one that validates
+    for (const prediction of data.predictions) {
+      const placeId = prediction.place_id;
+      const result = await upgradeWithPlaceDetails(placeId, query);
+      
+      if (result) {
+        // Validate road type and street name match
+        if (isValidAddressMatch(query, result.formatted_address)) {
+          console.log(`✅ [HouseAddress] Valid match: "${query}" → "${result.formatted_address}"`);
+          return result;
+        } else {
+          console.warn(`⚠️ [HouseAddress] Rejected mismatch: "${query}" → "${result.formatted_address}"`);
+          // Continue to next prediction
+        }
+      }
+    }
+    
+    // No valid matches found
+    console.warn(`❌ [HouseAddress] No valid matches for: "${query}" (road type/name mismatch)`);
+    return null;
   } catch (e) {
     console.error("[HouseAddress] Error:", e);
     return null;
