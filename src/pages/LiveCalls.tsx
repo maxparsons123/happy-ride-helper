@@ -169,8 +169,27 @@ export default function LiveCalls() {
   }, []);
 
   useEffect(() => {
+    // Cleanup stale active calls older than 10 minutes
+    const cleanupStaleCalls = async () => {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const { error } = await supabase
+        .from("live_calls")
+        .update({ status: "completed", ended_at: new Date().toISOString() })
+        .eq("status", "active")
+        .lt("started_at", tenMinutesAgo);
+      
+      if (error) {
+        console.error("Error cleaning up stale calls:", error);
+      } else {
+        console.log("[LiveCalls] Cleaned up stale active calls older than 10 minutes");
+      }
+    };
+
     // Fetch initial active calls
     const fetchCalls = async () => {
+      // First cleanup stale calls
+      await cleanupStaleCalls();
+
       const { data, error } = await supabase
         .from("live_calls")
         .select("*")
