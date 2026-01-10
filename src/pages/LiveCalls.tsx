@@ -135,6 +135,7 @@ export default function LiveCalls() {
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<AudioQueue | null>(null);
+  const transcriptBottomRef = useRef<HTMLDivElement | null>(null);
 
   // Initialize audio context on user interaction
   const enableAudio = useCallback(() => {
@@ -407,6 +408,16 @@ export default function LiveCalls() {
 
   const selectedCallData = calls.find(c => c.call_id === selectedCall);
   const activeCalls = calls.filter(c => c.status === "active");
+
+  // Auto-scroll transcript to the latest message
+  useEffect(() => {
+    if (!selectedCallData) return;
+
+    // Wait for DOM paint
+    requestAnimationFrame(() => {
+      transcriptBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [selectedCall, selectedCallData?.transcripts?.length]);
 
   const formatTime = (dateStr: string, opts?: { ms?: boolean }) => {
     const date = new Date(dateStr);
@@ -886,6 +897,9 @@ export default function LiveCalls() {
                       ))
                     )}
                   </div>
+
+                  {/* Auto-scroll anchor */}
+                  <div ref={transcriptBottomRef} />
                 </div>
               </Card>
             ) : (
