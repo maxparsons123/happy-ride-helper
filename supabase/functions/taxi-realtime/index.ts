@@ -2220,8 +2220,8 @@ Rules:
             turn_detection: {
               type: "server_vad",
               threshold: 0.6,            // Slightly lower = catch softer speech on phone lines
-              prefix_padding_ms: 400,    // Capture more lead-in for phone audio
-              silence_duration_ms: 1200, // Wait 1.2s of silence (phone audio has more pauses)
+              prefix_padding_ms: 500,    // Capture more lead-in for phone audio
+              silence_duration_ms: 1800, // Wait 1.8s of silence - gives passengers more time to finish
               create_response: false,    // Manual response.create after transcription.completed
               interrupt_response: true   // Allow user to interrupt Ada
             },
