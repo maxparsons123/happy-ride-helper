@@ -24,6 +24,7 @@ interface GeocodeResult {
   found: boolean;
   address: string;
   display_name?: string;
+  place_name?: string; // Business/place name from Google (e.g., "Birmingham Airport")
   lat?: number;
   lon?: number;
   error?: string;
@@ -433,6 +434,7 @@ export default function LiveCalls() {
               found: true,
               address: callData.pickup!,
               display_name: data.pickup.formatted_address,
+              place_name: data.pickup.name, // Business name from Google
               lat: data.pickup.lat,
               lon: data.pickup.lng
             });
@@ -445,6 +447,7 @@ export default function LiveCalls() {
               found: true,
               address: callData.destination!,
               display_name: data.dropoff.formatted_address,
+              place_name: data.dropoff.name, // Business name from Google
               lat: data.dropoff.lat,
               lon: data.dropoff.lng
             });
@@ -868,7 +871,7 @@ export default function LiveCalls() {
                           {addressVerification && pickupGeocode && !pickupGeocode.loading && (
                             <p className={`text-xs pl-6 ${pickupGeocode.found ? "text-green-400" : "text-red-400"}`}>
                               {pickupGeocode.found 
-                                ? `✓ ${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
+                                ? `✓ ${pickupGeocode.place_name ? `${pickupGeocode.place_name} - ` : ""}${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
                                 : `✗ ${pickupGeocode.error || "Not found"}`}
                             </p>
                           )}
@@ -893,7 +896,7 @@ export default function LiveCalls() {
                           {addressVerification && destinationGeocode && !destinationGeocode.loading && (
                             <p className={`text-xs pl-6 ${destinationGeocode.found ? "text-green-400" : "text-red-400"}`}>
                               {destinationGeocode.found 
-                                ? `✓ ${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
+                                ? `✓ ${destinationGeocode.place_name ? `${destinationGeocode.place_name} - ` : ""}${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
                                 : `✗ ${destinationGeocode.error || "Not found"}`}
                             </p>
                           )}
