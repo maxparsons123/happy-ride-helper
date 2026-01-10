@@ -235,8 +235,17 @@ serve(async (req) => {
       }
     };
 
-    // If we have caller coordinates, try nearby search first for local places
-    if (searchLat && searchLon) {
+    // Check if user is asking for something "nearby" (e.g., "nearby Tesco", "nearest pharmacy")
+    const nearbyKeywords = /\b(nearby|nearest|closest|near me|around here)\b/i;
+    const isNearbyQuery = nearbyKeywords.test(address);
+
+    // STRATEGY:
+    // 1. For "nearby" queries with coordinates → use Nearby Search
+    // 2. For regular addresses → use Text Search first, then Geocoding API
+    
+    if (isNearbyQuery && searchLat && searchLon) {
+      // User explicitly asked for nearby - use Nearby Search
+      console.log(`[Geocode] Nearby query detected: "${address}"`);
       const nearbyResult = await googleNearbySearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY);
       if (nearbyResult.found) {
         cacheResult(nearbyResult);
@@ -247,7 +256,7 @@ serve(async (req) => {
       }
     }
 
-    // Try text search with location bias (check for multiple matches if requested)
+    // Try Text Search first (best for addresses and place names)
     const textSearchResult = await googleTextSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
     if (textSearchResult.found) {
       cacheResult(textSearchResult);
