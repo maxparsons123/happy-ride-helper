@@ -4791,21 +4791,25 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                   output: JSON.stringify({
                     success: false,
                     message:
-                      "Customer has not confirmed they're finished. Ask again if they need anything else, then wait.",
+                      "Customer has not confirmed they're finished. Do NOT speak. Wait silently for their reply.",
                   }),
                 },
               }),
             );
 
-            // Nudge the model to continue (otherwise it may stall after the tool rejection)
-            setTimeout(() => {
-              openaiWs?.send(
-                JSON.stringify({
-                  type: "response.create",
-                  response: { modalities: ["audio", "text"] },
-                }),
-              );
-            }, 50);
+            // IMPORTANT: If we're already in the "Anything else?" follow-up window, DO NOT prompt again.
+            // Re-prompting here causes the duplicate "anything else" question.
+            if (followupAskedAt === 0) {
+              // Nudge the model to continue (otherwise it may stall after the tool rejection)
+              setTimeout(() => {
+                openaiWs?.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: { modalities: ["audio", "text"] },
+                  }),
+                );
+              }, 50);
+            }
             return;
           }
 
