@@ -1235,6 +1235,7 @@ serve(async (req) => {
   // Check if an address matches any in the caller's address history (BOTH pickups AND dropoffs)
   // This avoids unnecessary geocoding calls for addresses we've already verified
   // Returns the matched address WITH CITY appended if it doesn't already have one
+  // NOW INCLUDES: Fuzzy house number matching for STT errors (e.g., "5208" → "52A")
   const matchesKnownAddress = (address: string): string | null => {
     if (!address) return null;
     
@@ -1243,6 +1244,61 @@ serve(async (req) => {
     if (allKnownAddresses.length === 0) return null;
     
     const normalizedInput = normalize(address).toLowerCase();
+    
+    // FUZZY HOUSE NUMBER PATTERNS: Common STT mishearings
+    // "5208" → could be "52A", "520B", "52 8" etc.
+    // "528" → could be "52A", "52B" etc.
+    const fuzzyHouseNumberVariants = (houseNum: string): string[] => {
+      const variants: string[] = [houseNum];
+      
+      // Pattern: digits followed by digits that could be letters (5208 → 52A, 520B)
+      // Common: last digit or two could be a letter suffix
+      const match = houseNum.match(/^(\d+)(\d)$/);
+      if (match) {
+        const base = match[1];
+        const lastDigit = match[2];
+        // Map digits to likely letter mishearings
+        const digitToLetter: Record<string, string[]> = {
+          "0": ["o"],
+          "1": ["i", "l"],
+          "2": ["z"],
+          "3": ["e"],
+          "4": ["a"],  // CRITICAL: "4" often heard as "A"
+          "5": ["s"],
+          "6": ["g", "b"],
+          "7": ["t"],
+          "8": ["a", "b"],  // CRITICAL: "8" often heard as "A" or "B" (5208 → 52A)
+          "9": ["g", "p"],
+        };
+        
+        if (digitToLetter[lastDigit]) {
+          for (const letter of digitToLetter[lastDigit]) {
+            variants.push(base + letter);
+          }
+        }
+      }
+      
+      // Pattern: 4-digit number where last two digits could be letter+something (5208 → 52 0 8)
+      const match2 = houseNum.match(/^(\d{2})(\d)(\d)$/);
+      if (match2) {
+        const base = match2[1];
+        const d1 = match2[2];
+        const d2 = match2[3];
+        // "5208" → base=52, d1=0, d2=8 → try "52A" (d2=8 → A)
+        const digitToLetter: Record<string, string[]> = {
+          "0": ["o"], "1": ["i", "l"], "2": ["z"], "3": ["e"], 
+          "4": ["a"], "5": ["s"], "6": ["g", "b"], "7": ["t"], 
+          "8": ["a", "b"], "9": ["g", "p"],
+        };
+        if (digitToLetter[d2]) {
+          for (const letter of digitToLetter[d2]) {
+            variants.push(base + letter);
+          }
+        }
+      }
+      
+      return [...new Set(variants)]; // Dedupe
+    };
     
     for (const known of allKnownAddresses) {
       const normalizedKnown = normalize(known).toLowerCase();
@@ -1265,12 +1321,52 @@ serve(async (req) => {
         return match ? match[1].toLowerCase() : addr.toLowerCase();
       };
       
+      // Extract just the house number
+      const extractHouseNumber = (addr: string): string | null => {
+        const match = addr.match(/^(\d+[a-z]?)/i);
+        return match ? match[1].toLowerCase() : null;
+      };
+      
+      // Extract street name (without house number)
+      const extractStreetName = (addr: string): string | null => {
+        const match = addr.match(/^\d+[a-z]?\s+(.+)/i);
+        return match ? match[1].toLowerCase().split(",")[0].trim() : null;
+      };
+      
       const inputCore = extractCore(normalizedInput);
       const knownCore = extractCore(normalizedKnown);
       
+      // Standard core match
       if (inputCore === knownCore && inputCore.length > 5) {
         console.log(`[${callId}] 📍 Address matched from history (core): "${address}" → "${known}"`);
         return enrichAddressWithCity(known);
+      }
+      
+      // FUZZY HOUSE NUMBER MATCH: Compare street names and try house number variants
+      const inputHouseNum = extractHouseNumber(normalizedInput);
+      const knownHouseNum = extractHouseNumber(normalizedKnown);
+      const inputStreet = extractStreetName(normalizedInput);
+      const knownStreet = extractStreetName(normalizedKnown);
+      
+      if (inputHouseNum && knownHouseNum && inputStreet && knownStreet) {
+        // Check if street names match (or are very similar)
+        const streetsMatch = 
+          inputStreet === knownStreet || 
+          inputStreet.includes(knownStreet) || 
+          knownStreet.includes(inputStreet) ||
+          // Handle STT road type variations (already normalized by caller)
+          inputStreet.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '') === 
+          knownStreet.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '');
+        
+        if (streetsMatch) {
+          // Try fuzzy variants of the input house number
+          const inputVariants = fuzzyHouseNumberVariants(inputHouseNum);
+          
+          if (inputVariants.includes(knownHouseNum)) {
+            console.log(`[${callId}] 📍 Address matched from history (FUZZY house number): "${address}" → "${known}" [${inputHouseNum} → ${knownHouseNum}]`);
+            return enrichAddressWithCity(known);
+          }
+        }
       }
     }
     
