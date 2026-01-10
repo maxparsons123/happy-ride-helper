@@ -242,9 +242,11 @@ serve(async (req) => {
   let callerTotalBookings = 0; // Number of previous bookings
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
-  let callerCity = ""; // City extracted from caller's last addresses or phone area
+  let callerCity = ""; // City extracted from caller's pickup addresses (NOT destinations)
   let callerKnownAreas: Record<string, number> = {}; // {"Coventry": 5, "Birmingham": 1} - city mention counts
   let callerTrustedAddresses: string[] = []; // Array of addresses the caller has successfully used before
+  let callerPickupAddresses: string[] = []; // Array of verified PICKUP addresses (for local area bias)
+  let callerDropoffAddresses: string[] = []; // Array of verified DROPOFF addresses (for destination reference)
   let callerAddressAliases: Record<string, string> = {}; // {"home": "52A David Road", "work": "Coventry Train Station"}
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
@@ -1340,7 +1342,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Lookup caller info (including trusted addresses)
       const { data, error } = await supabase
         .from("callers")
-        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas, address_aliases")
+        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas, address_aliases, pickup_addresses, dropoff_addresses")
         .in("phone_number", phoneCandidates)
         .maybeSingle();
 
@@ -1363,6 +1365,16 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         // Load known_areas for reference
         callerKnownAreas = (data.known_areas as Record<string, number>) || {};
 
+        // Load pickup and dropoff address arrays
+        callerPickupAddresses = (data.pickup_addresses as string[]) || [];
+        callerDropoffAddresses = (data.dropoff_addresses as string[]) || [];
+        if (callerPickupAddresses.length > 0) {
+          console.log(`[${callId}] 📍 Loaded ${callerPickupAddresses.length} pickup addresses`);
+        }
+        if (callerDropoffAddresses.length > 0) {
+          console.log(`[${callId}] 🎯 Loaded ${callerDropoffAddresses.length} dropoff addresses`);
+        }
+
         // Load address aliases (e.g., {"home": "52A David Road", "work": "Train Station"})
         callerAddressAliases = (data.address_aliases as Record<string, string>) || {};
         if (Object.keys(callerAddressAliases).length > 0) {
@@ -1370,27 +1382,51 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         }
 
         // Derive primary city (bias) with better priorities:
-        // 1) Any explicit city embedded in saved aliases (most reliable for "home" area)
-        // 2) last_pickup city
-        // 3) known_areas counts
-        // 4) last_destination city
-        const aliasCities = Object.values(callerAddressAliases)
-          .map((a) => extractCityFromAddress(a))
-          .filter(Boolean) as string[];
-
-        if (aliasCities.length > 0) {
-          const counts = aliasCities.reduce<Record<string, number>>((acc, c) => {
-            acc[c] = (acc[c] || 0) + 1;
-            return acc;
-          }, {});
-          const topAliasCity = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
-          if (topAliasCity) {
-            callerCity = topAliasCity;
-            console.log(`[${callId}] 🏙️ Primary city from address_aliases: ${callerCity}`);
+        // IMPORTANT: Only use PICKUP addresses for city bias, NOT destinations!
+        // 1) Cities from saved pickup_addresses (most reliable for caller's local area)
+        // 2) Any explicit city embedded in saved aliases (home/work locations)
+        // 3) last_pickup city
+        // 4) known_areas counts
+        // 5) Default to Coventry (service area)
+        
+        // 1) Cities from pickup_addresses
+        if (!callerCity && callerPickupAddresses.length > 0) {
+          const pickupCities = callerPickupAddresses
+            .map((a) => extractCityFromAddress(a))
+            .filter(Boolean) as string[];
+          if (pickupCities.length > 0) {
+            const counts = pickupCities.reduce<Record<string, number>>((acc, c) => {
+              acc[c] = (acc[c] || 0) + 1;
+              return acc;
+            }, {});
+            const topPickupCity = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+            if (topPickupCity) {
+              callerCity = topPickupCity;
+              console.log(`[${callId}] 🏙️ Primary city from pickup_addresses: ${callerCity}`);
+            }
           }
         }
 
-        // 2) last_pickup city
+        // 2) Cities from address aliases (if not already set from pickup_addresses)
+        if (!callerCity) {
+          const aliasCities = Object.values(callerAddressAliases)
+            .map((a) => extractCityFromAddress(a))
+            .filter(Boolean) as string[];
+
+          if (aliasCities.length > 0) {
+            const counts = aliasCities.reduce<Record<string, number>>((acc, c) => {
+              acc[c] = (acc[c] || 0) + 1;
+              return acc;
+            }, {});
+            const topAliasCity = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+            if (topAliasCity) {
+              callerCity = topAliasCity;
+              console.log(`[${callId}] 🏙️ Primary city from address_aliases: ${callerCity}`);
+            }
+          }
+        }
+
+        // 3) last_pickup city
         if (!callerCity && callerLastPickup) {
           const pickupCity = extractCityFromAddress(callerLastPickup);
           if (pickupCity) {
@@ -1399,7 +1435,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           }
         }
 
-        // 3) known_areas
+        // 4) known_areas (pickup-derived, not destination)
         if (!callerCity && Object.keys(callerKnownAreas).length > 0) {
           const topCity = Object.entries(callerKnownAreas).sort((a, b) => b[1] - a[1])[0];
           if (topCity) {
@@ -1408,11 +1444,8 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           }
         }
 
-        // 4) last_destination city
-        if (!callerCity && callerLastDestination) {
-          callerCity = extractCityFromAddress(callerLastDestination);
-          if (callerCity) console.log(`[${callId}] 🏙️ Primary city from last_destination: ${callerCity}`);
-        }
+        // NOTE: We intentionally do NOT use last_destination for city bias
+        // Destinations can be anywhere and shouldn't influence pickup geocoding
 
         
         // If still no city, geocode the history address to get city from Google
@@ -1600,20 +1633,21 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Check if caller exists
       const { data: existing } = await supabase
         .from("callers")
-        .select("id, total_bookings, trusted_addresses")
+        .select("id, total_bookings, trusted_addresses, pickup_addresses, dropoff_addresses")
         .eq("phone_number", userPhone)
         .maybeSingle();
       
       // Build updated trusted addresses list (add pickup and destination if not already present)
-      const MAX_TRUSTED_ADDRESSES = 10; // Limit to prevent unbounded growth
+      const MAX_ADDRESSES = 10; // Limit to prevent unbounded growth
       let updatedTrusted: string[] = existing?.trusted_addresses || callerTrustedAddresses || [];
+      let updatedPickupAddrs: string[] = existing?.pickup_addresses || callerPickupAddresses || [];
+      let updatedDropoffAddrs: string[] = existing?.dropoff_addresses || callerDropoffAddresses || [];
       
       // Normalize addresses for comparison (use core address without city for deduplication)
-      const normalizedTrusted = new Set(updatedTrusted.map(a => {
-        // Extract core address (house number + street) for comparison
-        const core = normalize(a).toLowerCase().split(',')[0].trim();
-        return core;
-      }));
+      const normalizeForComparison = (a: string) => normalize(a).toLowerCase().split(',')[0].trim();
+      const normalizedTrusted = new Set(updatedTrusted.map(normalizeForComparison));
+      const normalizedPickups = new Set(updatedPickupAddrs.map(normalizeForComparison));
+      const normalizedDropoffs = new Set(updatedDropoffAddrs.map(normalizeForComparison));
       
       // Helper to enrich address with city if missing
       const ensureAddressHasCity = (addr: string): string => {
@@ -1628,30 +1662,48 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         return addr;
       };
       
-      // Add pickup if not already trusted (with city for future lookups)
-      const pickupCore = normalize(booking.pickup || "").toLowerCase().split(',')[0].trim();
-      if (booking.pickup && !normalizedTrusted.has(pickupCore)) {
-        const enrichedPickup = ensureAddressHasCity(booking.pickup);
-        updatedTrusted.push(enrichedPickup);
-        console.log(`[${callId}] 🏠 Adding pickup to trusted addresses: "${enrichedPickup}"`);
-      }
-      
-      // Add destination if not already trusted (with city for future lookups)
-      const destCore = normalize(booking.destination || "").toLowerCase().split(',')[0].trim();
-      if (booking.destination && !normalizedTrusted.has(destCore)) {
-        const enrichedDest = ensureAddressHasCity(booking.destination);
-        updatedTrusted.push(enrichedDest);
-        console.log(`[${callId}] 🏠 Adding destination to trusted addresses: "${enrichedDest}"`);
-      }
-      
-      // Trim to max size (keep most recent)
-      if (updatedTrusted.length > MAX_TRUSTED_ADDRESSES) {
-        updatedTrusted = updatedTrusted.slice(-MAX_TRUSTED_ADDRESSES);
-      }
-      
-      // Enrich last_pickup and last_destination with city for future lookups
       const enrichedPickup = ensureAddressHasCity(booking.pickup);
       const enrichedDestination = ensureAddressHasCity(booking.destination);
+      
+      // Add pickup to pickup_addresses (separate from destinations)
+      const pickupCore = normalizeForComparison(booking.pickup || "");
+      if (booking.pickup && !normalizedPickups.has(pickupCore)) {
+        updatedPickupAddrs.push(enrichedPickup);
+        console.log(`[${callId}] 📍 Adding to pickup_addresses: "${enrichedPickup}"`);
+      }
+      
+      // Add destination to dropoff_addresses (separate from pickups)
+      const destCore = normalizeForComparison(booking.destination || "");
+      if (booking.destination && !normalizedDropoffs.has(destCore)) {
+        updatedDropoffAddrs.push(enrichedDestination);
+        console.log(`[${callId}] 🎯 Adding to dropoff_addresses: "${enrichedDestination}"`);
+      }
+      
+      // Also add both to trusted_addresses for compatibility
+      if (booking.pickup && !normalizedTrusted.has(pickupCore)) {
+        updatedTrusted.push(enrichedPickup);
+      }
+      if (booking.destination && !normalizedTrusted.has(destCore)) {
+        updatedTrusted.push(enrichedDestination);
+      }
+      
+      // Trim all arrays to max size (keep most recent)
+      if (updatedTrusted.length > MAX_ADDRESSES) {
+        updatedTrusted = updatedTrusted.slice(-MAX_ADDRESSES);
+      }
+      if (updatedPickupAddrs.length > MAX_ADDRESSES) {
+        updatedPickupAddrs = updatedPickupAddrs.slice(-MAX_ADDRESSES);
+      }
+      if (updatedDropoffAddrs.length > MAX_ADDRESSES) {
+        updatedDropoffAddrs = updatedDropoffAddrs.slice(-MAX_ADDRESSES);
+      }
+      
+      // Update known_areas with the pickup city (NOT destination city!)
+      const pickupCity = extractCityFromAddress(enrichedPickup);
+      if (pickupCity) {
+        callerKnownAreas[pickupCity] = (callerKnownAreas[pickupCity] || 0) + 1;
+        console.log(`[${callId}] 🏙️ Updated known_areas with pickup city: ${pickupCity}`);
+      }
       
       if (existing) {
         // Update existing caller
@@ -1660,11 +1712,14 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           last_destination: enrichedDestination,
           total_bookings: (existing.total_bookings || 0) + 1,
           trusted_addresses: updatedTrusted,
+          pickup_addresses: updatedPickupAddrs,
+          dropoff_addresses: updatedDropoffAddrs,
+          known_areas: callerKnownAreas,
           updated_at: new Date().toISOString()
         }).eq("phone_number", userPhone);
         
         if (error) console.error(`[${callId}] Update caller error:`, error);
-        else console.log(`[${callId}] 💾 Updated caller ${userPhone} (${existing.total_bookings + 1} bookings, ${updatedTrusted.length} trusted addresses)`);
+        else console.log(`[${callId}] 💾 Updated caller ${userPhone} (${existing.total_bookings + 1} bookings, ${updatedPickupAddrs.length} pickups, ${updatedDropoffAddrs.length} dropoffs)`);
       } else {
         // Insert new caller
         const { error } = await supabase.from("callers").insert({
@@ -1673,15 +1728,20 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           last_pickup: enrichedPickup,
           last_destination: enrichedDestination,
           total_bookings: 1,
-          trusted_addresses: updatedTrusted
+          trusted_addresses: updatedTrusted,
+          pickup_addresses: updatedPickupAddrs,
+          dropoff_addresses: updatedDropoffAddrs,
+          known_areas: callerKnownAreas
         });
         
         if (error) console.error(`[${callId}] Insert caller error:`, error);
-        else console.log(`[${callId}] 💾 New caller saved: ${userPhone} with ${updatedTrusted.length} trusted addresses`);
+        else console.log(`[${callId}] 💾 New caller saved: ${userPhone} with ${updatedPickupAddrs.length} pickups, ${updatedDropoffAddrs.length} dropoffs`);
       }
       
       // Update local cache for this session
       callerTrustedAddresses = updatedTrusted;
+      callerPickupAddresses = updatedPickupAddrs;
+      callerDropoffAddresses = updatedDropoffAddrs;
     } catch (e) {
       console.error(`[${callId}] Save caller exception:`, e);
     }
