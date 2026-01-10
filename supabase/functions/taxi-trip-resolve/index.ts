@@ -394,7 +394,7 @@ async function resolveLocation(
 
 /**
  * HOUSE ADDRESS - Best for "52A David Road" type addresses
- * Uses Place Autocomplete API with types=address
+ * Uses Text Search API with location bias (no autocomplete)
  * Validates that road type (Road vs Street) and street name match
  */
 async function resolveHouseAddress(
@@ -403,39 +403,37 @@ async function resolveHouseAddress(
   lng: number,
   country: string = "GB"
 ): Promise<ResolvedLocation | null> {
-  console.log(`[HouseAddress] Autocomplete: '${query}'`);
+  console.log(`[HouseAddress] TextSearch: '${query}'`);
   
   const params = new URLSearchParams({
-    input: query,
-    types: "address",
+    query: query,
     location: `${lat},${lng}`,
     radius: "5000", // 5km - local only
-    components: `country:${country.toLowerCase()}`,
     key: GOOGLE_API_KEY!,
   });
   
-  const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params}`;
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
   
   try {
     const resp = await fetch(url);
     if (!resp.ok) return null;
     
     const data = await resp.json();
-    if (data.status !== "OK" || !data.predictions?.length) return null;
+    if (data.status !== "OK" || !data.results?.length) return null;
     
-    // Try each prediction until we find one that validates
-    for (const prediction of data.predictions) {
-      const placeId = prediction.place_id;
-      const result = await upgradeWithPlaceDetails(placeId, query);
+    // Try each result until we find one that validates
+    for (const result of data.results) {
+      const placeId = result.place_id;
+      const detailed = await upgradeWithPlaceDetails(placeId, query);
       
-      if (result) {
+      if (detailed) {
         // Validate road type and street name match
-        if (isValidAddressMatch(query, result.formatted_address)) {
-          console.log(`✅ [HouseAddress] Valid match: "${query}" → "${result.formatted_address}"`);
-          return result;
+        if (isValidAddressMatch(query, detailed.formatted_address)) {
+          console.log(`✅ [HouseAddress] Valid match: "${query}" → "${detailed.formatted_address}"`);
+          return detailed;
         } else {
-          console.warn(`⚠️ [HouseAddress] Rejected mismatch: "${query}" → "${result.formatted_address}"`);
-          // Continue to next prediction
+          console.warn(`⚠️ [HouseAddress] Rejected mismatch: "${query}" → "${detailed.formatted_address}"`);
+          // Continue to next result
         }
       }
     }
