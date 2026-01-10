@@ -2333,19 +2333,6 @@ Rules:
                 }
 
                 console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
-              }
-
-                const normalizedDestination = normalize(usedAddress);
-                if (geocodeClarificationSent.destination === normalizedDestination) {
-                  geocodeClarificationSent.destination = undefined;
-                  clearGeocodeClarification(
-                    "destination",
-                    usedAddress,
-                    destResult.formatted_address || destResult.display_name
-                  );
-                }
-
-                console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
               } else {
                 // Address not found - ask Ada to request correction
                 notifyGeocodeResult("destination", knownBooking.destination!, false);
