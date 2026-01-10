@@ -2612,11 +2612,19 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             return true;
           }
           
-          // Common Whisper hallucination phrases
+          // Common Whisper hallucination phrases - expanded to catch video/podcast artifacts
+          // IMPORTANT: Don't filter single words like "yes", "no", "ok" - those are valid responses!
+          // Only filter obvious YouTube/podcast outros and artifacts
           const hallucinationPhrases = [
             /thank you for watching/i,
+            /thanks for watching/i,
             /please subscribe/i,
             /like and subscribe/i,
+            /see you (all )?(on the|in the|next)/i,  // "See you all on the next one" - common video outro
+            /see you next time/i,
+            /until next time/i,
+            /catch you (later|next|on the)/i,
+            /take care.+bye/i,  // "Take care, bye!" - outro phrase
             /\[music\]/i,
             /\[applause\]/i,
             /subtitles by/i,
@@ -2691,6 +2699,31 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         if (isHallucination(rawTranscript)) {
           console.log(`[${callId}] 🚫 Skipping hallucinated transcript: "${rawTranscript.substring(0, 100)}..."`);
           // Don't process, don't save, don't forward
+          return;
+        }
+        
+        // CONTEXTUAL PHANTOM FILTER: Filter "Thank you." or "Bye." ONLY if:
+        // It appears right after Ada stopped speaking (likely echo/phantom)
+        const isContextualPhantom = (text: string): boolean => {
+          const t = text.trim().toLowerCase();
+          // These short phrases are often phantoms when they appear right after Ada speaks
+          const phantomCandidates = ['thank you', 'thanks', 'bye', 'goodbye', 'cheers'];
+          
+          // Check if it's a short phantom-candidate phrase
+          const isShortPhrase = phantomCandidates.some(p => t === p || t === p + '.');
+          if (!isShortPhrase) return false;
+          
+          // Check if Ada just finished speaking (within 800ms) - likely a phantom/echo
+          if (aiStoppedSpeakingAt > 0 && Date.now() - aiStoppedSpeakingAt < 800) {
+            console.log(`[${callId}] 🔇 Contextual phantom: "${text}" appeared ${Date.now() - aiStoppedSpeakingAt}ms after Ada finished`);
+            return true;
+          }
+          
+          return false;
+        };
+        
+        if (isContextualPhantom(rawTranscript)) {
+          console.log(`[${callId}] 🔇 Skipping contextual phantom: "${rawTranscript}"`);
           return;
         }
         
