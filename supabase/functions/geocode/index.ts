@@ -286,6 +286,7 @@ serve(async (req) => {
 });
 
 // Nearby Search - finds places closest to the caller's location
+// IMPORTANT: Only use for business/POI lookups, NOT for street addresses
 async function googleNearbySearch(
   query: string,
   lat: number,
@@ -293,6 +294,14 @@ async function googleNearbySearch(
   apiKey: string
 ): Promise<GeocodeResult> {
   try {
+    // Skip nearby search for street addresses (contain numbers followed by letters)
+    // This prevents "52A David Road" from matching random businesses
+    const looksLikeStreetAddress = /^\d+[a-z]?\s+/i.test(query.trim());
+    if (looksLikeStreetAddress) {
+      console.log(`[Geocode] Nearby search: skipping (looks like street address: "${query}")`);
+      return { found: false, address: query };
+    }
+
     const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
       `?location=${lat},${lon}` +
       `&rankby=distance` +
@@ -309,7 +318,22 @@ async function googleNearbySearch(
       return { found: false, address: query };
     }
 
-    const placeId = data.results[0].place_id;
+    // Validate that the result actually matches the query (fuzzy check)
+    const bestResult = data.results[0];
+    const resultName = (bestResult.name || "").toLowerCase();
+    const queryLower = query.toLowerCase();
+    
+    // Check if the result name contains key words from the query
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+    const matchingWords = queryWords.filter(w => resultName.includes(w));
+    const matchRatio = queryWords.length > 0 ? matchingWords.length / queryWords.length : 0;
+    
+    if (matchRatio < 0.3) {
+      console.log(`[Geocode] Nearby search: rejecting poor match - "${bestResult.name}" doesn't match "${query}" (ratio: ${matchRatio.toFixed(2)})`);
+      return { found: false, address: query };
+    }
+
+    const placeId = bestResult.place_id;
     if (!placeId) {
       return { found: false, address: query };
     }
