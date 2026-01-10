@@ -3829,21 +3829,39 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           return;
         }
         
-        // IMMEDIATE BROADCAST: Send user transcript to frontend RIGHT AWAY
-        // This ensures user's words appear instantly, not after extraction/geocoding
-        socket.send(JSON.stringify({
-          type: "transcript",
-          text: rawTranscript,
-          role: "user",
-        }));
+        // === ECHO DETECTION (must run BEFORE broadcast to prevent phantom UI updates) ===
+        const isEchoOfAda = (transcript: string): boolean => {
+          if (!currentAssistantText) return false;
+          const tLower = transcript.toLowerCase().trim();
+          const ada = currentAssistantText.toLowerCase();
+          
+          // Check if user transcript is a substantial substring of Ada's recent speech
+          // (at least 20 chars and appears in Ada's text)
+          if (tLower.length >= 20 && ada.includes(tLower)) {
+            console.log(`[${callId}] 🔇 ECHO DETECTED: User transcript matches Ada's speech`);
+            return true;
+          }
+          
+          // Check for Ada's signature phrases being echoed back
+          const adaPhrases = ['247 radio carz', 'lovely to hear from you', 'shall i book that', 
+            'is there anything else', 'have a great journey', 'your driver will be with you'];
+          for (const phrase of adaPhrases) {
+            if (tLower.includes(phrase)) {
+              console.log(`[${callId}] 🔇 ECHO DETECTED: Ada phrase "${phrase}" in user transcript`);
+              return true;
+            }
+          }
+          
+          return false;
+        };
         
-        // Save to history immediately (for context)
-        transcriptHistory.push({
-          role: "user",
-          text: rawTranscript,
-          timestamp: new Date().toISOString()
-        });
-        queueLiveCallBroadcast({});
+        // Check echo FIRST - don't broadcast phantom echoes
+        if (isEchoOfAda(rawTranscript)) {
+          console.log(`[${callId}] 🔇 Discarding echo transcript (pre-broadcast): "${rawTranscript}"`);
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
+          return;
+        }
 
         // If Ada asked "anything else?" and the customer clearly said NO,
         // force a clean goodbye + end_call (prevents looping the follow-up question).
@@ -3877,38 +3895,6 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             forcedResponseInstructions =
               "The customer has said they do NOT need anything else. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'no_further_assistance'. Do NOT ask any further questions.";
           }
-        }
-        // This is more reliable than time-based filtering on phone lines
-        const isEchoOfAda = (transcript: string): boolean => {
-          if (!currentAssistantText) return false;
-          const t = transcript.toLowerCase().trim();
-          const ada = currentAssistantText.toLowerCase();
-          
-          // Check if user transcript is a substantial substring of Ada's recent speech
-          // (at least 20 chars and appears in Ada's text)
-          if (t.length >= 20 && ada.includes(t)) {
-            console.log(`[${callId}] 🔇 ECHO DETECTED: User transcript matches Ada's speech`);
-            return true;
-          }
-          
-          // Check for Ada's signature phrases being echoed back
-          const adaPhrases = ['247 radio carz', 'lovely to hear from you', 'shall i book that', 
-            'is there anything else', 'have a great journey', 'your driver will be with you'];
-          for (const phrase of adaPhrases) {
-            if (t.includes(phrase)) {
-              console.log(`[${callId}] 🔇 ECHO DETECTED: Ada phrase "${phrase}" in user transcript`);
-              return true;
-            }
-          }
-          
-          return false;
-        };
-        
-        if (isEchoOfAda(rawTranscript)) {
-          console.log(`[${callId}] 🔇 Discarding echo transcript: "${rawTranscript}"`);
-          awaitingResponseAfterCommit = false;
-          responseCreatedSinceCommit = true;
-          return;
         }
         
         // Filter Whisper hallucinations - common patterns when there's silence/noise
@@ -4073,6 +4059,22 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           responseCreatedSinceCommit = true;
           return;
         }
+        
+        // === ALL FILTERS PASSED - NOW BROADCAST ===
+        // CRITICAL: We broadcast AFTER echo/hallucination/phantom filters to prevent phantom UI updates
+        socket.send(JSON.stringify({
+          type: "transcript",
+          text: rawTranscript,
+          role: "user",
+        }));
+        
+        // Save to history now that we know it's valid
+        transcriptHistory.push({
+          role: "user",
+          text: rawTranscript,
+          timestamp: new Date().toISOString()
+        });
+        queueLiveCallBroadcast({});
         
         console.log(`[${callId}] User said: ${rawTranscript}`);
         lastFinalUserTranscript = rawTranscript;
