@@ -239,10 +239,11 @@ serve(async (req) => {
     const nearbyKeywords = /\b(nearby|nearest|closest|near me|around here)\b/i;
     const isNearbyQuery = nearbyKeywords.test(address);
 
-    // STRATEGY:
+    // STRATEGY (updated):
     // 1. For "nearby" queries with coordinates → use Nearby Search
-    // 2. For house-number addresses (e.g., "52A David Road") → use Places Autocomplete first
+    // 2. For house-number addresses (e.g., "52A David Road") → use location-biased Text Search with tight radius (8km)
     // 3. For regular addresses/places → use Text Search, then Geocoding API
+    // NOTE: Autocomplete is too fuzzy (matches "David Road" to "David Street") - avoid for residential addresses
     
     if (isNearbyQuery && searchLat && searchLon) {
       // User explicitly asked for nearby - use Nearby Search
@@ -258,11 +259,33 @@ serve(async (req) => {
     }
 
     // Detect house-number addresses (e.g., "52A David Road", "123 High Street")
-    // These need Autocomplete for accurate resolution, not Text Search
     const looksLikeHouseAddress = /^\d+[a-z]?\s+[a-z]/i.test(address.trim());
     
-    if (looksLikeHouseAddress) {
-      console.log(`[Geocode] House-number address detected: "${address}" - trying Autocomplete first`);
+    if (looksLikeHouseAddress && searchLat && searchLon) {
+      // Use "loose local" text search with tight 8km radius - more precise than Autocomplete
+      console.log(`[Geocode] House-number address detected: "${address}" - trying local Text Search (8km radius)`);
+      const looseLocalResult = await googleLooseLocalSearch(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, check_ambiguous);
+      if (looseLocalResult.found) {
+        cacheResult(looseLocalResult);
+        return new Response(
+          JSON.stringify(looseLocalResult),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.log(`[Geocode] Local Text Search failed for "${address}", trying Geocoding API`);
+      
+      // Try Geocoding API next (more precise for exact addresses)
+      const geocodeResult = await googleGeocode(address, city, country, GOOGLE_MAPS_API_KEY);
+      if (geocodeResult.found) {
+        cacheResult(geocodeResult);
+        return new Response(
+          JSON.stringify(geocodeResult),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      
+      // Last resort: try Autocomplete (but with road type validation)
+      console.log(`[Geocode] Geocoding API failed for "${address}", trying Autocomplete as fallback`);
       const autocompleteResult = await googlePlacesAutocomplete(address, searchLat, searchLon, GOOGLE_MAPS_API_KEY, city);
       if (autocompleteResult.found) {
         cacheResult(autocompleteResult);
@@ -271,7 +294,6 @@ serve(async (req) => {
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
-      console.log(`[Geocode] Autocomplete failed for "${address}", falling back to Text Search`);
     }
 
     // Try Text Search (best for business names and general places)
@@ -496,6 +518,118 @@ async function googleNearbySearch(
 
   } catch (error) {
     console.error("[Geocode] Nearby search error:", error);
+    return { found: false, address: query, error: String(error) };
+  }
+}
+
+// Loose Local Search - location-biased text search with tight 8km radius
+// Best for residential addresses like "52A David Road" - more precise than Autocomplete
+async function googleLooseLocalSearch(
+  query: string,
+  lat: number,
+  lon: number,
+  apiKey: string,
+  returnMultiple: boolean = false
+): Promise<GeocodeResult> {
+  try {
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+      `?query=${encodeURIComponent(query)}` +
+      `&location=${lat},${lon}` +
+      `&radius=8000` +  // 8km radius - tight local search
+      `&key=${apiKey}`;
+
+    console.log(`[Geocode] Loose local search: "${query}" near ${lat},${lon} (8km radius)`);
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      console.log(`[Geocode] Loose local search: no results (status: ${data.status})`);
+      return { found: false, address: query };
+    }
+
+    // Extract query road type for validation
+    const queryRoadType = extractRoadType(query);
+    const queryHouseNumber = query.match(/^(\d+[a-z]?)/i)?.[1]?.toLowerCase();
+    
+    console.log(`[Geocode] Query analysis: house="${queryHouseNumber}", roadType="${queryRoadType}"`);
+
+    // Find a valid match with road type validation
+    let validResult = null;
+    
+    for (const result of data.results) {
+      const resultAddress = result.formatted_address || result.name || "";
+      const resultRoadType = extractRoadType(resultAddress);
+      
+      // Check road type match (CRITICAL: Road ≠ Street)
+      if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
+        console.log(`[Geocode] Loose local REJECTED: "${resultAddress}" - road type mismatch (query: ${queryRoadType}, result: ${resultRoadType})`);
+        continue;
+      }
+      
+      // Check house number if present
+      if (queryHouseNumber) {
+        const resultLower = resultAddress.toLowerCase();
+        if (!resultLower.includes(queryHouseNumber)) {
+          console.log(`[Geocode] Loose local REJECTED: "${resultAddress}" - house number "${queryHouseNumber}" not found`);
+          continue;
+        }
+      }
+      
+      validResult = result;
+      break;
+    }
+
+    if (!validResult) {
+      console.log(`[Geocode] Loose local search: no valid matches after validation`);
+      return { found: false, address: query };
+    }
+
+    // Handle multiple matches for disambiguation
+    if (returnMultiple && data.results.length > 1) {
+      const uniqueAreas = new Set<string>();
+      const matches: GeocodeMatch[] = [];
+      
+      for (const result of data.results.slice(0, 5)) {
+        const resultAddress = result.formatted_address || "";
+        const resultRoadType = extractRoadType(resultAddress);
+        
+        // Only include matches with correct road type
+        if (queryRoadType && resultRoadType && !roadTypesMatch(queryRoadType, resultRoadType)) {
+          continue;
+        }
+        
+        const areaKey = resultAddress.split(',').slice(-2).join(',') || result.place_id;
+        if (!uniqueAreas.has(areaKey)) {
+          uniqueAreas.add(areaKey);
+          matches.push({
+            display_name: result.name || resultAddress,
+            formatted_address: resultAddress,
+            lat: result.geometry?.location?.lat,
+            lon: result.geometry?.location?.lng,
+            place_id: result.place_id,
+          });
+        }
+      }
+      
+      if (matches.length > 1) {
+        console.log(`[Geocode] Loose local: multiple matches found (${matches.length})`);
+        const bestMatch = await getPlaceDetails(validResult.place_id, query, apiKey);
+        bestMatch.multiple_matches = matches;
+        return bestMatch;
+      }
+    }
+
+    const placeId = validResult.place_id;
+    if (!placeId) {
+      return { found: false, address: query };
+    }
+
+    console.log(`[Geocode] Loose local match: "${validResult.formatted_address || validResult.name}"`);
+    return await getPlaceDetails(placeId, query, apiKey);
+
+  } catch (error) {
+    console.error("[Geocode] Loose local search error:", error);
     return { found: false, address: query, error: String(error) };
   }
 }
