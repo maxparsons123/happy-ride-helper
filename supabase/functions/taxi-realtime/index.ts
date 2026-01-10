@@ -2307,11 +2307,12 @@ Rules:
           
           // Geocode pickup if it changed and hasn't been verified yet
           if (pickupChanged && !knownBooking.pickupVerified) {
-            // TRUSTED ADDRESS CHECK: Auto-verify if caller has used this pickup before
-            const trustedPickup = matchesTrustedAddress(knownBooking.pickup!);
-            if (trustedPickup) {
+            // KNOWN ADDRESS CHECK: Auto-verify if caller has used this address before (trusted OR pickup/dropoff history)
+            const knownPickup = matchesKnownAddress(knownBooking.pickup!) || matchesTrustedAddress(knownBooking.pickup!);
+            if (knownPickup) {
+              knownBooking.pickup = knownPickup; // Use the enriched version with city
               knownBooking.pickupVerified = true;
-              console.log(`[${callId}] 🏠 Pickup auto-verified (trusted): "${knownBooking.pickup}" → "${trustedPickup}"`);
+              console.log(`[${callId}] 🏠 Pickup auto-verified (known address): "${knownBooking.pickup}" → "${knownPickup}"`);
             } else {
               // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
               const extractedPickup = knownBooking.pickup!;
@@ -2481,11 +2482,12 @@ Rules:
           
           // Geocode destination if it changed and hasn't been verified yet
           if (destinationChanged && !knownBooking.destinationVerified) {
-            // TRUSTED ADDRESS CHECK: Auto-verify if caller has used this destination before
-            const trustedDestination = matchesTrustedAddress(knownBooking.destination!);
-            if (trustedDestination) {
+            // KNOWN ADDRESS CHECK: Auto-verify if caller has used this address before (trusted OR pickup/dropoff history)
+            const knownDestination = matchesKnownAddress(knownBooking.destination!) || matchesTrustedAddress(knownBooking.destination!);
+            if (knownDestination) {
+              knownBooking.destination = knownDestination; // Use the enriched version with city
               knownBooking.destinationVerified = true;
-              console.log(`[${callId}] 🏠 Destination auto-verified (trusted): "${knownBooking.destination}" → "${trustedDestination}"`);
+              console.log(`[${callId}] 🏠 Destination auto-verified (known address): "${knownBooking.destination}" → "${knownDestination}"`);
             } else {
               // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
               const extractedDest = knownBooking.destination!;
