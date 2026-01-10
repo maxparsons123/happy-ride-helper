@@ -2066,7 +2066,7 @@ Rules:
 
                     transcriptHistory.push({
                       role: "system",
-                      text: `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying)`,
+                      text: `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the street name — ask ONLY for postcode (or nearby landmark), do NOT ask for the street name again.`,
                       timestamp: new Date().toISOString(),
                     });
                     queueLiveCallBroadcast({});
@@ -2237,11 +2237,11 @@ Rules:
                       google: cleanGoogleAddress,
                     });
 
-                    transcriptHistory.push({
-                      role: "system",
-                      text: `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying)`,
-                      timestamp: new Date().toISOString(),
-                    });
+                     transcriptHistory.push({
+                       role: "system",
+                       text: `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the place name — ask ONLY for postcode / area (or a nearby landmark), do NOT ask them to repeat the name unless they correct it.`,
+                       timestamp: new Date().toISOString(),
+                     });
                     queueLiveCallBroadcast({});
 
                     notifyGeocodeResult("destination", knownBooking.destination!, false);
