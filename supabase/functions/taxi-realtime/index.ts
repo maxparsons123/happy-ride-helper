@@ -254,9 +254,12 @@ ENDING THE CALL - CRITICAL:
 - After booking is confirmed, ask: "Is there anything else I can help you with?"
 - IMPORTANT: STOP speaking after you ask this question. Do NOT say goodbye in the same turn.
 - Wait for the customer's NEXT response.
-- ONLY if the customer clearly says "no", "that's all", "nothing else", "I'm good", "that's fine", "that's alright", "thanks", etc:
+- If the customer says "YES", "yeah", "please", "yes please", "actually yes", or anything affirmative:
+  - This means they WANT another booking or have another request. Ask "What else can I help with?" and continue.
+- ONLY if the customer clearly says "NO", "nope", "that's all", "nothing else", "I'm good", "that's it", "no thanks":
   - Say a brief goodbye ("You're welcome! Have a great journey, goodbye!")
   - Then IMMEDIATELY call the end_call function
+- WARNING: "thanks", "cheers", "ta" alone are AMBIGUOUS - they could mean "yes thanks" (wanting more) or farewell. If unsure, ask: "Was there anything else?"
 
 GENERAL RULES:
 - Never ask for information you already have
@@ -4108,31 +4111,46 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
             t.length < 15 // Short responses after goodbye are almost always acknowledgements
           );
           
+          // Check if customer said YES (they want something else) - these should NEVER end the call
+          const customerSaidYes =
+            t === "yes" ||
+            t === "yeah" ||
+            t === "yep" ||
+            t === "please" ||
+            t === "yes please" ||
+            t === "yeah please" ||
+            t.includes("yes please") ||
+            t.includes("yeah please") ||
+            t.includes("actually yes") ||
+            t.includes("one more") ||
+            t.includes("another") ||
+            (t.includes("yeah") && t.includes("please"));
+          
+          // Only accept end_call if customer clearly declined, NOT if they said yes
           const customerSaidNo =
-            isFinalAcknowledgement ||
-            t === "no" ||
-            t === "nope" ||
-            t === "nah" ||
-            t.includes("nothing else") ||
-            t.includes("that's all") ||
-            t.includes("thats all") ||
-            t.includes("that's it") ||
-            t.includes("thats it") ||
-            t.includes("all sorted") ||
-            t.includes("i'm good") ||
-            t.includes("im good") ||
-            t.includes("no thanks") ||
-            t.includes("no thank you") ||
-            t.includes("that's fine") ||
-            t.includes("thats fine") ||
-            t.includes("that's alright") ||
-            t.includes("thats alright") ||
-            t.includes("that's okay") ||
-            t.includes("thats ok") ||
-            t.includes("that's ok") ||
-            t.includes("thanks") ||
-            t.includes("thank you") ||
-            t.includes("cheers");
+            !customerSaidYes && (
+              isFinalAcknowledgement ||
+              t === "no" ||
+              t === "nope" ||
+              t === "nah" ||
+              t.includes("nothing else") ||
+              t.includes("that's all") ||
+              t.includes("thats all") ||
+              t.includes("that's it") ||
+              t.includes("thats it") ||
+              t.includes("all sorted") ||
+              t.includes("i'm good") ||
+              t.includes("im good") ||
+              t.includes("no thanks") ||
+              t.includes("no thank you") ||
+              t.includes("that's fine") ||
+              t.includes("thats fine") ||
+              t.includes("that's alright") ||
+              t.includes("thats alright") ||
+              t.includes("that's okay") ||
+              t.includes("thats ok") ||
+              t.includes("that's ok")
+            );
 
           const assistantSaidGoodbye = (() => {
             const lastAssistant = [...transcriptHistory].reverse().find((m) => m.role === "assistant");
