@@ -2103,25 +2103,52 @@ Rules:
                   askForAddressDisambiguation("pickup", pickupResult.multiple_matches);
                   return; // Wait for customer to clarify
                 }
-                knownBooking.pickupVerified = true;
 
-                // USE GOOGLE'S CORRECTED ADDRESS - fuzzy matching may have fixed spelling
-                // Extract a clean address from Google's response (strip country suffix)
+                // USE GOOGLE'S CORRECTED ADDRESS - BUT ONLY IF IT'S A SAFE "SPELLING" CORRECTION.
+                // We MUST NOT replace a correct customer address with an unrelated Google match.
                 const googleAddress = pickupResult.display_name || pickupResult.formatted_address;
                 if (googleAddress && googleAddress !== usedAddress) {
-                  // Google returned a different (corrected) address - use it!
-                  const cleanGoogleAddress = googleAddress.replace(/,\s*UK$/i, '').replace(/,\s*United Kingdom$/i, '').trim();
-                  console.log(`[${callId}] 🔧 Google fuzzy-corrected address: "${usedAddress}" → "${cleanGoogleAddress}"`);
-                  knownBooking.pickup = cleanGoogleAddress;
-                  usedAddress = cleanGoogleAddress;
-                  
-                  transcriptHistory.push({
-                    role: "system",
-                    text: `🔧 GOOGLE CORRECTED: "${extractedPickup}" → "${cleanGoogleAddress}"`,
-                    timestamp: new Date().toISOString()
-                  });
-                  queueLiveCallBroadcast({ pickup: cleanGoogleAddress });
+                  const cleanGoogleAddress = googleAddress
+                    .replace(/,\s*UK$/i, "")
+                    .replace(/,\s*United Kingdom$/i, "")
+                    .trim();
+
+                  const safe =
+                    isSafeAddressCorrection(extractedPickup, cleanGoogleAddress) ||
+                    isSafeAddressCorrection(usedAddress, cleanGoogleAddress);
+
+                  if (safe) {
+                    console.log(`[${callId}] 🔧 Google fuzzy-corrected pickup (safe): "${usedAddress}" → "${cleanGoogleAddress}"`);
+                    knownBooking.pickup = cleanGoogleAddress;
+                    usedAddress = cleanGoogleAddress;
+
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `🔧 GOOGLE CORRECTED: "${extractedPickup}" → "${cleanGoogleAddress}"`,
+                      timestamp: new Date().toISOString(),
+                    });
+                    queueLiveCallBroadcast({ pickup: cleanGoogleAddress });
+                  } else {
+                    console.log(`[${callId}] ⚠️ Google pickup mismatch (unsafe correction) - keeping customer input`, {
+                      customer: extractedPickup,
+                      usedAddress,
+                      google: cleanGoogleAddress,
+                    });
+
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying)`,
+                      timestamp: new Date().toISOString(),
+                    });
+                    queueLiveCallBroadcast({});
+
+                    // Treat as NOT verified and ask for postcode / clarification.
+                    notifyGeocodeResult("pickup", knownBooking.pickup!, false);
+                    return;
+                  }
                 }
+
+                knownBooking.pickupVerified = true;
 
                 const normalizedPickup = normalize(usedAddress);
                 if (geocodeClarificationSent.pickup === normalizedPickup) {
@@ -2250,24 +2277,63 @@ Rules:
                   askForAddressDisambiguation("destination", destResult.multiple_matches);
                   return; // Wait for customer to clarify
                 }
-                knownBooking.destinationVerified = true;
 
-                // USE GOOGLE'S CORRECTED ADDRESS - fuzzy matching may have fixed spelling
+                // USE GOOGLE'S CORRECTED ADDRESS - BUT ONLY IF IT'S A SAFE "SPELLING" CORRECTION.
                 const googleAddress = destResult.display_name || destResult.formatted_address;
                 if (googleAddress && googleAddress !== usedAddress) {
-                  // Google returned a different (corrected) address - use it!
-                  const cleanGoogleAddress = googleAddress.replace(/,\s*UK$/i, '').replace(/,\s*United Kingdom$/i, '').trim();
-                  console.log(`[${callId}] 🔧 Google fuzzy-corrected address: "${usedAddress}" → "${cleanGoogleAddress}"`);
-                  knownBooking.destination = cleanGoogleAddress;
-                  usedAddress = cleanGoogleAddress;
-                  
-                  transcriptHistory.push({
-                    role: "system",
-                    text: `🔧 GOOGLE CORRECTED: "${extractedDest}" → "${cleanGoogleAddress}"`,
-                    timestamp: new Date().toISOString()
-                  });
-                  queueLiveCallBroadcast({ destination: cleanGoogleAddress });
+                  const cleanGoogleAddress = googleAddress
+                    .replace(/,\s*UK$/i, "")
+                    .replace(/,\s*United Kingdom$/i, "")
+                    .trim();
+
+                  const safe =
+                    isSafeAddressCorrection(extractedDest, cleanGoogleAddress) ||
+                    isSafeAddressCorrection(usedAddress, cleanGoogleAddress);
+
+                  if (safe) {
+                    console.log(`[${callId}] 🔧 Google fuzzy-corrected destination (safe): "${usedAddress}" → "${cleanGoogleAddress}"`);
+                    knownBooking.destination = cleanGoogleAddress;
+                    usedAddress = cleanGoogleAddress;
+
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `🔧 GOOGLE CORRECTED: "${extractedDest}" → "${cleanGoogleAddress}"`,
+                      timestamp: new Date().toISOString(),
+                    });
+                    queueLiveCallBroadcast({ destination: cleanGoogleAddress });
+                  } else {
+                    console.log(`[${callId}] ⚠️ Google destination mismatch (unsafe correction) - keeping customer input`, {
+                      customer: extractedDest,
+                      usedAddress,
+                      google: cleanGoogleAddress,
+                    });
+
+                    transcriptHistory.push({
+                      role: "system",
+                      text: `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying)`,
+                      timestamp: new Date().toISOString(),
+                    });
+                    queueLiveCallBroadcast({});
+
+                    notifyGeocodeResult("destination", knownBooking.destination!, false);
+                    return;
+                  }
                 }
+
+                knownBooking.destinationVerified = true;
+
+                const normalizedDestination = normalize(usedAddress);
+                if (geocodeClarificationSent.destination === normalizedDestination) {
+                  geocodeClarificationSent.destination = undefined;
+                  clearGeocodeClarification(
+                    "destination",
+                    usedAddress,
+                    destResult.formatted_address || destResult.display_name
+                  );
+                }
+
+                console.log(`[${callId}] ✅ Destination verified: ${destResult.display_name}`);
+              }
 
                 const normalizedDestination = normalize(usedAddress);
                 if (geocodeClarificationSent.destination === normalizedDestination) {
@@ -2787,7 +2853,7 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         const rawTranscript = data.transcript || "";
         console.log(`[${callId}] Raw user transcript: "${rawTranscript}" (length: ${rawTranscript.length})`);
         noteUserActivity("transcription.completed");
-        
+
         // Log empty/very short transcripts for debugging
         if (!rawTranscript || rawTranscript.trim().length < 2) {
           console.log(`[${callId}] ⚠️ Empty or very short transcript received - likely audio quality issue`);
@@ -2796,8 +2862,31 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
           responseCreatedSinceCommit = true;
           return;
         }
-        
-        // CONTENT-BASED ECHO FILTER: Check if transcript matches what Ada just said
+
+        // If Ada asked "anything else?" and the customer clearly said NO,
+        // force a clean goodbye + end_call (prevents looping the follow-up question).
+        let forcedResponseInstructions: string | null = null;
+        const lastAssistantTextLower = ([...transcriptHistory]
+          .reverse()
+          .find((m) => m.role === "assistant")?.text
+          ?.toLowerCase() || "");
+
+        const adaAskedAnythingElse =
+          lastAssistantTextLower.includes("is there anything else i can help") ||
+          lastAssistantTextLower.includes("anything else i can help");
+
+        if (adaAskedAnythingElse) {
+          const t = rawTranscript.toLowerCase().trim();
+          const saidNo =
+            /^(no|nope|nah)\b/.test(t) ||
+            /\b(no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|i'?m\s+good|im\s+good|i'?m\s+fine|im\s+fine)\b/.test(t);
+          const saidYes = /\b(yes|yeah|yep|sure|please|ok|okay)\b/.test(t);
+
+          if (saidNo && !saidYes) {
+            forcedResponseInstructions =
+              "The customer has said they do NOT need anything else. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'no_further_assistance'. Do NOT ask any further questions.";
+          }
+        }
         // This is more reliable than time-based filtering on phone lines
         const isEchoOfAda = (transcript: string): boolean => {
           if (!currentAssistantText) return false;
@@ -3131,9 +3220,13 @@ Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "
         // Prefer sending response.create AFTER we have the finalized transcript processed.
         // This helps multilingual language-locking and address/name injections take effect before Ada replies.
         if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+          const response = forcedResponseInstructions
+            ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
+            : { modalities: ["audio", "text"] };
+
           openaiWs.send(JSON.stringify({
             type: "response.create",
-            response: { modalities: ["audio", "text"] },
+            response,
           }));
           responseCreatedSinceCommit = true;
           console.log(`[${callId}] >>> response.create sent (after transcription.completed)`);
