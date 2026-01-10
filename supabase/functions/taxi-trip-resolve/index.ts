@@ -743,6 +743,18 @@ async function resolveLocationGlobal(
   if (!query || !GOOGLE_API_KEY) return null;
   
   const startsWithNumber = /^\d+/.test(query);
+
+  // CRITICAL: If this is a PICKUP-style house address with NO city/postcode context,
+  // do NOT guess globally (prevents wrong towns like Lymm vs Coventry).
+  const hasUkPostcode = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(query);
+  const hasUkOutcode = /\b[A-Z]{1,2}\d[A-Z\d]?\b/i.test(query);
+  const hasCommaContext = query.includes(",");
+  const hasCityInText = Boolean(extractCityFromText(query));
+
+  if (strictPickup && startsWithNumber && !hasUkPostcode && !hasUkOutcode && !hasCommaContext && !hasCityInText) {
+    console.warn(`[ResolveGlobal] Refusing global pickup match without area/postcode: "${query}"`);
+    return null;
+  }
   
   // 1️⃣ HOUSE ADDRESS - use global Text Search with strict validation
   if (startsWithNumber) {
@@ -1197,7 +1209,20 @@ serve(async (req) => {
     // If an input was provided but we couldn't resolve it, surface an error (prevents random/incorrect matches)
     if (pickup_input && !pickup && !response.error) {
       response.ok = false;
-      response.error = `Pickup "${pickup_input}" could not be found near ${cityContext || "your area"}. Please provide a house number and street, or a well-known landmark.`;
+
+      const p = pickup_input.trim();
+      const startsWithNumber = /^\d+/.test(p);
+      const hasUkPostcode = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(p);
+      const hasUkOutcode = /\b[A-Z]{1,2}\d[A-Z\d]?\b/i.test(p);
+      const hasCommaContext = p.includes(",");
+      const hasCityInText = Boolean(extractCityFromText(p));
+
+      // If we have no city context and the pickup is a bare house+street, force clarification
+      if (!cityContext && startsWithNumber && !hasUkPostcode && !hasUkOutcode && !hasCommaContext && !hasCityInText) {
+        response.error = `Pickup "${pickup_input}" needs an area/town or postcode so I don't match the wrong address. What area are you calling from (e.g., Coventry/Birmingham), or what's the postcode?`;
+      } else {
+        response.error = `Pickup "${pickup_input}" could not be found near ${cityContext || "your area"}. Please provide a house number and street, or a well-known landmark.`;
+      }
     }
 
     if (dropoff_input && !dropoff && !response.error) {
