@@ -3817,6 +3817,22 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           responseCreatedSinceCommit = true;
           return;
         }
+        
+        // IMMEDIATE BROADCAST: Send user transcript to frontend RIGHT AWAY
+        // This ensures user's words appear instantly, not after extraction/geocoding
+        socket.send(JSON.stringify({
+          type: "transcript",
+          text: rawTranscript,
+          role: "user",
+        }));
+        
+        // Save to history immediately (for context)
+        transcriptHistory.push({
+          role: "user",
+          text: rawTranscript,
+          timestamp: new Date().toISOString()
+        });
+        queueLiveCallBroadcast({});
 
         // If Ada asked "anything else?" and the customer clearly said NO,
         // force a clean goodbye + end_call (prevents looping the follow-up question).
