@@ -728,7 +728,84 @@ async function upgradeWithPlaceDetails(
 }
 
 /**
+ * GLOBAL LOCATION SEARCH (no city bias)
+ * Used when caller has no city context - searches UK-wide with strict validation
+ * For house addresses, uses Text Search with validation to avoid wrong matches
+ */
+async function resolveLocationGlobal(
+  query: string,
+  country: string = "GB",
+  strictPickup: boolean = false
+): Promise<ResolvedLocation | null> {
+  console.log(`[ResolveGlobal] START: '${query}', strict=${strictPickup}`);
+  
+  query = query.trim();
+  if (!query || !GOOGLE_API_KEY) return null;
+  
+  const startsWithNumber = /^\d+/.test(query);
+  
+  // 1️⃣ HOUSE ADDRESS - use global Text Search with strict validation
+  if (startsWithNumber) {
+    console.log(`[ResolveGlobal] House address detected - using global Text Search with validation`);
+    
+    // Search UK-wide with address validation
+    const searchQuery = query.toLowerCase().includes("uk") ? query : `${query}, UK`;
+    
+    const params = new URLSearchParams({
+      query: searchQuery,
+      key: GOOGLE_API_KEY!,
+    });
+    
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
+    
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      
+      const data = await resp.json();
+      if (data.status !== "OK" || !data.results?.length) {
+        console.warn(`[ResolveGlobal] No results for: "${query}"`);
+        return null;
+      }
+      
+      // Try each result with validation
+      for (const result of data.results) {
+        const placeId = result.place_id;
+        const detailed = await upgradeWithPlaceDetails(placeId, query);
+        
+        if (detailed) {
+          // Validate road type and street name match
+          if (isValidAddressMatch(query, detailed.formatted_address)) {
+            console.log(`✅ [ResolveGlobal] Valid match: "${query}" → "${detailed.formatted_address}"`);
+            return detailed;
+          } else {
+            console.warn(`⚠️ [ResolveGlobal] Rejected mismatch: "${query}" → "${detailed.formatted_address}"`);
+          }
+        }
+      }
+      
+      console.warn(`❌ [ResolveGlobal] No valid matches for: "${query}" (all failed validation)`);
+      return null;
+    } catch (e) {
+      console.error("[ResolveGlobal] Error:", e);
+      return null;
+    }
+  }
+  
+  // 2️⃣ NON-HOUSE ADDRESS - use global text search (for POIs, cities, etc.)
+  const globalRes = await resolveGlobalTextSearch(query, country);
+  if (globalRes) {
+    console.log(`✅ [ResolveGlobal] Global OK: ${globalRes.formatted_address}`);
+    return globalRes;
+  }
+  
+  console.warn(`❌ [ResolveGlobal] NO_RESULTS for: ${query}`);
+  return null;
+}
+
+/**
  * Legacy geocodeAddress wrapper - calls resolveLocation
+ * IMPORTANT: No default city bias - if no city hint is provided, use global search with validation
  */
 async function geocodeAddress(
   rawInput: string,
@@ -737,8 +814,18 @@ async function geocodeAddress(
   country: string = "GB",
   strictPickup: boolean = false
 ): Promise<ResolvedLocation | null> {
-  const coords = coordsHint || getCityCoords(cityHint || "") || { lat: 52.4862, lng: -1.8904 }; // Default to Birmingham
-  return resolveLocation(rawInput, coords.lat, coords.lng, cityHint || "", strictPickup, country);
+  // Get coords from hint if available - NO DEFAULT CITY to avoid wrong matches
+  const coords = coordsHint || getCityCoords(cityHint || "");
+  
+  if (coords) {
+    // Have city context - use local biased search
+    return resolveLocation(rawInput, coords.lat, coords.lng, cityHint || "", strictPickup, country);
+  } else {
+    // NO city context - use global search with strict validation
+    // This avoids defaulting to Birmingham and finding wrong addresses
+    console.log(`[geocodeAddress] No city context for "${rawInput}" - using global search`);
+    return resolveLocationGlobal(rawInput, country, strictPickup);
+  }
 }
 
 /**
