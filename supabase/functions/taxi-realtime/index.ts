@@ -656,6 +656,21 @@ serve(async (req) => {
   // then prefer it over the model's paraphrasing when the booking is confirmed.
   let knownBooking: KnownBooking = {};
 
+  type PendingHighFareConfirmation = {
+    booking: {
+      pickup: string;
+      destination: string;
+      passengers: number;
+      pickupTime: string;
+      vehicleType: string | null;
+    };
+    verifiedFare: number;
+  };
+
+  // When we ask the customer to confirm a high fare, store the booking so we can
+  // force a single follow-up tool call on "Yes" (prevents double-confirm loops).
+  let pendingHighFareConfirmation: PendingHighFareConfirmation | null = null;
+
   // Track whether we've already asked Ada to clarify a given address.
   // This prevents a "stuck" loop where an early failed geocode prompt keeps repeating
   // even after the address later verifies successfully.
@@ -3483,13 +3498,57 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
         // If we're about to end the call (e.g., user said "bye"), skip extraction entirely.
         // OPTIMIZATION: Skip heavy extraction for simple confirmations/short responses
         const transcriptLower = rawTranscript.trim().toLowerCase();
+
+        // If the customer is confirming the high-fare verification, force a single tool call.
+        // This prevents Ada from asking for confirmation twice (model uncertainty) on expensive trips.
+        if (
+          pendingHighFareConfirmation &&
+          /^(yes|yeah|yep|yup|please|confirm|go ahead|that's right|that is right|correct|sounds good)\b/i.test(transcriptLower)
+        ) {
+          console.log(`[${callId}] ✅ High-fare verification confirmed by customer: "${rawTranscript}"`);
+
+          const b = pendingHighFareConfirmation.booking;
+          const verifiedFare = pendingHighFareConfirmation.verifiedFare;
+
+          // Clear first to avoid any chance of re-entry
+          pendingHighFareConfirmation = null;
+
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            const instruction = `[SYSTEM: CUSTOMER CONFIRMED - PROCEED NOW]
+The customer just confirmed they want to proceed with the verified high-fare booking.
+
+IMMEDIATELY call the book_taxi tool now using EXACTLY:
+- pickup: "${b.pickup}"
+- destination: "${b.destination}"
+- passengers: ${b.passengers}
+- pickup_time: "${b.pickupTime}"
+- vehicle_type: ${b.vehicleType ? `"${b.vehicleType}"` : "null"}
+
+Do NOT ask the customer to confirm again. Use the previously verified fare (£${verifiedFare}).`;
+
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: instruction }],
+              },
+            }));
+
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] },
+            }));
+
+            responseCreatedSinceCommit = true;
+          }
+        }
         
         // Fast-path: Skip extraction for these patterns (no address info to extract)
         const skipExtractionPatterns = [
           // Simple confirmations
           /^(yes|yeah|yep|yup|no|nope|nah|ok|okay|sure|please|right|correct|that's right|that's correct)\b/i,
           // Thank you variations
-          /^(thanks|thank you|cheers|ta|lovely|great|perfect|brilliant)\b/i,
           // Simple negatives (with filler words)
           /^no[,.]?\s*(no[,.]?\s*)?(that'?s?\s*(fine|all|it|ok|okay)|i'?m\s*(good|fine|ok|okay)|nothing|thanks)/i,
           // Passenger counts (with optional filler)
@@ -3626,6 +3685,8 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
           };
 
           bookingData = finalBooking;
+          // If we had a pending high-fare confirmation, it is now being actioned.
+          pendingHighFareConfirmation = null;
           console.log(`[${callId}] Booking (final):`, finalBooking);
           
           // Calculate fare and distance using taxi-trip-resolve function
@@ -3796,10 +3857,22 @@ Say: "Hello ${callerName}! Lovely to hear from you again. How can I help with yo
             
             // Mark as verified so we don't loop forever
             knownBooking.highFareVerified = true;
-            
+
             // Store the calculated fare so we use the SAME value when they confirm
             knownBooking.verifiedFare = fare;
             const verifiedFare = fare;
+
+            // Store booking details so we can force a tool call on the next "Yes"
+            pendingHighFareConfirmation = {
+              booking: {
+                pickup: finalBooking.pickup,
+                destination: finalBooking.destination,
+                passengers: Number(finalBooking.passengers || 1),
+                pickupTime: finalBooking.pickupTime || "ASAP",
+                vehicleType: finalBooking.vehicleType || null,
+              },
+              verifiedFare,
+            };
             
             // Send a verification request back to Ada - DON'T quote another fare, just confirm addresses
             openaiWs?.send(JSON.stringify({
