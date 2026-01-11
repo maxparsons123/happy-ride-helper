@@ -338,6 +338,7 @@ export type Database = {
           caller_name: string | null
           caller_phone: string | null
           caller_total_bookings: number | null
+          clarification_attempts: Json | null
           destination: string | null
           ended_at: string | null
           eta: string | null
@@ -359,6 +360,7 @@ export type Database = {
           caller_name?: string | null
           caller_phone?: string | null
           caller_total_bookings?: number | null
+          clarification_attempts?: Json | null
           destination?: string | null
           ended_at?: string | null
           eta?: string | null
@@ -380,6 +382,7 @@ export type Database = {
           caller_name?: string | null
           caller_phone?: string | null
           caller_total_bookings?: number | null
+          clarification_attempts?: Json | null
           destination?: string | null
           ended_at?: string | null
           eta?: string | null
