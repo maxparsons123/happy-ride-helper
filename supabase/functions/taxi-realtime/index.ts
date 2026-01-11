@@ -910,6 +910,12 @@ serve(async (req) => {
 
       if (!sessionReady || openaiWs?.readyState !== WebSocket.OPEN) return;
       if (aiSpeaking) return; // don't talk over ourselves
+      
+      // If we're waiting for area disambiguation, don't reprompt - Ada already asked
+      if (pendingAreaDisambiguation) {
+        console.log(`[${callId}] 🔁 No-reply reprompt skipped (disambiguation pending)`);
+        return;
+      }
 
       noReplyRepromptCount += 1;
       console.log(`[${callId}] 🔁 No-reply reprompt firing (#${noReplyRepromptCount})`);
@@ -4881,37 +4887,45 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           }
           
         } else if (!forcedResponseInstructions) {
-          // ADDRESS-CONTAINING RESPONSE: Run extraction in BACKGROUND (non-blocking)
-          // This restores the original fast-response behavior where response.create fires immediately
-          // Geocoding/clarifications will inject context for Ada's NEXT turn if needed
-          console.log(`[${callId}] 🔍 Address-path: starting extraction in background for: "${rawTranscript}"`);
+          // ADDRESS-CONTAINING RESPONSE: Run extraction and WAIT for disambiguation check
+          // This ensures we catch ambiguous addresses (like "School Road, Birmingham") before Ada continues
+          console.log(`[${callId}] 🔍 Address-path: running extraction (with disambiguation check) for: "${rawTranscript}"`);
           
-          // Fire-and-forget extraction (don't await)
-          extractBookingFromTranscript(rawTranscript).catch(err => {
-            console.error(`[${callId}] Background extraction error:`, err);
-          });
-          
-          // Check travel hub for luggage question BEFORE sending response
-          const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
-          if (tripHasTravelHubNow && !knownBooking.luggage && !knownBooking.luggageAsked) {
-            knownBooking.luggageAsked = true;
-            forcedResponseInstructions =
-              "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
-            console.log(`[${callId}] ✈️ Forcing luggage question (address-path)`);
+          // AWAIT extraction so disambiguation can trigger before Ada responds
+          try {
+            await extractBookingFromTranscript(rawTranscript);
+          } catch (err) {
+            console.error(`[${callId}] Extraction error:`, err);
           }
           
-          // Send response.create IMMEDIATELY (don't wait for extraction)
-          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
-            const response = forcedResponseInstructions
-              ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
-              : { modalities: ["audio", "text"] };
+          // Check if disambiguation was triggered - if so, skip normal response
+          if (pendingAreaDisambiguation) {
+            console.log(`[${callId}] 🗺️ Disambiguation pending - skipping normal response.create`);
+            responseCreatedSinceCommit = true; // Prevent other paths from sending response
+            awaitingResponseAfterCommit = false;
+          } else {
+            // Check travel hub for luggage question BEFORE sending response
+            const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
+            if (tripHasTravelHubNow && !knownBooking.luggage && !knownBooking.luggageAsked) {
+              knownBooking.luggageAsked = true;
+              forcedResponseInstructions =
+                "Before confirming the booking, ask the customer how many bags they will have for this trip. Do not ask 'shall I book that' yet.";
+              console.log(`[${callId}] ✈️ Forcing luggage question (address-path)`);
+            }
+            
+            // Send response.create after extraction completes (disambiguation didn't trigger)
+            if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+              const response = forcedResponseInstructions
+                ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
+                : { modalities: ["audio", "text"] };
 
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response,
-            }));
-            responseCreatedSinceCommit = true;
-            console.log(`[${callId}] >>> response.create sent IMMEDIATELY (extraction in background)`);
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response,
+              }));
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] >>> response.create sent (after extraction complete)`);
+            }
           }
         } else {
           console.log(`[${callId}] 📴 Skipping extraction (forcedResponseInstructions set)`);
