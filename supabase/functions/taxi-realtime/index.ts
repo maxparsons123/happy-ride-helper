@@ -5241,6 +5241,24 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               console.log(`[${callId}] 🏙️ Appended callerCity to destination: "${finalBooking.destination}" → "${dropoffForResolver}"`);
             }
             
+            // Extract city from pickup address if present (e.g., "School Road, Birmingham" → "Birmingham")
+            // This should override callerCity for biasing to ensure disambiguation works correctly
+            const extractCityFromAddress = (addr: string): string | null => {
+              const cities = ["Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Wolverhampton", "Solihull", "Walsall", "Dudley"];
+              for (const city of cities) {
+                if (addr.toLowerCase().includes(city.toLowerCase())) return city;
+              }
+              return null;
+            };
+            
+            // Use city from pickup address if explicitly mentioned, otherwise fall back to callerCity
+            const pickupCity = extractCityFromAddress(pickupForResolver);
+            const effectiveCityHint = pickupCity || callerCity || undefined;
+            
+            if (pickupCity && pickupCity.toLowerCase() !== callerCity?.toLowerCase()) {
+              console.log(`[${callId}] 🏙️ Using pickup city "${pickupCity}" instead of caller city "${callerCity}" for disambiguation bias`);
+            }
+            
             const tripResolveResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
               method: "POST",
               headers: {
@@ -5250,7 +5268,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               body: JSON.stringify({
                 pickup_input: pickupForResolver,
                 dropoff_input: dropoffForResolver,
-                caller_city_hint: callerCity || undefined,
+                caller_city_hint: effectiveCityHint,
                 passengers: finalBooking.passengers || 1,
                 country: "GB"
               }),
