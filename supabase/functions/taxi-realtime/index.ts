@@ -3002,14 +3002,58 @@ Rules:
       if (pendingAreaDisambiguation && pendingAreaDisambiguation.matches.length > 0) {
         const lowerTranscript = transcript.toLowerCase();
         
+        // Fuzzy matching helper - handles STT mishearings like "Soryo" → "Solihull"
+        const fuzzyMatch = (spoken: string, target: string): boolean => {
+          const spokenLower = spoken.toLowerCase().trim();
+          const targetLower = target.toLowerCase().trim();
+          
+          // Exact match
+          if (spokenLower.includes(targetLower) || targetLower.includes(spokenLower)) return true;
+          
+          // First 3+ characters match (catches "sol" in "solio" matching "solihull")
+          if (spokenLower.length >= 3 && targetLower.startsWith(spokenLower.slice(0, 3))) return true;
+          if (targetLower.length >= 3 && spokenLower.startsWith(targetLower.slice(0, 3))) return true;
+          
+          // Phonetic similarity - common STT mishearings
+          const normalize = (s: string) => s
+            .replace(/yo$/i, 'ull')    // Soryo → Solihull
+            .replace(/io$/i, 'ihull')  // Solio → Solihull
+            .replace(/worth$/i, 'worth')
+            .replace(/arden$/i, 'arden');
+          
+          const normalizedSpoken = normalize(spokenLower);
+          const normalizedTarget = normalize(targetLower);
+          
+          if (normalizedTarget.includes(normalizedSpoken) || normalizedSpoken.includes(normalizedTarget)) return true;
+          
+          // Levenshtein distance for close matches (allow 30% error rate)
+          const maxDist = Math.floor(Math.max(spokenLower.length, targetLower.length) * 0.4);
+          let dist = 0;
+          const m = spokenLower.length, n = targetLower.length;
+          const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+          for (let i = 0; i <= m; i++) dp[i][0] = i;
+          for (let j = 0; j <= n; j++) dp[0][j] = j;
+          for (let i = 1; i <= m; i++) {
+            for (let j = 1; j <= n; j++) {
+              dp[i][j] = Math.min(
+                dp[i-1][j] + 1,
+                dp[i][j-1] + 1,
+                dp[i-1][j-1] + (spokenLower[i-1] === targetLower[j-1] ? 0 : 1)
+              );
+            }
+          }
+          dist = dp[m][n];
+          
+          return dist <= maxDist;
+        };
+        
         // Try to match the area from the customer's response
         let matchedArea: PendingAreaDisambiguation['matches'][0] | null = null;
         for (const match of pendingAreaDisambiguation.matches) {
-          const areaLower = match.area.toLowerCase();
-          
-          // Check if customer mentioned this area
-          if (lowerTranscript.includes(areaLower)) {
+          // Check if customer mentioned this area (with fuzzy matching)
+          if (fuzzyMatch(lowerTranscript, match.area)) {
             matchedArea = match;
+            console.log(`[${callId}] 🗺️ Fuzzy matched "${lowerTranscript}" → "${match.area}"`);
             break;
           }
         }
@@ -3034,7 +3078,7 @@ Rules:
                   role: "user",
                   content: [{ 
                     type: "input_text", 
-                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Pickup is now confirmed as "${fullAddress}". Proceed with asking for destination or confirming the booking.]` 
+                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Pickup is now confirmed as "${fullAddress}". Continue with the booking - ask for any missing details or confirm the booking.]` 
                   }]
                 }
               }));
@@ -3053,15 +3097,24 @@ Rules:
                   role: "user",
                   content: [{ 
                     type: "input_text", 
-                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Destination is now confirmed as "${fullAddress}". Proceed with confirmation or any remaining questions.]` 
+                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Destination is now confirmed as "${fullAddress}". Continue with the booking - confirm or ask any remaining questions.]` 
                   }]
                 }
               }));
             }
           }
           
-          // Clear the pending disambiguation
+          // Clear the pending disambiguation BEFORE triggering response
           pendingAreaDisambiguation = null;
+          
+          // CRITICAL: Trigger Ada to respond now that disambiguation is resolved
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] }
+            }));
+            console.log(`[${callId}] >>> response.create sent after disambiguation resolved`);
+          }
           
           // Broadcast update to live_calls
           await supabase.from("live_calls").update({
@@ -3069,6 +3122,45 @@ Rules:
             destination: knownBooking.destination || null,
             updated_at: new Date().toISOString()
           }).eq("call_id", callId);
+          
+          // Skip normal extraction since we just resolved disambiguation
+          return;
+        } else {
+          // Customer said something but it didn't match any option - re-ask
+          console.log(`[${callId}] 🗺️ No fuzzy match found in "${lowerTranscript}" for options: ${pendingAreaDisambiguation.matches.map(m => m.area).join(', ')}`);
+          
+          // Re-prompt with clearer options
+          const areasForSpeech = pendingAreaDisambiguation.matches.slice(0, 4).map(m => m.area);
+          let speechOptions: string;
+          if (areasForSpeech.length === 2) {
+            speechOptions = `${areasForSpeech[0]} or ${areasForSpeech[1]}`;
+          } else {
+            const lastOption = areasForSpeech.pop();
+            speechOptions = `${areasForSpeech.join(", ")}, or ${lastOption}`;
+          }
+          
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ 
+                  type: "input_text", 
+                  text: `[SYSTEM: Customer's response "${transcript}" didn't clearly match an area. Politely ask again: "Sorry, I didn't quite catch that. Was it ${speechOptions}?"]` 
+                }]
+              }
+            }));
+            
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] }
+            }));
+            console.log(`[${callId}] >>> Re-asking for disambiguation (no clear match)`);
+          }
+          
+          // Skip normal extraction
+          return;
         }
       }
       
