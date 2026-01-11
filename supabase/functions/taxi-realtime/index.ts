@@ -2668,6 +2668,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         const { error } = await supabase.from("callers").update({
           last_pickup: enrichedPickup,
           last_destination: enrichedDestination,
+          last_booking_at: new Date().toISOString(),
           total_bookings: (existing.total_bookings || 0) + 1,
           trusted_addresses: updatedTrusted,
           pickup_addresses: updatedPickupAddrs,
@@ -2685,6 +2686,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
           name: callerName || null,
           last_pickup: enrichedPickup,
           last_destination: enrichedDestination,
+          last_booking_at: new Date().toISOString(),
           total_bookings: 1,
           trusted_addresses: updatedTrusted,
           pickup_addresses: updatedPickupAddrs,

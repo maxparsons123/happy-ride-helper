@@ -267,6 +267,7 @@ export type Database = {
           dropoff_addresses: string[] | null
           id: string
           known_areas: Json | null
+          last_booking_at: string | null
           last_destination: string | null
           last_pickup: string | null
           name: string | null
@@ -282,6 +283,7 @@ export type Database = {
           dropoff_addresses?: string[] | null
           id?: string
           known_areas?: Json | null
+          last_booking_at?: string | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
@@ -297,6 +299,7 @@ export type Database = {
           dropoff_addresses?: string[] | null
           id?: string
           known_areas?: Json | null
+          last_booking_at?: string | null
           last_destination?: string | null
           last_pickup?: string | null
           name?: string | null
