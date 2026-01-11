@@ -920,7 +920,17 @@ async function checkAreaDisambiguation(
           findComponent("locality") ||
           "Unknown area";
         
-        const city = findComponent("locality");
+        // Get city - prefer administrative_area_level_2 (e.g., "Dudley") over locality
+        // This ensures we get the parent city for areas like Netherton, which is IN Dudley
+        const adminLevel2 = findComponent("administrative_area_level_2");
+        const locality = findComponent("locality");
+        
+        // If locality equals area, use adminLevel2 as the city (parent area)
+        // e.g., area=Netherton, locality=Netherton, adminLevel2=Dudley → city=Dudley
+        const city = (locality && locality.toLowerCase() === area.toLowerCase()) 
+          ? adminLevel2 || locality
+          : locality || adminLevel2;
+          
         const postcode = findComponent("postal_code");
         
         // Check distance from bias point

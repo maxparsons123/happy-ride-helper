@@ -2134,9 +2134,21 @@ Wait for their response before proceeding.`;
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN || areaMatches.length < 2) return;
     
     // Format the areas for Ada to present naturally
-    // e.g., "School Road in Hockley, School Road in Yardley, or School Road in Erdington"
-    const areasList = areaMatches.slice(0, 4).map(m => m.area).join(", ");
-    const areasForSpeech = areaMatches.slice(0, 4).map(m => `${m.road} in ${m.area}`);
+    // IMPROVED: Include parent city/postcode for context (e.g., "Netherton in Dudley" not just "Netherton")
+    const formatAreaForSpeech = (m: AreaMatch): string => {
+      // If area is different from city (e.g., "Netherton" in "Dudley"), show both
+      if (m.city && m.area && m.city.toLowerCase() !== m.area.toLowerCase()) {
+        return `${m.road} in ${m.area}, ${m.city}`;
+      }
+      // If we have a postcode, include it for clarity
+      if (m.postcode) {
+        return `${m.road} in ${m.area || m.city || 'Unknown'} (${m.postcode})`;
+      }
+      return `${m.road} in ${m.area || m.city || 'Unknown'}`;
+    };
+    
+    const areasList = areaMatches.slice(0, 4).map(m => m.area || m.city || 'Unknown').join(", ");
+    const areasForSpeech = areaMatches.slice(0, 4).map(formatAreaForSpeech);
     
     // Create natural speech options
     let speechOptions: string;
@@ -2149,7 +2161,7 @@ Wait for their response before proceeding.`;
     
     const message = `[SYSTEM: AREA DISAMBIGUATION REQUIRED]
 I've found ${roadName} in multiple areas nearby:
-${areaMatches.slice(0, 4).map(m => `• ${m.road}, ${m.area}${m.city ? ` (${m.city})` : ''}`).join('\n')}
+${areaMatches.slice(0, 4).map(m => `• ${m.road}, ${m.area}${m.city ? ` (${m.city})` : ''}${m.postcode ? ` - ${m.postcode}` : ''}`).join('\n')}
 
 You MUST ask the customer which area they mean. Say something like:
 "I've found ${roadName} in a few areas nearby — do you mean ${speechOptions}?"
