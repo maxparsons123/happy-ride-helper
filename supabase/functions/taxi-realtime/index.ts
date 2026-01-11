@@ -1878,6 +1878,112 @@ CRITICAL RULES:
     }));
   };
   
+  // Helper function to check for area disambiguation early (when address is first extracted)
+  // This calls taxi-trip-resolve to check if the address needs disambiguation
+  const checkAndTriggerAreaDisambiguation = async (address: string, addressType: "pickup" | "destination"): Promise<boolean> => {
+    // Skip if we already have pending disambiguation
+    if (pendingAreaDisambiguation) {
+      console.log(`[${callId}] 🗺️ Skipping early disambiguation check - already pending`);
+      return false;
+    }
+    
+    // Skip if address already has house number (specific enough)
+    if (/^\d+/.test(address.trim())) {
+      return false;
+    }
+    
+    // Skip if address has full postcode (specific enough)
+    if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(address)) {
+      return false;
+    }
+    
+    // Check if it looks like a bare road address (e.g., "School Road" or "School Road, Birmingham")
+    const ROAD_TYPES = ["road", "rd", "street", "st", "avenue", "ave", "drive", "dr", "lane", "ln", "close", "cl", "crescent", "way", "court", "place", "grove", "terrace", "gardens", "walk", "rise", "hill"];
+    const hasRoadType = ROAD_TYPES.some(rt => address.toLowerCase().includes(` ${rt}`) || address.toLowerCase().endsWith(rt));
+    
+    if (!hasRoadType) {
+      return false; // Not a road address
+    }
+    
+    // Get coordinates for bias - use callerCity or default to Birmingham
+    let biasLat = 52.4862; // Birmingham default
+    let biasLng = -1.8904;
+    
+    const UK_CITIES: Record<string, { lat: number; lng: number }> = {
+      "coventry": { lat: 52.4068, lng: -1.5197 },
+      "birmingham": { lat: 52.4862, lng: -1.8904 },
+      "manchester": { lat: 53.4808, lng: -2.2426 },
+      "london": { lat: 51.5074, lng: -0.1278 },
+      "leeds": { lat: 53.8008, lng: -1.5491 },
+      "liverpool": { lat: 53.4084, lng: -2.9916 },
+      "sheffield": { lat: 53.3811, lng: -1.4701 },
+      "nottingham": { lat: 52.9548, lng: -1.1581 },
+      "leicester": { lat: 52.6369, lng: -1.1398 },
+    };
+    
+    if (callerCity) {
+      const cityCoords = UK_CITIES[callerCity.toLowerCase()];
+      if (cityCoords) {
+        biasLat = cityCoords.lat;
+        biasLng = cityCoords.lng;
+      }
+    }
+    
+    console.log(`[${callId}] 🗺️ Early area disambiguation check for "${address}" (${addressType}) near ${callerCity || 'Birmingham'}`);
+    
+    try {
+      // Prepare address with city if needed
+      let addressWithCity = address;
+      if (callerCity && !address.toLowerCase().includes(callerCity.toLowerCase())) {
+        addressWithCity = `${address}, ${callerCity}`;
+      }
+      
+      // Call taxi-trip-resolve with just this address to check for disambiguation
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          pickup_input: addressType === "pickup" ? addressWithCity : undefined,
+          dropoff_input: addressType === "destination" ? addressWithCity : undefined,
+          caller_city_hint: callerCity || undefined,
+          country: "GB"
+        }),
+      });
+      
+      if (!response.ok) {
+        console.error(`[${callId}] Early disambiguation API error: ${response.status}`);
+        return false;
+      }
+      
+      const result = await response.json();
+      
+      // Check if disambiguation is needed
+      if (addressType === "pickup" && result.needs_pickup_disambiguation && result.pickup_area_matches?.length > 1) {
+        console.log(`[${callId}] 🗺️ EARLY: Pickup needs area disambiguation! ${result.pickup_area_matches.length} areas found`);
+        
+        const roadName = result.pickup_area_matches[0]?.road || address;
+        askForAreaDisambiguation("pickup", roadName, result.pickup_area_matches);
+        return true;
+      }
+      
+      if (addressType === "destination" && result.needs_dropoff_disambiguation && result.dropoff_area_matches?.length > 1) {
+        console.log(`[${callId}] 🗺️ EARLY: Dropoff needs area disambiguation! ${result.dropoff_area_matches.length} areas found`);
+        
+        const roadName = result.dropoff_area_matches[0]?.road || address;
+        askForAreaDisambiguation("destination", roadName, result.dropoff_area_matches);
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      console.error(`[${callId}] Early disambiguation check error:`, e);
+      return false;
+    }
+  };
+
 
   const verifyHighFare = (fare: number, pickup: string, destination: string) => {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
@@ -3126,6 +3232,10 @@ Rules:
               knownBooking.highFareVerified = false;
             }
             knownBooking.pickup = newPickup;
+            
+            // ===== EARLY AREA DISAMBIGUATION CHECK =====
+            // Check immediately if this address exists in multiple areas
+            await checkAndTriggerAreaDisambiguation(newPickup, "pickup");
           }
         }
       }
@@ -3167,6 +3277,10 @@ Rules:
               knownBooking.highFareVerified = false;
             }
             knownBooking.destination = newDestination;
+            
+            // ===== EARLY AREA DISAMBIGUATION CHECK =====
+            // Check immediately if this address exists in multiple areas
+            await checkAndTriggerAreaDisambiguation(newDestination, "destination");
           }
         }
       }
