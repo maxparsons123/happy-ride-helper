@@ -2060,7 +2060,8 @@ CRITICAL RULES:
   };
   
   // Helper function to check for area disambiguation early (when address is first extracted)
-  // This calls taxi-trip-resolve to check if the address needs disambiguation
+  // This calls street-disambiguate to check if the address needs disambiguation
+  // NOW SUPPORTS: House number validation to reduce disambiguation prompts
   const checkAndTriggerAreaDisambiguation = async (address: string, addressType: "pickup" | "destination"): Promise<boolean> => {
     // Skip if we already have pending disambiguation
     if (pendingAreaDisambiguation) {
@@ -2074,17 +2075,16 @@ CRITICAL RULES:
       return false;
     }
     
-    // Skip if address already has house number (specific enough)
-    if (/^\d+/.test(address.trim())) {
-      return false;
-    }
+    // Extract house number if present (e.g., "35 School Road" -> "35")
+    const houseNumberMatch = address.trim().match(/^(\d+[a-z]?)\s+/i);
+    const houseNumber = houseNumberMatch ? houseNumberMatch[1] : null;
     
     // Skip if address has full postcode (specific enough)
     if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(address)) {
       return false;
     }
     
-    // Check if it looks like a bare road address (e.g., "School Road" or "School Road, Birmingham")
+    // Check if it looks like a road address (e.g., "School Road" or "35 School Road, Birmingham")
     const ROAD_TYPES = ["road", "rd", "street", "st", "avenue", "ave", "drive", "dr", "lane", "ln", "close", "cl", "crescent", "way", "court", "place", "grove", "terrace", "gardens", "walk", "rise", "hill"];
     const hasRoadType = ROAD_TYPES.some(rt => address.toLowerCase().includes(` ${rt}`) || address.toLowerCase().endsWith(rt));
     
@@ -2119,11 +2119,11 @@ CRITICAL RULES:
     }
 
     console.log(
-      `[${callId}] 🗺️ Early area disambiguation check for "${address}" (${addressType}) using city hint: ${effectiveCityHint} (callerCity=${callerCity || "none"})`,
+      `[${callId}] 🗺️ Early area disambiguation check for "${address}" (${addressType}) using city hint: ${effectiveCityHint} (callerCity=${callerCity || "none"}, houseNumber=${houseNumber || "none"})`,
     );
 
     try {
-      // Use OS Open Names API for street disambiguation (replaces Google)
+      // Use OS Open Names API for street disambiguation with optional house number validation
       const response = await fetch(`${SUPABASE_URL}/functions/v1/street-disambiguate`, {
         method: "POST",
         headers: {
@@ -2132,6 +2132,7 @@ CRITICAL RULES:
         },
         body: JSON.stringify({
           street: address,
+          houseNumber: houseNumber, // Pass house number for validation
           lat: biasLat,
           lon: biasLng,
           radiusMeters: 8000, // ~5 miles
@@ -2145,6 +2146,13 @@ CRITICAL RULES:
       
       const result = await response.json();
       
+      // Check if house number uniquely resolved the street
+      if (result.resolvedMatch && !result.needsClarification) {
+        console.log(`[${callId}] 🏠 House number ${houseNumber} uniquely resolved to ${result.resolvedMatch.name} in ${result.resolvedMatch.area || result.resolvedMatch.borough}`);
+        // No disambiguation needed - house number was unique!
+        return false;
+      }
+      
       // Check if disambiguation is needed (OS API returns needsClarification flag)
       if (result.needsClarification && result.matches?.length > 1) {
         console.log(`[${callId}] 🗺️ EARLY (OS): ${addressType} needs area disambiguation! ${result.matches.length} areas found`);
@@ -2155,6 +2163,7 @@ CRITICAL RULES:
           area: m.area || m.borough || "Unknown",
           lat: m.lat,
           lng: m.lon,
+          hasHouseNumber: m.hasHouseNumber,
         }));
         
         askForAreaDisambiguation(addressType, result.street || address, areaMatches);
