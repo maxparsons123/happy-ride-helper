@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
-"""Taxi AI Asterisk Bridge (v2.2 - High Quality Audio)
+"""Taxi AI Asterisk Bridge (v2.3 - Binary WebSocket)
 
 Combines the working v2 auto-detection with:
 - Binary UUID fix
 - High-quality resample_poly for anti-aliased audio (no hiss)
+- Binary WebSocket frames for audio (~33% bandwidth savings)
 
 """
 
@@ -75,6 +76,7 @@ class TaxiBridgeV2:
         self.phone = "Unknown"
         self.ast_codec = "slin16"
         self.ast_frame_bytes = 320
+        self.binary_audio_count = 0  # Track binary frames sent
 
     def _detect_format(self, frame_len):
         if frame_len == 160:
@@ -93,6 +95,7 @@ class TaxiBridgeV2:
         try:
             async with websockets.connect(WS_URL, ping_interval=5, ping_timeout=10) as ws:
                 self.ws = ws
+                # Send init as JSON (text message)
                 await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id, "addressTtsSplicing": True}))
                 await asyncio.gather(self.asterisk_to_ai(), self.ai_to_queue())
         except Exception as e:
@@ -100,6 +103,7 @@ class TaxiBridgeV2:
         finally:
             self.running = False
             playback_task.cancel()
+            logger.info(f"[{self.call_id}] 📊 Binary audio frames sent: {self.binary_audio_count}")
             await self.cleanup()
 
     async def asterisk_to_ai(self):
@@ -115,6 +119,7 @@ class TaxiBridgeV2:
                     if len(raw_hex) >= 12:
                         self.phone = raw_hex[-12:]
                     logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
+                    # Send init with phone as JSON (text message)
                     await self.ws.send(json.dumps({
                         "type": "init", "call_id": self.call_id,
                         "user_phone": self.phone, "addressTtsSplicing": True
@@ -125,7 +130,11 @@ class TaxiBridgeV2:
                         self._detect_format(m_len)
                     linear16 = audioop.ulaw2lin(payload, 2) if self.ast_codec == "ulaw" else payload
                     upsampled = resample_audio_linear16(linear16, AST_RATE, AI_RATE)
-                    await self.ws.send(json.dumps({"type": "audio", "audio": base64.b64encode(upsampled).decode()}))
+                    
+                    # BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
+                    # This reduces CPU usage and bandwidth by ~33%
+                    await self.ws.send(upsampled)  # websockets sends bytes as binary frame
+                    self.binary_audio_count += 1
 
                 elif m_type == MSG_HANGUP:
                     break
@@ -136,6 +145,15 @@ class TaxiBridgeV2:
     async def ai_to_queue(self):
         try:
             async for message in self.ws:
+                # Handle binary audio from AI (future optimization)
+                if isinstance(message, bytes):
+                    # Binary audio from AI - resample and queue
+                    pcm_8k = resample_audio_linear16(message, AI_RATE, AST_RATE)
+                    out = audioop.lin2ulaw(pcm_8k, 2) if self.ast_codec == "ulaw" else pcm_8k
+                    self.audio_queue.append(out)
+                    continue
+                
+                # JSON message (text)
                 data = json.loads(message)
                 if data.get("type") in ["audio", "address_tts"]:
                     raw_24k = base64.b64decode(data["audio"])
@@ -185,7 +203,7 @@ class TaxiBridgeV2:
 
 async def main():
     server = await asyncio.start_server(lambda r, w: TaxiBridgeV2(r, w).run(), AUDIOSOCKET_HOST, AUDIOSOCKET_PORT)
-    logger.info(f"🚀 Taxi Bridge v2.1 Online")
+    logger.info(f"🚀 Taxi Bridge v2.3 Online (Binary WebSocket)")
     async with server:
         await server.serve_forever()
 
