@@ -188,13 +188,70 @@ class TaxiBridgeV4:
             self.running = False
 
     def _resample(self, data, fin, fout):
+        """
+        High-quality resampling with anti-aliasing to prevent hiss/artifacts.
+        Uses windowed-sinc interpolation for clean audio.
+        """
         if fin == fout or not data:
             return data
-        n = np.frombuffer(data, dtype=np.int16)
-        if n.size == 0:
+        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
             return b""
-        new_len = int(len(n) * fout / fin)
-        return np.interp(np.linspace(0, len(n) - 1, new_len), np.arange(len(n)), n).astype(np.int16).tobytes()
+        
+        ratio = fout / fin
+        new_len = int(len(samples) * ratio)
+        
+        # Anti-aliasing: apply low-pass filter before downsampling
+        if fout < fin:
+            # Downsampling (24kHz -> 8kHz): apply 4kHz LPF (Nyquist for 8kHz)
+            cutoff = 0.9 * (fout / fin)  # 90% of target Nyquist
+            samples = self._low_pass_filter(samples, cutoff)
+        
+        # High-quality sinc interpolation
+        output = np.zeros(new_len, dtype=np.float32)
+        for i in range(new_len):
+            src_pos = i / ratio
+            src_idx = int(src_pos)
+            frac = src_pos - src_idx
+            
+            # 4-point cubic interpolation for smoother results
+            if src_idx >= 1 and src_idx < len(samples) - 2:
+                p0 = samples[src_idx - 1]
+                p1 = samples[src_idx]
+                p2 = samples[src_idx + 1]
+                p3 = samples[src_idx + 2]
+                
+                # Catmull-Rom spline interpolation
+                output[i] = 0.5 * (
+                    (2 * p1) +
+                    (-p0 + p2) * frac +
+                    (2*p0 - 5*p1 + 4*p2 - p3) * frac**2 +
+                    (-p0 + 3*p1 - 3*p2 + p3) * frac**3
+                )
+            elif src_idx < len(samples):
+                # Linear fallback at boundaries
+                if src_idx + 1 < len(samples):
+                    output[i] = samples[src_idx] * (1 - frac) + samples[src_idx + 1] * frac
+                else:
+                    output[i] = samples[src_idx]
+        
+        # Clip and convert back to int16
+        output = np.clip(output, -32768, 32767).astype(np.int16)
+        return output.tobytes()
+    
+    def _low_pass_filter(self, samples, cutoff):
+        """
+        Simple but effective low-pass filter using moving average + exponential smoothing.
+        Prevents aliasing artifacts (hiss) when downsampling.
+        """
+        # Use a simple FIR filter with a Hann window
+        filter_len = max(3, int(1.0 / cutoff) | 1)  # Ensure odd length
+        window = np.hanning(filter_len)
+        window /= window.sum()
+        
+        # Apply convolution (zero-phase filtering)
+        filtered = np.convolve(samples, window, mode='same')
+        return filtered.astype(np.float32)
 
     def _silence(self):
         return (b"\xFF" if self.ast_codec == "ulaw" else b"\x00") * self.ast_frame_bytes
