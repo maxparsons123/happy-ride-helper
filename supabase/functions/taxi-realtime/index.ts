@@ -1464,8 +1464,24 @@ serve(async (req) => {
     
     const normalizedInput = normalize(address).toLowerCase();
     
+    // CRITICAL: Check if input explicitly mentions a city - if so, only match addresses in that same city
+    const distinctCities = ['birmingham', 'solihull', 'coventry', 'wolverhampton', 'dudley', 'walsall', 
+                            'london', 'manchester', 'liverpool', 'leeds', 'sheffield', 'bristol', 
+                            'nottingham', 'leicester', 'cambridge', 'oxford', 'bedworth', 'nuneaton', 
+                            'rugby', 'warwick', 'leamington', 'kenilworth'];
+    const inputCity = distinctCities.find(city => normalizedInput.includes(city));
+    
     for (const known of allKnownAddresses) {
       const normalizedKnown = normalize(known).toLowerCase();
+      
+      // If input has an explicit city, the known address must be from the same city
+      if (inputCity) {
+        const knownCity = distinctCities.find(city => normalizedKnown.includes(city));
+        if (knownCity && knownCity !== inputCity) {
+          // User said "School Road, Birmingham" but known is "School Road, Coventry" - skip this match
+          continue;
+        }
+      }
       
       // Exact match
       if (normalizedInput === normalizedKnown) {
@@ -1474,6 +1490,7 @@ serve(async (req) => {
       }
       
       // Check if input contains the known address or vice versa
+      // BUT only if cities match (or neither has a city specified)
       if (normalizedInput.includes(normalizedKnown) || normalizedKnown.includes(normalizedInput)) {
         console.log(`[${callId}] 📍 Address matched from history (partial): "${address}" → "${known}"`);
         return enrichAddressWithCity(known);
