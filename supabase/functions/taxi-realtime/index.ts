@@ -467,14 +467,23 @@ IMPORTANT: Include vehicle type in FINAL CONFIRMATION when NOT a standard saloon
 Example: "That's all booked in a people carrier. The fare is £47..."
 
 ════════════════════════════════════
-RECOMMENDATIONS
+VENUE & PLACE RECOMMENDATIONS
 ════════════════════════════════════
-If the customer asks for nearby hotels, restaurants, cafes, or bars:
+When customers ask about venues, places to go, or where to eat/drink/stay:
 - Use the find_nearby_places tool with appropriate category
-- Context is taken from: pickup → destination → last known location
-- Suggest 2–3 options only.
-- Ask if they want to go to one of them.
+- Categories: hotel, restaurant, cafe, bar, pub, nightclub, cinema, theatre, shopping
+- Context is taken from: pickup → destination → caller's city
+- Present 2–3 top options with names and brief info
+- Be helpful and enthusiastic: "Ooh, let me have a look what's good nearby..."
+- After presenting options, ask: "Would you like a taxi to any of these?"
+- If they choose one, use it as the destination for booking
 
+EXAMPLE PHRASES that trigger recommendations:
+- "Where's a good restaurant?" → find_nearby_places(restaurant)
+- "Know any nice pubs?" → find_nearby_places(pub)
+- "I need a hotel" → find_nearby_places(hotel)
+- "What's good for a night out?" → find_nearby_places(nightclub) or bar
+- "Any cafes near the station?" → find_nearby_places(cafe)
 ════════════════════════════════════
 ADDRESS ALIASES
 ════════════════════════════════════
@@ -4500,12 +4509,16 @@ Rules:
               {
                 type: "function",
                 name: "find_nearby_places",
-                description: "Find nearby hotels, restaurants, cafes, or bars based on known location context. Use when customer asks for recommendations like 'nearest hotel' or 'good restaurant nearby'.",
+                description: "Find nearby venues when customer asks for recommendations. Use for questions like 'where's a good restaurant?', 'know any nice pubs?', 'I need a hotel', 'what's good for a night out?', etc.",
                 parameters: {
                   type: "object",
                   properties: {
-                    category: { type: "string", enum: ["hotel", "restaurant", "cafe", "bar"], description: "Type of place to search for" },
-                    context_address: { type: "string", description: "Optional: Use pickup or destination as reference location" }
+                    category: { 
+                      type: "string", 
+                      enum: ["hotel", "restaurant", "cafe", "bar", "pub", "nightclub", "cinema", "theatre", "shopping"], 
+                      description: "Type of venue: hotel, restaurant, cafe, bar, pub, nightclub, cinema, theatre, shopping" 
+                    },
+                    context_address: { type: "string", description: "Optional: Use pickup/destination as reference, or leave empty to use caller's city" }
                   },
                   required: ["category"]
                 }
@@ -6774,6 +6787,170 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                   customer_name: callerName,
                   message: `Customer name saved: ${callerName}. Use this name to address them throughout the call.`,
                   next_action: `Say "Lovely to meet you ${callerName}!" and continue with the booking flow.`
+                })
+              }
+            }));
+          }
+          
+          // Trigger response
+          openaiWs?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
+        
+        // Handle find_nearby_places function - recommend venues/places to go
+        if (data.name === "find_nearby_places") {
+          const args = JSON.parse(data.arguments);
+          console.log(`[${callId}] 🔍 find_nearby_places called: category=${args.category}, context=${args.context_address || 'auto'}`);
+          
+          // Determine location context for search (pickup → destination → callerCity)
+          let searchCity = callerCity;
+          let searchCoords: { lat: number; lng: number } | null = null;
+          
+          // Use provided context address or infer from booking state
+          const contextAddress = args.context_address || knownBooking.pickup || knownBooking.destination;
+          
+          if (contextAddress) {
+            // Try to extract city from the context address
+            const cities = [
+              "Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds",
+              "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Cardiff",
+              "Wolverhampton", "Solihull", "Walsall", "Dudley", "West Bromwich"
+            ];
+            for (const city of cities) {
+              if (contextAddress.toLowerCase().includes(city.toLowerCase())) {
+                searchCity = city;
+                break;
+              }
+            }
+          }
+          
+          // City coordinates for nearby search
+          const CITY_COORDS: Record<string, { lat: number; lng: number }> = {
+            "birmingham": { lat: 52.4862, lng: -1.8904 },
+            "coventry": { lat: 52.4068, lng: -1.5197 },
+            "manchester": { lat: 53.4808, lng: -2.2426 },
+            "liverpool": { lat: 53.4084, lng: -2.9916 },
+            "london": { lat: 51.5074, lng: -0.1278 },
+            "leeds": { lat: 53.8008, lng: -1.5491 },
+            "sheffield": { lat: 53.3811, lng: -1.4701 },
+            "bristol": { lat: 51.4545, lng: -2.5879 },
+            "nottingham": { lat: 52.9548, lng: -1.1581 },
+            "leicester": { lat: 52.6369, lng: -1.1398 },
+            "newcastle": { lat: 54.9783, lng: -1.6178 },
+            "cardiff": { lat: 51.4816, lng: -3.1791 },
+            "wolverhampton": { lat: 52.5870, lng: -2.1288 },
+            "solihull": { lat: 52.4130, lng: -1.7780 },
+            "walsall": { lat: 52.5860, lng: -1.9829 },
+            "dudley": { lat: 52.5085, lng: -2.0894 },
+            "west bromwich": { lat: 52.5186, lng: -1.9945 }
+          };
+          
+          if (searchCity) {
+            searchCoords = CITY_COORDS[searchCity.toLowerCase()] || null;
+          }
+          
+          if (!searchCoords) {
+            // Default to Birmingham if no context
+            searchCoords = CITY_COORDS["birmingham"];
+            searchCity = "Birmingham";
+          }
+          
+          // Map category to Google Places type
+          const CATEGORY_TO_TYPE: Record<string, { type: string; keyword: string }> = {
+            "hotel": { type: "lodging", keyword: "hotel" },
+            "restaurant": { type: "restaurant", keyword: "restaurant" },
+            "cafe": { type: "cafe", keyword: "cafe coffee" },
+            "bar": { type: "bar", keyword: "bar pub" },
+            "pub": { type: "bar", keyword: "pub" },
+            "nightclub": { type: "night_club", keyword: "nightclub club" },
+            "cinema": { type: "movie_theater", keyword: "cinema" },
+            "theatre": { type: "theater", keyword: "theatre" },
+            "shopping": { type: "shopping_mall", keyword: "shopping centre" }
+          };
+          
+          const categoryInfo = CATEGORY_TO_TYPE[args.category.toLowerCase()] || { type: args.category, keyword: args.category };
+          
+          try {
+            // Call taxi-trip-resolve with nearby_query
+            const tripResolveResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+              },
+              body: JSON.stringify({
+                nearby_query: args.category,
+                caller_city_hint: searchCity,
+                country: "GB"
+              }),
+            });
+            
+            let places: Array<{ name: string; address: string; rating?: number }> = [];
+            
+            if (tripResolveResponse.ok) {
+              const resolveResult = await tripResolveResponse.json();
+              console.log(`[${callId}] 📍 Nearby search result:`, JSON.stringify(resolveResult, null, 2));
+              
+              if (resolveResult.nearby_results?.length > 0) {
+                // Take top 3 results
+                places = resolveResult.nearby_results.slice(0, 3).map((p: any) => ({
+                  name: p.name,
+                  address: p.address,
+                  rating: p.rating
+                }));
+              }
+            }
+            
+            if (places.length > 0) {
+              const placesList = places.map((p, i) => 
+                `${i + 1}. ${p.name}${p.rating ? ` (${p.rating}★)` : ''} - ${p.address}`
+              ).join("\n");
+              
+              console.log(`[${callId}] ✅ Found ${places.length} ${args.category} recommendations`);
+              
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: true,
+                    category: args.category,
+                    location_context: searchCity,
+                    places: places,
+                    message: `Found ${places.length} ${args.category} options near ${searchCity}:\n${placesList}`,
+                    suggestion: "Present these options to the customer and ask if they'd like a taxi to any of them."
+                  })
+                }
+              }));
+            } else {
+              console.log(`[${callId}] ⚠️ No ${args.category} places found near ${searchCity}`);
+              
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    category: args.category,
+                    message: `Sorry, I couldn't find any ${args.category} recommendations near ${searchCity}. Ask the customer if they have a specific place in mind.`
+                  })
+                }
+              }));
+            }
+          } catch (err) {
+            console.error(`[${callId}] find_nearby_places error:`, err);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  message: "Sorry, I couldn't search for venues right now. Ask the customer if they have a specific destination in mind."
                 })
               }
             }));
