@@ -1840,10 +1840,9 @@ serve(async (req) => {
     }
     
     // Check if it looks like a street address without a house number
+    // Only require house numbers for explicit road types (road, street, avenue, lane, drive)
     const ROAD_TYPES = [
-      "road", "rd", "street", "st", "avenue", "ave", "drive", "dr", 
-      "lane", "ln", "close", "cl", "crescent", "way", "court", "ct",
-      "place", "pl", "grove", "terrace", "gardens", "walk", "rise", "hill"
+      "road", "rd", "street", "st", "avenue", "ave", "lane", "ln", "drive", "dr"
     ];
     
     const addr = address.trim().toLowerCase();
