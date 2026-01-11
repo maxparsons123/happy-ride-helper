@@ -446,6 +446,7 @@ export type Database = {
       uk_locations: {
         Row: {
           aliases: string[] | null
+          country: string
           created_at: string
           id: string
           is_distinct: boolean | null
@@ -458,6 +459,7 @@ export type Database = {
         }
         Insert: {
           aliases?: string[] | null
+          country?: string
           created_at?: string
           id?: string
           is_distinct?: boolean | null
@@ -470,6 +472,7 @@ export type Database = {
         }
         Update: {
           aliases?: string[] | null
+          country?: string
           created_at?: string
           id?: string
           is_distinct?: boolean | null

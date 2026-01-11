@@ -1539,9 +1539,28 @@ serve(async (req) => {
     
     // Resolve pickup first
     if (pickup_input) {
+      // Helper: Check if address appears to be foreign (not UK)
+      // If foreign, skip UK-specific disambiguation and just geocode globally
+      const isForeignAddress = (addr: string): boolean => {
+        const lower = addr.toLowerCase();
+        const foreignIndicators = [
+          'france', 'germany', 'spain', 'italy', 'portugal', 'poland', 'ireland', 'netherlands',
+          'belgium', 'switzerland', 'austria', 'greece', 'turkey', 'usa', 'united states', 'america',
+          'canada', 'australia', 'india', 'pakistan', 'bangladesh', 'nigeria', 'south africa',
+          'china', 'japan', 'korea', 'dubai', 'uae', 'qatar', 'saudi',
+          'paris', 'berlin', 'madrid', 'rome', 'barcelona', 'amsterdam', 'brussels', 'dublin',
+          'new york', 'los angeles', 'chicago', 'toronto', 'sydney', 'melbourne',
+          'strasse', 'straße', 'avenue de', 'rue de', 'calle', 'via ', 'piazza',
+        ];
+        return foreignIndicators.some(ind => lower.includes(ind));
+      };
+      
+      const pickupIsForeign = isForeignAddress(pickup_input);
+      
       // Check if this is a bare road address that might need area disambiguation
       // e.g., "School Road" exists in multiple areas of Birmingham
-      if (isBareRoadAddress(pickup_input) && coordsContext) {
+      // SKIP disambiguation for foreign addresses - just geocode globally
+      if (!pickupIsForeign && isBareRoadAddress(pickup_input) && coordsContext) {
         const disambiguationCheck = await checkAreaDisambiguation(
           pickup_input, 
           coordsContext.lat, 
@@ -1555,6 +1574,8 @@ serve(async (req) => {
           response.pickup_area_matches = disambiguationCheck.matches;
           // Don't continue with normal geocoding - let Ada ask user to choose
         }
+      } else if (pickupIsForeign) {
+        console.log(`[Resolve] Skipping pickup disambiguation - foreign address detected: "${pickup_input}"`);
       }
       
       // Only geocode if no disambiguation needed
@@ -1574,8 +1595,26 @@ serve(async (req) => {
     
     // Now resolve dropoff with pickup location as bias
     if (dropoff_input && !response.needs_pickup_disambiguation) {
+      // Reuse foreign address check logic
+      const isForeignAddress = (addr: string): boolean => {
+        const lower = addr.toLowerCase();
+        const foreignIndicators = [
+          'france', 'germany', 'spain', 'italy', 'portugal', 'poland', 'ireland', 'netherlands',
+          'belgium', 'switzerland', 'austria', 'greece', 'turkey', 'usa', 'united states', 'america',
+          'canada', 'australia', 'india', 'pakistan', 'bangladesh', 'nigeria', 'south africa',
+          'china', 'japan', 'korea', 'dubai', 'uae', 'qatar', 'saudi',
+          'paris', 'berlin', 'madrid', 'rome', 'barcelona', 'amsterdam', 'brussels', 'dublin',
+          'new york', 'los angeles', 'chicago', 'toronto', 'sydney', 'melbourne',
+          'strasse', 'straße', 'avenue de', 'rue de', 'calle', 'via ', 'piazza',
+        ];
+        return foreignIndicators.some(ind => lower.includes(ind));
+      };
+      
+      const dropoffIsForeign = isForeignAddress(dropoff_input);
+      
       // Check if dropoff is a bare road address that might need area disambiguation
-      if (isBareRoadAddress(dropoff_input) && coordsContext) {
+      // SKIP disambiguation for foreign addresses
+      if (!dropoffIsForeign && isBareRoadAddress(dropoff_input) && coordsContext) {
         const disambiguationCheck = await checkAreaDisambiguation(
           dropoff_input, 
           coordsContext.lat, 
@@ -1588,6 +1627,8 @@ serve(async (req) => {
           response.needs_dropoff_disambiguation = true;
           response.dropoff_area_matches = disambiguationCheck.matches;
         }
+      } else if (dropoffIsForeign) {
+        console.log(`[Resolve] Skipping dropoff disambiguation - foreign address detected: "${dropoff_input}"`);
       }
       
       // Only geocode if no disambiguation needed

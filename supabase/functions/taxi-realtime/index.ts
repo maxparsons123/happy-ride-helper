@@ -644,6 +644,9 @@ serve(async (req) => {
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   let awaitingClarificationFor: "pickup" | "destination" | null = null; // Which address are we awaiting clarification for?
   
+  // UK locations loaded from database - used for disambiguation and country detection
+  let ukLocations: { name: string; type: string; parent_city: string | null; aliases: string[] | null; country: string }[] = [];
+  
   // DEDUPLICATION: Track last assistant transcript to avoid saving duplicates
   let lastSavedAssistantText = "";
   let lastSavedAssistantAt = 0;
@@ -732,6 +735,108 @@ serve(async (req) => {
     prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig.personality_traits.join(", "));
     
     return prompt;
+  };
+
+  // Load UK locations from database for disambiguation and country detection
+  const loadUkLocations = async (): Promise<void> => {
+    try {
+      console.log(`[${callId}] 🗺️ Loading UK locations from database...`);
+      const { data, error } = await supabase
+        .from("uk_locations")
+        .select("name, type, parent_city, aliases, country")
+        .eq("country", "GB");
+      
+      if (error) {
+        console.error(`[${callId}] Failed to load UK locations:`, error);
+        return;
+      }
+      
+      ukLocations = data || [];
+      console.log(`[${callId}] ✅ Loaded ${ukLocations.length} UK locations`);
+    } catch (e) {
+      console.error(`[${callId}] Exception loading UK locations:`, e);
+    }
+  };
+
+  // Check if an address appears to be in the UK (uses loaded UK locations + patterns)
+  // Returns false for foreign addresses to bypass UK-specific disambiguation
+  const isUkAddress = (address: string): boolean => {
+    if (!address) return true; // Default to UK if empty
+    
+    const lowerAddress = address.toLowerCase().trim();
+    
+    // UK postcode pattern (full or partial)
+    const ukPostcodePattern = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d?[A-Z]{0,2}\b/i;
+    if (ukPostcodePattern.test(address)) {
+      console.log(`[${callId}] 🇬🇧 Address detected as UK (has postcode): "${address}"`);
+      return true;
+    }
+    
+    // Common foreign country indicators
+    const foreignIndicators = [
+      // Countries
+      'france', 'germany', 'spain', 'italy', 'portugal', 'poland', 'ireland', 'netherlands',
+      'belgium', 'switzerland', 'austria', 'greece', 'turkey', 'usa', 'united states', 'america',
+      'canada', 'australia', 'india', 'pakistan', 'bangladesh', 'nigeria', 'south africa',
+      'china', 'japan', 'korea', 'dubai', 'uae', 'qatar', 'saudi',
+      // Foreign city indicators
+      'paris', 'berlin', 'madrid', 'rome', 'barcelona', 'amsterdam', 'brussels', 'dublin',
+      'new york', 'los angeles', 'chicago', 'toronto', 'sydney', 'melbourne',
+      // Foreign address patterns
+      'strasse', 'straße', 'avenue de', 'rue de', 'calle', 'via ', 'piazza',
+    ];
+    
+    for (const indicator of foreignIndicators) {
+      if (lowerAddress.includes(indicator)) {
+        console.log(`[${callId}] 🌍 Address detected as FOREIGN (contains "${indicator}"): "${address}"`);
+        return false;
+      }
+    }
+    
+    // Check if address contains a known UK location from database
+    for (const loc of ukLocations) {
+      if (lowerAddress.includes(loc.name.toLowerCase())) {
+        console.log(`[${callId}] 🇬🇧 Address detected as UK (contains "${loc.name}"): "${address}"`);
+        return true;
+      }
+      // Check aliases
+      if (loc.aliases) {
+        for (const alias of loc.aliases) {
+          if (lowerAddress.includes(alias.toLowerCase())) {
+            console.log(`[${callId}] 🇬🇧 Address detected as UK (contains alias "${alias}"): "${address}"`);
+            return true;
+          }
+        }
+      }
+    }
+    
+    // Check hardcoded UK cities (fallback if DB not loaded)
+    const ukCities = [
+      'london', 'birmingham', 'manchester', 'leeds', 'liverpool', 'sheffield',
+      'bristol', 'nottingham', 'leicester', 'coventry', 'newcastle', 'sunderland',
+      'wolverhampton', 'stoke', 'derby', 'southampton', 'portsmouth', 'brighton',
+      'reading', 'luton', 'oxford', 'cambridge', 'york', 'hull', 'bradford',
+      'cardiff', 'swansea', 'newport', 'edinburgh', 'glasgow', 'aberdeen', 'dundee',
+      'belfast', 'derry', 'warwick', 'leamington', 'kenilworth', 'nuneaton', 'rugby',
+      'solihull', 'sutton coldfield', 'dudley', 'walsall', 'west bromwich',
+    ];
+    
+    for (const city of ukCities) {
+      if (lowerAddress.includes(city)) {
+        console.log(`[${callId}] 🇬🇧 Address detected as UK (contains "${city}"): "${address}"`);
+        return true;
+      }
+    }
+    
+    // If caller has UK city context, assume address is UK unless proven otherwise
+    if (callerCity) {
+      console.log(`[${callId}] 🇬🇧 Address assumed UK (caller city is ${callerCity}): "${address}"`);
+      return true;
+    }
+    
+    // Default to UK for ambiguous addresses (most callers are UK-based)
+    console.log(`[${callId}] 🇬🇧 Address assumed UK (no foreign indicators): "${address}"`);
+    return true;
   };
 
   // --- Call lifecycle + "Ada didn't finish" safeguards ---
@@ -1960,6 +2065,12 @@ CRITICAL RULES:
     // Skip if we already have pending disambiguation
     if (pendingAreaDisambiguation) {
       console.log(`[${callId}] 🗺️ Skipping early disambiguation check - already pending`);
+      return false;
+    }
+    
+    // FOREIGN ADDRESS CHECK: Skip UK-specific disambiguation for foreign addresses
+    if (!isUkAddress(address)) {
+      console.log(`[${callId}] 🌍 Skipping area disambiguation - foreign address detected: "${address}"`);
       return false;
     }
     
@@ -3993,6 +4104,10 @@ Rules:
       // Session created - send configuration
       if (data.type === "session.created") {
         console.log(`[${callId}] Session created. Server defaults:`, data.session);
+        
+        // Load UK locations from database (for disambiguation and country detection)
+        await loadUkLocations();
+        
         console.log(`[${callId}] Sending session.update...`);
         openaiWs?.send(JSON.stringify({
           type: "session.update",
