@@ -699,6 +699,9 @@ serve(async (req) => {
     silenceHangupFailsafeTimer = null;
     goodbyeFailsafeTimer = null;
     noReplyRepromptTimer = null;
+    
+    // Also clear flow safeguard timers
+    clearFlowSafeguardTimers();
   };
 
   const forceHangup = (reason: string, delayMs = 0) => {
@@ -3377,9 +3380,12 @@ Rules:
           
           // Clear the pending disambiguation BEFORE triggering response
           pendingAreaDisambiguation = null;
+          clearDisambiguationTimeout(); // SAFEGUARD 3: Clear timeout since resolved
           
           // CRITICAL: Trigger Ada to respond now that disambiguation is resolved
           if (openaiWs?.readyState === WebSocket.OPEN) {
+            openAiResponseInProgress = true;
+            startResponseTimeout(); // SAFEGUARD 1
             openaiWs.send(JSON.stringify({
               type: "response.create",
               response: { modalities: ["audio", "text"] }
@@ -4168,7 +4174,217 @@ Rules:
   // "conversation_already_has_active_response".
   // We guard against that by deferring response.create until we see response.done.
   let openAiResponseInProgress = false;
+  let openAiResponseStartedAt = 0; // Timestamp when response started (for timeout detection)
   let deferredResponseCreate: { response: Record<string, unknown>; label: string } | null = null;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FLOW SAFEGUARDS - Prevent Ada from getting stuck or cutting out
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Safeguard 1: Response timeout - auto-reset openAiResponseInProgress if stuck
+  const RESPONSE_TIMEOUT_MS = 8000; // 8 seconds max for any response
+  let responseTimeoutTimer: number | null = null;
+
+  // Safeguard 2: Transcription timeout - handle audio commit with no transcript
+  const TRANSCRIPTION_TIMEOUT_MS = 5000; // 5 seconds to get transcript after audio commit
+  let transcriptionTimeoutTimer: number | null = null;
+  let lastAudioCommitItemId: string | null = null;
+
+  // Safeguard 3: Disambiguation timeout - clear stale disambiguation
+  const DISAMBIGUATION_TIMEOUT_MS = 12000; // 12 seconds max to wait for disambiguation response
+  let disambiguationTimeoutTimer: number | null = null;
+
+  // Safeguard 4: Tool block response retry - ensure Ada speaks after tool blocks
+  const TOOL_BLOCK_RETRY_MS = 4000; // 4 seconds to retry response after tool block
+  let toolBlockRetryTimer: number | null = null;
+
+  // Safeguard 5: Heartbeat - periodic status logging for debugging
+  const HEARTBEAT_INTERVAL_MS = 30000; // Log status every 30 seconds
+  let heartbeatTimer: number | null = null;
+  let lastHeartbeatState = "";
+
+  // Clear all flow safeguard timers
+  const clearFlowSafeguardTimers = () => {
+    if (responseTimeoutTimer !== null) { clearTimeout(responseTimeoutTimer); responseTimeoutTimer = null; }
+    if (transcriptionTimeoutTimer !== null) { clearTimeout(transcriptionTimeoutTimer); transcriptionTimeoutTimer = null; }
+    if (disambiguationTimeoutTimer !== null) { clearTimeout(disambiguationTimeoutTimer); disambiguationTimeoutTimer = null; }
+    if (toolBlockRetryTimer !== null) { clearTimeout(toolBlockRetryTimer); toolBlockRetryTimer = null; }
+    if (heartbeatTimer !== null) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
+  };
+
+  // Safeguard 1: Start response timeout when AI begins responding
+  const startResponseTimeout = () => {
+    if (responseTimeoutTimer !== null) clearTimeout(responseTimeoutTimer);
+    openAiResponseStartedAt = Date.now();
+    
+    responseTimeoutTimer = setTimeout(() => {
+      if (openAiResponseInProgress && !callEnded) {
+        const elapsed = Date.now() - openAiResponseStartedAt;
+        console.log(`[${callId}] ⚠️ SAFEGUARD 1: Response timeout after ${elapsed}ms - resetting openAiResponseInProgress`);
+        openAiResponseInProgress = false;
+        
+        // Flush any deferred response
+        if (deferredResponseCreate && sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          const { response, label } = deferredResponseCreate;
+          deferredResponseCreate = null;
+          openAiResponseInProgress = true;
+          startResponseTimeout(); // Re-arm for the new response
+          openaiWs.send(JSON.stringify({ type: "response.create", response }));
+          console.log(`[${callId}] >>> response.create sent (timeout recovery: ${label})`);
+        }
+      }
+    }, RESPONSE_TIMEOUT_MS);
+  };
+
+  // Safeguard 1: Clear response timeout when AI finishes
+  const clearResponseTimeout = () => {
+    if (responseTimeoutTimer !== null) {
+      clearTimeout(responseTimeoutTimer);
+      responseTimeoutTimer = null;
+    }
+    openAiResponseStartedAt = 0;
+  };
+
+  // Safeguard 2: Start transcription timeout after audio commit
+  const startTranscriptionTimeout = (itemId: string) => {
+    if (transcriptionTimeoutTimer !== null) clearTimeout(transcriptionTimeoutTimer);
+    lastAudioCommitItemId = itemId;
+    
+    transcriptionTimeoutTimer = setTimeout(() => {
+      if (awaitingResponseAfterCommit && !responseCreatedSinceCommit && !callEnded) {
+        console.log(`[${callId}] ⚠️ SAFEGUARD 2: Transcription timeout for item ${itemId} - prompting "didn't catch that"`);
+        
+        // Prompt Ada to say she didn't catch that
+        if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "[SYSTEM: Audio was received but transcription failed. Say: 'Sorry, I didn\'t quite catch that. Could you repeat that for me?']" }]
+            }
+          }));
+          
+          if (!openAiResponseInProgress) {
+            openAiResponseInProgress = true;
+            startResponseTimeout();
+            openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+            console.log(`[${callId}] >>> response.create sent (transcription timeout recovery)`);
+          }
+        }
+        
+        awaitingResponseAfterCommit = false;
+        responseCreatedSinceCommit = true;
+      }
+    }, TRANSCRIPTION_TIMEOUT_MS);
+  };
+
+  // Safeguard 2: Clear transcription timeout when transcript received
+  const clearTranscriptionTimeout = () => {
+    if (transcriptionTimeoutTimer !== null) {
+      clearTimeout(transcriptionTimeoutTimer);
+      transcriptionTimeoutTimer = null;
+    }
+    lastAudioCommitItemId = null;
+  };
+
+  // Safeguard 3: Start disambiguation timeout
+  const startDisambiguationTimeout = () => {
+    if (disambiguationTimeoutTimer !== null) clearTimeout(disambiguationTimeoutTimer);
+    
+    disambiguationTimeoutTimer = setTimeout(() => {
+      if (pendingAreaDisambiguation && !callEnded) {
+        console.log(`[${callId}] ⚠️ SAFEGUARD 3: Disambiguation timeout - clearing and continuing`);
+        
+        const roadName = pendingAreaDisambiguation.roadName;
+        pendingAreaDisambiguation = null;
+        
+        // Tell Ada to continue without disambiguation
+        if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[SYSTEM: The customer didn't respond to the area question for "${roadName}". Accept the address as-is and continue with the booking. Ask for the next piece of information you need.]` }]
+            }
+          }));
+          
+          if (!openAiResponseInProgress) {
+            openAiResponseInProgress = true;
+            startResponseTimeout();
+            openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+            console.log(`[${callId}] >>> response.create sent (disambiguation timeout recovery)`);
+          }
+        }
+      }
+    }, DISAMBIGUATION_TIMEOUT_MS);
+  };
+
+  // Safeguard 3: Clear disambiguation timeout
+  const clearDisambiguationTimeout = () => {
+    if (disambiguationTimeoutTimer !== null) {
+      clearTimeout(disambiguationTimeoutTimer);
+      disambiguationTimeoutTimer = null;
+    }
+  };
+
+  // Safeguard 4: Start tool block retry timer
+  const startToolBlockRetry = (context: string) => {
+    if (toolBlockRetryTimer !== null) clearTimeout(toolBlockRetryTimer);
+    
+    toolBlockRetryTimer = setTimeout(() => {
+      if (!callEnded && sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+        // Check if Ada has responded since the block
+        if (!openAiResponseInProgress && !aiSpeaking) {
+          console.log(`[${callId}] ⚠️ SAFEGUARD 4: Tool block retry for ${context} - Ada didn't respond, retriggering`);
+          
+          openAiResponseInProgress = true;
+          startResponseTimeout();
+          openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+          console.log(`[${callId}] >>> response.create sent (tool block retry: ${context})`);
+        }
+      }
+    }, TOOL_BLOCK_RETRY_MS);
+  };
+
+  // Safeguard 5: Start heartbeat logging
+  const startHeartbeat = () => {
+    if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
+    
+    const logHeartbeat = () => {
+      if (callEnded) return;
+      
+      const state = JSON.stringify({
+        aiSpeaking,
+        responseInProgress: openAiResponseInProgress,
+        awaitingResponse: awaitingResponseAfterCommit,
+        disambiguation: pendingAreaDisambiguation ? pendingAreaDisambiguation.roadName : null,
+        hasBooking: !!knownBooking.pickup || !!knownBooking.destination,
+        passengers: knownBooking.passengers,
+        luggage: knownBooking.luggage
+      });
+      
+      // Only log if state changed
+      if (state !== lastHeartbeatState) {
+        console.log(`[${callId}] 💓 Heartbeat: ${state}`);
+        lastHeartbeatState = state;
+      }
+      
+      // Check for stuck states
+      if (openAiResponseInProgress && openAiResponseStartedAt > 0) {
+        const elapsed = Date.now() - openAiResponseStartedAt;
+        if (elapsed > RESPONSE_TIMEOUT_MS * 0.8) {
+          console.log(`[${callId}] ⚠️ Heartbeat: Response running long (${elapsed}ms)`);
+        }
+      }
+      
+      // Re-arm heartbeat
+      heartbeatTimer = setTimeout(logHeartbeat, HEARTBEAT_INTERVAL_MS);
+    };
+    
+    heartbeatTimer = setTimeout(logHeartbeat, HEARTBEAT_INTERVAL_MS);
+  };
 
   // Connect to OpenAI Realtime API
   const connectToOpenAI = () => {
@@ -4324,6 +4540,9 @@ Rules:
       // Session updated - now ready
       if (data.type === "session.updated") {
         console.log(`[${callId}] Session ready! Effective config:`, data.session);
+        
+        // SAFEGUARD 5: Start heartbeat logging
+        startHeartbeat();
         
         // If customer has an active booking and we haven't injected the context yet, do it now
         // But DON'T trigger the greeting again - we use greetingSent flag for that
@@ -4695,6 +4914,9 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         const rawTranscript = data.transcript || "";
         console.log(`[${callId}] Raw user transcript: "${rawTranscript}" (length: ${rawTranscript.length})`);
         noteUserActivity("transcription.completed");
+        
+        // SAFEGUARD 2: Clear transcription timeout - we got a transcript
+        clearTranscriptionTimeout();
 
         // Log empty/very short transcripts for debugging
         if (!rawTranscript || rawTranscript.trim().length < 2) {
@@ -5271,6 +5493,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
             } else {
               openAiResponseInProgress = true;
+              startResponseTimeout(); // SAFEGUARD 1
               openaiWs.send(JSON.stringify({
                 type: "response.create",
                 response,
@@ -5297,6 +5520,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             console.log(`[${callId}] 🗺️ Disambiguation pending - skipping normal response.create`);
             responseCreatedSinceCommit = true; // Prevent other paths from sending response
             awaitingResponseAfterCommit = false;
+            startDisambiguationTimeout(); // SAFEGUARD 3
           } else {
             // Check travel hub for luggage question BEFORE sending response
             const tripHasTravelHubNow = isTravelHub(knownBooking.pickup) || isTravelHub(knownBooking.destination);
@@ -5321,6 +5545,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
               } else {
                 openAiResponseInProgress = true;
+                startResponseTimeout(); // SAFEGUARD 1
                 openaiWs.send(JSON.stringify({
                   type: "response.create",
                   response,
@@ -5344,6 +5569,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
             } else {
               openAiResponseInProgress = true;
+              startResponseTimeout(); // SAFEGUARD 1
               openaiWs.send(JSON.stringify({
                 type: "response.create",
                 response,
@@ -5381,6 +5607,9 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         lastAudioCommitAt = Date.now();
         awaitingResponseAfterCommit = true;
         responseCreatedSinceCommit = false;
+        
+        // SAFEGUARD 2: Start transcription timeout
+        startTranscriptionTimeout(data.item_id || "unknown");
       }
 
       // Handle transcription failures - important for debugging missed responses
@@ -5401,12 +5630,16 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
         // Mark response finished so we don't accidentally create overlapping responses.
         openAiResponseInProgress = false;
+        
+        // SAFEGUARD 1: Clear response timeout
+        clearResponseTimeout();
 
         // If we deferred a response.create due to an in-progress response, flush it now.
         if (deferredResponseCreate && sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
           const { response, label } = deferredResponseCreate;
           deferredResponseCreate = null;
           openAiResponseInProgress = true; // optimistic guard against race
+          startResponseTimeout(); // SAFEGUARD 1: Re-arm for new response
           openaiWs.send(JSON.stringify({ type: "response.create", response }));
           console.log(`[${callId}] >>> response.create sent (flushed deferred: ${label})`);
         }
@@ -5446,11 +5679,16 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               
               // CRITICAL: Trigger Ada to respond to the blocking message
               // Without this, she stays silent after the tool call fails
+              openAiResponseInProgress = true;
+              startResponseTimeout(); // SAFEGUARD 1
               openaiWs.send(JSON.stringify({
                 type: "response.create",
                 response: { modalities: ["audio", "text"] }
               }));
               console.log(`[${callId}] ✈️ Triggered luggage question after book_taxi block`);
+              
+              // SAFEGUARD 4: Start tool block retry in case Ada doesn't respond
+              startToolBlockRetry("luggage_block");
             }
             
             // Return early without processing the booking
