@@ -3007,28 +3007,33 @@ Rules:
           const spokenLower = spoken.toLowerCase().trim();
           const targetLower = target.toLowerCase().trim();
           
-          // Exact match
-          if (spokenLower.includes(targetLower) || targetLower.includes(spokenLower)) return true;
+          if (!spokenLower || !targetLower) return false;
           
-          // First 3+ characters match (catches "sol" in "solio" matching "solihull")
+          // Exact or substring match
+          if (spokenLower === targetLower) return true;
+          if (targetLower.includes(spokenLower) && spokenLower.length >= 3) return true;
+          if (spokenLower.includes(targetLower)) return true;
+          
+          // First 3 characters match (catches "sol" matching "solihull")
           if (spokenLower.length >= 3 && targetLower.startsWith(spokenLower.slice(0, 3))) return true;
-          if (targetLower.length >= 3 && spokenLower.startsWith(targetLower.slice(0, 3))) return true;
           
-          // Phonetic similarity - common STT mishearings
-          const normalize = (s: string) => s
-            .replace(/yo$/i, 'ull')    // Soryo → Solihull
-            .replace(/io$/i, 'ihull')  // Solio → Solihull
-            .replace(/worth$/i, 'worth')
-            .replace(/arden$/i, 'arden');
+          // Common STT mishearings for these specific areas
+          const mishearings: Record<string, string[]> = {
+            'solihull': ['solio', 'soryo', 'solia', 'solyo', 'solehill', 'solihill', 'solidhull', 'soul', 'solely'],
+            'bedworth': ['bedford', 'bedward', 'bedsworth', 'badworth'],
+            'henley-in-arden': ['henley', 'hendley', 'henleigh', 'arden'],
+          };
           
-          const normalizedSpoken = normalize(spokenLower);
-          const normalizedTarget = normalize(targetLower);
+          for (const [correct, variants] of Object.entries(mishearings)) {
+            if (targetLower === correct || targetLower.includes(correct.split('-')[0])) {
+              if (variants.some(v => spokenLower.includes(v) || v.includes(spokenLower))) {
+                return true;
+              }
+            }
+          }
           
-          if (normalizedTarget.includes(normalizedSpoken) || normalizedSpoken.includes(normalizedTarget)) return true;
-          
-          // Levenshtein distance for close matches (allow 30% error rate)
-          const maxDist = Math.floor(Math.max(spokenLower.length, targetLower.length) * 0.4);
-          let dist = 0;
+          // Levenshtein distance for close matches (allow 40% error rate for short words)
+          const maxDist = Math.max(2, Math.floor(Math.max(spokenLower.length, targetLower.length) * 0.4));
           const m = spokenLower.length, n = targetLower.length;
           const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
           for (let i = 0; i <= m; i++) dp[i][0] = i;
@@ -3042,19 +3047,51 @@ Rules:
               );
             }
           }
-          dist = dp[m][n];
           
-          return dist <= maxDist;
+          return dp[m][n] <= maxDist;
         };
+        
+        // Extract candidate words/phrases from transcript to match against areas
+        // e.g., "school road in solio" → ["school", "road", "in", "solio", "school road", "in solio"]
+        const words = lowerTranscript.replace(/[.,!?]/g, '').split(/\s+/).filter(w => w.length >= 2);
+        const candidatePhrases = [...words];
+        
+        // Also check last word specifically (most likely to be the area)
+        const lastWord = words[words.length - 1];
         
         // Try to match the area from the customer's response
         let matchedArea: PendingAreaDisambiguation['matches'][0] | null = null;
+        
         for (const match of pendingAreaDisambiguation.matches) {
-          // Check if customer mentioned this area (with fuzzy matching)
-          if (fuzzyMatch(lowerTranscript, match.area)) {
+          const targetArea = match.area.toLowerCase();
+          
+          // Check last word first (highest priority - "It's in Solio" → "Solio")
+          if (lastWord && fuzzyMatch(lastWord, targetArea)) {
             matchedArea = match;
-            console.log(`[${callId}] 🗺️ Fuzzy matched "${lowerTranscript}" → "${match.area}"`);
+            console.log(`[${callId}] 🗺️ Fuzzy matched last word "${lastWord}" → "${match.area}"`);
             break;
+          }
+          
+          // Check all words
+          for (const word of candidatePhrases) {
+            if (fuzzyMatch(word, targetArea)) {
+              matchedArea = match;
+              console.log(`[${callId}] 🗺️ Fuzzy matched word "${word}" → "${match.area}"`);
+              break;
+            }
+          }
+          
+          if (matchedArea) break;
+        }
+        
+        // If still no match, check if full transcript contains area name or close variant
+        if (!matchedArea) {
+          for (const match of pendingAreaDisambiguation.matches) {
+            if (fuzzyMatch(lowerTranscript, match.area)) {
+              matchedArea = match;
+              console.log(`[${callId}] 🗺️ Fuzzy matched full transcript → "${match.area}"`);
+              break;
+            }
           }
         }
         
