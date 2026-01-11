@@ -1024,6 +1024,22 @@ serve(async (req) => {
   // force a single follow-up tool call on "Yes" (prevents double-confirm loops).
   let pendingHighFareConfirmation: PendingHighFareConfirmation | null = null;
 
+  // Track pending area disambiguation (when same road exists in multiple areas)
+  type PendingAreaDisambiguation = {
+    addressType: "pickup" | "destination";
+    roadName: string;
+    matches: {
+      road: string;
+      area: string;
+      city?: string;
+      postcode?: string;
+      lat: number;
+      lng: number;
+      formatted_address?: string;
+    }[];
+  };
+  let pendingAreaDisambiguation: PendingAreaDisambiguation | null = null;
+
   // Track whether we've already asked Ada to clarify a given address.
   // This prevents a "stuck" loop where an early failed geocode prompt keeps repeating
   // even after the address later verifies successfully.
@@ -1794,7 +1810,75 @@ Wait for their response before proceeding.`;
     }));
   };
   
-  // Verify a high fare and ask Ada to confirm addresses with customer
+  // Ask Ada to disambiguate when the same road exists in multiple areas
+  // This is different from askForAddressDisambiguation - it's specifically for road-level area choices
+  // e.g., "School Road in Hockley, Yardley, or Erdington?"
+  interface AreaMatch {
+    road: string;
+    area: string;
+    city?: string;
+    postcode?: string;
+    lat: number;
+    lng: number;
+    formatted_address?: string;
+  }
+  
+  const askForAreaDisambiguation = (addressType: "pickup" | "destination", roadName: string, areaMatches: AreaMatch[]) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN || areaMatches.length < 2) return;
+    
+    // Format the areas for Ada to present naturally
+    // e.g., "School Road in Hockley, School Road in Yardley, or School Road in Erdington"
+    const areasList = areaMatches.slice(0, 4).map(m => m.area).join(", ");
+    const areasForSpeech = areaMatches.slice(0, 4).map(m => `${m.road} in ${m.area}`);
+    
+    // Create natural speech options
+    let speechOptions: string;
+    if (areasForSpeech.length === 2) {
+      speechOptions = `${areasForSpeech[0]} or ${areasForSpeech[1]}`;
+    } else {
+      const lastOption = areasForSpeech.pop();
+      speechOptions = `${areasForSpeech.join(", ")}, or ${lastOption}`;
+    }
+    
+    const message = `[SYSTEM: AREA DISAMBIGUATION REQUIRED]
+I've found ${roadName} in multiple areas nearby:
+${areaMatches.slice(0, 4).map(m => `• ${m.road}, ${m.area}${m.city ? ` (${m.city})` : ''}`).join('\n')}
+
+You MUST ask the customer which area they mean. Say something like:
+"I've found ${roadName} in a few areas nearby — do you mean ${speechOptions}?"
+
+CRITICAL RULES:
+- NEVER auto-pick an area
+- NEVER re-ask for the street name (they already said "${roadName}")
+- Wait for them to say the area name before proceeding
+- Once they choose, use that specific address`;
+    
+    console.log(`[${callId}] 🗺️ Asking for AREA disambiguation: ${roadName} - found in ${areasList}`);
+    
+    // Store the pending disambiguation so we can match their response
+    pendingAreaDisambiguation = {
+      addressType,
+      roadName,
+      matches: areaMatches
+    };
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }]
+      }
+    }));
+    
+    // Trigger Ada to respond
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] }
+    }));
+  };
+  
+
   const verifyHighFare = (fare: number, pickup: string, destination: string) => {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
     
@@ -2767,6 +2851,80 @@ Rules:
               }
             }));
           }
+        }
+      }
+      
+      // CHECK: If we have pending area disambiguation, try to match the customer's choice
+      if (pendingAreaDisambiguation && pendingAreaDisambiguation.matches.length > 0) {
+        const lowerTranscript = transcript.toLowerCase();
+        
+        // Try to match the area from the customer's response
+        let matchedArea: PendingAreaDisambiguation['matches'][0] | null = null;
+        for (const match of pendingAreaDisambiguation.matches) {
+          const areaLower = match.area.toLowerCase();
+          
+          // Check if customer mentioned this area
+          if (lowerTranscript.includes(areaLower)) {
+            matchedArea = match;
+            break;
+          }
+        }
+        
+        if (matchedArea) {
+          console.log(`[${callId}] 🗺️ Area disambiguation resolved: ${matchedArea.area} for ${pendingAreaDisambiguation.addressType}`);
+          
+          // Update the address with the chosen area
+          const fullAddress = matchedArea.formatted_address || `${matchedArea.road}, ${matchedArea.area}${matchedArea.city ? `, ${matchedArea.city}` : ''}`;
+          
+          if (pendingAreaDisambiguation.addressType === "pickup") {
+            knownBooking.pickup = fullAddress;
+            knownBooking.pickupVerified = true;
+            console.log(`[${callId}] 📍 Pickup updated to: ${fullAddress}`);
+            
+            // Inject confirmation into Ada's context
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ 
+                    type: "input_text", 
+                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Pickup is now confirmed as "${fullAddress}". Proceed with asking for destination or confirming the booking.]` 
+                  }]
+                }
+              }));
+            }
+          } else {
+            knownBooking.destination = fullAddress;
+            knownBooking.destinationVerified = true;
+            console.log(`[${callId}] 📍 Destination updated to: ${fullAddress}`);
+            
+            // Inject confirmation into Ada's context
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ 
+                    type: "input_text", 
+                    text: `[INTERNAL: Customer chose ${matchedArea.area}. Destination is now confirmed as "${fullAddress}". Proceed with confirmation or any remaining questions.]` 
+                  }]
+                }
+              }));
+            }
+          }
+          
+          // Clear the pending disambiguation
+          pendingAreaDisambiguation = null;
+          
+          // Broadcast update to live_calls
+          await supabase.from("live_calls").update({
+            pickup: knownBooking.pickup || null,
+            destination: knownBooking.destination || null,
+            updated_at: new Date().toISOString()
+          }).eq("call_id", callId);
         }
       }
       
@@ -4807,6 +4965,69 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             if (tripResolveResponse.ok) {
               tripResolveResult = await tripResolveResponse.json();
               console.log(`[${callId}] 🚕 Trip resolve result:`, JSON.stringify(tripResolveResult, null, 2));
+              
+              // ===== NEW: Check for area disambiguation (same road in multiple areas) =====
+              if (tripResolveResult.needs_pickup_disambiguation && tripResolveResult.pickup_area_matches?.length > 1) {
+                console.log(`[${callId}] 🗺️ Pickup needs area disambiguation: ${tripResolveResult.pickup_area_matches.length} areas found`);
+                
+                // Get the road name from the first match
+                const roadName = tripResolveResult.pickup_area_matches[0]?.road || finalBooking.pickup;
+                
+                // Ask Ada to have the customer choose
+                askForAreaDisambiguation("pickup", roadName, tripResolveResult.pickup_area_matches);
+                
+                // Return a helpful error to Ada
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      error: "area_disambiguation_needed",
+                      message: `I found ${roadName} in multiple areas. Please ask the customer which area they mean.`
+                    })
+                  }
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] }
+                }));
+                
+                return; // Don't proceed until customer chooses area
+              }
+              
+              if (tripResolveResult.needs_dropoff_disambiguation && tripResolveResult.dropoff_area_matches?.length > 1) {
+                console.log(`[${callId}] 🗺️ Dropoff needs area disambiguation: ${tripResolveResult.dropoff_area_matches.length} areas found`);
+                
+                // Get the road name from the first match
+                const roadName = tripResolveResult.dropoff_area_matches[0]?.road || finalBooking.destination;
+                
+                // Ask Ada to have the customer choose
+                askForAreaDisambiguation("destination", roadName, tripResolveResult.dropoff_area_matches);
+                
+                // Return a helpful error to Ada
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      error: "area_disambiguation_needed",
+                      message: `I found ${roadName} in multiple areas. Please ask the customer which area they mean.`
+                    })
+                  }
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] }
+                }));
+                
+                return; // Don't proceed until customer chooses area
+              }
               
               // Check for errors (non-UK addresses, trip too long, etc.)
               if (tripResolveResult.error) {
