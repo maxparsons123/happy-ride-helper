@@ -57,6 +57,17 @@ interface NearbyResult {
   types?: string[];
 }
 
+// NEW: Area disambiguation for roads that exist in multiple areas
+interface AreaMatch {
+  road: string;
+  area: string;
+  city?: string;
+  postcode?: string;
+  lat: number;
+  lng: number;
+  formatted_address?: string;
+}
+
 interface TripResolveRequest {
   // Trip resolution
   pickup_input?: string;
@@ -83,6 +94,12 @@ interface TripResolveResponse {
   inferred_area?: InferredArea;
   distance?: DistanceInfo;
   fare_estimate?: FareEstimate;
+  
+  // NEW: Area disambiguation
+  needs_pickup_disambiguation?: boolean;
+  pickup_area_matches?: AreaMatch[];
+  needs_dropoff_disambiguation?: boolean;
+  dropoff_area_matches?: AreaMatch[];
   
   // Nearby lookup results
   nearby_results?: NearbyResult[];
@@ -791,6 +808,179 @@ async function upgradeWithPlaceDetails(
 }
 
 /**
+ * AREA DISAMBIGUATION - Finds if same road exists in multiple nearby areas
+ * Returns multiple area matches for Ada to ask user to choose
+ * 
+ * Rules:
+ * - If same road exists in multiple nearby areas → return all for disambiguation
+ * - Never auto-pick between areas
+ * - Never re-ask street name (user already said "School Road")
+ */
+async function checkAreaDisambiguation(
+  address: string,
+  biasLat: number,
+  biasLng: number,
+  radiusMeters: number = 15000
+): Promise<{ needsDisambiguation: boolean; matches: AreaMatch[] }> {
+  if (!GOOGLE_API_KEY) {
+    return { needsDisambiguation: false, matches: [] };
+  }
+  
+  console.log(`[AreaDisambiguation] Checking: "${address}" near ${biasLat},${biasLng}`);
+  
+  // Normalize the address for searching
+  const normalizedAddress = normalizeSTTAddress(address);
+  
+  // Use Google Places Text Search to find all matches
+  const params = new URLSearchParams({
+    query: `${normalizedAddress}, UK`,
+    location: `${biasLat},${biasLng}`,
+    radius: radiusMeters.toString(),
+    key: GOOGLE_API_KEY,
+  });
+  
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
+  
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      console.error("[AreaDisambiguation] API error:", resp.status);
+      return { needsDisambiguation: false, matches: [] };
+    }
+    
+    const data = await resp.json();
+    if (data.status !== "OK" || !data.results?.length) {
+      console.log("[AreaDisambiguation] No results");
+      return { needsDisambiguation: false, matches: [] };
+    }
+    
+    // Extract road/area info from each result
+    const areaMatches: AreaMatch[] = [];
+    
+    for (const result of data.results.slice(0, 10)) {
+      const placeId = result.place_id;
+      if (!placeId) continue;
+      
+      // Get detailed address components
+      const detailParams = new URLSearchParams({
+        place_id: placeId,
+        fields: "name,formatted_address,geometry,address_components",
+        key: GOOGLE_API_KEY,
+      });
+      
+      const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?${detailParams}`;
+      
+      try {
+        const detailResp = await fetch(detailUrl);
+        if (!detailResp.ok) continue;
+        
+        const detailData = await detailResp.json();
+        if (detailData.status !== "OK" || !detailData.result) continue;
+        
+        const r = detailData.result;
+        const components = r.address_components || [];
+        const loc = r.geometry?.location;
+        if (!loc) continue;
+        
+        // Extract components
+        const findComponent = (type: string): string | undefined =>
+          components.find((c: any) => c.types?.includes(type))?.long_name;
+        
+        const route = findComponent("route");
+        if (!route) continue;
+        
+        // Get area (sublocality, neighborhood, postal_town, or locality)
+        const area =
+          findComponent("sublocality") ||
+          findComponent("neighborhood") ||
+          findComponent("postal_town") ||
+          findComponent("locality") ||
+          "Unknown area";
+        
+        const city = findComponent("locality");
+        const postcode = findComponent("postal_code");
+        
+        // Check distance from bias point
+        const distanceMeters = haversineDistance(biasLat, biasLng, loc.lat, loc.lng);
+        if (distanceMeters > radiusMeters * 1.5) {
+          console.log(`[AreaDisambiguation] Skipping too-far result: ${r.formatted_address} (${Math.round(distanceMeters / 1000)}km away)`);
+          continue;
+        }
+        
+        areaMatches.push({
+          road: route,
+          area: area,
+          city: city,
+          postcode: postcode,
+          lat: loc.lat,
+          lng: loc.lng,
+          formatted_address: r.formatted_address,
+        });
+      } catch (e) {
+        console.error("[AreaDisambiguation] Detail fetch error:", e);
+      }
+    }
+    
+    // Dedupe by area (same road+area = same match)
+    const uniqueMatches = dedupeAreaMatches(areaMatches);
+    
+    console.log(`[AreaDisambiguation] Found ${uniqueMatches.length} unique area(s) for "${address}":`, 
+      uniqueMatches.map(m => `${m.road} in ${m.area}`).join(", "));
+    
+    // If multiple areas found for same road → disambiguation needed
+    if (uniqueMatches.length > 1) {
+      return {
+        needsDisambiguation: true,
+        matches: uniqueMatches,
+      };
+    }
+    
+    return {
+      needsDisambiguation: false,
+      matches: uniqueMatches,
+    };
+    
+  } catch (e) {
+    console.error("[AreaDisambiguation] Error:", e);
+    return { needsDisambiguation: false, matches: [] };
+  }
+}
+
+/**
+ * Dedupe area matches by road+area combination
+ */
+function dedupeAreaMatches(matches: AreaMatch[]): AreaMatch[] {
+  const seen = new Set<string>();
+  const result: AreaMatch[] = [];
+  
+  for (const m of matches) {
+    const key = `${m.road.toLowerCase()}|${m.area.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(m);
+  }
+  
+  return result.slice(0, 5); // Safety limit
+}
+
+/**
+ * Check if address is a "bare" road name without house number (e.g., "School Road")
+ * These are candidates for area disambiguation
+ */
+function isBareRoadAddress(address: string): boolean {
+  const trimmed = address.trim();
+  // Starts with a number = has house number, not bare
+  if (/^\d+/.test(trimmed)) return false;
+  // Has a postcode = specific enough
+  if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(trimmed)) return false;
+  // Has a comma (likely includes area) = specific enough
+  if (trimmed.includes(",")) return false;
+  // Check if it contains a road type (Road, Street, Lane, etc.)
+  const hasRoadType = extractRoadType(trimmed) !== null;
+  return hasRoadType;
+}
+
+/**
  * GLOBAL LOCATION SEARCH (no city bias)
  * Used when caller has no city context - searches UK-wide with strict validation
  * For house addresses, uses Text Search with validation to avoid wrong matches
@@ -1249,25 +1439,77 @@ serve(async (req) => {
     
     // Resolve pickup first
     if (pickup_input) {
-      pickup = await geocodeAddress(pickup_input, cityContext, coordsContext, country, true);  // strictPickup = true
-      
-      // Use pickup location for dropoff biasing
-      if (pickup && pickup.lat && pickup.lng) {
-        coordsContext = { lat: pickup.lat, lng: pickup.lng };
-        if (!cityContext && pickup.city) {
-          cityContext = pickup.city;
+      // Check if this is a bare road address that might need area disambiguation
+      // e.g., "School Road" exists in multiple areas of Birmingham
+      if (isBareRoadAddress(pickup_input) && coordsContext) {
+        const disambiguationCheck = await checkAreaDisambiguation(
+          pickup_input, 
+          coordsContext.lat, 
+          coordsContext.lng,
+          15000 // 15km radius for pickup disambiguation
+        );
+        
+        if (disambiguationCheck.needsDisambiguation) {
+          console.log(`[Resolve] Pickup needs area disambiguation: ${disambiguationCheck.matches.length} areas found`);
+          response.needs_pickup_disambiguation = true;
+          response.pickup_area_matches = disambiguationCheck.matches;
+          // Don't continue with normal geocoding - let Ada ask user to choose
         }
-        console.log(`[Resolve] Using pickup for dropoff bias: ${pickup.city} (${pickup.lat}, ${pickup.lng})`);
+      }
+      
+      // Only geocode if no disambiguation needed
+      if (!response.needs_pickup_disambiguation) {
+        pickup = await geocodeAddress(pickup_input, cityContext, coordsContext, country, true);  // strictPickup = true
+        
+        // Use pickup location for dropoff biasing
+        if (pickup && pickup.lat && pickup.lng) {
+          coordsContext = { lat: pickup.lat, lng: pickup.lng };
+          if (!cityContext && pickup.city) {
+            cityContext = pickup.city;
+          }
+          console.log(`[Resolve] Using pickup for dropoff bias: ${pickup.city} (${pickup.lat}, ${pickup.lng})`);
+        }
       }
     }
     
     // Now resolve dropoff with pickup location as bias
-    if (dropoff_input) {
-      dropoff = await geocodeAddress(dropoff_input, cityContext, coordsContext, country, false);  // strictPickup = false (can be global)
+    if (dropoff_input && !response.needs_pickup_disambiguation) {
+      // Check if dropoff is a bare road address that might need area disambiguation
+      if (isBareRoadAddress(dropoff_input) && coordsContext) {
+        const disambiguationCheck = await checkAreaDisambiguation(
+          dropoff_input, 
+          coordsContext.lat, 
+          coordsContext.lng,
+          20000 // 20km radius for dropoff (can be going to nearby town)
+        );
+        
+        if (disambiguationCheck.needsDisambiguation) {
+          console.log(`[Resolve] Dropoff needs area disambiguation: ${disambiguationCheck.matches.length} areas found`);
+          response.needs_dropoff_disambiguation = true;
+          response.dropoff_area_matches = disambiguationCheck.matches;
+        }
+      }
+      
+      // Only geocode if no disambiguation needed
+      if (!response.needs_dropoff_disambiguation) {
+        dropoff = await geocodeAddress(dropoff_input, cityContext, coordsContext, country, false);  // strictPickup = false (can be global)
+      }
     }
     
     if (pickup) response.pickup = pickup;
     if (dropoff) response.dropoff = dropoff;
+    
+    // If disambiguation is needed, return early with the options
+    if (response.needs_pickup_disambiguation || response.needs_dropoff_disambiguation) {
+      response.ok = true; // Not an error - just needs user input
+      response.inferred_area = inferArea(undefined, undefined, cityContext, coordsContext);
+      
+      console.log(`✅ Trip Resolve Response (disambiguation needed):`, JSON.stringify(response, null, 2));
+      
+      return new Response(JSON.stringify(response), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // If an input was provided but we couldn't resolve it, surface an error (prevents random/incorrect matches)
     if (pickup_input && !pickup && !response.error) {
