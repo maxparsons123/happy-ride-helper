@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot } from "lucide-react";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle } from "lucide-react";
 
 interface Agent {
   id: string;
@@ -29,6 +29,8 @@ interface GeocodeResult {
   lon?: number;
   error?: string;
   loading?: boolean;
+  needs_disambiguation?: boolean; // Multiple areas found, user must choose
+  disambiguation_areas?: string[]; // List of area options
 }
 
 interface LiveCall {
@@ -438,6 +440,16 @@ export default function LiveCalls() {
               lat: data.pickup.lat,
               lon: data.pickup.lng
             });
+          } else if (data.needs_pickup_disambiguation && data.pickup_matches) {
+            // Multiple areas found - disambiguation needed
+            const areas = data.pickup_matches.map((m: any) => m.area || m.locality || m.city).filter(Boolean);
+            setPickupGeocode({
+              found: false,
+              address: callData.pickup!,
+              needs_disambiguation: true,
+              disambiguation_areas: areas,
+              error: "Disambiguation needed"
+            });
           } else if (callData.pickup) {
             setPickupGeocode({ found: false, address: callData.pickup, error: "Not found" });
           }
@@ -450,6 +462,16 @@ export default function LiveCalls() {
               place_name: data.dropoff.name, // Business name from Google
               lat: data.dropoff.lat,
               lon: data.dropoff.lng
+            });
+          } else if (data.needs_dropoff_disambiguation && data.dropoff_matches) {
+            // Multiple areas found - disambiguation needed
+            const areas = data.dropoff_matches.map((m: any) => m.area || m.locality || m.city).filter(Boolean);
+            setDestinationGeocode({
+              found: false,
+              address: callData.destination!,
+              needs_disambiguation: true,
+              disambiguation_areas: areas,
+              error: "Disambiguation needed"
             });
           } else if (callData.destination) {
             setDestinationGeocode({ found: false, address: callData.destination, error: "Not found" });
@@ -862,6 +884,8 @@ export default function LiveCalls() {
                                 <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
                               ) : pickupGeocode.found ? (
                                 <CheckCircle2 className="w-4 h-4 text-green-500" />
+                              ) : pickupGeocode.needs_disambiguation ? (
+                                <AlertCircle className="w-4 h-4 text-amber-500" />
                               ) : (
                                 <XCircle className="w-4 h-4 text-red-500" />
                               )
@@ -869,10 +893,18 @@ export default function LiveCalls() {
                           </div>
                           <p className="text-muted-foreground pl-6">{selectedCallData.pickup || "—"}</p>
                           {addressVerification && pickupGeocode && !pickupGeocode.loading && (
-                            <p className={`text-xs pl-6 ${pickupGeocode.found ? "text-green-400" : "text-red-400"}`}>
+                            <p className={`text-xs pl-6 ${
+                              pickupGeocode.found 
+                                ? "text-green-400" 
+                                : pickupGeocode.needs_disambiguation 
+                                  ? "text-amber-400" 
+                                  : "text-red-400"
+                            }`}>
                               {pickupGeocode.found 
-                                ? `✓ ${pickupGeocode.place_name ? `${pickupGeocode.place_name} - ` : ""}${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
-                                : `✗ ${pickupGeocode.error || "Not found"}`}
+                                ? `✓ ${pickupGeocode.place_name ? `${pickupGeocode.place_name} - ` : ""}${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}`
+                                : pickupGeocode.needs_disambiguation
+                                  ? `⚠ Disambiguation needed${pickupGeocode.disambiguation_areas?.length ? `: ${pickupGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
+                                  : `✗ ${pickupGeocode.error || "Not found"}`}
                             </p>
                           )}
                         </div>
@@ -887,6 +919,8 @@ export default function LiveCalls() {
                                 <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
                               ) : destinationGeocode.found ? (
                                 <CheckCircle2 className="w-4 h-4 text-green-500" />
+                              ) : destinationGeocode.needs_disambiguation ? (
+                                <AlertCircle className="w-4 h-4 text-amber-500" />
                               ) : (
                                 <XCircle className="w-4 h-4 text-red-500" />
                               )
@@ -894,10 +928,18 @@ export default function LiveCalls() {
                           </div>
                           <p className="text-muted-foreground pl-6">{selectedCallData.destination || "—"}</p>
                           {addressVerification && destinationGeocode && !destinationGeocode.loading && (
-                            <p className={`text-xs pl-6 ${destinationGeocode.found ? "text-green-400" : "text-red-400"}`}>
+                            <p className={`text-xs pl-6 ${
+                              destinationGeocode.found 
+                                ? "text-green-400" 
+                                : destinationGeocode.needs_disambiguation 
+                                  ? "text-amber-400" 
+                                  : "text-red-400"
+                            }`}>
                               {destinationGeocode.found 
-                                ? `✓ ${destinationGeocode.place_name ? `${destinationGeocode.place_name} - ` : ""}${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}` 
-                                : `✗ ${destinationGeocode.error || "Not found"}`}
+                                ? `✓ ${destinationGeocode.place_name ? `${destinationGeocode.place_name} - ` : ""}${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}`
+                                : destinationGeocode.needs_disambiguation
+                                  ? `⚠ Disambiguation needed${destinationGeocode.disambiguation_areas?.length ? `: ${destinationGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
+                                  : `✗ ${destinationGeocode.error || "Not found"}`}
                             </p>
                           )}
                         </div>
