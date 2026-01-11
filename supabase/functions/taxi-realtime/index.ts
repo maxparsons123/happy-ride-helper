@@ -3945,6 +3945,13 @@ Rules:
   let awaitingResponseAfterCommit = false;
   let responseCreatedSinceCommit = false;
 
+  // OpenAI Realtime can only have ONE active response at a time.
+  // If we try to create a new response while one is still in progress, OpenAI returns:
+  // "conversation_already_has_active_response".
+  // We guard against that by deferring response.create until we see response.done.
+  let openAiResponseInProgress = false;
+  let deferredResponseCreate: { response: Record<string, unknown>; label: string } | null = null;
+
   // Connect to OpenAI Realtime API
   const connectToOpenAI = () => {
     console.log(`[${callId}] Connecting to OpenAI Realtime API...`);
@@ -4253,6 +4260,7 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         // Reset state for new response
         currentAssistantText = "";
         aiSpeaking = true;
+        openAiResponseInProgress = true;
         aiPlaybackBytesTotal = 0;
         aiPlaybackStartedAt = 0;
 
@@ -5029,14 +5037,23 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
               : { modalities: ["audio", "text"] };
 
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response,
-            }));
-            responseCreatedSinceCommit = true;
-            console.log(`[${callId}] >>> response.create sent IMMEDIATELY (fast-path)`);
+            const label = forcedResponseInstructions ? "fast-path(forced)" : "fast-path";
+
+            if (openAiResponseInProgress) {
+              deferredResponseCreate = { response: response as Record<string, unknown>, label };
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
+            } else {
+              openAiResponseInProgress = true;
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response,
+              }));
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] >>> response.create sent IMMEDIATELY (${label})`);
+            }
           }
-          
+
         } else if (!forcedResponseInstructions) {
           // ADDRESS-CONTAINING RESPONSE: Run extraction and WAIT for disambiguation check
           // This ensures we catch ambiguous addresses (like "School Road, Birmingham") before Ada continues
@@ -5135,6 +5152,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         console.log(`[${callId}] >>> response.done - status: ${status}, outputs: ${outputCount}`);
         if (data.response?.status_details) {
           console.log(`[${callId}] >>> status_details:`, JSON.stringify(data.response.status_details));
+        }
+
+        // Mark response finished so we don't accidentally create overlapping responses.
+        openAiResponseInProgress = false;
+
+        // If we deferred a response.create due to an in-progress response, flush it now.
+        if (deferredResponseCreate && sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
+          const { response, label } = deferredResponseCreate;
+          deferredResponseCreate = null;
+          openAiResponseInProgress = true; // optimistic guard against race
+          openaiWs.send(JSON.stringify({ type: "response.create", response }));
+          console.log(`[${callId}] >>> response.create sent (flushed deferred: ${label})`);
         }
       }
 
