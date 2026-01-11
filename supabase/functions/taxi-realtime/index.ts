@@ -1758,6 +1758,132 @@ serve(async (req) => {
     return `${address}, ${callerCity}`;
   };
 
+  // Helper: Check if an address looks like a named place/POI (e.g., "Sweet Spot", "Birmingham Airport")
+  // vs a street address that requires a house number (e.g., "School Road")
+  const isNamedPlace = (address: string): boolean => {
+    if (!address) return false;
+    const addr = address.trim().toLowerCase();
+    
+    // If it starts with a number, it's a house number address, NOT a named place
+    if (/^\d+/.test(addr)) return false;
+    
+    // Common road type suffixes - if address ends with these, it's likely a street
+    const ROAD_TYPES = [
+      "road", "rd", "street", "st", "avenue", "ave", "drive", "dr", 
+      "lane", "ln", "close", "cl", "crescent", "way", "court", "ct",
+      "place", "pl", "grove", "terrace", "gardens", "walk", "rise", "hill",
+      "mews", "square", "row", "park", "green", "end", "view", "field"
+    ];
+    
+    // Check if address ends with a road type
+    for (const rt of ROAD_TYPES) {
+      if (addr.endsWith(` ${rt}`) || addr.includes(` ${rt},`)) {
+        return false; // It's a street address
+      }
+    }
+    
+    // Common POI/building names that don't need house numbers
+    const POI_PATTERNS = [
+      /airport/i, /station/i, /terminal/i, /hospital/i, /university/i,
+      /hotel/i, /mall/i, /centre/i, /center/i, /college/i, /school/i,
+      /park\s*&?\s*(ride)?/i, /arena/i, /stadium/i, /cinema/i, /theatre/i,
+      /supermarket/i, /tesco/i, /asda/i, /sainsbury/i, /morrisons/i, /aldi/i, /lidl/i,
+      /pub/i, /inn/i, /bar/i, /restaurant/i, /cafe/i, /coffee/i, /costa/i, /starbucks/i,
+      /mcdonald/i, /kfc/i, /burger\s*king/i, /pizza/i, /subway/i,
+      /gym/i, /fitness/i, /leisure/i, /swimming/i,
+      /church/i, /mosque/i, /temple/i, /synagogue/i,
+      /library/i, /museum/i, /gallery/i,
+      /nec/i, /o2/i, /bullring/i, /westfield/i,
+      /heathrow/i, /gatwick/i, /stansted/i, /luton/i, /manchester/i, /birmingham\s*airport/i
+    ];
+    
+    for (const pattern of POI_PATTERNS) {
+      if (pattern.test(addr)) return true;
+    }
+    
+    // If address has no road type and no numbers, it's likely a named place
+    // e.g., "Sweet Spot", "The Bell", "King's Head"
+    if (!/\d/.test(addr)) {
+      // Check if it looks like a simple business name (1-4 words, no street indicators)
+      const words = addr.split(/\s+/).filter(Boolean);
+      if (words.length >= 1 && words.length <= 5) {
+        return true; // Likely a named place
+      }
+    }
+    
+    return false;
+  };
+
+  // Helper: Check if a pickup address requires a house number
+  // Returns true if the address is a street without a house number
+  const pickupNeedsHouseNumber = (address: string): boolean => {
+    if (!address) return false;
+    
+    // If it's a named place, no house number needed
+    if (isNamedPlace(address)) {
+      console.log(`[${callId}] 🏪 "${address}" is a named place - no house number required`);
+      return false;
+    }
+    
+    // If it already has a house number, we're good
+    if (/^\d+[a-z]?\s+/i.test(address.trim())) {
+      return false;
+    }
+    
+    // Check if it looks like a street address without a house number
+    const ROAD_TYPES = [
+      "road", "rd", "street", "st", "avenue", "ave", "drive", "dr", 
+      "lane", "ln", "close", "cl", "crescent", "way", "court", "ct",
+      "place", "pl", "grove", "terrace", "gardens", "walk", "rise", "hill"
+    ];
+    
+    const addr = address.trim().toLowerCase();
+    for (const rt of ROAD_TYPES) {
+      if (addr.includes(` ${rt}`) || addr.endsWith(` ${rt}`)) {
+        console.log(`[${callId}] 🏠 "${address}" is a street address without house number`);
+        return true; // It's a street address without a house number
+      }
+    }
+    
+    return false;
+  };
+
+  // Helper: Prompt Ada to ask for house number
+  const askForHouseNumber = (addressType: "pickup" | "destination", streetAddress: string) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    
+    const message = addressType === "pickup"
+      ? `[SYSTEM: HOUSE NUMBER REQUIRED]
+The customer gave a street name "${streetAddress}" but didn't include a house number.
+The driver needs to know exactly which house to pick them up from.
+
+Ask them: "What's the house number on ${streetAddress}?"
+
+Wait for them to give the number, then update the pickup with the full address.`
+      : `[SYSTEM: HOUSE NUMBER NEEDED]
+The customer gave a street name "${streetAddress}" but no house number.
+It would help to have the specific address.
+
+Ask them: "What's the house number for ${streetAddress}?"`;
+    
+    console.log(`[${callId}] 🏠 Asking for house number on ${addressType}: "${streetAddress}"`);
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }]
+      }
+    }));
+    
+    // Trigger Ada to respond
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] }
+    }));
+  };
+
   // Guardrail: only accept Google "corrections" when the proposed address is plausibly the same place.
   // Prevents disasters like "52A David Road" → "72 Bury New Road".
   const isSafeAddressCorrection = (original: string, proposed: string): boolean => {
@@ -3717,6 +3843,12 @@ Rules:
           
           // Geocode pickup if it changed and hasn't been verified yet
           if (pickupChanged && !knownBooking.pickupVerified) {
+            // HOUSE NUMBER CHECK: If it's a street address without house number, ask for it
+            if (pickupNeedsHouseNumber(knownBooking.pickup!)) {
+              askForHouseNumber("pickup", knownBooking.pickup!);
+              return; // Wait for house number before proceeding
+            }
+            
             // KNOWN ADDRESS CHECK: Auto-verify if caller has used this address before (trusted OR pickup/dropoff history)
             const knownPickup = matchesKnownAddress(knownBooking.pickup!) || matchesTrustedAddress(knownBooking.pickup!);
             if (knownPickup) {

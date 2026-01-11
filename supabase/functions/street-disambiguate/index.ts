@@ -12,6 +12,7 @@ export interface StreetMatch {
   lat: number;
   lon: number;
   hasHouseNumber?: boolean; // True if this street has the specified house number
+  formattedAddress?: string; // Google's formatted address if validated
 }
 
 export interface StreetDisambiguationResult {
@@ -28,6 +29,74 @@ export interface StreetDisambiguationResult {
 
 const OS_API_URL = "https://api.os.uk/search/names/v1/find";
 
+// Validate a complete address using Google Places Autocomplete
+// Returns true if the address is found and matches well
+async function validateAddressWithAutocomplete({
+  fullAddress,
+  lat,
+  lon,
+  googleApiKey
+}: {
+  fullAddress: string;
+  lat: number;
+  lon: number;
+  googleApiKey: string;
+}): Promise<{ valid: boolean; formattedAddress?: string; placeId?: string }> {
+  try {
+    // Use Google Places Autocomplete for address validation
+    const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
+      `?input=${encodeURIComponent(fullAddress)}` +
+      `&types=address` +
+      `&location=${lat},${lon}` +
+      `&radius=8000` +
+      `&strictbounds=false` +
+      `&components=country:gb` +
+      `&key=${googleApiKey}`;
+    
+    console.log(`[street-disambiguate] Validating address with Autocomplete: "${fullAddress}"`);
+    
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.error(`[street-disambiguate] Google Autocomplete error: ${response.status}`);
+      return { valid: false };
+    }
+    
+    const data = await response.json();
+    
+    if (data.status !== "OK" || !data.predictions?.length) {
+      console.log(`[street-disambiguate] No Autocomplete results for "${fullAddress}"`);
+      return { valid: false };
+    }
+    
+    // Check the top prediction
+    const topPrediction = data.predictions[0];
+    const description = (topPrediction.description || "").toLowerCase();
+    const inputNorm = fullAddress.toLowerCase().replace(/[,\s]+/g, ' ').trim();
+    
+    // Extract house number from input
+    const houseNumMatch = fullAddress.match(/^(\d+[a-z]?)\s+/i);
+    const houseNumber = houseNumMatch ? houseNumMatch[1].toLowerCase() : null;
+    
+    // Check if the prediction contains the house number (if provided)
+    if (houseNumber) {
+      if (!description.includes(houseNumber)) {
+        console.log(`[street-disambiguate] ✗ Autocomplete result doesn't contain house number ${houseNumber}: "${description}"`);
+        return { valid: false };
+      }
+    }
+    
+    console.log(`[street-disambiguate] ✓ Autocomplete validated: "${fullAddress}" → "${topPrediction.description}"`);
+    return { 
+      valid: true, 
+      formattedAddress: topPrediction.description,
+      placeId: topPrediction.place_id
+    };
+  } catch (error) {
+    console.error(`[street-disambiguate] Autocomplete validation error:`, error);
+    return { valid: false };
+  }
+}
+
 // Check if a specific house number exists on a street using Google Places
 async function checkHouseNumberExists({
   houseNumber,
@@ -41,30 +110,42 @@ async function checkHouseNumberExists({
   lat: number;
   lon: number;
   googleApiKey: string;
-}): Promise<boolean> {
+}): Promise<{ exists: boolean; formattedAddress?: string }> {
   const fullAddress = `${houseNumber} ${streetName}`;
   
+  // First try Autocomplete for better validation
+  const autocompleteResult = await validateAddressWithAutocomplete({
+    fullAddress,
+    lat,
+    lon,
+    googleApiKey
+  });
+  
+  if (autocompleteResult.valid) {
+    return { exists: true, formattedAddress: autocompleteResult.formattedAddress };
+  }
+  
+  // Fallback to Text Search
   try {
-    // Use Google Places Text Search biased to the street's location
     const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
       `?query=${encodeURIComponent(fullAddress)}` +
       `&location=${lat},${lon}` +
       `&radius=2000` + // 2km radius around the street
       `&key=${googleApiKey}`;
     
-    console.log(`[street-disambiguate] Checking house number: "${fullAddress}" near ${lat},${lon}`);
+    console.log(`[street-disambiguate] Fallback: checking house number via Text Search: "${fullAddress}"`);
     
     const response = await fetch(url);
     if (!response.ok) {
       console.error(`[street-disambiguate] Google API error: ${response.status}`);
-      return false;
+      return { exists: false };
     }
     
     const data = await response.json();
     
     if (data.status !== "OK" || !data.results?.length) {
       console.log(`[street-disambiguate] No results for "${fullAddress}"`);
-      return false;
+      return { exists: false };
     }
     
     // Check if any result contains the house number
@@ -77,15 +158,15 @@ async function checkHouseNumberExists({
       // Check if the house number appears at the start of the address
       if (resultNorm.startsWith(houseNumNorm) || formattedAddress.includes(` ${houseNumber.toLowerCase()} `)) {
         console.log(`[street-disambiguate] ✓ House number ${houseNumber} EXISTS at "${result.formatted_address}"`);
-        return true;
+        return { exists: true, formattedAddress: result.formatted_address };
       }
     }
     
     console.log(`[street-disambiguate] ✗ House number ${houseNumber} NOT found for "${fullAddress}"`);
-    return false;
+    return { exists: false };
   } catch (error) {
     console.error(`[street-disambiguate] House number check error:`, error);
-    return false;
+    return { exists: false };
   }
 }
 
@@ -193,28 +274,30 @@ async function disambiguateStreet({
     // Check house number existence in parallel for all matches
     const houseNumberChecks = await Promise.all(
       uniqueMatches.map(async (match) => {
-        const exists = await checkHouseNumberExists({
+        const result = await checkHouseNumberExists({
           houseNumber,
           streetName: match.name,
           lat: match.lat,
           lon: match.lon,
           googleApiKey
         });
-        return { match, exists };
+        return { match, ...result };
       })
     );
     
     // Filter to only streets that have the house number
     const matchesWithHouse = houseNumberChecks.filter(c => c.exists).map(c => ({
       ...c.match,
-      hasHouseNumber: true
+      hasHouseNumber: true,
+      formattedAddress: c.formattedAddress
     }));
     
     console.log(`[street-disambiguate] 🏠 House number ${houseNumber} found on ${matchesWithHouse.length}/${uniqueMatches.length} streets`);
     
     if (matchesWithHouse.length === 1) {
       // SUCCESS: House number uniquely identifies the street!
-      console.log(`[street-disambiguate] ✓ House number ${houseNumber} uniquely resolves to ${matchesWithHouse[0].name} in ${matchesWithHouse[0].area || matchesWithHouse[0].borough}`);
+      const resolved = matchesWithHouse[0];
+      console.log(`[street-disambiguate] ✓ House number ${houseNumber} uniquely resolves to ${resolved.name} in ${resolved.area || resolved.borough}`);
       return {
         found: true,
         street: streetOnly,
@@ -222,7 +305,7 @@ async function disambiguateStreet({
         multiple: false,
         matches: matchesWithHouse,
         needsClarification: false,
-        resolvedMatch: matchesWithHouse[0]
+        resolvedMatch: resolved
       };
     } else if (matchesWithHouse.length > 1) {
       // Multiple streets have this house number - still need disambiguation but narrower
