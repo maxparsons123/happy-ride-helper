@@ -2397,14 +2397,15 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
   const extractNameFromTranscript = (transcript: string): string | null => {
     const t = transcript.trim();
     
-    // Expanded list of non-name words to filter out
+    // Expanded list of non-name words to filter out - including "not" to prevent "my name is not X" errors
     const nonNames = new Set([
       'yes', 'no', 'yeah', 'yep', 'nope', 'okay', 'ok', 'sure', 'please', 'thanks', 'thank',
       'hello', 'hi', 'hey', 'hiya', 'the', 'from', 'to', 'a', 'an', 'and', 'or', 'but',
       'taxi', 'cab', 'car', 'booking', 'book', 'need', 'want', 'would', 'like', 'can',
       'could', 'just', 'actually', 'really', 'well', 'um', 'uh', 'er', 'ah', 'oh',
       'good', 'morning', 'afternoon', 'evening', 'night', 'today', 'now', 'soon',
-      'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four'
+      'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four',
+      'not', 'wrong', 'incorrect', 'correct', 'actually', 'change', 'update', 'fix'
     ]);
     
     // Helper to capitalize name properly (handles multi-word names like "Mary Jane")
@@ -2426,8 +2427,39 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       return true;
     };
     
-    // Patterns ordered by specificity (most specific first)
-    // These capture multi-word names like "Mary Jane" or "John Smith"
+    // PRIORITY 1: Name CORRECTION patterns - handle "my name is not X, it's Y" etc
+    // These MUST be checked first to get the corrected name, not the wrong one
+    const correctionPatterns: Array<{ regex: RegExp; group: number }> = [
+      // "my name is not X, my name is Y" / "name is not X it's Y"
+      { regex: /my name(?:'s| is) not\s+\w+[,.\s]+(?:my name(?:'s| is)|it(?:'s| is)|i(?:'m| am))\s+([A-Za-z]+)/i, group: 1 },
+      // "it's not X, it's Y" / "I'm not X, I'm Y"  
+      { regex: /(?:it(?:'s| is)|i(?:'m| am)) not\s+\w+[,.\s]+(?:it(?:'s| is)|i(?:'m| am)|my name(?:'s| is))\s+([A-Za-z]+)/i, group: 1 },
+      // "not X, my name is Y" / "not X, I'm Y"
+      { regex: /not\s+\w+[,.\s]+(?:my name(?:'s| is)|i(?:'m| am)|it(?:'s| is))\s+([A-Za-z]+)/i, group: 1 },
+      // "wrong, my name is Y" / "incorrect, it's Y"
+      { regex: /(?:wrong|incorrect|no)[,.\s]+(?:my name(?:'s| is)|it(?:'s| is)|i(?:'m| am))\s+([A-Za-z]+)/i, group: 1 },
+      // "please correct it, my name is Y" / "correct my name to Y"
+      { regex: /(?:correct|change|update|fix)(?:\s+(?:it|my name))?\s*(?:to|,)?\s*(?:my name(?:'s| is)|it(?:'s| is)|i(?:'m| am))?\s*([A-Za-z]+)/i, group: 1 },
+      // "call me Y instead" / "it's actually Y"
+      { regex: /(?:call me|it(?:'s| is) actually|i(?:'m| am) actually)\s+([A-Za-z]+)/i, group: 1 },
+    ];
+    
+    // Check correction patterns FIRST
+    for (const { regex, group } of correctionPatterns) {
+      const match = t.match(regex);
+      if (match?.[group]) {
+        const rawName = match[group].trim();
+        const firstName = rawName.split(/\s+/)[0];
+        
+        if (isValidName(firstName)) {
+          const name = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+          console.log(`[${callId}] 🔧 Correction pattern extracted name: "${name}" from "${t}"`);
+          return name;
+        }
+      }
+    }
+    
+    // PRIORITY 2: Standard name introduction patterns
     const patterns: Array<{ regex: RegExp; group: number }> = [
       // "My name is Mary Jane" / "My name's John Smith"
       { regex: /my name(?:'s| is)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i, group: 1 },
