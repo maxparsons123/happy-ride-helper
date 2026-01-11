@@ -820,26 +820,35 @@ async function checkAreaDisambiguation(
   address: string,
   biasLat: number,
   biasLng: number,
-  radiusMeters: number = 15000
+  radiusMeters: number = 15000,
+  requiredCity?: string // If provided, only return matches within this city
 ): Promise<{ needsDisambiguation: boolean; matches: AreaMatch[]; roadName: string }> {
   if (!GOOGLE_API_KEY) {
     return { needsDisambiguation: false, matches: [], roadName: address };
   }
   
-  console.log(`[AreaDisambiguation] Checking: "${address}" near ${biasLat},${biasLng}`);
+  console.log(`[AreaDisambiguation] Checking: "${address}" near ${biasLat},${biasLng}${requiredCity ? ` (filtering to ${requiredCity})` : ''}`);
   
   // Extract just the road name, stripping any city suffix
   // "School Road, Birmingham" → "School Road"
   // "High Street, Coventry" → "High Street"
   let roadNameOnly = address;
+  let extractedCity: string | undefined;
   if (address.includes(",")) {
     const parts = address.split(",").map(p => p.trim());
     // First part should be the road name
     if (extractRoadType(parts[0])) {
       roadNameOnly = parts[0];
-      console.log(`[AreaDisambiguation] Extracted road name: "${roadNameOnly}" from "${address}"`);
+      // Second part might be the city
+      if (parts[1]) {
+        extractedCity = parts[1];
+      }
+      console.log(`[AreaDisambiguation] Extracted road name: "${roadNameOnly}" from "${address}"${extractedCity ? `, city: "${extractedCity}"` : ''}`);
     }
   }
+  
+  // Use extracted city if requiredCity not explicitly provided
+  const cityFilter = requiredCity || extractedCity;
   
   // Normalize the road name for searching
   const normalizedRoad = normalizeSTTAddress(roadNameOnly);
@@ -936,10 +945,25 @@ async function checkAreaDisambiguation(
     }
     
     // Dedupe by area (same road+area = same match)
-    const uniqueMatches = dedupeAreaMatches(areaMatches);
+    let uniqueMatches = dedupeAreaMatches(areaMatches);
+    
+    // Filter by city if specified (e.g., "School Road, Birmingham" should only show Birmingham areas)
+    if (cityFilter) {
+      const normalizedCityFilter = cityFilter.toLowerCase().trim();
+      const beforeCount = uniqueMatches.length;
+      uniqueMatches = uniqueMatches.filter(m => {
+        const matchCity = (m.city || '').toLowerCase();
+        // Check if the city matches or if the area is within the specified city
+        // "Birmingham" should match localities like "Hockley, Birmingham"
+        return matchCity === normalizedCityFilter || 
+               matchCity.includes(normalizedCityFilter) ||
+               normalizedCityFilter.includes(matchCity);
+      });
+      console.log(`[AreaDisambiguation] Filtered by city "${cityFilter}": ${beforeCount} → ${uniqueMatches.length} matches`);
+    }
     
     console.log(`[AreaDisambiguation] Found ${uniqueMatches.length} unique area(s) for "${address}":`, 
-      uniqueMatches.map(m => `${m.road} in ${m.area}`).join(", "));
+      uniqueMatches.map(m => `${m.road} in ${m.area}${m.city ? ` (${m.city})` : ''}`).join(", "));
     
     // If multiple areas found for same road → disambiguation needed
     if (uniqueMatches.length > 1) {
