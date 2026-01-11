@@ -443,6 +443,45 @@ export type Database = {
         }
         Relationships: []
       }
+      uk_locations: {
+        Row: {
+          aliases: string[] | null
+          created_at: string
+          id: string
+          is_distinct: boolean | null
+          lat: number | null
+          lng: number | null
+          name: string
+          parent_city: string | null
+          postcodes: string[] | null
+          type: string
+        }
+        Insert: {
+          aliases?: string[] | null
+          created_at?: string
+          id?: string
+          is_distinct?: boolean | null
+          lat?: number | null
+          lng?: number | null
+          name: string
+          parent_city?: string | null
+          postcodes?: string[] | null
+          type?: string
+        }
+        Update: {
+          aliases?: string[] | null
+          created_at?: string
+          id?: string
+          is_distinct?: boolean | null
+          lat?: number | null
+          lng?: number | null
+          name?: string
+          parent_city?: string | null
+          postcodes?: string[] | null
+          type?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
