@@ -951,13 +951,33 @@ async function checkAreaDisambiguation(
     if (cityFilter) {
       const normalizedCityFilter = cityFilter.toLowerCase().trim();
       const beforeCount = uniqueMatches.length;
+      
+      // List of distinct cities that should NOT match each other
+      // e.g., Solihull is a separate city from Birmingham, not an area within it
+      const distinctCities = ['birmingham', 'solihull', 'coventry', 'wolverhampton', 'dudley', 'walsall', 'london', 'manchester'];
+      const filterIsDistinctCity = distinctCities.includes(normalizedCityFilter);
+      
       uniqueMatches = uniqueMatches.filter(m => {
         const matchCity = (m.city || '').toLowerCase();
-        // Check if the city matches or if the area is within the specified city
-        // "Birmingham" should match localities like "Hockley, Birmingham"
+        const matchArea = (m.area || '').toLowerCase();
+        
+        // If the area itself is a distinct city different from the filter, exclude it
+        // e.g., if filter is "Birmingham" and area is "Solihull", exclude it
+        if (filterIsDistinctCity) {
+          const areaIsDistinctCity = distinctCities.includes(matchArea);
+          if (areaIsDistinctCity && matchArea !== normalizedCityFilter) {
+            console.log(`[AreaDisambiguation] Excluding ${m.road} in ${m.area} - different city from ${cityFilter}`);
+            return false;
+          }
+        }
+        
+        // Check if city or area matches the filter
+        // "Birmingham" should match "School Road in Hockley (Birmingham)" but not "School Road in Solihull"
         return matchCity === normalizedCityFilter || 
+               matchArea === normalizedCityFilter ||
                matchCity.includes(normalizedCityFilter) ||
-               normalizedCityFilter.includes(matchCity);
+               normalizedCityFilter.includes(matchCity) ||
+               (matchCity === '' && matchArea !== '' && !distinctCities.includes(matchArea)); // Allow unknown areas if not distinct cities
       });
       console.log(`[AreaDisambiguation] Filtered by city "${cityFilter}": ${beforeCount} → ${uniqueMatches.length} matches`);
     }
