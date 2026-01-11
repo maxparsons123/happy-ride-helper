@@ -3037,9 +3037,11 @@ Rules:
           
           // Common STT mishearings for these specific areas
           const mishearings: Record<string, string[]> = {
-            'solihull': ['solio', 'soryo', 'solia', 'solyo', 'solehill', 'solihill', 'solidhull', 'soul', 'solely'],
+            'solihull': ['solio', 'soryo', 'solia', 'solyo', 'solehill', 'solihill', 'solidhull', 'soul', 'solely', 'sunnyvale', 'sunny', 'sunnyville', 'sonyvale', 'sonny'],
             'bedworth': ['bedford', 'bedward', 'bedsworth', 'badworth'],
             'henley-in-arden': ['henley', 'hendley', 'henleigh', 'arden'],
+            'birmingham': ['burning', 'burningham', 'brimingham', 'bermingham', 'birming'],
+            'dudley': ['deadly', 'doodley', 'dudly', 'dully'],
           };
           
           for (const [correct, variants] of Object.entries(mishearings)) {
