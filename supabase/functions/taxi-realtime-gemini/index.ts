@@ -192,6 +192,7 @@ serve(async (req) => {
             ...conversationHistory.map(m => ({ role: m.role, content: m.content }))
           ],
           max_tokens: 150,
+          temperature: 0.7, // Lower = more focused/consistent responses
         }),
       });
       
@@ -406,6 +407,16 @@ serve(async (req) => {
         }
         
         socket.send(JSON.stringify({ type: "audio.done" }));
+        
+        // Check if Ada said goodbye - end the call
+        const goodbyePatterns = /\b(goodbye|bye|take care|have a (great|lovely|good) (day|journey|trip))\b/i;
+        if (goodbyePatterns.test(aiResponse.response)) {
+          console.log(`[${callId}] 👋 Ada said goodbye, ending call...`);
+          // Give time for audio to play, then signal call end
+          setTimeout(() => {
+            socket.send(JSON.stringify({ type: "session.end", reason: "goodbye" }));
+          }, 3000); // 3 second delay for audio playback
+        }
       }
       
       const totalLatency = Date.now() - pipelineStart;
