@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
-"""Taxi AI Asterisk Bridge (v2.1 - Hybrid)
+"""Taxi AI Asterisk Bridge (v2.2 - High Quality Audio)
 
-Combines the working v2 auto-detection with the binary UUID fix.
+Combines the working v2 auto-detection with:
+- Binary UUID fix
+- High-quality resample_poly for anti-aliased audio (no hiss)
 
 """
 
@@ -16,7 +18,7 @@ import audioop
 from typing import Optional
 from collections import deque
 import numpy as np
-from scipy import signal
+from scipy.signal import resample_poly
 import websockets
 
 # --- Configuration ---
@@ -26,6 +28,8 @@ WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"
 
 AST_RATE = 8000
 AI_RATE = 24000
+# Ratio: 24000 / 8000 = 3 (integer ratio for resample_poly)
+RESAMPLE_RATIO = AI_RATE // AST_RATE  # = 3
 
 MSG_HANGUP = 0x00
 MSG_UUID = 0x01
@@ -37,9 +41,9 @@ logger = logging.getLogger(__name__)
 
 def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
     """
-    High-quality resampling using scipy.signal.resample.
-    Uses FFT-based resampling with built-in anti-aliasing to prevent
-    hiss/artifacts at word boundaries during downsampling.
+    High-quality resampling using scipy.signal.resample_poly.
+    Uses polyphase filtering with built-in anti-aliasing - faster than FFT
+    for integer ratios like 8kHz <-> 24kHz (3x).
     """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
@@ -47,10 +51,13 @@ def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) ->
     if audio_np.size == 0:
         return b""
     
-    new_length = int(len(audio_np) * to_rate / from_rate)
-    
-    # scipy.signal.resample uses FFT with proper anti-aliasing
-    resampled = signal.resample(audio_np, new_length)
+    # resample_poly(x, up, down) - uses polyphase filter with anti-aliasing
+    if to_rate > from_rate:
+        # Upsampling: 8kHz -> 24kHz (up=3, down=1)
+        resampled = resample_poly(audio_np, up=RESAMPLE_RATIO, down=1)
+    else:
+        # Downsampling: 24kHz -> 8kHz (up=1, down=3)
+        resampled = resample_poly(audio_np, up=1, down=RESAMPLE_RATIO)
     
     # Clip to int16 range and convert back
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
