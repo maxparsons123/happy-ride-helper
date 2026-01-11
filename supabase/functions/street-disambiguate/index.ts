@@ -245,26 +245,53 @@ async function disambiguateStreet({
   // Extract and normalize matches
   const matches: StreetMatch[] = results.map((r: any) => {
     const g = r.GAZETTEER_ENTRY;
+    // Log all location fields for debugging
+    console.log(`[street-disambiguate] OS result: NAME1=${g.NAME1}, POPULATED_PLACE=${g.POPULATED_PLACE}, SUBURB=${g.SUBURB}, DISTRICT_BOROUGH=${g.DISTRICT_BOROUGH}, COUNTY_UNITARY=${g.COUNTY_UNITARY}`);
+    
+    // Priority for area: POPULATED_PLACE > SUBURB > first part of DISTRICT_BOROUGH
+    // This ensures "Perry Barr" or "Sutton Coldfield" is used instead of just "Birmingham"
+    const area = g.POPULATED_PLACE || g.SUBURB || null;
+    const borough = g.DISTRICT_BOROUGH || g.COUNTY_UNITARY || null;
+    
     return {
       name: g.NAME1,
-      area: g.POPULATED_PLACE || g.SUBURB || undefined,
-      borough: g.DISTRICT_BOROUGH || undefined,
+      area: area,
+      borough: borough,
       lat: g.GEOMETRY_Y,
       lon: g.GEOMETRY_X
     };
   });
 
   // Group by unique area+borough combinations
+  // IMPORTANT: Use the most specific area name to distinguish streets within the same city
   const uniqueAreaMap = new Map<string, StreetMatch>();
   for (const match of matches) {
-    const key = `${match.area || ""}|${match.borough || ""}`;
+    // Create a unique key that distinguishes streets in different sub-areas
+    // If area is null but borough exists, use borough as the key
+    const areaKey = match.area || match.borough || "Unknown";
+    const key = `${areaKey}|${match.lat.toFixed(3)},${match.lon.toFixed(3)}`; // Include rough coords to catch truly different locations
+    
     if (!uniqueAreaMap.has(key)) {
       uniqueAreaMap.set(key, match);
+      console.log(`[street-disambiguate] Added unique match: ${match.name} in ${match.area || match.borough || "Unknown"}`);
     }
   }
 
   let uniqueMatches = Array.from(uniqueAreaMap.values());
+  
+  // FALLBACK: If all matches have the same area but different boroughs, use borough for disambiguation
+  const allSameArea = uniqueMatches.length > 1 && uniqueMatches.every(m => m.area === uniqueMatches[0].area);
+  if (allSameArea && uniqueMatches.some(m => m.borough !== uniqueMatches[0].borough)) {
+    console.log(`[street-disambiguate] All matches have same area "${uniqueMatches[0].area}" - using borough for disambiguation`);
+    // Swap area and borough for display purposes
+    uniqueMatches = uniqueMatches.map(m => ({
+      ...m,
+      area: m.borough || m.area, // Use borough as the display area
+    }));
+  }
+  
   console.log(`[street-disambiguate] Found ${uniqueMatches.length} unique areas for "${streetOnly}"`);
+
 
   // HOUSE NUMBER DISAMBIGUATION: If we have multiple matches AND a house number,
   // check which streets actually have that house number
