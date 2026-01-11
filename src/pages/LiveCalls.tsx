@@ -54,6 +54,7 @@ interface LiveCall {
   caller_total_bookings: number | null;
   caller_last_pickup: string | null;
   caller_last_destination: string | null;
+  caller_last_booking_at: string | null;
 }
 
 // Audio playback utilities (PCM16 @ 24kHz)
@@ -848,9 +849,22 @@ export default function LiveCalls() {
                       {/* Last Trip */}
                       {selectedCallData.caller_last_pickup && (
                         <div className="mt-3 pt-3 border-t border-border/50">
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                            <History className="w-3 h-3" />
-                            <span>Last Trip</span>
+                          <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
+                            <div className="flex items-center gap-2">
+                              <History className="w-3 h-3" />
+                              <span>Last Trip</span>
+                            </div>
+                            {selectedCallData.caller_last_booking_at && (
+                              <span className="text-muted-foreground/70">
+                                {new Date(selectedCallData.caller_last_booking_at).toLocaleDateString('en-GB', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                })}
+                              </span>
+                            )}
                           </div>
                           <div className="text-sm space-y-1">
                             <p className="flex items-center gap-2">

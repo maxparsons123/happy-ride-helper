@@ -619,6 +619,7 @@ serve(async (req) => {
   let callerTotalBookings = 0; // Number of previous bookings
   let callerLastPickup = ""; // Last pickup address
   let callerLastDestination = ""; // Last destination address
+  let callerLastBookingAt = ""; // Timestamp of last booking
   let callerCity = ""; // City extracted from caller's pickup addresses (NOT destinations)
   let callerKnownAreas: Record<string, number> = {}; // {"Coventry": 5, "Birmingham": 1} - city mention counts
   let callerTrustedAddresses: string[] = []; // Array of addresses the caller has successfully used before
@@ -2287,7 +2288,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       // Lookup caller info (including trusted addresses)
       const { data, error } = await supabase
         .from("callers")
-        .select("name, last_pickup, last_destination, total_bookings, trusted_addresses, known_areas, address_aliases, pickup_addresses, dropoff_addresses")
+        .select("name, last_pickup, last_destination, last_booking_at, total_bookings, trusted_addresses, known_areas, address_aliases, pickup_addresses, dropoff_addresses")
         .in("phone_number", phoneCandidates)
         .maybeSingle();
 
@@ -2306,6 +2307,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         callerTotalBookings = data.total_bookings || 0;
         callerLastPickup = data.last_pickup || "";
         callerLastDestination = data.last_destination || "";
+        callerLastBookingAt = data.last_booking_at || "";
         
         // Load known_areas for reference
         callerKnownAreas = (data.known_areas as Record<string, number>) || {};
@@ -2719,6 +2721,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         caller_total_bookings: callerTotalBookings,
         caller_last_pickup: callerLastPickup || null,
         caller_last_destination: callerLastDestination || null,
+        caller_last_booking_at: callerLastBookingAt || null,
         ...updates,
         transcripts: transcriptHistory,
         updated_at: new Date().toISOString(),
