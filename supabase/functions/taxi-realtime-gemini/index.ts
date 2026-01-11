@@ -391,6 +391,17 @@ serve(async (req) => {
       
       console.log(`[${callId}] 📦 Combined audio: ${totalLength} bytes`);
       
+      // Minimum audio check: Whisper needs at least ~0.5s of audio
+      // At 24kHz PCM16 (2 bytes/sample), 0.5s = 24000 bytes
+      const MIN_AUDIO_BYTES = 12000; // 0.25s minimum - short words like "yes", "hello"
+      if (totalLength < MIN_AUDIO_BYTES) {
+        console.log(`[${callId}] ⚠️ Audio too short (${totalLength} < ${MIN_AUDIO_BYTES}), waiting for more...`);
+        // Put audio back in buffer and wait for more
+        audioBuffer.push(combinedAudio);
+        isProcessing = false;
+        return;
+      }
+      
       // Pipeline: STT → LLM → TTS
       const transcript = await transcribeAudio(combinedAudio);
       
