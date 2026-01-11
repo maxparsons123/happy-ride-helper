@@ -1974,52 +1974,45 @@ CRITICAL RULES:
     );
 
     try {
-      // Prepare address with city if needed
-      let addressWithCity = address;
-      if (effectiveCityHint && !addressLower.includes(effectiveCityHint)) {
-        addressWithCity = `${address}, ${effectiveCityHint}`;
-      }
-
-      // Call taxi-trip-resolve with just this address to check for disambiguation
-      const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
+      // Use OS Open Names API for street disambiguation (replaces Google)
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/street-disambiguate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
         body: JSON.stringify({
-          pickup_input: addressType === "pickup" ? addressWithCity : undefined,
-          dropoff_input: addressType === "destination" ? addressWithCity : undefined,
-          // IMPORTANT: bias by the city mentioned in the address if present (e.g. "... in Birmingham")
-          caller_city_hint: effectiveCityHint || undefined,
-          country: "GB",
+          street: address,
+          lat: biasLat,
+          lon: biasLng,
+          radiusMeters: 8000, // ~5 miles
         }),
       });
       
       if (!response.ok) {
-        console.error(`[${callId}] Early disambiguation API error: ${response.status}`);
+        console.error(`[${callId}] OS street disambiguation API error: ${response.status}`);
         return false;
       }
       
       const result = await response.json();
       
-      // Check if disambiguation is needed
-      if (addressType === "pickup" && result.needs_pickup_disambiguation && result.pickup_area_matches?.length > 1) {
-        console.log(`[${callId}] 🗺️ EARLY: Pickup needs area disambiguation! ${result.pickup_area_matches.length} areas found`);
+      // Check if disambiguation is needed (OS API returns needsClarification flag)
+      if (result.needsClarification && result.matches?.length > 1) {
+        console.log(`[${callId}] 🗺️ EARLY (OS): ${addressType} needs area disambiguation! ${result.matches.length} areas found`);
         
-        const roadName = result.pickup_area_matches[0]?.road || address;
-        askForAreaDisambiguation("pickup", roadName, result.pickup_area_matches);
+        // Convert OS matches to our format for askForAreaDisambiguation
+        const areaMatches = result.matches.map((m: any) => ({
+          road: m.name,
+          area: m.area || m.borough || "Unknown",
+          lat: m.lat,
+          lng: m.lon,
+        }));
+        
+        askForAreaDisambiguation(addressType, result.street || address, areaMatches);
         return true;
       }
       
-      if (addressType === "destination" && result.needs_dropoff_disambiguation && result.dropoff_area_matches?.length > 1) {
-        console.log(`[${callId}] 🗺️ EARLY: Dropoff needs area disambiguation! ${result.dropoff_area_matches.length} areas found`);
-        
-        const roadName = result.dropoff_area_matches[0]?.road || address;
-        askForAreaDisambiguation("destination", roadName, result.dropoff_area_matches);
-        return true;
-      }
-      
+      console.log(`[${callId}] 🗺️ OS disambiguation: No clarification needed for "${address}" (found=${result.found})`);
       return false;
     } catch (e) {
       console.error(`[${callId}] Early disambiguation check error:`, e);
