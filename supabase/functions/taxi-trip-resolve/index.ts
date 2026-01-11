@@ -964,20 +964,60 @@ function dedupeAreaMatches(matches: AreaMatch[]): AreaMatch[] {
 }
 
 /**
- * Check if address is a "bare" road name without house number (e.g., "School Road")
- * These are candidates for area disambiguation
+ * Check if address is a "bare" road name (e.g., "School Road" or "School Road, Birmingham")
+ * These are candidates for area disambiguation because they lack a house number
+ * 
+ * Examples that SHOULD trigger disambiguation:
+ * - "School Road" (bare road)
+ * - "School Road, Birmingham" (road + city, but no house number)
+ * - "High Street, Coventry" (road + city, but no house number)
+ * 
+ * Examples that should NOT trigger disambiguation:
+ * - "52 School Road" (has house number - specific)
+ * - "52A School Road, Birmingham" (has house number - specific)
+ * - "Tesco, Birmingham" (not a road type - it's a place name)
+ * - "CV1 2AB" (has postcode - specific)
  */
 function isBareRoadAddress(address: string): boolean {
   const trimmed = address.trim();
+  
   // Starts with a number = has house number, not bare
   if (/^\d+/.test(trimmed)) return false;
-  // Has a postcode = specific enough
+  
+  // Has a full UK postcode = specific enough
   if (/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(trimmed)) return false;
-  // Has a comma (likely includes area) = specific enough
-  if (trimmed.includes(",")) return false;
+  
   // Check if it contains a road type (Road, Street, Lane, etc.)
   const hasRoadType = extractRoadType(trimmed) !== null;
-  return hasRoadType;
+  if (!hasRoadType) return false; // Not a road address at all
+  
+  // If there's a comma, check if it's just "Road Name, City" format
+  // vs something more specific like "Near the shops, School Road, Birmingham"
+  if (trimmed.includes(",")) {
+    const parts = trimmed.split(",").map(p => p.trim());
+    
+    // If first part starts with a number, it has a house number
+    if (/^\d+/.test(parts[0])) return false;
+    
+    // If first part contains a road type and nothing else specific, it's bare
+    // e.g., "School Road, Birmingham" → first part is "School Road"
+    const firstPart = parts[0];
+    const firstPartHasRoadType = extractRoadType(firstPart) !== null;
+    
+    // Count words in first part - bare roads typically have 2-3 words max
+    const wordCount = firstPart.split(/\s+/).filter(w => w.length > 0).length;
+    
+    // If first part is just a road name (2-4 words with road type), it's bare
+    if (firstPartHasRoadType && wordCount <= 4) {
+      return true;
+    }
+    
+    // Otherwise it might be a complex address
+    return false;
+  }
+  
+  // No comma, has road type, no house number = bare road
+  return true;
 }
 
 /**
