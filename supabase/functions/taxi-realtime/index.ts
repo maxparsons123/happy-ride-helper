@@ -2236,7 +2236,7 @@ CRITICAL RULES:
 
     // UK cities and notable areas for bias detection
     const UK_CITIES: Record<string, { lat: number; lng: number }> = {
-      // Major cities
+      // === Major UK Cities ===
       coventry: { lat: 52.4068, lng: -1.5197 },
       birmingham: { lat: 52.4862, lng: -1.8904 },
       manchester: { lat: 53.4808, lng: -2.2426 },
@@ -2246,12 +2246,19 @@ CRITICAL RULES:
       sheffield: { lat: 53.3811, lng: -1.4701 },
       nottingham: { lat: 52.9548, lng: -1.1581 },
       leicester: { lat: 52.6369, lng: -1.1398 },
-      // West Midlands boroughs/areas
+      bristol: { lat: 51.4545, lng: -2.5879 },
+      newcastle: { lat: 54.9783, lng: -1.6178 },
+      cardiff: { lat: 51.4816, lng: -3.1791 },
+      edinburgh: { lat: 55.9533, lng: -3.1883 },
+      glasgow: { lat: 55.8642, lng: -4.2518 },
+      belfast: { lat: 54.5973, lng: -5.9301 },
+      
+      // === West Midlands ===
       wolverhampton: { lat: 52.5869, lng: -2.1257 },
       dudley: { lat: 52.5085, lng: -2.0895 },
       walsall: { lat: 52.5859, lng: -1.9821 },
       solihull: { lat: 52.4119, lng: -1.7780 },
-      // Notable areas within cities
+      "west bromwich": { lat: 52.5190, lng: -1.9945 },
       netherton: { lat: 52.4897, lng: -2.0870 },
       "sutton coldfield": { lat: 52.5633, lng: -1.8227 },
       "perry barr": { lat: 52.5241, lng: -1.9008 },
@@ -2259,6 +2266,109 @@ CRITICAL RULES:
       edgbaston: { lat: 52.4637, lng: -1.9275 },
       moseley: { lat: 52.4444, lng: -1.8873 },
       handsworth: { lat: 52.5095, lng: -1.9355 },
+      aston: { lat: 52.5003, lng: -1.8815 },
+      sparkhill: { lat: 52.4478, lng: -1.8647 },
+      sparkbrook: { lat: 52.4589, lng: -1.8673 },
+      "kings heath": { lat: 52.4345, lng: -1.8932 },
+      harborne: { lat: 52.4564, lng: -1.9486 },
+      "selly oak": { lat: 52.4389, lng: -1.9364 },
+      quinton: { lat: 52.4574, lng: -1.9855 },
+      
+      // === Greater Manchester ===
+      salford: { lat: 53.4875, lng: -2.2901 },
+      stockport: { lat: 53.4106, lng: -2.1575 },
+      oldham: { lat: 53.5409, lng: -2.1114 },
+      rochdale: { lat: 53.6097, lng: -2.1561 },
+      bolton: { lat: 53.5785, lng: -2.4299 },
+      bury: { lat: 53.5933, lng: -2.2966 },
+      wigan: { lat: 53.5450, lng: -2.6325 },
+      tameside: { lat: 53.4806, lng: -2.0809 },
+      trafford: { lat: 53.4219, lng: -2.3515 },
+      didsbury: { lat: 53.4167, lng: -2.2333 },
+      chorlton: { lat: 53.4404, lng: -2.2722 },
+      withington: { lat: 53.4269, lng: -2.2267 },
+      rusholme: { lat: 53.4500, lng: -2.2167 },
+      fallowfield: { lat: 53.4392, lng: -2.2214 },
+      stretford: { lat: 53.4467, lng: -2.3111 },
+      
+      // === London Boroughs ===
+      westminster: { lat: 51.4975, lng: -0.1357 },
+      kensington: { lat: 51.5010, lng: -0.1916 },
+      chelsea: { lat: 51.4875, lng: -0.1687 },
+      hammersmith: { lat: 51.4927, lng: -0.2248 },
+      fulham: { lat: 51.4730, lng: -0.2073 },
+      wandsworth: { lat: 51.4571, lng: -0.1818 },
+      lambeth: { lat: 51.4571, lng: -0.1231 },
+      southwark: { lat: 51.5035, lng: -0.0804 },
+      lewisham: { lat: 51.4415, lng: -0.0117 },
+      greenwich: { lat: 51.4934, lng: 0.0098 },
+      hackney: { lat: 51.5450, lng: -0.0553 },
+      islington: { lat: 51.5416, lng: -0.1027 },
+      camden: { lat: 51.5290, lng: -0.1255 },
+      brent: { lat: 51.5673, lng: -0.2711 },
+      ealing: { lat: 51.5130, lng: -0.3089 },
+      hounslow: { lat: 51.4668, lng: -0.3618 },
+      richmond: { lat: 51.4613, lng: -0.3037 },
+      kingston: { lat: 51.4123, lng: -0.3007 },
+      croydon: { lat: 51.3762, lng: -0.0982 },
+      bromley: { lat: 51.4039, lng: 0.0198 },
+      bexley: { lat: 51.4549, lng: 0.1505 },
+      barking: { lat: 51.5397, lng: 0.0808 },
+      dagenham: { lat: 51.5464, lng: 0.1547 },
+      havering: { lat: 51.5812, lng: 0.1837 },
+      redbridge: { lat: 51.5590, lng: 0.0741 },
+      walthamstow: { lat: 51.5908, lng: -0.0134 },
+      enfield: { lat: 51.6538, lng: -0.0799 },
+      barnet: { lat: 51.6252, lng: -0.1517 },
+      haringey: { lat: 51.5906, lng: -0.1110 },
+      tottenham: { lat: 51.5975, lng: -0.0676 },
+      brixton: { lat: 51.4613, lng: -0.1156 },
+      peckham: { lat: 51.4745, lng: -0.0689 },
+      stratford: { lat: 51.5423, lng: -0.0026 },
+      "canary wharf": { lat: 51.5054, lng: -0.0235 },
+      docklands: { lat: 51.5077, lng: -0.0246 },
+      shoreditch: { lat: 51.5263, lng: -0.0796 },
+      
+      // === Merseyside ===
+      birkenhead: { lat: 53.3934, lng: -3.0145 },
+      wallasey: { lat: 53.4284, lng: -3.0556 },
+      bootle: { lat: 53.4457, lng: -2.9891 },
+      "st helens": { lat: 53.4536, lng: -2.7364 },
+      knowsley: { lat: 53.4545, lng: -2.8528 },
+      
+      // === South Yorkshire ===
+      rotherham: { lat: 53.4300, lng: -1.3568 },
+      doncaster: { lat: 53.5228, lng: -1.1288 },
+      barnsley: { lat: 53.5526, lng: -1.4797 },
+      
+      // === West Yorkshire ===
+      bradford: { lat: 53.7960, lng: -1.7594 },
+      huddersfield: { lat: 53.6458, lng: -1.7850 },
+      wakefield: { lat: 53.6830, lng: -1.4977 },
+      halifax: { lat: 53.7248, lng: -1.8658 },
+      
+      // === Tyne and Wear ===
+      gateshead: { lat: 54.9527, lng: -1.6032 },
+      sunderland: { lat: 54.9069, lng: -1.3838 },
+      "south shields": { lat: 54.9988, lng: -1.4326 },
+      
+      // === East Midlands ===
+      derby: { lat: 52.9225, lng: -1.4746 },
+      northampton: { lat: 52.2405, lng: -0.9027 },
+      
+      // === Other notable areas ===
+      cambridge: { lat: 52.2053, lng: 0.1218 },
+      oxford: { lat: 51.7520, lng: -1.2577 },
+      reading: { lat: 51.4551, lng: -0.9787 },
+      brighton: { lat: 50.8225, lng: -0.1372 },
+      southampton: { lat: 50.9097, lng: -1.4044 },
+      portsmouth: { lat: 50.8198, lng: -1.0880 },
+      bournemouth: { lat: 50.7192, lng: -1.8808 },
+      plymouth: { lat: 50.3755, lng: -4.1427 },
+      exeter: { lat: 50.7184, lng: -3.5339 },
+      bath: { lat: 51.3811, lng: -2.3590 },
+      york: { lat: 53.9600, lng: -1.0873 },
+      hull: { lat: 53.7676, lng: -0.3274 },
     };
 
     const addressLower = address.toLowerCase();
@@ -5621,14 +5731,41 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             // Extract city/area from pickup address if present (e.g., "School Road, Birmingham" → "Birmingham")
             // This should override callerCity for biasing to ensure disambiguation works correctly
             const extractCityFromAddress = (addr: string): string | null => {
-              // Include West Midlands boroughs and notable areas
+              // Comprehensive UK cities and areas list
               const cities = [
+                // Major UK cities
                 "Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", 
-                "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", 
-                "Wolverhampton", "Solihull", "Walsall", "Dudley",
-                // Notable areas
-                "Netherton", "Sutton Coldfield", "Perry Barr", "Erdington", 
-                "Edgbaston", "Moseley", "Handsworth", "Aston", "Sparkhill"
+                "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Cardiff",
+                "Edinburgh", "Glasgow", "Belfast",
+                // West Midlands
+                "Wolverhampton", "Solihull", "Walsall", "Dudley", "West Bromwich",
+                "Netherton", "Sutton Coldfield", "Perry Barr", "Erdington", "Edgbaston",
+                "Moseley", "Handsworth", "Aston", "Sparkhill", "Sparkbrook", "Kings Heath",
+                "Harborne", "Selly Oak", "Quinton",
+                // Greater Manchester
+                "Salford", "Stockport", "Oldham", "Rochdale", "Bolton", "Bury", "Wigan",
+                "Tameside", "Trafford", "Didsbury", "Chorlton", "Withington", "Rusholme",
+                "Fallowfield", "Stretford",
+                // London boroughs
+                "Westminster", "Kensington", "Chelsea", "Hammersmith", "Fulham", "Wandsworth",
+                "Lambeth", "Southwark", "Lewisham", "Greenwich", "Hackney", "Islington",
+                "Camden", "Brent", "Ealing", "Hounslow", "Richmond", "Kingston", "Croydon",
+                "Bromley", "Bexley", "Barking", "Dagenham", "Havering", "Redbridge",
+                "Walthamstow", "Enfield", "Barnet", "Haringey", "Tottenham", "Brixton",
+                "Peckham", "Stratford", "Canary Wharf", "Docklands", "Shoreditch",
+                // Merseyside
+                "Birkenhead", "Wallasey", "Bootle", "St Helens", "Knowsley",
+                // South Yorkshire
+                "Rotherham", "Doncaster", "Barnsley",
+                // West Yorkshire
+                "Bradford", "Huddersfield", "Wakefield", "Halifax",
+                // Tyne and Wear
+                "Gateshead", "Sunderland", "South Shields",
+                // East Midlands
+                "Derby", "Northampton",
+                // Other
+                "Cambridge", "Oxford", "Reading", "Brighton", "Southampton", "Portsmouth",
+                "Bournemouth", "Plymouth", "Exeter", "Bath", "York", "Hull"
               ];
               for (const city of cities) {
                 if (addr.toLowerCase().includes(city.toLowerCase())) return city;
