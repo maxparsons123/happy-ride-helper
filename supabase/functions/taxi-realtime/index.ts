@@ -1943,39 +1943,43 @@ CRITICAL RULES:
       return false; // Not a road address
     }
     
-    // Get coordinates for bias - use callerCity or default to Birmingham
+    // Get coordinates for bias - prefer city explicitly mentioned in the address over callerCity
     let biasLat = 52.4862; // Birmingham default
     let biasLng = -1.8904;
-    
+
     const UK_CITIES: Record<string, { lat: number; lng: number }> = {
-      "coventry": { lat: 52.4068, lng: -1.5197 },
-      "birmingham": { lat: 52.4862, lng: -1.8904 },
-      "manchester": { lat: 53.4808, lng: -2.2426 },
-      "london": { lat: 51.5074, lng: -0.1278 },
-      "leeds": { lat: 53.8008, lng: -1.5491 },
-      "liverpool": { lat: 53.4084, lng: -2.9916 },
-      "sheffield": { lat: 53.3811, lng: -1.4701 },
-      "nottingham": { lat: 52.9548, lng: -1.1581 },
-      "leicester": { lat: 52.6369, lng: -1.1398 },
+      coventry: { lat: 52.4068, lng: -1.5197 },
+      birmingham: { lat: 52.4862, lng: -1.8904 },
+      manchester: { lat: 53.4808, lng: -2.2426 },
+      london: { lat: 51.5074, lng: -0.1278 },
+      leeds: { lat: 53.8008, lng: -1.5491 },
+      liverpool: { lat: 53.4084, lng: -2.9916 },
+      sheffield: { lat: 53.3811, lng: -1.4701 },
+      nottingham: { lat: 52.9548, lng: -1.1581 },
+      leicester: { lat: 52.6369, lng: -1.1398 },
     };
-    
-    if (callerCity) {
-      const cityCoords = UK_CITIES[callerCity.toLowerCase()];
-      if (cityCoords) {
-        biasLat = cityCoords.lat;
-        biasLng = cityCoords.lng;
-      }
+
+    const addressLower = address.toLowerCase();
+    const cityMentionedInAddress = Object.keys(UK_CITIES).find((c) => addressLower.includes(c)) || null;
+    const effectiveCityHint = (cityMentionedInAddress || callerCity || "Birmingham").toLowerCase();
+
+    const cityCoords = UK_CITIES[effectiveCityHint];
+    if (cityCoords) {
+      biasLat = cityCoords.lat;
+      biasLng = cityCoords.lng;
     }
-    
-    console.log(`[${callId}] 🗺️ Early area disambiguation check for "${address}" (${addressType}) near ${callerCity || 'Birmingham'}`);
-    
+
+    console.log(
+      `[${callId}] 🗺️ Early area disambiguation check for "${address}" (${addressType}) using city hint: ${effectiveCityHint} (callerCity=${callerCity || "none"})`,
+    );
+
     try {
       // Prepare address with city if needed
       let addressWithCity = address;
-      if (callerCity && !address.toLowerCase().includes(callerCity.toLowerCase())) {
-        addressWithCity = `${address}, ${callerCity}`;
+      if (effectiveCityHint && !addressLower.includes(effectiveCityHint)) {
+        addressWithCity = `${address}, ${effectiveCityHint}`;
       }
-      
+
       // Call taxi-trip-resolve with just this address to check for disambiguation
       const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
         method: "POST",
@@ -1986,8 +1990,9 @@ CRITICAL RULES:
         body: JSON.stringify({
           pickup_input: addressType === "pickup" ? addressWithCity : undefined,
           dropoff_input: addressType === "destination" ? addressWithCity : undefined,
-          caller_city_hint: callerCity || undefined,
-          country: "GB"
+          // IMPORTANT: bias by the city mentioned in the address if present (e.g. "... in Birmingham")
+          caller_city_hint: effectiveCityHint || undefined,
+          country: "GB",
         }),
       });
       
