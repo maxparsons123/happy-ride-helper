@@ -336,6 +336,7 @@ export type Database = {
         Row: {
           booking_confirmed: boolean
           call_id: string
+          caller_last_booking_at: string | null
           caller_last_destination: string | null
           caller_last_pickup: string | null
           caller_name: string | null
@@ -358,6 +359,7 @@ export type Database = {
         Insert: {
           booking_confirmed?: boolean
           call_id: string
+          caller_last_booking_at?: string | null
           caller_last_destination?: string | null
           caller_last_pickup?: string | null
           caller_name?: string | null
@@ -380,6 +382,7 @@ export type Database = {
         Update: {
           booking_confirmed?: boolean
           call_id?: string
+          caller_last_booking_at?: string | null
           caller_last_destination?: string | null
           caller_last_pickup?: string | null
           caller_name?: string | null
