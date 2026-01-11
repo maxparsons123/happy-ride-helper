@@ -11,10 +11,10 @@ serve(async (req) => {
   }
 
   try {
-    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
 
-    if (!OPENAI_API_KEY) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY is not configured");
     }
 
     const contentType = req.headers.get("content-type") || "";
@@ -57,24 +57,24 @@ serve(async (req) => {
       audioBlob = new Blob([bytes], { type: mimeType });
     }
 
-    console.log(`[${callId}] STT request, audio size: ${audioBlob.size} bytes, format: ${audioFormat}`);
+    console.log(`[${callId}] STT request (Groq), audio size: ${audioBlob.size} bytes, format: ${audioFormat}`);
 
     const startTime = Date.now();
 
-    // Prepare form data for Whisper API
+    // Prepare form data for Groq Whisper API
     const formData = new FormData();
     const fileName = `audio.${audioFormat === "ulaw" ? "wav" : audioFormat}`;
     formData.append("file", audioBlob, fileName);
-    formData.append("model", "whisper-1");
+    formData.append("model", "whisper-large-v3-turbo"); // Groq's fastest Whisper model
     // No language specified - let Whisper auto-detect for multilingual support
     formData.append("response_format", "json");
     // Add prompt for context - helps with taxi/address terminology
     formData.append("prompt", "Taxi booking conversation. Common terms: pickup, destination, passengers, estate car, saloon, minibus, airport, train station. Addresses may include UK postcodes like SW1A 1AA, B1 1AA. Names of places and streets.");
 
-    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${GROQ_API_KEY}`,
       },
       body: formData,
     });
@@ -83,8 +83,8 @@ serve(async (req) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[${callId}] Whisper error:`, response.status, errorText);
-      throw new Error(`Whisper API error: ${response.status}`);
+      console.error(`[${callId}] Groq Whisper error:`, response.status, errorText);
+      throw new Error(`Groq Whisper API error: ${response.status}`);
     }
 
     const result = await response.json();
