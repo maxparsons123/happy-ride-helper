@@ -4442,7 +4442,93 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (isSimpleResponse) {
           console.log(`[${callId}] ⚡ FAST-PATH: simple response: "${rawTranscript}" - sending response.create IMMEDIATELY`);
           
-          // Quick state extraction (passengers, luggage) without blocking
+          // Number word to digit mapping
+          const numMap: { [key: string]: number } = { 
+            'none': 0, 'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 
+            'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10 
+          };
+          
+          // =========== COMBINED PASSENGERS + LUGGAGE PARSING ===========
+          // Handles responses like "just me with 2 bags", "3 passengers no luggage", "two of us and three suitcases"
+          
+          const lowerTranscript = rawTranscript.toLowerCase();
+          
+          // Patterns for combined responses
+          // "just me with 2 bags" / "myself with a bag" / "just one and 2 bags"
+          const justMeWithBags = lowerTranscript.match(/\b(just\s+me|myself|just\s+one|only\s+me)\b.*?\b(?:with\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:bag|bags|suitcase|suitcases|luggage|case|cases)\b/i);
+          if (justMeWithBags) {
+            knownBooking.passengers = 1;
+            const bagNum = numMap[justMeWithBags[2].toLowerCase()] ?? parseInt(justMeWithBags[2]);
+            if (bagNum >= 0 && bagNum <= 10) {
+              knownBooking.luggage = bagNum === 0 ? "no luggage" : `${bagNum} bag${bagNum > 1 ? 's' : ''}`;
+            }
+            console.log(`[${callId}] ⚡ Combined parse: passengers=1 (just me), luggage="${knownBooking.luggage}"`);
+          }
+          
+          // "X passengers with Y bags" / "X people and Y suitcases"
+          const passengersWithBags = lowerTranscript.match(/\b(\d+|one|two|three|four|five|six|seven|eight)\s*(?:passengers?|people|persons?|of\s+us)?\s*(?:with|and|,)?\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten|no|none|zero)\s*(?:bag|bags|suitcase|suitcases|luggage|case|cases)\b/i);
+          if (passengersWithBags && !justMeWithBags) {
+            const paxNum = numMap[passengersWithBags[1].toLowerCase()] ?? parseInt(passengersWithBags[1]);
+            if (paxNum >= 1 && paxNum <= 8) {
+              knownBooking.passengers = paxNum;
+            }
+            const bagCount = passengersWithBags[2].toLowerCase();
+            if (bagCount === 'no' || bagCount === 'none' || bagCount === 'zero') {
+              knownBooking.luggage = "no luggage";
+            } else {
+              const bagNum = numMap[bagCount] ?? parseInt(bagCount);
+              if (bagNum >= 0 && bagNum <= 10) {
+                knownBooking.luggage = bagNum === 0 ? "no luggage" : `${bagNum} bag${bagNum > 1 ? 's' : ''}`;
+              }
+            }
+            console.log(`[${callId}] ⚡ Combined parse: passengers=${knownBooking.passengers}, luggage="${knownBooking.luggage}"`);
+          }
+          
+          // "X passengers no luggage" / "just 2 no bags"
+          const passengersNoLuggage = lowerTranscript.match(/\b(\d+|one|two|three|four|five|six|seven|eight|just\s+me|myself)\s*(?:passengers?|people|persons?|of\s+us)?\s*(?:,\s*)?(?:no|without|zero|none)\s*(?:bag|bags|suitcase|suitcases|luggage)\b/i);
+          if (passengersNoLuggage && !justMeWithBags && !passengersWithBags) {
+            const paxPart = passengersNoLuggage[1].toLowerCase();
+            if (paxPart.includes('me') || paxPart.includes('myself')) {
+              knownBooking.passengers = 1;
+            } else {
+              const paxNum = numMap[paxPart] ?? parseInt(paxPart);
+              if (paxNum >= 1 && paxNum <= 8) {
+                knownBooking.passengers = paxNum;
+              }
+            }
+            knownBooking.luggage = "no luggage";
+            console.log(`[${callId}] ⚡ Combined parse: passengers=${knownBooking.passengers}, luggage="no luggage"`);
+          }
+          
+          // "just me no bags" / "myself, no luggage"
+          const justMeNoBags = lowerTranscript.match(/\b(just\s+me|myself|just\s+one|only\s+me)\b.*?\b(no|without|zero|none)\s*(?:bag|bags|suitcase|suitcases|luggage)\b/i);
+          if (justMeNoBags && !justMeWithBags && !passengersWithBags && !passengersNoLuggage) {
+            knownBooking.passengers = 1;
+            knownBooking.luggage = "no luggage";
+            console.log(`[${callId}] ⚡ Combined parse: passengers=1 (just me), luggage="no luggage"`);
+          }
+          
+          // =========== SINGLE FIELD EXTRACTION (if combined didn't match) ===========
+          
+          // If we haven't extracted passengers yet from combined patterns
+          if (!knownBooking.passengers) {
+            // "just me" / "just one" / "myself"
+            if (/\b(just\s+me|myself|just\s+one|only\s+me)\b/i.test(rawTranscript)) {
+              knownBooking.passengers = 1;
+              console.log(`[${callId}] ⚡ Fast-path: passengers=1 (just me/myself)`);
+            } else {
+              const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
+              if (passengerMatch && !knownBooking.luggage) { // Only if we're not parsing luggage
+                const num = numMap[passengerMatch[1].toLowerCase()] ?? parseInt(passengerMatch[1]);
+                if (num >= 1 && num <= 8) {
+                  knownBooking.passengers = num;
+                  console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
+                }
+              }
+            }
+          }
+          
+          // If we haven't extracted luggage yet and Ada asked about it
           if (knownBooking.luggageAsked && !knownBooking.luggage) {
             const luggageMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|none|zero|1|2|3|4|5|6|7|8|9|10|0)\b/i);
             const isYesResponse = /\b(yes|yeah|yep|yup|aye)\b/i.test(rawTranscript);
@@ -4452,10 +4538,6 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               knownBooking.luggage = "no luggage";
               console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage" (no response)`);
             } else if (luggageMatch) {
-              const numMap: { [key: string]: number } = { 
-                'none': 0, 'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 
-                'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10 
-              };
               const num = numMap[luggageMatch[1].toLowerCase()] ?? parseInt(luggageMatch[1]);
               if (num === 0) {
                 knownBooking.luggage = "no luggage";
@@ -4466,17 +4548,6 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               }
             } else if (isYesResponse) {
               console.log(`[${callId}] ⚡ Fast-path: luggage answer "yes" without count, waiting for follow-up`);
-            }
-          } else {
-            // Standard simple response handling - extract passenger count
-            const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
-            if (passengerMatch) {
-              const numMap: { [key: string]: number } = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8 };
-              const num = numMap[passengerMatch[1].toLowerCase()] || parseInt(passengerMatch[1]);
-              if (num >= 1 && num <= 8) {
-                knownBooking.passengers = num;
-                console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
-              }
             }
           }
           
