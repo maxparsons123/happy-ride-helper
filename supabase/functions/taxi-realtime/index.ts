@@ -983,7 +983,17 @@ serve(async (req) => {
     luggageAsked?: boolean; // Track if we've asked about luggage for this trip
     pickupName?: string; // Business/place name from Google (e.g., "Birmingham Airport")
     destinationName?: string; // Business/place name from Google (e.g., "Sweet Spot Cafe")
+    // Question attempt tracking - prevents loops and enables escalation
+    pickupClarificationAttempts?: number; // How many times we've asked for pickup clarification
+    destinationClarificationAttempts?: number; // How many times we've asked for destination clarification
+    passengerAttempts?: number; // How many times we've asked for passenger count
+    luggageAttempts?: number; // How many times we've asked about luggage
+    lastPickupAsked?: string; // Last pickup address we asked about (to detect new addresses)
+    lastDestinationAsked?: string; // Last destination address we asked about (to detect new addresses)
   };
+  
+  // Maximum attempts before escalating or accepting approximate address
+  const MAX_CLARIFICATION_ATTEMPTS = 3;
 
   // We keep our own "known booking" extracted from the user's *exact* transcript/text,
   // then prefer it over the model's paraphrasing when the booking is confirmed.
@@ -1874,11 +1884,37 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
 
     if (found) {
       console.log(`[${callId}] ✅ ${addressType} address verified: "${address}"`);
-      // No need to say anything - address is valid
+      // Reset attempt counter on success
+      if (addressType === "pickup") {
+        knownBooking.pickupClarificationAttempts = 0;
+        knownBooking.lastPickupAsked = undefined;
+      } else {
+        knownBooking.destinationClarificationAttempts = 0;
+        knownBooking.lastDestinationAsked = undefined;
+      }
       return;
     }
 
-    console.log(`[${callId}] ⚠️ ${addressType} address not found in geocoder: "${address}" - asking for clarification`);
+    // Track attempt count
+    const attemptKey = addressType === "pickup" ? "pickupClarificationAttempts" : "destinationClarificationAttempts";
+    const lastAskedKey = addressType === "pickup" ? "lastPickupAsked" : "lastDestinationAsked";
+    
+    // Check if this is a NEW address (customer provided different one) - reset counter
+    const lastAsked = knownBooking[lastAskedKey];
+    const isNewAddress = lastAsked && normalize(lastAsked).toLowerCase() !== normalize(address).toLowerCase();
+    
+    if (isNewAddress) {
+      console.log(`[${callId}] 🔄 New ${addressType} address detected: "${lastAsked}" → "${address}" - resetting attempt counter`);
+      knownBooking[attemptKey] = 1;
+    } else {
+      knownBooking[attemptKey] = (knownBooking[attemptKey] || 0) + 1;
+    }
+    
+    // Track what we're asking about
+    knownBooking[lastAskedKey] = address;
+    const attempts = knownBooking[attemptKey] || 1;
+    
+    console.log(`[${callId}] ⚠️ ${addressType} address not found: "${address}" - clarification attempt ${attempts}/${MAX_CLARIFICATION_ATTEMPTS}`);
 
     // Remember we have prompted for this specific address (so we can clear it if it later verifies)
     geocodeClarificationSent[addressType] = normalize(address);
@@ -1886,6 +1922,44 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     // CRITICAL: Track which field we're asking about so the next postcode/answer routes correctly
     awaitingClarificationFor = addressType;
     console.log(`[${callId}] 📋 Now awaiting clarification for: ${addressType}`);
+
+    // Check if we've exceeded max attempts - accept address as-is and move on
+    if (attempts >= MAX_CLARIFICATION_ATTEMPTS) {
+      console.log(`[${callId}] 🛑 Max clarification attempts (${MAX_CLARIFICATION_ATTEMPTS}) reached for ${addressType} - accepting address as-is`);
+      
+      // Mark as verified (approximately) and continue
+      if (addressType === "pickup") {
+        knownBooking.pickupVerified = true;
+      } else {
+        knownBooking.destinationVerified = true;
+      }
+      
+      // Add note to transcript
+      transcriptHistory.push({
+        role: "system",
+        text: `⚠️ Max attempts reached for ${addressType}: "${address}" - accepted without full verification`,
+        timestamp: new Date().toISOString()
+      });
+      queueLiveCallBroadcast({});
+      
+      // Clear clarification state and tell Ada to continue
+      awaitingClarificationFor = null;
+      
+      openaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `[SYSTEM: We've asked about the ${addressType} address "${address}" multiple times. Accept this address and continue with the booking - do NOT ask about it again. Move on to the next question.]` }],
+        },
+      }));
+      
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities: ["audio", "text"] },
+      }));
+      return;
+    }
 
     // IMPORTANT: Do NOT ask customer to spell out common landmarks like train stations, airports, hospitals, etc.
     // Only ask for clarification if it's a residential address that sounds garbled
@@ -1899,16 +1973,29 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     // Heuristic: if the customer already provided a specific street address, do NOT ask them to repeat it.
     // Ask ONLY for postcode / area / nearby landmark so dispatch is safe but low-friction.
     const looksLikeStreetAddress = /^\s*\d+[a-z]?\s+.+/i.test(address);
+    
+    // Vary the message based on attempt number to avoid sounding robotic
+    const attemptContext = attempts > 1 ? ` (Attempt ${attempts}/${MAX_CLARIFICATION_ATTEMPTS} - be patient and helpful)` : "";
 
     const message = (() => {
       if (addressType === "pickup") {
-        return looksLikeStreetAddress
-          ? `[SYSTEM: The pickup address "${address}" could not be verified. The customer already gave the street name/house number. Ask ONLY for the POSTCODE (or a nearby landmark/area). Say: "Could you tell me the postcode for that pickup address, please?" ]`
-          : `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`;
+        if (attempts === 1) {
+          return looksLikeStreetAddress
+            ? `[SYSTEM: The pickup address "${address}" could not be verified. The customer already gave the street name/house number. Ask ONLY for the POSTCODE (or a nearby landmark/area). Say: "Could you tell me the postcode for that pickup address, please?"]`
+            : `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`;
+        } else if (attempts === 2) {
+          return `[SYSTEM: Second attempt for pickup "${address}". Be MORE specific - ask: "Could you spell out the street name for me, or give me a nearby landmark I can use?"]`;
+        }
+        return `[SYSTEM: Final attempt for pickup "${address}". Ask clearly: "I'm still having trouble with that address. What's the nearest main road or a business nearby I can look up?"]`;
       }
 
       // destination
-      return `[SYSTEM: The destination address "${address}" could not be verified. Ask for the POSTCODE / area (or a nearby landmark) to confirm it safely. Say something like "Could you tell me the postcode or the area for that destination, please?"]`;
+      if (attempts === 1) {
+        return `[SYSTEM: The destination address "${address}" could not be verified. Ask for the POSTCODE / area (or a nearby landmark) to confirm it safely. Say something like "Could you tell me the postcode or the area for that destination, please?"]`;
+      } else if (attempts === 2) {
+        return `[SYSTEM: Second attempt for destination "${address}". Be MORE specific - ask: "Could you spell out the name for me, or is there a landmark nearby I can search for?"]`;
+      }
+      return `[SYSTEM: Final attempt for destination "${address}". Ask clearly: "What's the nearest main road or a well-known place nearby?"]`;
     })();
 
     openaiWs.send(JSON.stringify({
@@ -2377,6 +2464,13 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         ...updates,
         transcripts: transcriptHistory,
         updated_at: new Date().toISOString(),
+        // Include attempt counters for monitoring/debugging
+        clarification_attempts: {
+          pickup: knownBooking.pickupClarificationAttempts || 0,
+          destination: knownBooking.destinationClarificationAttempts || 0,
+          passengers: knownBooking.passengerAttempts || 0,
+          luggage: knownBooking.luggageAttempts || 0,
+        },
       }, { onConflict: "call_id" });
       if (error) console.error(`[${callId}] Live call broadcast error:`, error);
     } catch (e) {
@@ -2947,33 +3041,50 @@ Rules:
       console.log(`[${callId}] 🔍 Travel hub check: pickup="${knownBooking.pickup}" dest="${knownBooking.destination}" isTravelHub=${tripHasTravelHub} luggage="${knownBooking.luggage}" asked=${knownBooking.luggageAsked}`);
       
       if (tripHasTravelHub && !knownBooking.luggage && !knownBooking.luggageAsked) {
-        console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - FORCING luggage question NOW`);
-        knownBooking.luggageAsked = true;
+        // Track luggage question attempts
+        knownBooking.luggageAttempts = (knownBooking.luggageAttempts || 0) + 1;
         
-        // Add to transcript for visibility
-        transcriptHistory.push({
-          role: "system",
-          text: `✈️ Travel hub detected - asking about luggage`,
-          timestamp: new Date().toISOString()
-        });
-        queueLiveCallBroadcast({});
-        
-        // FORCE Ada to ask about luggage IMMEDIATELY by injecting STRONG instruction
-        // This must happen BEFORE she summarizes/confirms the booking
-        if (openaiWs?.readyState === WebSocket.OPEN) {
-          // Inject as a high-priority instruction that Ada MUST follow
-          openaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "system",
-              content: [{ 
-                type: "input_text", 
-                text: `[STOP - MANDATORY LUGGAGE CHECK] This trip is to/from an airport or station. You MUST ask about luggage RIGHT NOW before doing anything else. Do NOT summarize the booking. Do NOT ask "shall I book?". Simply ask: "How many bags will you have for this trip?" Wait for their answer before proceeding.` 
-              }]
-            }
-          }));
-          console.log(`[${callId}] ✈️ Injected mandatory luggage question`);
+        // Check if we've asked too many times
+        if (knownBooking.luggageAttempts >= MAX_CLARIFICATION_ATTEMPTS) {
+          console.log(`[${callId}] 🛑 Max luggage question attempts (${MAX_CLARIFICATION_ATTEMPTS}) reached - assuming no luggage`);
+          knownBooking.luggage = "0 bags";
+          knownBooking.luggageAsked = true;
+          
+          transcriptHistory.push({
+            role: "system",
+            text: `⚠️ Max attempts for luggage - assuming no luggage`,
+            timestamp: new Date().toISOString()
+          });
+          queueLiveCallBroadcast({});
+        } else {
+          console.log(`[${callId}] ✈️ TRAVEL HUB DETECTED - FORCING luggage question NOW (attempt ${knownBooking.luggageAttempts}/${MAX_CLARIFICATION_ATTEMPTS})`);
+          knownBooking.luggageAsked = true;
+          
+          // Add to transcript for visibility
+          transcriptHistory.push({
+            role: "system",
+            text: `✈️ Travel hub detected - asking about luggage (attempt ${knownBooking.luggageAttempts})`,
+            timestamp: new Date().toISOString()
+          });
+          queueLiveCallBroadcast({});
+          
+          // FORCE Ada to ask about luggage IMMEDIATELY by injecting STRONG instruction
+          // This must happen BEFORE she summarizes/confirms the booking
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            // Inject as a high-priority instruction that Ada MUST follow
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{ 
+                  type: "input_text", 
+                  text: `[STOP - MANDATORY LUGGAGE CHECK] This trip is to/from an airport or station. You MUST ask about luggage RIGHT NOW before doing anything else. Do NOT summarize the booking. Do NOT ask "shall I book?". Simply ask: "How many bags will you have for this trip?" Wait for their answer before proceeding.` 
+                }]
+              }
+            }));
+            console.log(`[${callId}] ✈️ Injected mandatory luggage question`);
+          }
         }
       }
 
