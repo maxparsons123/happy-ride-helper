@@ -8,6 +8,7 @@ A high-performance C# SIP/RTP bridge using SIPSorcery that handles multiple conc
 - **SIP/RTP handling**: Full SIP signaling and RTP media using SIPSorcery
 - **Audio conversion**: G.711 μ-law ↔ PCM16 codec
 - **Resampling**: 8kHz ↔ 24kHz audio resampling
+- **Binary WebSocket**: Raw PCM streaming (~33% less bandwidth vs base64)
 - **Real-time pacing**: 20ms frame timing with silence injection
 - **Graceful shutdown**: Clean call termination and resource cleanup
 

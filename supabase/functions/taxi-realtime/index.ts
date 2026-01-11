@@ -7068,6 +7068,34 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
   socket.onmessage = async (event) => {
     try {
+      // BINARY AUDIO PATH: Handle raw PCM bytes directly (no base64 overhead)
+      if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+        if (!sessionReady) {
+          // Queue binary audio until session is ready
+          const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+          const base64Audio = btoa(String.fromCharCode(...audioBytes));
+          pendingMessages.push({ type: "audio", audio: base64Audio });
+          console.log(`[${callId}] ⏳ Binary audio received before session ready - queueing (${audioBytes.length} bytes)`);
+          return;
+        }
+        
+        // Forward binary audio to OpenAI as binary WebSocket frame
+        // OpenAI Realtime API supports binary frames for input_audio_buffer.append
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+          
+          // OpenAI accepts raw PCM16 binary frames directly
+          // This avoids base64 encoding overhead (~33% bandwidth savings)
+          openaiWs.send(audioBytes.buffer);
+          
+          // Log periodically (not every frame to reduce noise)
+          if (Math.random() < 0.01) {
+            console.log(`[${callId}] 🔊 Binary audio forwarded: ${audioBytes.length} bytes`);
+          }
+        }
+        return;
+      }
+      
       const message = JSON.parse(event.data);
       
       // Set call ID from client
@@ -7133,7 +7161,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         return;
       }
       
-      // Forward audio to OpenAI - ONLY if session is fully configured
+      // Forward audio to OpenAI - JSON/base64 path (legacy support)
       if (message.type === "audio" && openaiWs?.readyState === WebSocket.OPEN) {
         if (!sessionReady) {
           // Queue audio until session is ready (prevents responses with default OpenAI instructions)
