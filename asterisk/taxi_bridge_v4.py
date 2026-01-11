@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""
-Taxi AI Asterisk Bridge (v4.4 - Binary UUID & Immediate Playback Fix)
-- Fix: Uses binary hex parsing to match Asterisk's internal 16-byte UUID.
-- Stability: Starts playback task immediately to prevent Asterisk timeout.
+
+"""Taxi AI Asterisk Bridge (v2.1 - Hybrid)
+
+Combines the working v2 auto-detection with the binary UUID fix.
+
 """
 
 import asyncio
@@ -12,8 +13,8 @@ import base64
 import time
 import logging
 import audioop
+from typing import Optional
 from collections import deque
-
 import numpy as np
 import websockets
 
@@ -24,7 +25,6 @@ WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"
 
 AST_RATE = 8000
 AI_RATE = 24000
-JITTER_BUFFER_MS = 300
 
 MSG_HANGUP = 0x00
 MSG_UUID = 0x01
@@ -34,7 +34,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-class TaxiBridgeV4:
+def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
+    if from_rate == to_rate or not audio_bytes:
+        return audio_bytes
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+    if audio_np.size == 0:
+        return b""
+    new_length = int(len(audio_np) * to_rate / from_rate)
+    return np.interp(np.linspace(0, len(audio_np)-1, new_length), np.arange(len(audio_np)), audio_np).astype(np.int16).tobytes()
+
+
+class TaxiBridgeV2:
     def __init__(self, reader, writer):
         self.reader = reader
         self.writer = writer
@@ -43,31 +53,28 @@ class TaxiBridgeV4:
         self.audio_queue = deque()
         self.call_id = f"ast-{int(time.time() * 1000)}"
         self.phone = "Unknown"
-        self.caller_name = "Guest"
-        self.buffering = True
         self.ast_codec = "slin16"
         self.ast_frame_bytes = 320
 
+    def _detect_format(self, frame_len):
+        if frame_len == 160:
+            self.ast_codec, self.ast_frame_bytes = "ulaw", 160
+        elif frame_len == 320:
+            self.ast_codec, self.ast_frame_bytes = "slin16", 320
+        logger.info(f"[{self.call_id}] 🔎 Format: {self.ast_codec} ({frame_len} bytes)")
+
     async def run(self):
         peer = self.writer.get_extra_info("peername")
-        logger.info(f"[{self.call_id}] 📞 Socket connected from {peer}")
+        logger.info(f"[{self.call_id}] 📞 Call from {peer}")
 
-        # FIX: Start the playback loop immediately to keep Asterisk alive
+        # Start playback immediately to prevent Asterisk timeout
         playback_task = asyncio.create_task(self.queue_to_asterisk())
 
         try:
             async with websockets.connect(WS_URL, ping_interval=5, ping_timeout=10) as ws:
                 self.ws = ws
-                await self.ws.send(json.dumps({
-                    "type": "init",
-                    "call_id": self.call_id,
-                    "addressTtsSplicing": True
-                }))
-
-                await asyncio.gather(
-                    self.asterisk_to_ai(),
-                    self.ai_to_queue(),
-                )
+                await self.ws.send(json.dumps({"type": "init", "call_id": self.call_id, "addressTtsSplicing": True}))
+                await asyncio.gather(self.asterisk_to_ai(), self.ai_to_queue())
         except Exception as e:
             logger.error(f"[{self.call_id}] ❌ Error: {e}")
         finally:
@@ -79,45 +86,31 @@ class TaxiBridgeV4:
         while self.running:
             try:
                 header = await self.reader.readexactly(3)
-                m_type = header[0]
-                m_len = struct.unpack(">H", header[1:3])[0]
+                m_type, m_len = header[0], struct.unpack(">H", header[1:3])[0]
                 payload = await self.reader.readexactly(m_len)
 
                 if m_type == MSG_UUID:
-                    # FIX: Handle raw 16-byte binary UUID
-                    raw_uuid_hex = payload.hex()
-                    logger.info(f"[{self.call_id}] 🔑 UUID Received (Hex): {raw_uuid_hex}")
-
-                    if len(raw_uuid_hex) >= 12:
-                        self.phone = raw_uuid_hex[-12:]
-
-                    logger.info(f"[{self.call_id}] 👤 Phone Extracted: {self.phone}")
-
+                    # FIXED: Binary safe UUID handling
+                    raw_hex = payload.hex()
+                    if len(raw_hex) >= 12:
+                        self.phone = raw_hex[-12:]
+                    logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
                     await self.ws.send(json.dumps({
-                        "type": "init",
-                        "call_id": self.call_id,
-                        "user_phone": self.phone,
-                        "addressTtsSplicing": True
+                        "type": "init", "call_id": self.call_id,
+                        "user_phone": self.phone, "addressTtsSplicing": True
                     }))
 
                 elif m_type == MSG_AUDIO:
-                    if self.ast_frame_bytes != m_len:
-                        self.ast_codec = "ulaw" if m_len == 160 else "slin16"
-                        self.ast_frame_bytes = m_len
-
-                    pcm = audioop.ulaw2lin(payload, 2) if self.ast_codec == "ulaw" else payload
-                    upsampled = self._resample(pcm, AST_RATE, AI_RATE)
-
-                    if self.ws and self.ws.open:
-                        await self.ws.send(json.dumps({
-                            "type": "audio",
-                            "audio": base64.b64encode(upsampled).decode()
-                        }))
+                    if m_len != self.ast_frame_bytes:
+                        self._detect_format(m_len)
+                    linear16 = audioop.ulaw2lin(payload, 2) if self.ast_codec == "ulaw" else payload
+                    upsampled = resample_audio_linear16(linear16, AST_RATE, AI_RATE)
+                    await self.ws.send(json.dumps({"type": "audio", "audio": base64.b64encode(upsampled).decode()}))
 
                 elif m_type == MSG_HANGUP:
                     break
 
-            except Exception:
+            except:
                 break
 
     async def ai_to_queue(self):
@@ -126,132 +119,38 @@ class TaxiBridgeV4:
                 data = json.loads(message)
                 if data.get("type") in ["audio", "address_tts"]:
                     raw_24k = base64.b64decode(data["audio"])
-                    pcm_8k = self._resample(raw_24k, AI_RATE, AST_RATE)
+                    pcm_8k = resample_audio_linear16(raw_24k, AI_RATE, AST_RATE)
                     out = audioop.lin2ulaw(pcm_8k, 2) if self.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
                 elif data.get("type") == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role').upper()}: {data.get('text')}")
-                elif data.get("type") == "call_ended":
-                    logger.info(f"[{self.call_id}] 📴 AI requested hangup: {data.get('reason', 'unknown')}")
-                    # Send hangup message to Asterisk
-                    await self._send_hangup()
-                    self.running = False
-                    break
-        except Exception:
+        except:
             pass
 
-    async def _send_hangup(self):
-        """Send hangup message to Asterisk"""
-        try:
-            # MSG_HANGUP = 0x00, with 0 length payload
-            header = struct.pack(">BH", MSG_HANGUP, 0)
-            self.writer.write(header)
-            await self.writer.drain()
-            logger.info(f"[{self.call_id}] 📴 Hangup sent to Asterisk")
-        except Exception as e:
-            logger.error(f"[{self.call_id}] ❌ Failed to send hangup: {e}")
-
     async def queue_to_asterisk(self):
-        bytes_per_sec = AST_RATE * (1 if self.ast_codec == "ulaw" else 2)
-        frame_time = self.ast_frame_bytes / bytes_per_sec
-        bytes_played = 0
         start_time = time.time()
+        bytes_played = 0
+        buffer = bytearray()
 
         while self.running:
-            if self.buffering and len(self.audio_queue) < 5:
-                frame = self._silence()
-            else:
-                if self.buffering:
-                    self.buffering = False
-                    logger.info(f"[{self.call_id}] 🔊 Playing AI Audio")
+            while self.audio_queue:
+                buffer.extend(self.audio_queue.popleft())
 
-                if self.audio_queue:
-                    frame = self.audio_queue.popleft()
-                else:
-                    frame = self._silence()
-
-            await self._send_frame(frame)
-            bytes_played += len(frame)
-
-            # Pacing
+            # Strict Pacing
+            bytes_per_sec = AST_RATE * (1 if self.ast_codec == "ulaw" else 2)
             expected_time = start_time + (bytes_played / bytes_per_sec)
-            wait_time = expected_time - time.time()
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
+            await asyncio.sleep(max(0, expected_time - time.time()))
 
-    async def _send_frame(self, frame):
-        try:
-            header = struct.pack(">BH", MSG_AUDIO, len(frame))
-            self.writer.write(header + frame)
-            await self.writer.drain()
-        except:
-            self.running = False
+            chunk = bytes(buffer[:self.ast_frame_bytes]) if len(buffer) >= self.ast_frame_bytes else self._silence()
+            if len(buffer) >= self.ast_frame_bytes:
+                del buffer[:self.ast_frame_bytes]
 
-    def _resample(self, data, fin, fout):
-        """
-        High-quality resampling with anti-aliasing to prevent hiss/artifacts.
-        Uses windowed-sinc interpolation for clean audio.
-        """
-        if fin == fout or not data:
-            return data
-        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        if samples.size == 0:
-            return b""
-        
-        ratio = fout / fin
-        new_len = int(len(samples) * ratio)
-        
-        # Anti-aliasing: apply low-pass filter before downsampling
-        if fout < fin:
-            # Downsampling (24kHz -> 8kHz): apply 4kHz LPF (Nyquist for 8kHz)
-            cutoff = 0.9 * (fout / fin)  # 90% of target Nyquist
-            samples = self._low_pass_filter(samples, cutoff)
-        
-        # High-quality sinc interpolation
-        output = np.zeros(new_len, dtype=np.float32)
-        for i in range(new_len):
-            src_pos = i / ratio
-            src_idx = int(src_pos)
-            frac = src_pos - src_idx
-            
-            # 4-point cubic interpolation for smoother results
-            if src_idx >= 1 and src_idx < len(samples) - 2:
-                p0 = samples[src_idx - 1]
-                p1 = samples[src_idx]
-                p2 = samples[src_idx + 1]
-                p3 = samples[src_idx + 2]
-                
-                # Catmull-Rom spline interpolation
-                output[i] = 0.5 * (
-                    (2 * p1) +
-                    (-p0 + p2) * frac +
-                    (2*p0 - 5*p1 + 4*p2 - p3) * frac**2 +
-                    (-p0 + 3*p1 - 3*p2 + p3) * frac**3
-                )
-            elif src_idx < len(samples):
-                # Linear fallback at boundaries
-                if src_idx + 1 < len(samples):
-                    output[i] = samples[src_idx] * (1 - frac) + samples[src_idx + 1] * frac
-                else:
-                    output[i] = samples[src_idx]
-        
-        # Clip and convert back to int16
-        output = np.clip(output, -32768, 32767).astype(np.int16)
-        return output.tobytes()
-    
-    def _low_pass_filter(self, samples, cutoff):
-        """
-        Simple but effective low-pass filter using moving average + exponential smoothing.
-        Prevents aliasing artifacts (hiss) when downsampling.
-        """
-        # Use a simple FIR filter with a Hann window
-        filter_len = max(3, int(1.0 / cutoff) | 1)  # Ensure odd length
-        window = np.hanning(filter_len)
-        window /= window.sum()
-        
-        # Apply convolution (zero-phase filtering)
-        filtered = np.convolve(samples, window, mode='same')
-        return filtered.astype(np.float32)
+            try:
+                self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
+                await self.writer.drain()
+                bytes_played += len(chunk)
+            except:
+                break
 
     def _silence(self):
         return (b"\xFF" if self.ast_codec == "ulaw" else b"\x00") * self.ast_frame_bytes
@@ -262,16 +161,11 @@ class TaxiBridgeV4:
             await self.writer.wait_closed()
         except:
             pass
-        logger.info(f"[{self.call_id}] 📴 Call Finished")
 
 
 async def main():
-    server = await asyncio.start_server(
-        lambda r, w: TaxiBridgeV4(r, w).run(),
-        AUDIOSOCKET_HOST,
-        AUDIOSOCKET_PORT
-    )
-    logger.info(f"🚀 Taxi Bridge v4.4 Online")
+    server = await asyncio.start_server(lambda r, w: TaxiBridgeV2(r, w).run(), AUDIOSOCKET_HOST, AUDIOSOCKET_PORT)
+    logger.info(f"🚀 Taxi Bridge v2.1 Online")
     async with server:
         await server.serve_forever()
 
