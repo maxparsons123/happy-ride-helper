@@ -391,19 +391,24 @@ serve(async (req) => {
       
       console.log(`[${callId}] 📦 Combined audio: ${totalLength} bytes`);
       
-      // Minimum audio check: Whisper needs at least ~0.5s of audio
-      // At 24kHz PCM16 (2 bytes/sample), 0.5s = 24000 bytes
-      const MIN_AUDIO_BYTES = 12000; // 0.25s minimum - short words like "yes", "hello"
+      // Whisper needs ~0.5-1s of audio for reliable transcription
+      // At 24kHz PCM16 (2 bytes/sample), 1s = 48000 bytes
+      // For short utterances like "yes", "hello", "no" - pad with silence
+      const MIN_AUDIO_BYTES = 48000; // 1 second minimum for reliable Whisper
+      let audioToProcess = combinedAudio;
+      
       if (totalLength < MIN_AUDIO_BYTES) {
-        console.log(`[${callId}] ⚠️ Audio too short (${totalLength} < ${MIN_AUDIO_BYTES}), waiting for more...`);
-        // Put audio back in buffer and wait for more
-        audioBuffer.push(combinedAudio);
-        isProcessing = false;
-        return;
+        console.log(`[${callId}] 🔇 Audio short (${totalLength}), padding with silence to ${MIN_AUDIO_BYTES} bytes`);
+        // Create padded audio with silence before and after
+        const paddedAudio = new Uint8Array(MIN_AUDIO_BYTES);
+        // Center the actual audio in the middle, silence on both sides
+        const startOffset = Math.floor((MIN_AUDIO_BYTES - totalLength) / 2);
+        paddedAudio.set(combinedAudio, startOffset);
+        audioToProcess = paddedAudio;
       }
       
       // Pipeline: STT → LLM → TTS
-      const transcript = await transcribeAudio(combinedAudio);
+      const transcript = await transcribeAudio(audioToProcess);
       
       if (!transcript || transcript.trim().length === 0) {
         console.log(`[${callId}] ⚠️ Empty transcript, skipping`);
