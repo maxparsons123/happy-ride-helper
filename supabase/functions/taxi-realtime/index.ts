@@ -3980,7 +3980,10 @@ Rules:
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
             input_audio_transcription: { 
-              model: "whisper-1"
+              model: "whisper-1",
+              // Whisper prompt hint: reduces phonetic hallucinations by priming the model
+              // with expected vocabulary (e.g., "Sunnyvale" → "Solihull", "Skull" → "School")
+              prompt: "This is a UK taxi booking call. Common areas: Birmingham, Coventry, Solihull, Dudley, Wolverhampton, Walsall, Sandwell, Sutton Coldfield, Erdington, Yardley, Hockley, Moseley, Handsworth, Aston, Small Heath, Sparkhill, Hall Green, Edgbaston, Harborne, Selly Oak, Kings Heath, Northfield, Longbridge, Bournville, Bearwood, Smethwick, Oldbury, Tipton, West Bromwich, Wednesbury, Bilston, Willenhall, Bloxwich, Brownhills, Aldridge, Streetly, Cannock, Lichfield, Tamworth, Nuneaton, Bedworth, Rugby, Leamington Spa, Warwick, Stratford-upon-Avon, Redditch, Bromsgrove, Kidderminster, Stourbridge, Halesowen, Cradley Heath, Rowley Regis, Blackheath, Quinton, Bartley Green, Rubery, Rednal, Frankley, Woodgate, California, Weoley Castle. Common roads: School Road, High Street, Station Road, Church Road, Park Road, Green Lane, Manor Road, Victoria Road, Albert Road, King Street, Queen Street, New Street, Broad Street, Bristol Road, Warwick Road, Coventry Road, Stratford Road, Pershore Road, Hagley Road, Alcester Road, Moseley Road, Soho Road, Lozells Road, Birchfield Road, Aston Lane, Washwood Heath Road. Postcodes: B1-B99, CV1-CV99, WS1-WS15, WV1-WV16, DY1-DY14."
             },
             // Server VAD - tuned for phone audio where pauses can be longer
             // Give user more time to complete their response before committing
@@ -5087,12 +5090,21 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 ? { modalities: ["audio", "text"], instructions: forcedResponseInstructions }
                 : { modalities: ["audio", "text"] };
 
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response,
-              }));
-              responseCreatedSinceCommit = true;
-              console.log(`[${callId}] >>> response.create sent (after extraction complete)`);
+              const label = forcedResponseInstructions ? "address-path(forced)" : "address-path";
+
+              if (openAiResponseInProgress) {
+                deferredResponseCreate = { response: response as Record<string, unknown>, label };
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
+              } else {
+                openAiResponseInProgress = true;
+                openaiWs.send(JSON.stringify({
+                  type: "response.create",
+                  response,
+                }));
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] >>> response.create sent (${label})`);
+              }
             }
           }
         } else {
@@ -5100,12 +5112,22 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           
           // Still send response.create for forced instructions
           if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response: { modalities: ["audio", "text"], instructions: forcedResponseInstructions },
-            }));
-            responseCreatedSinceCommit = true;
-            console.log(`[${callId}] >>> response.create sent (forced instructions)`);
+            const response = { modalities: ["audio", "text"], instructions: forcedResponseInstructions };
+            const label = "forced-instructions";
+
+            if (openAiResponseInProgress) {
+              deferredResponseCreate = { response: response as Record<string, unknown>, label };
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
+            } else {
+              openAiResponseInProgress = true;
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response,
+              }));
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] >>> response.create sent (${label})`);
+            }
           }
         }
         
