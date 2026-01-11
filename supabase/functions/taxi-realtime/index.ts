@@ -2234,7 +2234,9 @@ CRITICAL RULES:
     let biasLat = 52.4862; // Birmingham default
     let biasLng = -1.8904;
 
+    // UK cities and notable areas for bias detection
     const UK_CITIES: Record<string, { lat: number; lng: number }> = {
+      // Major cities
       coventry: { lat: 52.4068, lng: -1.5197 },
       birmingham: { lat: 52.4862, lng: -1.8904 },
       manchester: { lat: 53.4808, lng: -2.2426 },
@@ -2244,11 +2246,31 @@ CRITICAL RULES:
       sheffield: { lat: 53.3811, lng: -1.4701 },
       nottingham: { lat: 52.9548, lng: -1.1581 },
       leicester: { lat: 52.6369, lng: -1.1398 },
+      // West Midlands boroughs/areas
+      wolverhampton: { lat: 52.5869, lng: -2.1257 },
+      dudley: { lat: 52.5085, lng: -2.0895 },
+      walsall: { lat: 52.5859, lng: -1.9821 },
+      solihull: { lat: 52.4119, lng: -1.7780 },
+      // Notable areas within cities
+      netherton: { lat: 52.4897, lng: -2.0870 },
+      "sutton coldfield": { lat: 52.5633, lng: -1.8227 },
+      "perry barr": { lat: 52.5241, lng: -1.9008 },
+      erdington: { lat: 52.5245, lng: -1.8420 },
+      edgbaston: { lat: 52.4637, lng: -1.9275 },
+      moseley: { lat: 52.4444, lng: -1.8873 },
+      handsworth: { lat: 52.5095, lng: -1.9355 },
     };
 
     const addressLower = address.toLowerCase();
+    // Check for any area mentioned in the address
     const cityMentionedInAddress = Object.keys(UK_CITIES).find((c) => addressLower.includes(c)) || null;
-    const effectiveCityHint = (cityMentionedInAddress || callerCity || "Birmingham").toLowerCase();
+    
+    // CRITICAL: Only use callerCity bias if NO area is mentioned in the address
+    // If user says "Church Road, Birmingham", use Birmingham (ignore callerCity)
+    // If user says "Church Road" with no area, use callerCity for bias
+    const effectiveCityHint = cityMentionedInAddress 
+      ? cityMentionedInAddress 
+      : (callerCity || "birmingham").toLowerCase();
 
     const cityCoords = UK_CITIES[effectiveCityHint];
     if (cityCoords) {
@@ -5596,22 +5618,34 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               console.log(`[${callId}] 🏙️ Appended callerCity to destination: "${finalBooking.destination}" → "${dropoffForResolver}"`);
             }
             
-            // Extract city from pickup address if present (e.g., "School Road, Birmingham" → "Birmingham")
+            // Extract city/area from pickup address if present (e.g., "School Road, Birmingham" → "Birmingham")
             // This should override callerCity for biasing to ensure disambiguation works correctly
             const extractCityFromAddress = (addr: string): string | null => {
-              const cities = ["Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", "Wolverhampton", "Solihull", "Walsall", "Dudley"];
+              // Include West Midlands boroughs and notable areas
+              const cities = [
+                "Birmingham", "Coventry", "Manchester", "Liverpool", "London", "Leeds", 
+                "Sheffield", "Bristol", "Nottingham", "Leicester", "Newcastle", 
+                "Wolverhampton", "Solihull", "Walsall", "Dudley",
+                // Notable areas
+                "Netherton", "Sutton Coldfield", "Perry Barr", "Erdington", 
+                "Edgbaston", "Moseley", "Handsworth", "Aston", "Sparkhill"
+              ];
               for (const city of cities) {
                 if (addr.toLowerCase().includes(city.toLowerCase())) return city;
               }
               return null;
             };
             
-            // Use city from pickup address if explicitly mentioned, otherwise fall back to callerCity
+            // CRITICAL: Only use callerCity bias if NO area is mentioned in the pickup address
+            // If user says "Church Road, Birmingham", use Birmingham (ignore callerCity)
+            // If user says "Church Road" with no area, use callerCity for bias
             const pickupCity = extractCityFromAddress(pickupForResolver);
             const effectiveCityHint = pickupCity || callerCity || undefined;
             
-            if (pickupCity && pickupCity.toLowerCase() !== callerCity?.toLowerCase()) {
-              console.log(`[${callId}] 🏙️ Using pickup city "${pickupCity}" instead of caller city "${callerCity}" for disambiguation bias`);
+            if (pickupCity) {
+              console.log(`[${callId}] 🏙️ Using explicit pickup area "${pickupCity}" for disambiguation (ignoring callerCity=${callerCity || "none"})`);
+            } else if (callerCity) {
+              console.log(`[${callId}] 🏙️ No area in pickup - using callerCity "${callerCity}" for bias`);
             }
             
             const tripResolveResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-trip-resolve`, {
