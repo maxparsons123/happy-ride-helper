@@ -821,19 +821,33 @@ async function checkAreaDisambiguation(
   biasLat: number,
   biasLng: number,
   radiusMeters: number = 15000
-): Promise<{ needsDisambiguation: boolean; matches: AreaMatch[] }> {
+): Promise<{ needsDisambiguation: boolean; matches: AreaMatch[]; roadName: string }> {
   if (!GOOGLE_API_KEY) {
-    return { needsDisambiguation: false, matches: [] };
+    return { needsDisambiguation: false, matches: [], roadName: address };
   }
   
   console.log(`[AreaDisambiguation] Checking: "${address}" near ${biasLat},${biasLng}`);
   
-  // Normalize the address for searching
-  const normalizedAddress = normalizeSTTAddress(address);
+  // Extract just the road name, stripping any city suffix
+  // "School Road, Birmingham" → "School Road"
+  // "High Street, Coventry" → "High Street"
+  let roadNameOnly = address;
+  if (address.includes(",")) {
+    const parts = address.split(",").map(p => p.trim());
+    // First part should be the road name
+    if (extractRoadType(parts[0])) {
+      roadNameOnly = parts[0];
+      console.log(`[AreaDisambiguation] Extracted road name: "${roadNameOnly}" from "${address}"`);
+    }
+  }
   
-  // Use Google Places Text Search to find all matches
+  // Normalize the road name for searching
+  const normalizedRoad = normalizeSTTAddress(roadNameOnly);
+  
+  // Search for just the road name with location bias - this finds ALL instances of the road nearby
+  // Don't include city in search to get multiple results within that city
   const params = new URLSearchParams({
-    query: `${normalizedAddress}, UK`,
+    query: `${normalizedRoad}`,
     location: `${biasLat},${biasLng}`,
     radius: radiusMeters.toString(),
     key: GOOGLE_API_KEY,
@@ -845,13 +859,13 @@ async function checkAreaDisambiguation(
     const resp = await fetch(url);
     if (!resp.ok) {
       console.error("[AreaDisambiguation] API error:", resp.status);
-      return { needsDisambiguation: false, matches: [] };
+      return { needsDisambiguation: false, matches: [], roadName: roadNameOnly };
     }
     
     const data = await resp.json();
     if (data.status !== "OK" || !data.results?.length) {
       console.log("[AreaDisambiguation] No results");
-      return { needsDisambiguation: false, matches: [] };
+      return { needsDisambiguation: false, matches: [], roadName: roadNameOnly };
     }
     
     // Extract road/area info from each result
@@ -932,17 +946,19 @@ async function checkAreaDisambiguation(
       return {
         needsDisambiguation: true,
         matches: uniqueMatches,
+        roadName: roadNameOnly,
       };
     }
     
     return {
       needsDisambiguation: false,
       matches: uniqueMatches,
+      roadName: roadNameOnly,
     };
     
   } catch (e) {
     console.error("[AreaDisambiguation] Error:", e);
-    return { needsDisambiguation: false, matches: [] };
+    return { needsDisambiguation: false, matches: [], roadName: roadNameOnly };
   }
 }
 
