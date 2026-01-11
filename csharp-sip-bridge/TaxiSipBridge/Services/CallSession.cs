@@ -160,16 +160,9 @@ public class CallSession : IDisposable
             // Resample 8kHz to 24kHz
             var resampled = AudioResampler.Resample(pcm16, 8000, 24000);
             
-            // Convert to base64 and send to AI
-            var base64Audio = Convert.ToBase64String(resampled);
-            
-            var audioMessage = new
-            {
-                type = "audio",
-                audio = base64Audio
-            };
-
-            _ = SendWebSocketMessage(audioMessage);
+            // BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
+            // This reduces CPU usage and bandwidth by ~33%
+            _ = SendBinaryAudio(resampled);
         }
         catch (Exception ex)
         {
@@ -375,6 +368,29 @@ public class CallSession : IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending WebSocket message");
+        }
+    }
+
+    /// <summary>
+    /// Send raw PCM audio as binary WebSocket frame (no base64 encoding)
+    /// This is ~33% more efficient than JSON/base64
+    /// </summary>
+    private async Task SendBinaryAudio(byte[] pcmData)
+    {
+        if (_webSocket?.State != WebSocketState.Open)
+            return;
+
+        try
+        {
+            await _webSocket.SendAsync(
+                new ArraySegment<byte>(pcmData),
+                WebSocketMessageType.Binary,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending binary audio");
         }
     }
 
