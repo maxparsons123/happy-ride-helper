@@ -16,6 +16,7 @@ import audioop
 from typing import Optional
 from collections import deque
 import numpy as np
+from scipy import signal
 import websockets
 
 # --- Configuration ---
@@ -35,13 +36,25 @@ logger = logging.getLogger(__name__)
 
 
 def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
+    """
+    High-quality resampling using scipy.signal.resample.
+    Uses FFT-based resampling with built-in anti-aliasing to prevent
+    hiss/artifacts at word boundaries during downsampling.
+    """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
         return b""
+    
     new_length = int(len(audio_np) * to_rate / from_rate)
-    return np.interp(np.linspace(0, len(audio_np)-1, new_length), np.arange(len(audio_np)), audio_np).astype(np.int16).tobytes()
+    
+    # scipy.signal.resample uses FFT with proper anti-aliasing
+    resampled = signal.resample(audio_np, new_length)
+    
+    # Clip to int16 range and convert back
+    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+    return resampled.tobytes()
 
 
 class TaxiBridgeV2:
