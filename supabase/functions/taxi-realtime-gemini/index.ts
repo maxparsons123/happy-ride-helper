@@ -132,7 +132,17 @@ serve(async (req) => {
       
       if (sttProvider === "deepgram" && DEEPGRAM_API_KEY) {
         // Deepgram Nova-2 - optimized for telephony and UK accents
-        const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB&punctuate=true&smart_format=true", {
+        // CRITICAL: Add keyword boosting for taxi commands and UK locations
+        const keywords = [
+          "cancel:2", "cancel it:2", "cancel the booking:2", "keep it:2", "book it:2",
+          "yes please:1.5", "no thanks:1.5", "that's right:1.5", "that's correct:1.5",
+          "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Wolverhampton:1.5",
+          "School Road:1.5", "David Road:1.5", "Station Road:1.5", "High Street:1.5",
+          "Birmingham Airport:1.5", "Heathrow:1.5", "Gatwick:1.5"
+        ].join("&keywords=");
+        
+        // Remove language lock for multilingual support, add keywords
+        const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&keywords=${keywords}`, {
           method: "POST",
           headers: {
             Authorization: `Token ${DEEPGRAM_API_KEY}`,
