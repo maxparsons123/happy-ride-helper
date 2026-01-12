@@ -1631,21 +1631,37 @@ serve(async (req) => {
       const knownStreet = extractStreetName(normalizedKnown);
       
       if (inputHouseNum && knownHouseNum && inputStreet && knownStreet) {
+        // Normalize street names: remove direction suffixes (N, S, E, W) and road types
+        const normalizeStreetForMatch = (street: string): string => {
+          return street
+            // Remove direction suffixes like "st n", "st north", "rd e", "rd east"
+            .replace(/\s+(n|s|e|w|north|south|east|west)$/i, '')
+            // Normalize road types
+            .replace(/\s+(road|rd)$/i, ' rd')
+            .replace(/\s+(street|st)$/i, ' st')
+            .replace(/\s+(avenue|ave)$/i, ' ave')
+            .replace(/\s+(drive|dr)$/i, ' dr')
+            .replace(/\s+(lane|ln)$/i, ' ln')
+            .replace(/\s+(close|cl)$/i, ' cl')
+            .trim();
+        };
+        
+        const normalizedInputStreet = normalizeStreetForMatch(inputStreet);
+        const normalizedKnownStreet = normalizeStreetForMatch(knownStreet);
+        
         // Check if street names match (or are very similar)
         const streetsMatch = 
-          inputStreet === knownStreet || 
-          inputStreet.includes(knownStreet) || 
-          knownStreet.includes(inputStreet) ||
-          // Handle STT road type variations (already normalized by caller)
-          inputStreet.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '') === 
-          knownStreet.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '');
+          normalizedInputStreet === normalizedKnownStreet || 
+          normalizedInputStreet.includes(normalizedKnownStreet) || 
+          normalizedKnownStreet.includes(normalizedInputStreet);
         
         if (streetsMatch) {
           // Try fuzzy variants of the input house number
           const inputVariants = fuzzyHouseNumberVariants(inputHouseNum);
           
-          if (inputVariants.includes(knownHouseNum)) {
-            console.log(`[${callId}] 📍 Address matched from history (FUZZY house number): "${address}" → "${known}" [${inputHouseNum} → ${knownHouseNum}]`);
+          // Include exact match as well as fuzzy variants
+          if (inputHouseNum === knownHouseNum || inputVariants.includes(knownHouseNum)) {
+            console.log(`[${callId}] 📍 Address matched from history (street match): "${address}" → "${known}" [${inputStreet} → ${knownStreet}]`);
             return enrichAddressWithCity(known);
           }
         }
@@ -1705,23 +1721,42 @@ serve(async (req) => {
       const knownStreet = extractStreetName(normalizedKnown);
       
       if (inputHouseNum && knownHouseNum && inputStreet && knownStreet) {
-        const streetBase = (s: string) => s.replace(/\s+(road|rd|street|st|avenue|ave|drive|dr|lane|ln|close|cl)$/i, '');
-        const streetsMatch = streetBase(inputStreet) === streetBase(knownStreet);
+        // Normalize street names: remove direction suffixes (N, S, E, W) and road types
+        const normalizeStreetForMatch = (street: string): string => {
+          return street
+            // Remove direction suffixes like "st n", "st north", "rd e", "rd east"
+            .replace(/\s+(n|s|e|w|north|south|east|west)$/i, '')
+            // Normalize road types
+            .replace(/\s+(road|rd)$/i, ' rd')
+            .replace(/\s+(street|st)$/i, ' st')
+            .replace(/\s+(avenue|ave)$/i, ' ave')
+            .replace(/\s+(drive|dr)$/i, ' dr')
+            .replace(/\s+(lane|ln)$/i, ' ln')
+            .replace(/\s+(close|cl)$/i, ' cl')
+            .trim();
+        };
+        
+        const normalizedInputStreet = normalizeStreetForMatch(inputStreet);
+        const normalizedKnownStreet = normalizeStreetForMatch(knownStreet);
+        
+        const streetsMatch = normalizedInputStreet === normalizedKnownStreet ||
+          normalizedInputStreet.includes(normalizedKnownStreet) ||
+          normalizedKnownStreet.includes(normalizedInputStreet);
         
         if (streetsMatch) {
-          // Check if this is a fuzzy house number match
+          // Check if this is a fuzzy house number match OR exact
           const fuzzyVariants = fuzzyHouseNumberVariants(inputHouseNum);
           
-          if (fuzzyVariants.includes(knownHouseNum)) {
+          if (inputHouseNum === knownHouseNum || fuzzyVariants.includes(knownHouseNum)) {
             // Calculate "edit distance" - if house numbers differ significantly, need clarification
             const houseNumDifferent = inputHouseNum !== knownHouseNum;
             const significantDifference = Math.abs(inputHouseNum.length - knownHouseNum.length) > 1;
             
-            console.log(`[${callId}] 🔍 Fuzzy match found: "${address}" ≈ "${known}" (clarification: ${houseNumDifferent})`);
+            console.log(`[${callId}] 🔍 Fuzzy match found: "${address}" ≈ "${known}" (clarification: ${houseNumDifferent && significantDifference})`);
             
             return { 
               matched: enrichAddressWithCity(known), 
-              matchType: "fuzzy", 
+              matchType: houseNumDifferent ? "fuzzy" : "exact", 
               spokenAddress: address, 
               needsClarification: houseNumDifferent && significantDifference
             };
