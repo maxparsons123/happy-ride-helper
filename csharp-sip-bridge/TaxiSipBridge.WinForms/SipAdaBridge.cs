@@ -272,30 +272,22 @@ public class SipAdaBridge : IDisposable
             });
 
             // === Buffer → SIP (AI → Caller) - Direct RTP Raw ===
-            // VoIPMediaSession.SendAudio doesn't exist with that signature.
-            // Use the underlying RTP session's SendRtpRaw for direct µ-law injection.
+            // Use rtpSession.RtpSession.SendRtpRaw for direct µ-law injection.
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
                 
-                // Get the audio RTP session for raw packet sending
-                var audioRtpSession = rtpSession.AudioRtpSession;
-                if (audioRtpSession == null)
+                // Get the underlying RTP session for raw packet sending
+                var rawRtpSession = rtpSession.RtpSession;
+                if (rawRtpSession == null)
                 {
-                    Log($"❌ [{callId}] No AudioRtpSession available!");
+                    Log($"❌ [{callId}] No RtpSession available!");
                     return;
                 }
                 
-                // Determine the payload type from negotiated codec (PCMU=0, PCMA=8)
-                byte payloadType = 0; // Default to PCMU (µ-law)
-                var audioFormat = rtpSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-                if (audioFormat != null)
-                {
-                    payloadType = (byte)audioFormat.ID;
-                    Log($"📻 [{callId}] Using codec: {audioFormat.Name}, PT={payloadType}");
-                }
+                Log($"📻 [{callId}] RTP session ready, using PCMU (payload type 0)");
 
                 while (!cts.Token.IsCancellationRequested)
                 {
@@ -314,8 +306,14 @@ public class SipAdaBridge : IDisposable
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
                             // Send raw RTP packet with µ-law payload
-                            // Duration = 160 samples = 20ms at 8kHz
-                            audioRtpSession.SendAudioFrame(rtpTimestamp, (int)payloadType, frame);
+                            // Payload type 0 = PCMU (µ-law), 160 samples = 20ms at 8kHz
+                            rawRtpSession.SendRtpRaw(
+                                SDPMediaTypesEnum.audio,
+                                frame,
+                                rtpTimestamp,
+                                0,  // Marker bit
+                                0   // Payload type 0 = PCMU (µ-law)
+                            );
 
                             rtpTimestamp += 160;
                             framesPlayed++;
