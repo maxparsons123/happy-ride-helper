@@ -5341,16 +5341,20 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         const skipExtractionPatterns = [
           // Simple confirmations
           /^(yes|yeah|yep|yup|no|nope|nah|ok|okay|sure|please|right|correct|that's right|that's correct)\b/i,
-          // Thank you variations
+          // Thank you variations (EXPANDED - catches "that's fine, thank you")
+          /\b(thank\s*you|thanks|cheers|ta|lovely|brilliant|perfect|great|fine)\b/i,
           // Simple negatives (with filler words)
           /^no[,.]?\s*(no[,.]?\s*)?(that'?s?\s*(fine|all|it|ok|okay)|i'?m\s*(good|fine|ok|okay)|nothing|thanks)/i,
           // Passenger counts (with optional filler)
           /^(just\s*)?(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|people|of us)?[!. ]*$/i,
-          // Short responses under 20 chars with no address-like content
+          // Goodbye patterns
+          /\b(bye|goodbye|see you|take care|have a (good|great|lovely) (day|one|journey))\b/i,
+          // Affirmative responses that don't need extraction
+          /^(and\s+)?(that'?s?\s*)?(fine|all|it|ok|okay|good|great|perfect|lovely)\b/i,
         ];
         
         const isSimpleResponse = skipExtractionPatterns.some(p => p.test(transcriptLower)) || 
-          (transcriptLower.length < 25 && !/\d{1,3}\s*[a-z]/i.test(transcriptLower) && !/road|street|avenue|lane|drive|close|way|court/i.test(transcriptLower));
+          (transcriptLower.length < 30 && !/\d{1,3}\s*[a-z]/i.test(transcriptLower) && !/road|street|avenue|lane|drive|close|way|court|station|airport/i.test(transcriptLower));
         
         // HYBRID LATENCY OPTIMIZATION:
         // - Simple responses → Send response.create IMMEDIATELY (no waiting)
