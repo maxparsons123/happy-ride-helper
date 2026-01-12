@@ -41,21 +41,23 @@ def ulaw2lin(ulaw_bytes: bytes) -> bytes:
     return pcm.tobytes()
 
 def lin2ulaw(pcm_bytes: bytes) -> bytes:
-    """Encode 16-bit linear PCM to μ-law using numpy."""
+    """Encode 16-bit linear PCM to μ-law using numpy (ITU-T G.711 compliant)."""
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
     sign = np.where(pcm < 0, 0x80, 0)
     pcm = np.abs(pcm)
     pcm = np.clip(pcm, 0, ULAW_CLIP)
     pcm += ULAW_BIAS
     
-    # Find segment (exponent)
-    exponent = np.floor(np.log2(pcm)).astype(np.int32) - 7
+    # Find segment (exponent) - use log2 safely (pcm is always >= ULAW_BIAS after +BIAS)
+    # pcm is now in range [132, 32767] so log2 is safe
+    exponent = (np.floor(np.log2(np.maximum(pcm, 1)))).astype(np.int32) - 7
     exponent = np.clip(exponent, 0, 7)
     
     # Extract mantissa
     mantissa = (pcm >> (exponent + 3)) & 0x0F
     
-    ulaw = ~(sign | (exponent << 4) | mantissa)
+    # Combine and complement - result should be uint8
+    ulaw = (~(sign | (exponent << 4) | mantissa)) & 0xFF
     return ulaw.astype(np.uint8).tobytes()
 
 # --- Configuration ---
