@@ -1818,7 +1818,10 @@ serve(async (req) => {
     }
     
     // If it already has a house number, we're good
-    if (/^\d+[a-z]?\s+/i.test(address.trim())) {
+    // Match patterns like: "52A David Road", "52A, David Road", "52 David Road"
+    // The separator can be space, comma+space, or just comma
+    if (/^\d+[a-z]?[\s,]+/i.test(address.trim())) {
+      console.log(`[${callId}] 🏠 "${address}" already has house number - no need to ask`);
       return false;
     }
     
