@@ -5041,6 +5041,12 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         }
         
         console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
+        
+        // CRITICAL: Add a short delay before the greeting to allow the telephony bridge
+        // audio channel to fully stabilize. Without this, the first few hundred ms of
+        // "Hello" can be clipped (heard as "lo" or "ello").
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
