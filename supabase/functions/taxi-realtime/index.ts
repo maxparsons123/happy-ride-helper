@@ -5042,10 +5042,37 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         
         console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
         
-        // CRITICAL: Add a short delay before the greeting to allow the telephony bridge
-        // audio channel to fully stabilize. Without this, the first few hundred ms of
-        // "Hello" can be clipped (heard as "lo" or "ello").
-        await new Promise(resolve => setTimeout(resolve, 300));
+        // CRITICAL: Send a short silence buffer BEFORE the greeting to prime the audio channel.
+        // This ensures the telephony bridge's RTP stream is active and buffered before the AI
+        // starts speaking, preventing "Hello" from being clipped to "lo" or "ello".
+        // 
+        // Audio format: PCM16 at 24kHz = 48000 bytes/sec = 4800 bytes per 100ms
+        // We send ~300ms of silence (3 chunks of 4800 bytes each)
+        const silenceChunkSize = 4800; // 100ms of silence at 24kHz PCM16
+        const silenceChunks = 3; // 300ms total
+        
+        // Create silence buffer (zeros = silence in PCM16)
+        const silenceBytes = new Uint8Array(silenceChunkSize);
+        // Convert to base64
+        let silenceBase64 = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < silenceBytes.length; i += chunkSize) {
+          const chunk = silenceBytes.subarray(i, Math.min(i + chunkSize, silenceBytes.length));
+          silenceBase64 += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        silenceBase64 = btoa(silenceBase64);
+        
+        // Send silence chunks to prime the audio channel
+        for (let i = 0; i < silenceChunks; i++) {
+          socket.send(JSON.stringify({
+            type: "audio",
+            audio: silenceBase64,
+          }));
+        }
+        console.log(`[${callId}] 🔇 Sent ${silenceChunks * 100}ms of silence to prime audio channel`);
+        
+        // Small additional delay to let the bridge process the silence
+        await new Promise(resolve => setTimeout(resolve, 100));
         
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
