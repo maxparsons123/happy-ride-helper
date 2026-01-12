@@ -5902,18 +5902,34 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           // =========== SINGLE FIELD EXTRACTION (if combined didn't match) ===========
           
           // If we haven't extracted passengers yet from combined patterns
+          // CRITICAL: Even if luggageAsked=true, customer may answer with passenger info
+          // e.g., "There'll be two passengers and Shelly" when asked about bags
+          // We must still capture passenger info from such responses
           if (!knownBooking.passengers) {
             // "just me" / "just one" / "myself"
             if (/\b(just\s+me|myself|just\s+one|only\s+me)\b/i.test(rawTranscript)) {
               knownBooking.passengers = 1;
               console.log(`[${callId}] ⚡ Fast-path: passengers=1 (just me/myself)`);
             } else {
-              const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
-              if (passengerMatch && !knownBooking.luggage) { // Only if we're not parsing luggage
-                const num = numMap[passengerMatch[1].toLowerCase()] ?? parseInt(passengerMatch[1]);
+              // Check for explicit passenger mentions even when asking about luggage
+              // Pattern: "X passengers", "X people", "X of us"
+              const explicitPassengerMatch = lowerTranscript.match(/\b(\d+|one|two|three|four|five|six|seven|eight)\s*(?:passengers?|people|persons?|of\s+us)\b/i);
+              if (explicitPassengerMatch) {
+                const num = numMap[explicitPassengerMatch[1].toLowerCase()] ?? parseInt(explicitPassengerMatch[1]);
                 if (num >= 1 && num <= 8) {
                   knownBooking.passengers = num;
-                  console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
+                  console.log(`[${callId}] ⚡ Fast-path: explicit passengers=${num}`);
+                }
+              } else if (!knownBooking.luggageAsked) {
+                // Only do bare number extraction if we're NOT asking about luggage
+                // This prevents "2 bags" from being parsed as "2 passengers"
+                const passengerMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\b/i);
+                if (passengerMatch) {
+                  const num = numMap[passengerMatch[1].toLowerCase()] ?? parseInt(passengerMatch[1]);
+                  if (num >= 1 && num <= 8) {
+                    knownBooking.passengers = num;
+                    console.log(`[${callId}] ⚡ Fast-path: extracted passengers=${num}`);
+                  }
                 }
               }
             }
