@@ -16,12 +16,47 @@ import struct
 import base64
 import time
 import logging
-import audioop
 from typing import Optional
 from collections import deque
 import numpy as np
 from scipy.signal import resample_poly, butter, sosfilt
 import websockets
+
+# μ-law codec using numpy (replaces deprecated audioop)
+# ITU-T G.711 μ-law encoding/decoding tables
+ULAW_BIAS = 0x84
+ULAW_CLIP = 32635
+
+def ulaw2lin(ulaw_bytes: bytes) -> bytes:
+    """Decode μ-law to 16-bit linear PCM using numpy."""
+    ulaw = np.frombuffer(ulaw_bytes, dtype=np.uint8)
+    ulaw = ~ulaw  # Complement
+    sign = (ulaw & 0x80)
+    exponent = (ulaw >> 4) & 0x07
+    mantissa = ulaw & 0x0F
+    sample = (mantissa << 3) + ULAW_BIAS
+    sample <<= exponent
+    sample -= ULAW_BIAS
+    pcm = np.where(sign != 0, -sample, sample).astype(np.int16)
+    return pcm.tobytes()
+
+def lin2ulaw(pcm_bytes: bytes) -> bytes:
+    """Encode 16-bit linear PCM to μ-law using numpy."""
+    pcm = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
+    sign = np.where(pcm < 0, 0x80, 0)
+    pcm = np.abs(pcm)
+    pcm = np.clip(pcm, 0, ULAW_CLIP)
+    pcm += ULAW_BIAS
+    
+    # Find segment (exponent)
+    exponent = np.floor(np.log2(pcm)).astype(np.int32) - 7
+    exponent = np.clip(exponent, 0, 7)
+    
+    # Extract mantissa
+    mantissa = (pcm >> (exponent + 3)) & 0x0F
+    
+    ulaw = ~(sign | (exponent << 4) | mantissa)
+    return ulaw.astype(np.uint8).tobytes()
 
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
@@ -172,7 +207,7 @@ class TaxiBridgeV2:
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
-                    linear16 = audioop.ulaw2lin(payload, 2) if self.ast_codec == "ulaw" else payload
+                    linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
                     
                     # NEW: Apply noise reduction pipeline (high-pass, noise gate, normalize)
                     cleaned = apply_noise_reduction(linear16)
@@ -196,7 +231,7 @@ class TaxiBridgeV2:
                 if isinstance(message, bytes):
                     # Binary audio from AI - resample and queue
                     pcm_8k = resample_audio_linear16(message, AI_RATE, AST_RATE)
-                    out = audioop.lin2ulaw(pcm_8k, 2) if self.ast_codec == "ulaw" else pcm_8k
+                    out = lin2ulaw(pcm_8k) if self.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
                     continue
                 
@@ -205,7 +240,7 @@ class TaxiBridgeV2:
                 if data.get("type") in ["audio", "address_tts"]:
                     raw_24k = base64.b64decode(data["audio"])
                     pcm_8k = resample_audio_linear16(raw_24k, AI_RATE, AST_RATE)
-                    out = audioop.lin2ulaw(pcm_8k, 2) if self.ast_codec == "ulaw" else pcm_8k
+                    out = lin2ulaw(pcm_8k) if self.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
                 elif data.get("type") == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role').upper()}: {data.get('text')}")
@@ -250,7 +285,7 @@ class TaxiBridgeV2:
 
 async def main():
     server = await asyncio.start_server(lambda r, w: TaxiBridgeV2(r, w).run(), AUDIOSOCKET_HOST, AUDIOSOCKET_PORT)
-    logger.info(f"🚀 Taxi Bridge v2.3 Online (Binary WebSocket)")
+    logger.info(f"🚀 Taxi Bridge v2.4 Online (No audioop, Noise Reduction)")
     async with server:
         await server.serve_forever()
 
