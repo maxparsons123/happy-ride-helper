@@ -5077,10 +5077,11 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           }),
         );
         
-        // NON-BLOCKING: Broadcast audio to monitoring channel (no await = no jitter)
+        // NON-BLOCKING: Broadcast AI audio to monitoring channel (no await = no jitter)
         void supabase.from("live_call_audio").insert({
           call_id: callId,
           audio_chunk: data.delta,
+          audio_source: "ai",
           created_at: new Date().toISOString()
         }); // Fire and forget - monitoring is optional
       }
@@ -7744,6 +7745,16 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               audio: base64Audio,
             }),
           );
+
+          // NON-BLOCKING: Broadcast USER audio to monitoring channel (sample ~10% to reduce DB load)
+          if (Math.random() < 0.1) {
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: base64Audio,
+              audio_source: "user",
+              created_at: new Date().toISOString()
+            }); // Fire and forget
+          }
 
           // Log periodically (not every frame to reduce noise)
           if (Math.random() < 0.01) {
