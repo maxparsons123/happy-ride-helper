@@ -5937,24 +5937,48 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           
           // If we haven't extracted luggage yet and Ada asked about it
           if (knownBooking.luggageAsked && !knownBooking.luggage) {
-            const luggageMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|none|zero|1|2|3|4|5|6|7|8|9|10|0)\b/i);
+            // CRITICAL: When extracting luggage, exclude numbers that are part of passenger mentions
+            // e.g., "two passengers" should NOT set luggage=2
+            // First check for explicit luggage mentions (X bags, X suitcases)
+            const explicitLuggageMatch = lowerTranscript.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:bag|bags|suitcase|suitcases|case|cases|piece|pieces)\b/i);
+            
+            // Check if transcript mentions passengers - if so, don't extract bare numbers as luggage
+            const mentionsPassengers = /\b(?:passenger|passengers|people|persons?|of\s+us)\b/i.test(lowerTranscript);
+            
             const isYesResponse = /\b(yes|yeah|yep|yup|aye)\b/i.test(rawTranscript);
             const isNoResponse = /\b(no|none|nope|nah|nothing)\b/i.test(rawTranscript);
             
-            if (isNoResponse && !luggageMatch) {
+            if (isNoResponse && !explicitLuggageMatch) {
               knownBooking.luggage = "no luggage";
               console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage" (no response)`);
-            } else if (luggageMatch) {
-              const num = numMap[luggageMatch[1].toLowerCase()] ?? parseInt(luggageMatch[1]);
+            } else if (explicitLuggageMatch) {
+              // Explicit luggage mention - trust it
+              const num = numMap[explicitLuggageMatch[1].toLowerCase()] ?? parseInt(explicitLuggageMatch[1]);
               if (num === 0) {
                 knownBooking.luggage = "no luggage";
                 console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage"`);
               } else if (num >= 1 && num <= 10) {
                 knownBooking.luggage = `${num} bag${num > 1 ? 's' : ''}`;
-                console.log(`[${callId}] ⚡ Fast-path: luggage="${knownBooking.luggage}"`);
+                console.log(`[${callId}] ⚡ Fast-path: explicit luggage="${knownBooking.luggage}"`);
+              }
+            } else if (!mentionsPassengers) {
+              // Only do bare number extraction if they didn't mention passengers
+              // This prevents "two passengers" from being parsed as "2 bags"
+              const luggageMatch = rawTranscript.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|none|zero|1|2|3|4|5|6|7|8|9|10|0)\b/i);
+              if (luggageMatch) {
+                const num = numMap[luggageMatch[1].toLowerCase()] ?? parseInt(luggageMatch[1]);
+                if (num === 0) {
+                  knownBooking.luggage = "no luggage";
+                  console.log(`[${callId}] ⚡ Fast-path: luggage="no luggage"`);
+                } else if (num >= 1 && num <= 10) {
+                  knownBooking.luggage = `${num} bag${num > 1 ? 's' : ''}`;
+                  console.log(`[${callId}] ⚡ Fast-path: luggage="${knownBooking.luggage}"`);
+                }
               }
             } else if (isYesResponse) {
               console.log(`[${callId}] ⚡ Fast-path: luggage answer "yes" without count, waiting for follow-up`);
+            } else if (mentionsPassengers) {
+              console.log(`[${callId}] ⚡ Fast-path: response mentions passengers but not bags - will re-ask for luggage`);
             }
           }
           
