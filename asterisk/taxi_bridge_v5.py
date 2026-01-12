@@ -365,6 +365,14 @@ class TaxiBridgeV25:
                         logger.info(f"[{self.call_id}] 🔊 JSON audio chunk #{audio_chunks_received}")
                 elif msg_type == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role', 'unknown').upper()}: {data.get('text', '')}")
+                elif msg_type == "user_speaking":
+                    speaking = data.get("speaking")
+                    if speaking is True:
+                        logger.info(f"[{self.call_id}] 🗣️ User speaking (start)")
+                    elif speaking is False:
+                        logger.info(f"[{self.call_id}] 🗣️ User speaking (stop)")
+                    else:
+                        logger.info(f"[{self.call_id}] 🗣️ User speaking: {speaking}")
                 elif msg_type == "session_resumed":
                     resumed = data.get("resumed", False)
                     turn_count = data.get("transcript_count", 0)
