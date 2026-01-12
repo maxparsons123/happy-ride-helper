@@ -6,7 +6,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 interface Agent {
   id: string;
@@ -168,6 +170,34 @@ export default function LiveCalls() {
     audioQueueRef.current?.clear();
     setAudioEnabled(false);
   }, []);
+
+  const [isClearing, setIsClearing] = useState(false);
+
+  const clearDatabase = async () => {
+    setIsClearing(true);
+    try {
+      // Clear tables - use neq filter to delete all rows
+      await supabase.from('live_call_audio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('live_calls').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('bookings').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('call_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('callers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      await supabase.from('address_cache').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      
+      setCalls([]);
+      setSelectedCall(null);
+      setPickupGeocode(null);
+      setDestinationGeocode(null);
+      setTripResolveResult(null);
+      
+      toast.success("Database cleared successfully");
+    } catch (error) {
+      console.error("Error clearing database:", error);
+      toast.error("Failed to clear database");
+    } finally {
+      setIsClearing(false);
+    }
+  };
 
   // Fetch agents on mount
   useEffect(() => {
@@ -697,6 +727,29 @@ export default function LiveCalls() {
             <Badge variant="outline" className="text-muted-foreground">
               {calls.length} Total
             </Badge>
+            {/* Clear Database Button */}
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="destructive" size="sm" disabled={isClearing}>
+                  <Trash2 className="w-4 h-4 mr-2" />
+                  {isClearing ? "Clearing..." : "Clear DB"}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear Database?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete all calls, bookings, callers, and call logs. This action cannot be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={clearDatabase} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                    Clear Everything
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         </div>
 
