@@ -5505,15 +5505,20 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         // Fix common mishearings of taxi commands BEFORE processing
         // These are phonetic mistakes on phone lines, not address-related
         const COMMAND_CORRECTIONS: Record<string, string> = {
-          "council": "cancel",      // "council" often mishears as "cancel"
+          // Cancel command mishearings - phone line STT errors
+          "council": "cancel",
           "console": "cancel",
           "counsel": "cancel", 
           "cancels": "cancel",
           "candle": "cancel",
           "kensal": "cancel",
+          "kansai": "cancel",
+          "kind of speak for you": "cancel",  // Severe mishearing on phone lines
+          "kind of speak": "cancel",
           "council it": "cancel it",
           "console it": "cancel it",
           "counsel it": "cancel it",
+          // ASAP command mishearings
           "asap time": "ASAP",
           "a sap": "ASAP",
           "8ap": "ASAP",
