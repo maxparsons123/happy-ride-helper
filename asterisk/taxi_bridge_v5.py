@@ -151,6 +151,7 @@ class TaxiBridgeV25:
         self.ws_connected = False
         self.last_ws_activity = time.time()
         self.call_formally_ended = False  # Set when call_ended received from server
+        self.init_sent = False  # Track if init with phone has been sent
         
         # Audio buffer for reconnect (keep recent audio to resend after reconnect)
         self.pending_audio_buffer = deque(maxlen=50)  # ~1 second of audio frames
@@ -176,15 +177,17 @@ class TaxiBridgeV25:
                     timeout=10.0
                 )
                 
-                # Send init message with reconnect flag if this is a reconnection
-                init_msg = {
-                    "type": "init",
-                    "call_id": self.call_id,
-                    "user_phone": self.phone if self.phone != "Unknown" else None,
-                    "addressTtsSplicing": True,
-                    "reconnect": self.reconnect_attempts > 0  # Signal this is a reconnect
-                }
-                await self.ws.send(json.dumps(init_msg))
+                # Only send init here if reconnecting (we already have phone)
+                # For fresh connections, wait for UUID message to get phone first
+                if self.reconnect_attempts > 0 or self.init_sent:
+                    init_msg = {
+                        "type": "init",
+                        "call_id": self.call_id,
+                        "user_phone": self.phone if self.phone != "Unknown" else None,
+                        "addressTtsSplicing": True,
+                        "reconnect": True
+                    }
+                    await self.ws.send(json.dumps(init_msg))
                 
                 self.ws_connected = True
                 self.last_ws_activity = time.time()
@@ -289,10 +292,13 @@ class TaxiBridgeV25:
                     if len(raw_hex) >= 12:
                         self.phone = raw_hex[-12:]
                     logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
-                    await self.ws.send(json.dumps({
-                        "type": "init", "call_id": self.call_id,
-                        "user_phone": self.phone, "addressTtsSplicing": True
-                    }))
+                    # Only send init once per connection
+                    if not self.init_sent:
+                        await self.ws.send(json.dumps({
+                            "type": "init", "call_id": self.call_id,
+                            "user_phone": self.phone, "addressTtsSplicing": True
+                        }))
+                        self.init_sent = True
 
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
