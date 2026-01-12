@@ -191,9 +191,10 @@ class TaxiBridgeV25:
                 
                 self.ws_connected = True
                 self.last_ws_activity = time.time()
+                is_reconnect = self.reconnect_attempts > 0 or self.init_sent
                 self.reconnect_attempts = 0  # Reset on successful connect
                 
-                logger.info(f"[{self.call_id}] ✅ WebSocket connected" + (" (reconnected)" if init_msg["reconnect"] else ""))
+                logger.info(f"[{self.call_id}] ✅ WebSocket connected" + (" (reconnected)" if is_reconnect else ""))
                 return True
                 
             except asyncio.TimeoutError:
