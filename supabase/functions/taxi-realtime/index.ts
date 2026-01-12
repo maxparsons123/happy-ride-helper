@@ -7747,17 +7747,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }),
           );
 
-          // NON-BLOCKING: Broadcast USER audio to monitoring channel (throttled to 2x/sec max)
-          const now = Date.now();
-          if (now - lastUserAudioBroadcastAt >= 500) {
-            lastUserAudioBroadcastAt = now;
-            void supabase.from("live_call_audio").insert({
-              call_id: callId,
-              audio_chunk: base64Audio,
-              audio_source: "user",
-              created_at: new Date().toISOString()
-            }); // Fire and forget
-          }
+          // USER AUDIO MONITORING - DISABLED for now (causes too much DB load)
+          // To re-enable: uncomment below and set a higher throttle interval
+          // const now = Date.now();
+          // if (now - lastUserAudioBroadcastAt >= 1000) {
+          //   lastUserAudioBroadcastAt = now;
+          //   void supabase.from("live_call_audio").insert({
+          //     call_id: callId,
+          //     audio_chunk: base64Audio,
+          //     audio_source: "user",
+          //     created_at: new Date().toISOString()
+          //   });
+          // }
 
           // Log periodically (not every frame to reduce noise)
           if (Math.random() < 0.01) {
