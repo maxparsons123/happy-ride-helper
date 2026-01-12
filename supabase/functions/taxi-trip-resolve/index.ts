@@ -197,6 +197,10 @@ const STT_CORRECTIONS: Record<string, string> = {
   "courts": "court",
   "placed": "place",
   "places": "place",
+  // Common name mishearings
+  "davie": "david",
+  "davy": "david",
+  "davies": "david",
 };
 
 // Normalize address by fixing common STT mishearings
