@@ -20,10 +20,27 @@ const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
  */
 function normalizeAddress(addr: string): string {
   if (!addr) return "";
-  return addr
+  let normalized = addr
     .toLowerCase()
     .replace(/\s+/g, " ")
-    .trim()
+    .trim();
+  
+  // Apply STT road name corrections (common mishearings)
+  const STT_NAME_CORRECTIONS: Record<string, string> = {
+    "davie": "david",
+    "davy": "david", 
+    "davies": "david",
+    "schooler": "school",
+    "churches": "church",
+  };
+  
+  for (const [mishearing, correction] of Object.entries(STT_NAME_CORRECTIONS)) {
+    const regex = new RegExp(`\\b${mishearing}\\b`, "gi");
+    normalized = normalized.replace(regex, correction);
+  }
+  
+  // Standardize road type abbreviations
+  return normalized
     .replace(/\bstreet\b/g, "st")
     .replace(/\broad\b/g, "rd")
     .replace(/\bavenue\b/g, "ave")
