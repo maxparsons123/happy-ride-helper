@@ -3027,8 +3027,18 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
   };
 
   // Save or update caller info after booking (including trusted addresses)
-  const saveCallerInfo = async (booking: { pickup: string; destination: string; passengers: number }): Promise<void> => {
+  // Only save VERIFIED addresses to caller history to prevent pollution from incorrect geocodes
+  const saveCallerInfo = async (booking: { 
+    pickup: string; 
+    destination: string; 
+    passengers: number;
+    pickupVerified?: boolean;
+    destinationVerified?: boolean;
+  }): Promise<void> => {
     if (!userPhone) return;
+    
+    // Log verification status for debugging
+    console.log(`[${callId}] 💾 saveCallerInfo called - pickup verified: ${booking.pickupVerified}, destination verified: ${booking.destinationVerified}`);
     try {
       // Check if caller exists
       const { data: existing } = await supabase
@@ -3073,25 +3083,29 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       const destResult = ensureAddressHasCity(booking.destination, false);
       const enrichedDestination = destResult.enriched;
       
-      // Add pickup to pickup_addresses (separate from destinations)
+      // Add pickup to pickup_addresses ONLY if verified (prevents polluting history with wrong geocodes)
       const pickupCore = normalizeForComparison(booking.pickup || "");
-      if (booking.pickup && !normalizedPickups.has(pickupCore)) {
+      if (booking.pickup && !normalizedPickups.has(pickupCore) && booking.pickupVerified) {
         updatedPickupAddrs.push(enrichedPickup);
-        console.log(`[${callId}] 📍 Adding to pickup_addresses: "${enrichedPickup}"`);
+        console.log(`[${callId}] 📍 Adding VERIFIED pickup to pickup_addresses: "${enrichedPickup}"`);
+      } else if (booking.pickup && !booking.pickupVerified) {
+        console.log(`[${callId}] ⚠️ Skipping unverified pickup (not saving to history): "${booking.pickup}"`);
       }
       
-      // Add destination to dropoff_addresses (separate from pickups)
+      // Add destination to dropoff_addresses ONLY if verified
       const destCore = normalizeForComparison(booking.destination || "");
-      if (booking.destination && !normalizedDropoffs.has(destCore)) {
+      if (booking.destination && !normalizedDropoffs.has(destCore) && booking.destinationVerified) {
         updatedDropoffAddrs.push(enrichedDestination);
-        console.log(`[${callId}] 🎯 Adding to dropoff_addresses: "${enrichedDestination}"`);
+        console.log(`[${callId}] 🎯 Adding VERIFIED destination to dropoff_addresses: "${enrichedDestination}"`);
+      } else if (booking.destination && !booking.destinationVerified) {
+        console.log(`[${callId}] ⚠️ Skipping unverified destination (not saving to history): "${booking.destination}"`);
       }
       
-      // Also add both to trusted_addresses for compatibility
-      if (booking.pickup && !normalizedTrusted.has(pickupCore)) {
+      // Also add to trusted_addresses for compatibility - but only if verified
+      if (booking.pickup && !normalizedTrusted.has(pickupCore) && booking.pickupVerified) {
         updatedTrusted.push(enrichedPickup);
       }
-      if (booking.destination && !normalizedTrusted.has(destCore)) {
+      if (booking.destination && !normalizedTrusted.has(destCore) && booking.destinationVerified) {
         updatedTrusted.push(enrichedDestination);
       }
       
@@ -6854,8 +6868,12 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               booking_details: bookingDetails
             }).select().single(),
             
-            // 3. Save/update caller info
-            saveCallerInfo(finalBooking),
+            // 3. Save/update caller info - pass verification flags to only save verified addresses
+            saveCallerInfo({
+              ...finalBooking,
+              pickupVerified: knownBooking.pickupVerified || false,
+              destinationVerified: knownBooking.destinationVerified || false
+            }),
             
             // 4. Broadcast booking confirmed
             broadcastLiveCall({
