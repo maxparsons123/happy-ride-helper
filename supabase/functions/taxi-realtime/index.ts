@@ -132,6 +132,22 @@ The customer already knows the details — just confirm it's done.
 If goodbye → "Safe travels!" + call end_call. Nothing more.
 
 ═══════════════════════════════════
+INTERNATIONAL CALLERS
+═══════════════════════════════════
+
+If a caller says they are in a country OUTSIDE the UK (e.g., "I'm in Trinidad", "calling from Jamaica", "I'm in the USA"):
+→ Politely explain: "I'm sorry, we only operate within the UK. If you need a taxi here, I'd be happy to help!"
+→ If they want to book a UK taxi (e.g., for a friend/family member in the UK), you can proceed normally.
+→ Ask: "Are you booking for someone in the UK, or do you need a taxi where you are?"
+
+Countries that indicate the caller is NOT in the UK include:
+- Caribbean: Trinidad, Tobago, Jamaica, Barbados, Bahamas, St Lucia, Grenada, Antigua, etc.
+- Americas: USA, Canada, Mexico, Brazil, etc.
+- Other: India, Pakistan, Nigeria, Australia, UAE, etc.
+
+If they ARE booking for someone in the UK, proceed with the booking flow as normal but clarify the pickup location is in the UK.
+
+═══════════════════════════════════
 ABSOLUTE RULES
 ═══════════════════════════════════
 
@@ -770,16 +786,43 @@ serve(async (req) => {
       return true;
     }
     
-    // Common foreign country indicators
+    // Common foreign country indicators (comprehensive list)
     const foreignIndicators = [
-      // Countries
+      // Caribbean & Americas
+      'trinidad', 'tobago', 'trinidad and tobago', 'jamaica', 'barbados', 'bahamas', 'haiti',
+      'dominican republic', 'puerto rico', 'cuba', 'grenada', 'st lucia', 'saint lucia',
+      'antigua', 'barbuda', 'st kitts', 'saint kitts', 'nevis', 'dominica', 'st vincent',
+      'cayman islands', 'bermuda', 'turks and caicos', 'virgin islands', 'aruba', 'curacao',
+      'guyana', 'suriname', 'belize', 'mexico', 'guatemala', 'honduras', 'el salvador',
+      'nicaragua', 'costa rica', 'panama', 'colombia', 'venezuela', 'ecuador', 'peru',
+      'brazil', 'argentina', 'chile', 'uruguay', 'paraguay', 'bolivia',
+      // North America
+      'usa', 'united states', 'america', 'canada', 'puerto rico',
+      // Europe (non-UK)
       'france', 'germany', 'spain', 'italy', 'portugal', 'poland', 'ireland', 'netherlands',
-      'belgium', 'switzerland', 'austria', 'greece', 'turkey', 'usa', 'united states', 'america',
-      'canada', 'australia', 'india', 'pakistan', 'bangladesh', 'nigeria', 'south africa',
-      'china', 'japan', 'korea', 'dubai', 'uae', 'qatar', 'saudi',
+      'belgium', 'switzerland', 'austria', 'greece', 'turkey', 'sweden', 'norway', 'denmark',
+      'finland', 'czech', 'hungary', 'romania', 'bulgaria', 'croatia', 'serbia', 'ukraine',
+      'russia', 'cyprus', 'malta', 'iceland', 'luxembourg', 'slovakia', 'slovenia', 'estonia',
+      'latvia', 'lithuania', 'belarus', 'moldova', 'albania', 'macedonia', 'montenegro', 'kosovo',
+      // Africa
+      'nigeria', 'south africa', 'ghana', 'kenya', 'tanzania', 'ethiopia', 'egypt', 'morocco',
+      'algeria', 'tunisia', 'libya', 'sudan', 'uganda', 'cameroon', 'ivory coast', 'senegal',
+      'zimbabwe', 'zambia', 'botswana', 'namibia', 'mozambique', 'angola', 'congo', 'rwanda',
+      // Asia & Middle East
+      'india', 'pakistan', 'bangladesh', 'sri lanka', 'nepal', 'afghanistan', 'iran', 'iraq',
+      'china', 'japan', 'korea', 'south korea', 'north korea', 'vietnam', 'thailand', 'malaysia',
+      'singapore', 'indonesia', 'philippines', 'taiwan', 'hong kong', 'macau', 'mongolia',
+      'myanmar', 'burma', 'cambodia', 'laos', 'brunei', 'timor',
+      'dubai', 'uae', 'united arab emirates', 'qatar', 'saudi', 'saudi arabia', 'kuwait',
+      'bahrain', 'oman', 'yemen', 'jordan', 'lebanon', 'syria', 'israel', 'palestine',
+      // Oceania
+      'australia', 'new zealand', 'fiji', 'samoa', 'tonga', 'papua new guinea',
       // Foreign city indicators
       'paris', 'berlin', 'madrid', 'rome', 'barcelona', 'amsterdam', 'brussels', 'dublin',
-      'new york', 'los angeles', 'chicago', 'toronto', 'sydney', 'melbourne',
+      'new york', 'los angeles', 'chicago', 'toronto', 'sydney', 'melbourne', 'port of spain',
+      'kingston', 'bridgetown', 'nassau', 'havana', 'san juan', 'mexico city', 'lagos',
+      'johannesburg', 'cape town', 'nairobi', 'cairo', 'casablanca', 'mumbai', 'delhi',
+      'shanghai', 'beijing', 'tokyo', 'seoul', 'bangkok', 'kuala lumpur', 'jakarta', 'manila',
       // Foreign address patterns
       'strasse', 'straße', 'avenue de', 'rue de', 'calle', 'via ', 'piazza',
     ];
@@ -1998,6 +2041,113 @@ Ask them: "What's the house number for ${streetAddress}?"`;
 
     return false;
   };
+
+  // Detect if caller explicitly states they are in a foreign country
+  // Returns the country name if detected, null otherwise
+  const detectCallerCountry = (transcript: string): { country: string; isUk: boolean } | null => {
+    const lowerTranscript = transcript.toLowerCase().trim();
+    
+    // Patterns for "I'm in [country]", "I am in [country]", "calling from [country]", "I'm from [country]"
+    const locationPatterns = [
+      /(?:i'm|i am|we're|we are|calling from|i'm from|i am from|we're from|i live in|based in|located in)\s+(?:in\s+)?([a-z\s]+?)(?:\s*$|[,.]|\s+and\s+|\s+but\s+|\s+so\s+)/i,
+    ];
+    
+    // Map of countries and their variations
+    const internationalCountries: Record<string, string[]> = {
+      // Caribbean
+      'Trinidad and Tobago': ['trinidad', 'tobago', 'trinidad and tobago', 'trini'],
+      'Jamaica': ['jamaica', 'jamaican'],
+      'Barbados': ['barbados', 'bajan'],
+      'Bahamas': ['bahamas', 'bahamian'],
+      'St Lucia': ['st lucia', 'saint lucia', 'st. lucia'],
+      'Grenada': ['grenada'],
+      'Antigua': ['antigua', 'antigua and barbuda', 'barbuda'],
+      'Dominica': ['dominica'],
+      'St Kitts': ['st kitts', 'saint kitts', 'nevis', 'st kitts and nevis'],
+      'St Vincent': ['st vincent', 'saint vincent', 'grenadines'],
+      'Guyana': ['guyana'],
+      // Americas
+      'USA': ['usa', 'united states', 'america', 'the states', 'u.s.a', 'u.s.', 'us'],
+      'Canada': ['canada', 'canadian'],
+      'Mexico': ['mexico'],
+      // Europe
+      'Ireland': ['ireland', 'irish republic', 'eire'],
+      'France': ['france', 'french'],
+      'Germany': ['germany', 'deutschland'],
+      'Spain': ['spain'],
+      'Italy': ['italy'],
+      'Poland': ['poland', 'polska'],
+      'Portugal': ['portugal'],
+      'Netherlands': ['netherlands', 'holland', 'dutch'],
+      // Africa
+      'Nigeria': ['nigeria'],
+      'Ghana': ['ghana'],
+      'South Africa': ['south africa'],
+      'Kenya': ['kenya'],
+      // Asia
+      'India': ['india'],
+      'Pakistan': ['pakistan'],
+      'Bangladesh': ['bangladesh'],
+      'Philippines': ['philippines'],
+      // Middle East
+      'UAE': ['uae', 'united arab emirates', 'dubai', 'abu dhabi'],
+      'Saudi Arabia': ['saudi', 'saudi arabia'],
+      // Oceania
+      'Australia': ['australia', 'aussie'],
+      'New Zealand': ['new zealand', 'nz'],
+    };
+    
+    // UK variations (return early as UK)
+    const ukVariations = [
+      'uk', 'united kingdom', 'britain', 'great britain', 'england', 'scotland', 'wales',
+      'northern ireland', 'the uk', 'the united kingdom',
+    ];
+    
+    for (const pattern of locationPatterns) {
+      const match = lowerTranscript.match(pattern);
+      if (match && match[1]) {
+        const mentionedLocation = match[1].trim().toLowerCase();
+        
+        // Check if it's UK
+        for (const ukVar of ukVariations) {
+          if (mentionedLocation.includes(ukVar)) {
+            console.log(`[${callId}] 🇬🇧 Caller confirmed UK location: "${mentionedLocation}"`);
+            return { country: 'United Kingdom', isUk: true };
+          }
+        }
+        
+        // Check international countries
+        for (const [countryName, variations] of Object.entries(internationalCountries)) {
+          for (const variation of variations) {
+            if (mentionedLocation.includes(variation)) {
+              console.log(`[${callId}] 🌍 Caller detected in FOREIGN country: ${countryName} (from "${mentionedLocation}")`);
+              return { country: countryName, isUk: false };
+            }
+          }
+        }
+      }
+    }
+    
+    // Also check for direct mentions without "I'm in" pattern
+    for (const [countryName, variations] of Object.entries(internationalCountries)) {
+      for (const variation of variations) {
+        // Match "trinidad and tobago" as a standalone or in context
+        if (lowerTranscript.includes(variation) && 
+            (lowerTranscript.includes('from ') || lowerTranscript.includes('in ') || 
+             lowerTranscript.includes('calling') || lowerTranscript.includes('live') ||
+             lowerTranscript.includes('based') || lowerTranscript.includes('located'))) {
+          console.log(`[${callId}] 🌍 Caller detected in FOREIGN country (context match): ${countryName}`);
+          return { country: countryName, isUk: false };
+        }
+      }
+    }
+    
+    return null;
+  };
+
+  // Track if caller is international (set when detected)
+  let callerCountry: string | null = null;
+  let callerIsInternational = false;
 
 
   // Returns disambiguation info if multiple similar addresses found
@@ -5536,6 +5686,25 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         }
 
         const t = correctedTranscript.toLowerCase().trim();
+
+        // === INTERNATIONAL CALLER DETECTION ===
+        // Check if caller mentions being in a foreign country
+        if (!callerIsInternational) {
+          const countryDetection = detectCallerCountry(correctedTranscript);
+          if (countryDetection && !countryDetection.isUk) {
+            callerCountry = countryDetection.country;
+            callerIsInternational = true;
+            console.log(`[${callId}] 🌍 INTERNATIONAL CALLER DETECTED: ${callerCountry}`);
+            
+            // Add to transcript for visibility
+            transcriptHistory.push({
+              role: "system",
+              text: `🌍 INTERNATIONAL: Caller is in ${callerCountry} (outside UK)`,
+              timestamp: new Date().toISOString()
+            });
+            queueLiveCallBroadcast({});
+          }
+        }
 
         // Explicit farewells should always end the call (these are NOT ambiguous like "cheers")
         // IMPORTANT: Include common STT mishearings of "bye" like "you", "by", "buy"
