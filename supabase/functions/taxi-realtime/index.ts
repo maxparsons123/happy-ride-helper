@@ -6565,9 +6565,51 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // Handle cancel_booking function
         if (data.name === "cancel_booking") {
-          const args = JSON.parse(data.arguments);
-          console.log(`[${callId}] 🚫 Cancel booking requested: ${args.reason}`);
-          
+          let args: any = {};
+          try {
+            args = JSON.parse(data.arguments || "{}");
+          } catch (e) {
+            console.error(`[${callId}] ⚠️ cancel_booking args parse error:`, e);
+          }
+
+          // SAFETY GUARD: Only cancel if the LAST finalized transcript contains an explicit cancel intent.
+          // Rationale: STT can be wildly wrong on telephony; the model may still *infer* cancel intent and call the tool.
+          // We must prevent accidental cancellations when the transcript does not clearly say cancel.
+          const guardT = (lastFinalUserTranscript || "").toLowerCase().trim();
+          const explicitCancel = /\b(cancel(\s+it|\s+that|\s+the\s+booking)?|call\s+it\s+off|call\s+off|scrap\s+it|cancel\s+booking)\b/.test(guardT);
+          const explicitKeep = /\b(keep(\s+it)?|leave\s+it|don'?t\s+cancel|still\s+okay|still\s+ok)\b/.test(guardT);
+
+          console.log(`[${callId}] 🚫 Cancel booking requested: ${args.reason} | transcript="${lastFinalUserTranscript}" | explicitCancel=${explicitCancel} explicitKeep=${explicitKeep}`);
+
+          if (!explicitCancel || explicitKeep) {
+            console.log(`[${callId}] 🛑 Cancel blocked (no explicit cancel in transcript)`);
+
+            // Tell the model to ask for a clear confirmation instead of cancelling.
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: data.call_id,
+                output: JSON.stringify({
+                  success: false,
+                  blocked: true,
+                  message: "Cancellation blocked: I didn't hear a clear request to cancel.",
+                  next_action: "Ask the customer to confirm: say 'cancel it' to cancel, or 'keep it' to keep the booking."
+                })
+              }
+            }));
+
+            openaiWs?.send(JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions: "You may have misheard the customer. Ask ONE clear question: 'Did you want me to cancel your booking? Please say cancel it, or keep it.' Do NOT cancel yet."
+              }
+            }));
+
+            return;
+          }
+
           // If activeBooking not set but we have phone, try to look it up
           let bookingToCancel = activeBooking;
           if (!bookingToCancel && userPhone) {
