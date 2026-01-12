@@ -5039,6 +5039,9 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           // IMPORTANT: Don't filter single words like "yes", "no", "ok" - those are valid responses!
           // Only filter obvious YouTube/podcast outros and artifacts
           const hallucinationPhrases = [
+            /^silence\.?$/i,  // "Silence." - common Whisper hallucination on quiet audio
+            /^\[silence\]$/i,  // "[Silence]" variant
+            /^\.\.\.+$/,  // Just ellipsis
             /thank you for watching/i,
             /thanks for watching/i,
             /please subscribe/i,
@@ -5050,6 +5053,8 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             /take care.+bye/i,  // "Take care, bye!" - outro phrase
             /\[music\]/i,
             /\[applause\]/i,
+            /\[inaudible\]/i,
+            /\[laughter\]/i,
             /subtitles by/i,
             /transcribed by/i,
             /transcript by/i,
