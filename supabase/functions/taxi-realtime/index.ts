@@ -3819,6 +3819,55 @@ Rules:
         
         // Clear the clarification state since we got an answer
         awaitingClarificationFor = null;
+      } else if (awaitingClarificationFor && !looksLikePostcodeOnly) {
+        // We asked for a postcode but user provided something else (probably repeated the address)
+        // Check if user just repeated the same address without adding clarification
+        const currentAddress = awaitingClarificationFor === "pickup" ? knownBooking.pickup : knownBooking.destination;
+        const newExtractedAddress = awaitingClarificationFor === "pickup" ? extracted.pickup_location : extracted.dropoff_location;
+        
+        // Normalize for comparison
+        const normalizedCurrent = normalize(currentAddress || "");
+        const normalizedNew = normalize(newExtractedAddress || "");
+        const normalizedTranscript = normalize(transcript || "");
+        
+        // Check if user is just repeating without adding postcode/landmark
+        const hasNewPostcode = /[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/i.test(transcript);
+        const hasLandmarkCue = /\b(near|by|next\s+to|opposite|behind|landmark|postcode)\b/i.test(transcript.toLowerCase());
+        const isSimilarToExisting = normalizedNew && normalizedCurrent && 
+          (normalizedNew.includes(normalizedCurrent.split(',')[0]) || normalizedCurrent.includes(normalizedNew.split(',')[0]));
+        
+        if (isSimilarToExisting && !hasNewPostcode && !hasLandmarkCue) {
+          console.log(`[${callId}] 🔄 User repeated address without postcode - re-asking for clarification`);
+          
+          // Don't clear the extracted address, but re-ask for postcode
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ 
+                  type: "text", 
+                  text: `[SYSTEM: The customer repeated "${transcript}" but did NOT provide the postcode you asked for. You MUST ask again: "I still need the postcode for ${currentAddress} please - could you give me the first part at least, like CV1 or B27?" Do NOT proceed without a postcode or landmark.]`
+                }]
+              }
+            }));
+            
+            // Trigger response
+            if (!openAiResponseInProgress) {
+              openAiResponseInProgress = true;
+              startResponseTimeout();
+              openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+            } else {
+              deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "postcode_re-ask" };
+            }
+          }
+          
+          // Keep awaitingClarificationFor set - don't clear it
+          // Don't update the booking with the same address
+          extracted.pickup_location = null;
+          extracted.dropoff_location = null;
+        }
       }
 
       // Only update fields that were extracted (non-null)
