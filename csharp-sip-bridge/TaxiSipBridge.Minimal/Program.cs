@@ -16,11 +16,11 @@ using SIPSorceryMedia.Abstractions;
 namespace TaxiSipBridge.Minimal;
 
 /// <summary>
-/// Fixed SIP-to-WebSocket bridge with proper audio timing.
+/// Fixed SIP-to-WebSocket bridge with proper RTP audio playback.
 /// Key fixes:
-/// 1. Proper RTP pacing using precise timing (20ms per frame)
-/// 2. Binary WebSocket frames for inbound audio (33% bandwidth savings)
-/// 3. Frame-based buffer queue instead of byte-by-byte
+/// 1. Uses SendRtpRaw() for direct µ-law RTP injection - NOT AudioExtrasSource
+/// 2. Proper 20ms frame pacing with Stopwatch
+/// 3. Binary WebSocket frames for inbound audio (33% bandwidth savings)
 /// 4. Anti-aliased resampling for better audio quality
 /// </summary>
 public class Program
@@ -33,16 +33,20 @@ public class Program
     private const int SipPort = 5060;
 
     private static ClientWebSocket? _webSocket;
-    private static VoIPMediaSession? _mediaSession;
+    private static RTPSession? _rtpSession;
     private static CancellationTokenSource? _cts;
     
     // Frame-based queue for proper audio timing
     private static readonly ConcurrentQueue<byte[]> _outboundFrames = new();
+    
+    // RTP timestamp tracking
+    private static uint _rtpTimestamp = 0;
+    private static ushort _rtpSeqNum = 0;
 
     public static async Task Main(string[] args)
     {
-        Console.WriteLine("🚕 Taxi SIP Bridge - Fixed Audio Timing");
-        Console.WriteLine("========================================");
+        Console.WriteLine("🚕 Taxi SIP Bridge - Fixed RTP Audio");
+        Console.WriteLine("=====================================");
 
         // Create SIP transport
         var sipTransport = new SIPTransport();
@@ -104,13 +108,15 @@ public class Program
         
         // Clear stale audio from previous calls
         while (_outboundFrames.TryDequeue(out _)) { }
+        _rtpTimestamp = 0;
+        _rtpSeqNum = 0;
 
         try
         {
             _cts = new CancellationTokenSource();
             
-            // Create media session with µ-law codec
-            _mediaSession = new VoIPMediaSession(new MediaEndPoints
+            // Create media session with µ-law codec - PCMU is payload type 0
+            var mediaSession = new VoIPMediaSession(new MediaEndPoints
             {
                 AudioSource = new AudioExtrasSource(
                     new AudioEncoder(),
@@ -119,14 +125,17 @@ public class Program
                 AudioSink = new AudioExtrasSource(new AudioEncoder())
             });
 
-            _mediaSession.AcceptRtpFromAny = true;
+            mediaSession.AcceptRtpFromAny = true;
 
-            // Subscribe to RTP audio events
-            _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
+            // Get the RTP session for direct packet injection
+            _rtpSession = mediaSession.RtpSession;
+
+            // Subscribe to RTP audio events from caller
+            _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
             // Answer the call
             var uas = userAgent.AcceptCall(req);
-            var result = await userAgent.Answer(uas, _mediaSession);
+            var result = await userAgent.Answer(uas, mediaSession);
 
             if (!result)
             {
@@ -135,9 +144,7 @@ public class Program
             }
 
             Console.WriteLine($"✅ [{callId}] Call answered");
-            
-            // Start audio source
-            await _mediaSession.AudioExtrasSource.StartAudio();
+            Console.WriteLine($"🎛️ [{callId}] RTP session started - using direct SendRtpRaw()");
 
             // Connect to edge function
             _webSocket = new ClientWebSocket();
@@ -157,8 +164,8 @@ public class Program
             // Start receive task
             var receiveTask = Task.Run(() => ReceiveFromEdgeFunction(callId));
             
-            // Start playback task with proper timing
-            var playbackTask = Task.Run(() => PlaybackWithTiming(callId));
+            // Start playback task with proper RTP injection
+            var playbackTask = Task.Run(() => PlaybackWithRtpRaw(callId));
 
             // Wait for call to end
             while (!_cts.Token.IsCancellationRequested && 
@@ -180,7 +187,7 @@ public class Program
             _cts?.Cancel();
             _webSocket?.Dispose();
             _webSocket = null;
-            _mediaSession = null;
+            _rtpSession = null;
         }
     }
 
@@ -240,7 +247,7 @@ public class Program
                     {
                         var type = typeEl.GetString();
 
-                        // Handle audio from AI
+                        // Handle audio from AI - response.audio.delta format
                         if (type == "response.audio.delta" && 
                             doc.RootElement.TryGetProperty("delta", out var deltaEl))
                         {
@@ -250,7 +257,7 @@ public class Program
                             var pcmData = Convert.FromBase64String(base64Audio);
                             var ulawData = ConvertPcm24kToUlaw(pcmData);
 
-                            // Queue as 160-byte frames (20ms at 8kHz)
+                            // Queue as 160-byte frames (20ms at 8kHz µ-law)
                             for (int i = 0; i < ulawData.Length; i += 160)
                             {
                                 int len = Math.Min(160, ulawData.Length - i);
@@ -259,7 +266,7 @@ public class Program
                                 _outboundFrames.Enqueue(frame);
                             }
 
-                            Console.WriteLine($"🧠 [{callId}] Queued {ulawData.Length}B → {_outboundFrames.Count} frames");
+                            Console.WriteLine($"🧠 [{callId}] Queued {ulawData.Length}B µ-law → {_outboundFrames.Count} frames");
                         }
                         // Handle transcripts
                         else if (type == "response.audio_transcript.delta" &&
@@ -267,7 +274,7 @@ public class Program
                         {
                             Console.Write(textEl.GetString());
                         }
-                        // Also handle simple "audio" type
+                        // Also handle simple "audio" type from edge function wrapper
                         else if (type == "audio" && 
                                  doc.RootElement.TryGetProperty("audio", out var audioEl))
                         {
@@ -284,6 +291,8 @@ public class Program
                                 Buffer.BlockCopy(ulawData, i, frame, 0, len);
                                 _outboundFrames.Enqueue(frame);
                             }
+                            
+                            Console.WriteLine($"🧠 [{callId}] Queued {ulawData.Length}B µ-law → {_outboundFrames.Count} frames");
                         }
                     }
                 }
@@ -302,16 +311,17 @@ public class Program
     }
 
     /// <summary>
-    /// Play audio to caller with PROPER 20ms timing per frame.
-    /// This is the key fix - ensures audio plays at correct speed.
+    /// Play audio to caller using SendRtpRaw for direct RTP packet injection.
+    /// This bypasses AudioExtrasSource which doesn't work for µ-law playback.
+    /// Maintains strict 20ms timing between frames.
     /// </summary>
-    private static async Task PlaybackWithTiming(string callId)
+    private static async Task PlaybackWithRtpRaw(string callId)
     {
         var stopwatch = Stopwatch.StartNew();
         long nextFrameTime = 0;
-        uint rtpTimestamp = 0;
+        int framesPlayed = 0;
 
-        Console.WriteLine($"🔊 [{callId}] Playback loop started");
+        Console.WriteLine($"🔊 [{callId}] Playback loop started - using SendRtpRaw()");
 
         while (!_cts!.Token.IsCancellationRequested)
         {
@@ -322,19 +332,35 @@ public class Program
                 if (now < nextFrameTime)
                 {
                     int delay = (int)(nextFrameTime - now);
-                    if (delay > 0)
+                    if (delay > 0 && delay < 100)
                     {
                         await Task.Delay(delay, _cts.Token);
                     }
                 }
 
                 // Try to dequeue and send a frame
-                if (_outboundFrames.TryDequeue(out var frame))
+                if (_outboundFrames.TryDequeue(out var frame) && _rtpSession != null)
                 {
-                    // Send via RTP with proper format
-                    _mediaSession?.AudioExtrasSource?.SendAudioFrame(frame);
+                    // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
+                    // The RTP session handles the packet construction
+                    _rtpSession.SendRtpRaw(
+                        SDPMediaTypesEnum.audio,
+                        frame,
+                        _rtpTimestamp,
+                        0,  // Marker bit - 0 for continuation
+                        0   // Payload type 0 = PCMU (µ-law)
+                    );
                     
-                    rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
+                    _rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
+                    _rtpSeqNum++;
+                    framesPlayed++;
+                    
+                    // Log every 25 frames (500ms)
+                    if (framesPlayed % 25 == 0)
+                    {
+                        Console.WriteLine($"🔊 [{callId}] Played {framesPlayed} frames, queue: {_outboundFrames.Count}");
+                    }
+                    
                     nextFrameTime = stopwatch.ElapsedMilliseconds + 20; // Schedule next frame in 20ms
                 }
                 else
@@ -354,7 +380,7 @@ public class Program
             }
         }
 
-        Console.WriteLine($"🔚 [{callId}] Playback loop ended");
+        Console.WriteLine($"🔚 [{callId}] Playback loop ended - played {framesPlayed} total frames");
     }
 
     #region Audio Conversion
