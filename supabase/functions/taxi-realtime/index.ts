@@ -8297,12 +8297,25 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         // Load agent configuration (default to 'ada' if not specified)
         const agentSlug = message.agent || "ada";
         await loadAgentConfig(agentSlug);
+        
+        // Voice override from client (allows testing different voices without changing agent)
+        if (message.voice && typeof message.voice === "string") {
+          const validVoices = ["shimmer", "alloy", "echo", "fable", "onyx", "nova", "ash", "ballad", "coral", "sage", "verse"];
+          if (validVoices.includes(message.voice.toLowerCase())) {
+            if (agentConfig) {
+              agentConfig.voice = message.voice.toLowerCase();
+              console.log(`[${callId}] 🎤 Voice override: ${agentConfig.voice}`);
+            }
+          } else {
+            console.log(`[${callId}] ⚠️ Invalid voice override ignored: ${message.voice}`);
+          }
+        }
 
         // Detect Asterisk calls by call_id prefix
         if (callId.startsWith("ast-") || callId.startsWith("asterisk-") || callId.startsWith("call_")) {
           callSource = "asterisk";
         }
-        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled}, agent: ${agentConfig?.name || 'default'})`);
+        console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled}, agent: ${agentConfig?.name || 'default'}, voice: ${agentConfig?.voice || 'shimmer'})`);
         return;
       }
       

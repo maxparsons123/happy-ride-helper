@@ -139,6 +139,7 @@ export default function LiveCalls() {
   const [useUnifiedExtraction, setUseUnifiedExtraction] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
+  const [selectedVoice, setSelectedVoice] = useState<string>("shimmer");
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
   const [destinationGeocode, setDestinationGeocode] = useState<GeocodeResult | null>(null);
   const [tripResolveResult, setTripResolveResult] = useState<any>(null);
@@ -671,6 +672,27 @@ export default function LiveCalls() {
                 </SelectContent>
               </Select>
             </div>
+            {/* Voice Selector */}
+            <div className="flex items-center gap-2">
+              <Volume2 className="w-4 h-4 text-muted-foreground" />
+              <Select value={selectedVoice} onValueChange={setSelectedVoice}>
+                <SelectTrigger className="w-28 h-8 text-sm bg-card border-border">
+                  <SelectValue placeholder="Voice" />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  <SelectItem value="shimmer">Shimmer</SelectItem>
+                  <SelectItem value="alloy">Alloy</SelectItem>
+                  <SelectItem value="echo">Echo</SelectItem>
+                  <SelectItem value="fable">Fable</SelectItem>
+                  <SelectItem value="onyx">Onyx</SelectItem>
+                  <SelectItem value="nova">Nova</SelectItem>
+                  <SelectItem value="ash">Ash</SelectItem>
+                  <SelectItem value="coral">Coral</SelectItem>
+                  <SelectItem value="sage">Sage</SelectItem>
+                  <SelectItem value="verse">Verse</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             {/* Pipeline Selector */}
             <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
               <div className="flex flex-col items-center">
@@ -880,6 +902,9 @@ export default function LiveCalls() {
                 </Badge>
                 <Badge variant="outline" className="text-xs text-primary border-primary/50">
                   GPT-4o Realtime
+                </Badge>
+                <Badge variant="outline" className="text-xs text-pink-400 border-pink-400/50">
+                  🎤 {selectedVoice.charAt(0).toUpperCase() + selectedVoice.slice(1)}
                 </Badge>
               </>
             )}
