@@ -42,6 +42,7 @@ export default function VoiceTest() {
   // Agent selection
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
+  const [selectedVoice, setSelectedVoice] = useState<string>("shimmer");
   const [loadingAgents, setLoadingAgents] = useState(true);
   
   // Metrics
@@ -239,6 +240,7 @@ export default function VoiceTest() {
           call_id: "voice-test-" + Date.now(),
           addressTtsSplicing: true,
           agent: selectedAgent,
+          voice: selectedVoice,
           useUnifiedExtraction: false, // Toggle to true to use AI-first extraction (taxi-extract-unified)
         }));
       };
@@ -510,6 +512,32 @@ export default function VoiceTest() {
                     </div>
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Voice Selector */}
+          <div className="flex items-center gap-2">
+            <Mic className="w-4 h-4 text-muted-foreground" />
+            <Select
+              value={selectedVoice}
+              onValueChange={setSelectedVoice}
+              disabled={status !== "disconnected"}
+            >
+              <SelectTrigger className="w-[120px] bg-card border-chat-border">
+                <SelectValue placeholder="Voice" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-chat-border">
+                <SelectItem value="shimmer">Shimmer</SelectItem>
+                <SelectItem value="alloy">Alloy</SelectItem>
+                <SelectItem value="echo">Echo</SelectItem>
+                <SelectItem value="fable">Fable</SelectItem>
+                <SelectItem value="onyx">Onyx</SelectItem>
+                <SelectItem value="nova">Nova</SelectItem>
+                <SelectItem value="ash">Ash</SelectItem>
+                <SelectItem value="coral">Coral</SelectItem>
+                <SelectItem value="sage">Sage</SelectItem>
+                <SelectItem value="verse">Verse</SelectItem>
               </SelectContent>
             </Select>
           </div>
