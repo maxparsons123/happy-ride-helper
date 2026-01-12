@@ -50,6 +50,18 @@ export default function VoiceTest() {
   const [avgLatency, setAvgLatency] = useState<number | null>(null);
   const [firstAudioLatency, setFirstAudioLatency] = useState<number | null>(null);
   const [responseCount, setResponseCount] = useState(0);
+
+  // Audio Quality Test state
+  const [isTestRecording, setIsTestRecording] = useState(false);
+  const [testTranscript, setTestTranscript] = useState<string | null>(null);
+  const [testLatency, setTestLatency] = useState<number | null>(null);
+  const [testAudioUrl, setTestAudioUrl] = useState<string | null>(null);
+  const [testAudioLevels, setTestAudioLevels] = useState<number[]>([]);
+  const [testError, setTestError] = useState<string | null>(null);
+  const testMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const testAudioChunksRef = useRef<Blob[]>([]);
+  const testAnalyserRef = useRef<AnalyserNode | null>(null);
+  const testAnimationRef = useRef<number | null>(null);
   
   // Refs for WebSocket and audio
   const wsRef = useRef<WebSocket | null>(null);
@@ -458,6 +470,116 @@ export default function VoiceTest() {
     }, 500);
   }, [stopRecordingInternal]);
 
+  // === AUDIO QUALITY TEST FUNCTIONS ===
+  const startAudioTest = useCallback(async () => {
+    setTestTranscript(null);
+    setTestLatency(null);
+    setTestAudioUrl(null);
+    setTestAudioLevels([]);
+    setTestError(null);
+    testAudioChunksRef.current = [];
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      // Set up audio analyser for visualizing levels
+      const audioCtx = new AudioContext({ sampleRate: 16000 });
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      testAnalyserRef.current = analyser;
+
+      // Visualize audio levels
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const updateLevels = () => {
+        if (!testAnalyserRef.current) return;
+        testAnalyserRef.current.getByteFrequencyData(dataArray);
+        // Get average level across first 32 bins (lower frequencies - speech)
+        const avg = dataArray.slice(0, 32).reduce((a, b) => a + b, 0) / 32;
+        setTestAudioLevels(prev => [...prev.slice(-50), avg]);
+        testAnimationRef.current = requestAnimationFrame(updateLevels);
+      };
+      updateLevels();
+
+      // Start MediaRecorder
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      testMediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          testAudioChunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stop visualization
+        if (testAnimationRef.current) {
+          cancelAnimationFrame(testAnimationRef.current);
+          testAnimationRef.current = null;
+        }
+        testAnalyserRef.current = null;
+        audioCtx.close();
+        stream.getTracks().forEach(t => t.stop());
+
+        // Create playback URL
+        const blob = new Blob(testAudioChunksRef.current, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        setTestAudioUrl(url);
+
+        // Send to STT
+        const startTime = Date.now();
+        try {
+          const reader = new FileReader();
+          reader.readAsDataURL(blob);
+          reader.onloadend = async () => {
+            const base64Audio = (reader.result as string).split(',')[1];
+            
+            const { data, error } = await supabase.functions.invoke('taxi-stt', {
+              body: {
+                audio: base64Audio,
+                call_id: 'audio-test-' + Date.now()
+              }
+            });
+
+            const latency = Date.now() - startTime;
+            setTestLatency(latency);
+
+            if (error) {
+              setTestError(`STT Error: ${error.message}`);
+            } else if (data?.text) {
+              setTestTranscript(data.text);
+            } else {
+              setTestError('No transcript returned');
+            }
+          };
+        } catch (err) {
+          setTestError(`Error: ${(err as Error).message}`);
+        }
+      };
+
+      mediaRecorder.start();
+      setIsTestRecording(true);
+    } catch (err) {
+      setTestError(`Microphone error: ${(err as Error).message}`);
+    }
+  }, []);
+
+  const stopAudioTest = useCallback(() => {
+    if (testMediaRecorderRef.current && testMediaRecorderRef.current.state === 'recording') {
+      testMediaRecorderRef.current.stop();
+    }
+    setIsTestRecording(false);
+  }, []);
+
   const sendTextMessage = useCallback(() => {
     if (!textInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -648,6 +770,59 @@ export default function VoiceTest() {
           <Button onClick={sendTextMessage} disabled={status !== "connected"}>
             Send
           </Button>
+        </div>
+
+        {/* Audio Quality Test */}
+        <div className="bg-card rounded-xl border border-chat-border p-4">
+          <h3 className="font-semibold text-primary mb-3">🎤 Audio Quality Test</h3>
+          <p className="text-xs text-muted-foreground mb-4">
+            Record your voice to see exactly what STT hears. Say "cancel" to test.
+          </p>
+          
+          <div className="flex items-center gap-4 mb-4">
+            <Button
+              onClick={isTestRecording ? stopAudioTest : startAudioTest}
+              variant={isTestRecording ? "destructive" : "default"}
+              className={isTestRecording ? "animate-pulse" : ""}
+            >
+              <Mic className="w-4 h-4 mr-2" />
+              {isTestRecording ? "Stop Recording" : "Test Audio"}
+            </Button>
+            
+            {testAudioUrl && (
+              <audio controls src={testAudioUrl} className="h-10 flex-1" />
+            )}
+          </div>
+
+          {/* Audio Level Visualization */}
+          {testAudioLevels.length > 0 && (
+            <div className="flex items-end gap-0.5 h-12 mb-4 bg-muted/30 rounded p-2">
+              {testAudioLevels.map((level, i) => (
+                <div
+                  key={i}
+                  className="flex-1 bg-primary rounded-t transition-all"
+                  style={{ height: `${Math.min(100, level / 2.55)}%` }}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Results */}
+          {testTranscript !== null && (
+            <div className="p-3 bg-muted/50 rounded-lg mb-2">
+              <p className="text-xs text-muted-foreground mb-1">STT Result:</p>
+              <p className="font-mono text-lg">"{testTranscript}"</p>
+              {testLatency && (
+                <p className="text-xs text-green-400 mt-1">⚡ {testLatency}ms</p>
+              )}
+            </div>
+          )}
+
+          {testError && (
+            <div className="p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm">
+              {testError}
+            </div>
+          )}
         </div>
 
         {/* Metrics */}
