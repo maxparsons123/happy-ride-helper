@@ -4253,16 +4253,30 @@ Rules:
               knownBooking.pickupVerified = true;
               console.log(`[${callId}] 🏠 Pickup auto-verified (known address): "${knownBooking.pickup}" → "${knownPickup}"`);
             } else {
-              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
+              // DUAL-SOURCE COMPARISON: Capture both STT and Ada's interpretation for comparison
               const extractedPickup = knownBooking.pickup!;
+              const adaPickup = extractAddressFromAdaResponse("pickup");
+              
+              // Log both sources for comparison (but trust STT for geocoding)
+              if (adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
+                console.log(`[${callId}] 📊 DUAL-SOURCE COMPARISON:`);
+                console.log(`[${callId}]    STT extracted: "${extractedPickup}"`);
+                console.log(`[${callId}]    Ada said: "${adaPickup}"`);
+                
+                // Add comparison to transcript for UI visibility
+                transcriptHistory.push({
+                  role: "system",
+                  text: `📊 ADDRESS SOURCES - STT: "${extractedPickup}" | Ada: "${adaPickup}"`,
+                  timestamp: new Date().toISOString()
+                });
+                queueLiveCallBroadcast({});
+              }
+              
+              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
               let pickupResult = await geocodeAddress(extractedPickup, shouldCheckAmbiguous, "pickup");
               let usedAddress = extractedPickup;
               
-              // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
-              // If STT succeeded, trust it - don't double-check with Ada's version
-              // This saves ~500-1000ms per address
-              
-              // Clear any stale alternatives - we auto-pick now, no need to store
+              // Clear any stale alternatives
               knownBooking.pickupAlternative = undefined;
               
               if (pickupResult.found) {
@@ -4348,16 +4362,30 @@ Rules:
               knownBooking.destinationVerified = true;
               console.log(`[${callId}] 🏠 Destination auto-verified (known address): "${knownBooking.destination}" → "${knownDestination}"`);
             } else {
-              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
+              // DUAL-SOURCE COMPARISON: Capture both STT and Ada's interpretation for comparison
               const extractedDest = knownBooking.destination!;
+              const adaDest = extractAddressFromAdaResponse("destination");
+              
+              // Log both sources for comparison (but trust STT for geocoding)
+              if (adaDest && normalize(adaDest) !== normalize(extractedDest)) {
+                console.log(`[${callId}] 📊 DUAL-SOURCE COMPARISON:`);
+                console.log(`[${callId}]    STT extracted: "${extractedDest}"`);
+                console.log(`[${callId}]    Ada said: "${adaDest}"`);
+                
+                // Add comparison to transcript for UI visibility
+                transcriptHistory.push({
+                  role: "system",
+                  text: `📊 ADDRESS SOURCES - STT: "${extractedDest}" | Ada: "${adaDest}"`,
+                  timestamp: new Date().toISOString()
+                });
+                queueLiveCallBroadcast({});
+              }
+              
+              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
               let destResult = await geocodeAddress(extractedDest, shouldCheckAmbiguous, "destination");
               let usedAddress = extractedDest;
               
-              // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
-              // If STT succeeded, trust it - don't double-check with Ada's version
-              // This saves ~500-1000ms per address
-              
-              // Clear any stale alternatives - we auto-pick now, no need to store
+              // Clear any stale alternatives
               knownBooking.destinationAlternative = undefined;
               
               if (destResult.found) {
