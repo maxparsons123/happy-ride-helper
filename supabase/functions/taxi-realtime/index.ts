@@ -5982,8 +5982,14 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           /\b(thank\s*you|thanks|cheers|ta|lovely|brilliant|perfect|great|fine)\b/i,
           // Simple negatives (with filler words)
           /^no[,.]?\s*(no[,.]?\s*)?(that'?s?\s*(fine|all|it|ok|okay)|i'?m\s*(good|fine|ok|okay)|nothing|thanks)/i,
-          // Passenger counts (with optional filler)
-          /^(just\s*)?(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|people|of us)?[!. ]*$/i,
+          // Passenger counts (with optional filler) - EXPANDED to match more natural speech
+          /^(just\s*)?(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|passengers|people|of us)?[!. ]*$/i,
+          // Natural passenger responses like "There's two passengers" / "there'll be 2" / "there are 3 of us"
+          /^(there'?s|there'll be|there will be|there are|we have|we've got|it's|it'll be|about|around)\s*(just\s*)?(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)/i,
+          // Luggage counts - "2 bags", "no bags", "just one suitcase"
+          /^(just\s*)?(one|two|three|four|five|six|seven|eight|nine|ten|no|none|zero|1|2|3|4|5|6|7|8|9|10|0)\s*(bag|bags|suitcase|suitcases|case|cases|piece|pieces)/i,
+          // "we have X bags" / "I've got 2 bags"
+          /^(we have|we've got|i have|i've got|got)\s*(one|two|three|four|five|six|seven|eight|nine|ten|no|none|zero|1|2|3|4|5|6|7|8|9|10|0)\s*(bag|bags|suitcase|suitcases)?/i,
           // Goodbye patterns
           /\b(bye|goodbye|see you|take care|have a (good|great|lovely) (day|one|journey))\b/i,
           // Affirmative responses that don't need extraction
