@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.street-disambiguate]
 verify_jwt = false
+
+[functions.taxi-extract-unified]
+verify_jwt = false
