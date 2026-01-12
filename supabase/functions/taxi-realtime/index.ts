@@ -5245,8 +5245,15 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         const t = rawTranscript.toLowerCase().trim();
 
         // Explicit farewells should always end the call (these are NOT ambiguous like "cheers")
-        const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya)\b[!. ]*$/.test(t);
-        if (explicitFarewellOnly) {
+        // IMPORTANT: Include common STT mishearings of "bye" like "you", "by", "buy"
+        const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya|by|buy|you)\b[!. ]*$/.test(t);
+        
+        // Also catch post-booking farewells like "thank you bye", "cheers bye", "thanks bye"
+        // Use activeBooking to check if a booking has been completed
+        const thankYouBye = /\b(thank\s*you|thanks|cheers|ta)\s*(bye|goodbye|by|you)?\s*[!.]*$/i.test(t) && t.length < 30;
+        
+        if (explicitFarewellOnly || (thankYouBye && activeBooking)) {
+          console.log(`[${callId}] 👋 Explicit farewell detected: "${t}"`);
           forcedResponseInstructions =
             "The customer has said goodbye. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'customer_request'. Do NOT ask any further questions.";
         }
