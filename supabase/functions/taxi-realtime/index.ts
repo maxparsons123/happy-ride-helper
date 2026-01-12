@@ -3830,16 +3830,38 @@ Rules:
         const normalizedNew = normalize(newExtractedAddress || "");
         const normalizedTranscript = normalize(transcript || "");
         
-        // Check if user is just repeating without adding postcode/landmark
+        // Check if user is providing something useful
         const hasNewPostcode = /[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/i.test(transcript);
-        const hasLandmarkCue = /\b(near|by|next\s+to|opposite|behind|landmark|postcode)\b/i.test(transcript.toLowerCase());
-        const isSimilarToExisting = normalizedNew && normalizedCurrent && 
-          (normalizedNew.includes(normalizedCurrent.split(',')[0]) || normalizedCurrent.includes(normalizedNew.split(',')[0]));
+        const hasLandmarkCue = /\b(near|by|next\s+to|opposite|behind|landmark|postcode|area)\b/i.test(transcript.toLowerCase());
+        // Check if transcript contains a city name (indicates they're clarifying the area)
+        const containsCityName = /\b(birmingham|coventry|london|manchester|liverpool|leeds|sheffield|bristol|nottingham|leicester|derby|wolverhampton|dudley|walsall|solihull|sandwell|nuneaton|bedworth|rugby)\b/i.test(transcript.toLowerCase());
         
-        if (isSimilarToExisting && !hasNewPostcode && !hasLandmarkCue) {
-          console.log(`[${callId}] 🔄 User repeated address without postcode - re-asking for clarification`);
+        // Check if user is providing a COMPLETELY DIFFERENT address (correction) vs repeating the same one
+        const currentCore = normalizedCurrent.split(',')[0].replace(/\d+[a-z]?\s*/gi, '').trim(); // Strip house number for core comparison
+        const transcriptCore = normalizedTranscript.replace(/\d+[a-z]?\s*/gi, '').trim();
+        
+        // If transcript looks similar to current address (or is very short), user is probably just repeating
+        const isSimilarAddress = normalizedCurrent && (
+          normalizedTranscript.includes(currentCore) || 
+          currentCore.includes(transcriptCore) ||
+          transcriptCore.length < 10 // Very short response like "is 52A David Road"
+        );
+        
+        // If user gave a completely different address, let it through for correction
+        const isDifferentAddress = normalizedNew && normalizedCurrent && 
+          !normalizedNew.includes(currentCore) && !currentCore.includes(normalizedNew.split(',')[0]);
+        
+        if (isDifferentAddress && !hasNewPostcode && !hasLandmarkCue && !containsCityName) {
+          // User is giving a DIFFERENT address entirely - this is a correction, not a clarification response
+          // Let it through but keep awaiting clarification for the new address too
+          console.log(`[${callId}] 📝 User gave different address "${newExtractedAddress}" - treating as correction, will verify new address`);
+          awaitingClarificationFor = null; // Clear for now, geocoder will re-set if needed
+        } else if (!hasNewPostcode && !hasLandmarkCue && !containsCityName) {
+          // User didn't provide postcode, landmark, city, or new address - re-ask
+          console.log(`[${callId}] 🔄 User responded "${transcript}" but didn't provide postcode/landmark/area - re-asking for clarification`);
+          console.log(`[${callId}] 🔄 isSimilar=${isSimilarAddress}, isDifferent=${isDifferentAddress}, currentCore="${currentCore}", transcriptCore="${transcriptCore}"`);
           
-          // Don't clear the extracted address, but re-ask for postcode
+          // Don't update the booking with the repeated/similar address
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
@@ -3848,7 +3870,7 @@ Rules:
                 role: "user",
                 content: [{ 
                   type: "text", 
-                  text: `[SYSTEM: The customer repeated "${transcript}" but did NOT provide the postcode you asked for. You MUST ask again: "I still need the postcode for ${currentAddress} please - could you give me the first part at least, like CV1 or B27?" Do NOT proceed without a postcode or landmark.]`
+                  text: `[SYSTEM: The customer said "${transcript}" but did NOT provide the postcode or area you asked for. You MUST ask again: "I still need the postcode or area for ${currentAddress} please - could you give me the first part of the postcode, like CV1 or B27?" Do NOT proceed without a postcode or area name.]`
                 }]
               }
             }));
@@ -3864,9 +3886,13 @@ Rules:
           }
           
           // Keep awaitingClarificationFor set - don't clear it
-          // Don't update the booking with the same address
+          // Don't update the booking with the repeated address
           extracted.pickup_location = null;
           extracted.dropoff_location = null;
+        } else {
+          // User provided something useful (postcode, landmark, or city) - clear clarification state
+          console.log(`[${callId}] ✅ User provided clarification: postcode=${hasNewPostcode}, landmark=${hasLandmarkCue}, city=${containsCityName}`);
+          awaitingClarificationFor = null;
         }
       }
 
