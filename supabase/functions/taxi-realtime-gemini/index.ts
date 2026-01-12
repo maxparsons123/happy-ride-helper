@@ -336,9 +336,9 @@ serve(async (req) => {
       let audioBuffer: ArrayBuffer;
       
       if (ttsProvider === "deepgram" && DEEPGRAM_API_KEY) {
-        // Deepgram Aura TTS - British female voice, linear16 PCM output
+        // Deepgram Aura TTS - British female voice (Athena), linear16 PCM output
         const response = await fetch(
-          "https://api.deepgram.com/v1/speak?model=aura-luna-en&encoding=linear16&sample_rate=24000",
+          "https://api.deepgram.com/v1/speak?model=aura-athena-en&encoding=linear16&sample_rate=24000",
           {
             method: "POST",
             headers: {
