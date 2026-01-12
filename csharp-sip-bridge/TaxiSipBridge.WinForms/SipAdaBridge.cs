@@ -272,22 +272,14 @@ public class SipAdaBridge : IDisposable
             });
 
             // === Buffer → SIP (AI → Caller) - Direct RTP Raw ===
-            // Use rtpSession.RtpSession.SendRtpRaw for direct µ-law injection.
+            // VoIPMediaSession inherits from RTPSession, so SendRtpRaw is available directly.
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
                 
-                // Get the underlying RTP session for raw packet sending
-                var rawRtpSession = rtpSession.RtpSession;
-                if (rawRtpSession == null)
-                {
-                    Log($"❌ [{callId}] No RtpSession available!");
-                    return;
-                }
-                
-                Log($"📻 [{callId}] RTP session ready, using PCMU (payload type 0)");
+                Log($"📻 [{callId}] Starting playback loop, using PCMU (payload type 0)");
 
                 while (!cts.Token.IsCancellationRequested)
                 {
@@ -305,9 +297,9 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send raw RTP packet with µ-law payload
+                            // Send raw RTP packet with µ-law payload directly on VoIPMediaSession
                             // Payload type 0 = PCMU (µ-law), 160 samples = 20ms at 8kHz
-                            rawRtpSession.SendRtpRaw(
+                            rtpSession.SendRtpRaw(
                                 SDPMediaTypesEnum.audio,
                                 frame,
                                 rtpTimestamp,
