@@ -81,7 +81,34 @@ serve(async (req) => {
   let audioBuffer: Uint8Array[] = [];
   let isProcessing = false;
   let silenceTimer: number | null = null;
-  const SILENCE_THRESHOLD_MS = 700; // Faster turn-taking - detect end of sentence sooner
+  let isAiTalking = false; // Track if AI is currently speaking
+  
+  // VAD Configuration - can be updated via session.update
+  let vadConfig = {
+    type: "server_vad",
+    threshold: 0.5,           // Sensitivity (0.0 to 1.0) - lower = more sensitive
+    prefix_padding_ms: 300,   // Keep audio before speech start
+    silence_duration_ms: 600, // Silence before considering turn complete
+    semantic_endpointing: true // Use grammar-based sentence completion
+  };
+  
+  // Semantic endpointing patterns - detect complete sentences
+  const SENTENCE_END_PATTERNS = [
+    /\b(please|thanks|thank you|cheers|ta)\s*[.!?]?\s*$/i,
+    /\b(that's (it|all|right|correct)|yes|no|yeah|nah|okay|ok)\s*[.!?]?\s*$/i,
+    /\d+\s+(passengers?|people|bags?|luggage|minutes?)\s*[.!?]?\s*$/i,
+    /\b(road|street|lane|avenue|drive|way|close|court|place|crescent)\s*[.!?]?\s*$/i,
+    /\b(station|airport|hospital|centre|center|mall|park|school)\s*[.!?]?\s*$/i,
+    /[.!?]\s*$/,  // Ends with punctuation
+  ];
+  
+  // Incomplete sentence patterns - wait for more
+  const INCOMPLETE_PATTERNS = [
+    /\b(I'm at|I am at|from|to|going to|heading to|need to go|pick me up)\s*$/i,
+    /\b(number|house|flat|apartment)\s*$/i,
+    /\b(and|but|or|so|then|also|wait|um|uh|er)\s*$/i,
+    /^\s*\d+\s*$/,  // Just a number, might be part of address
+  ];
   
   // Conversation history for context
   let conversationHistory: { role: string; content: string }[] = [];
@@ -499,9 +526,17 @@ serve(async (req) => {
       const audioData = await synthesizeSpeech(aiResponse.response);
       
       if (audioData) {
+        isAiTalking = true; // Mark AI as speaking
+        
         // Send audio in chunks (PCM16 format, same as OpenAI Realtime)
         const chunkSize = 4800; // 100ms of audio at 24kHz
         for (let i = 0; i < audioData.length; i += chunkSize) {
+          // Check if interrupted during playback
+          if (!isAiTalking) {
+            console.log(`[${callId}] 🛑 Audio playback interrupted at chunk ${i/chunkSize}`);
+            break;
+          }
+          
           const chunk = audioData.slice(i, Math.min(i + chunkSize, audioData.length));
           const base64 = btoa(String.fromCharCode(...chunk));
           
@@ -511,6 +546,7 @@ serve(async (req) => {
           }));
         }
         
+        isAiTalking = false; // Mark AI as done speaking
         socket.send(JSON.stringify({ type: "audio.done" }));
         
         // Check if Ada said goodbye - end the call
@@ -540,13 +576,63 @@ serve(async (req) => {
     }
   };
 
-  // Handle incoming audio data
+  // Calculate RMS energy from PCM audio (for VAD)
+  const calculateEnergy = (pcmData: Uint8Array): number => {
+    const int16 = new Int16Array(pcmData.buffer, pcmData.byteOffset, pcmData.length / 2);
+    let sum = 0;
+    for (let i = 0; i < int16.length; i++) {
+      sum += int16[i] * int16[i];
+    }
+    return Math.sqrt(sum / int16.length) / 32768; // Normalize to 0-1
+  };
+  
+  // Check if transcript appears to be a complete sentence
+  const isSemanticallyCom = (text: string): boolean => {
+    if (!vadConfig.semantic_endpointing) return true; // Skip if disabled
+    
+    const trimmed = text.trim();
+    if (trimmed.length < 2) return false;
+    
+    // Check for incomplete patterns first
+    for (const pattern of INCOMPLETE_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        console.log(`[${callId}] 🔄 Incomplete sentence detected: "${trimmed}"`);
+        return false;
+      }
+    }
+    
+    // Check for complete sentence patterns
+    for (const pattern of SENTENCE_END_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        return true;
+      }
+    }
+    
+    // Default: if text is > 15 chars, assume complete
+    return trimmed.length > 15;
+  };
+
+  // Handle incoming audio data with VAD
   const handleAudioData = (base64Audio: string) => {
     try {
       const binaryString = atob(base64Audio);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Calculate energy for VAD
+      const energy = calculateEnergy(bytes);
+      const isSpeech = energy > vadConfig.threshold * 0.1; // Scale threshold
+      
+      // Barge-in detection: if user speaks while AI is talking
+      if (isSpeech && isAiTalking) {
+        console.log(`[${callId}] 🛑 Barge-in detected! Interrupting AI...`);
+        isAiTalking = false;
+        socket.send(JSON.stringify({ type: "audio.interrupted" }));
+        // Clear any pending audio
+        audioBuffer = [];
+        if (silenceTimer) clearTimeout(silenceTimer);
       }
       
       audioBuffer.push(bytes);
@@ -556,10 +642,10 @@ serve(async (req) => {
         clearTimeout(silenceTimer);
       }
       
-      // Start silence timer - process after silence
+      // Start silence timer - process after configured silence duration
       silenceTimer = setTimeout(() => {
         processAudioPipeline();
-      }, SILENCE_THRESHOLD_MS);
+      }, vadConfig.silence_duration_ms);
       
     } catch (e) {
       console.error(`[${callId}] Audio decode error:`, e);
@@ -660,6 +746,38 @@ serve(async (req) => {
           
         case "session.end":
           console.log(`[${callId}] 📞 Session ended`);
+          break;
+          
+        case "session.update":
+          // Update VAD/turn detection config dynamically
+          if (msg.session?.turn_detection) {
+            const td = msg.session.turn_detection;
+            if (td.type) vadConfig.type = td.type;
+            if (td.threshold !== undefined) vadConfig.threshold = td.threshold;
+            if (td.prefix_padding_ms !== undefined) vadConfig.prefix_padding_ms = td.prefix_padding_ms;
+            if (td.silence_duration_ms !== undefined) vadConfig.silence_duration_ms = td.silence_duration_ms;
+            if (td.semantic_endpointing !== undefined) vadConfig.semantic_endpointing = td.semantic_endpointing;
+            
+            console.log(`[${callId}] ⚙️ VAD config updated:`, vadConfig);
+          }
+          
+          // Acknowledge the update
+          socket.send(JSON.stringify({
+            type: "session.updated",
+            session: {
+              turn_detection: vadConfig,
+              input_audio_format: "pcm16",
+              output_audio_format: "pcm16"
+            }
+          }));
+          break;
+          
+        case "conversation.item.truncate":
+          // Barge-in: stop AI speech immediately
+          console.log(`[${callId}] 🛑 Truncate request - stopping AI speech`);
+          isAiTalking = false;
+          audioBuffer = [];
+          socket.send(JSON.stringify({ type: "audio.interrupted" }));
           break;
           
         default:
