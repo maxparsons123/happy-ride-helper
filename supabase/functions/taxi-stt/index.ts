@@ -69,7 +69,14 @@ serve(async (req) => {
     // No language specified - let Whisper auto-detect for multilingual support
     formData.append("response_format", "json");
     // Add prompt for context - helps with taxi/address terminology
-    formData.append("prompt", "Taxi booking conversation. Common terms: pickup, destination, passengers, estate car, saloon, minibus, airport, train station. Addresses may include UK postcodes like SW1A 1AA, B1 1AA. Names of places and streets.");
+    // Enhanced with West Midlands vocabulary for better UK address recognition
+    formData.append("prompt", `Taxi booking conversation in the West Midlands, UK. 
+Cities: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington, Warwick, Rugby.
+Common streets: David Road, School Road, Station Road, High Street, Church Lane, Park Road, London Road.
+Address formats: 52A David Road, 14 School Road, house numbers like fifty-two A, one-four.
+Terms: pickup, drop-off, destination, passengers, luggage, bags, estate car, saloon, minibus, MPV.
+Locations: Birmingham Airport, Coventry Station, New Street Station, Manchester Airport.
+UK postcodes: CV1, CV2, B1, WV1, WS1.`);
 
     const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
