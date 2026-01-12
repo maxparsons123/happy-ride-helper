@@ -314,18 +314,21 @@ export type Database = {
       live_call_audio: {
         Row: {
           audio_chunk: string
+          audio_source: string
           call_id: string
           created_at: string
           id: string
         }
         Insert: {
           audio_chunk: string
+          audio_source?: string
           call_id: string
           created_at?: string
           id?: string
         }
         Update: {
           audio_chunk?: string
+          audio_source?: string
           call_id?: string
           created_at?: string
           id?: string

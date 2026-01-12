@@ -129,6 +129,7 @@ export default function LiveCalls() {
   const [selectedCall, setSelectedCall] = useState<string | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [audioSource, setAudioSource] = useState<"ai" | "user">("ai");
   const [addressVerification, setAddressVerification] = useState(true);
   const [useTripResolver, setUseTripResolver] = useState(true);
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
@@ -325,11 +326,11 @@ export default function LiveCalls() {
       return;
     }
 
-    console.log(`[LiveCalls] Subscribing to audio for call: ${selectedCall}`);
+    console.log(`[LiveCalls] Subscribing to ${audioSource} audio for call: ${selectedCall}`);
     setIsListening(true);
 
     const audioChannel = supabase
-      .channel(`audio-${selectedCall}`)
+      .channel(`audio-${selectedCall}-${audioSource}`)
       .on(
         "postgres_changes",
         {
@@ -339,6 +340,10 @@ export default function LiveCalls() {
           filter: `call_id=eq.${selectedCall}`
         },
         (payload) => {
+          // Filter by audio source
+          const payloadSource = (payload.new as any).audio_source as string;
+          if (payloadSource !== audioSource) return;
+          
           const audioChunk = payload.new.audio_chunk as string;
           if (audioChunk && audioQueueRef.current) {
             // Convert base64 to Uint8Array
@@ -359,7 +364,7 @@ export default function LiveCalls() {
       audioQueueRef.current?.clear();
       setIsListening(false);
     };
-  }, [selectedCall, audioEnabled]);
+  }, [selectedCall, audioEnabled, audioSource]);
 
   const inferCityHintFromAddress = (address?: string | null): string | undefined => {
     if (!address) return undefined;
@@ -735,25 +740,48 @@ export default function LiveCalls() {
                 </span>
               </div>
             )}
-            {/* Audio toggle */}
-            <Button
-              variant={audioEnabled ? "default" : "outline"}
-              size="sm"
-              onClick={audioEnabled ? disableAudio : enableAudio}
-              className={audioEnabled ? "bg-green-600 hover:bg-green-700" : ""}
-            >
-              {audioEnabled ? (
-                <>
-                  <Volume2 className="w-4 h-4 mr-2" />
-                  {isListening ? "Listening..." : "Audio On"}
-                </>
-              ) : (
-                <>
-                  <VolumeX className="w-4 h-4 mr-2" />
-                  Enable Audio
-                </>
+            {/* Audio controls */}
+            <div className="flex items-center gap-2">
+              <Button
+                variant={audioEnabled ? "default" : "outline"}
+                size="sm"
+                onClick={audioEnabled ? disableAudio : enableAudio}
+                className={audioEnabled ? "bg-green-600 hover:bg-green-700" : ""}
+              >
+                {audioEnabled ? (
+                  <>
+                    <Volume2 className="w-4 h-4 mr-2" />
+                    {isListening ? "Listening..." : "Audio On"}
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-4 h-4 mr-2" />
+                    Enable Audio
+                  </>
+                )}
+              </Button>
+              {audioEnabled && (
+                <Select value={audioSource} onValueChange={(v) => setAudioSource(v as "ai" | "user")}>
+                  <SelectTrigger className="w-[120px] h-8">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ai">
+                      <div className="flex items-center gap-2">
+                        <Bot className="w-3 h-3" />
+                        Ada
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="user">
+                      <div className="flex items-center gap-2">
+                        <User className="w-3 h-3" />
+                        Caller
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               )}
-            </Button>
+            </div>
             <Badge variant="outline" className="text-green-400 border-green-400">
               <span className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
               {activeCalls.length} Active
