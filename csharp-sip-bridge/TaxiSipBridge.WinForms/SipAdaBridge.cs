@@ -268,13 +268,8 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Decode µ-law to PCM16 and send via AudioExtrasSource
-                            var pcmSamples = AudioCodecs.MuLawDecode(frame);
-                            rtpSession.AudioExtrasSource.ExternalAudioSourceRawSample(
-                                AudioSamplingRatesEnum.Rate8KHz,
-                                20, // 20ms frame duration
-                                pcmSamples
-                            );
+                            // Send µ-law audio directly via RTPSession's SendAudio method
+                            rtpSession.SendAudio((uint)(framesPlayed * 160), frame);
 
                             rtpTimestamp += 160;
                             framesPlayed++;
