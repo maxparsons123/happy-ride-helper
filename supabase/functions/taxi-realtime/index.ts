@@ -7431,6 +7431,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       
       // Set call ID from client
       if (message.type === "init") {
+        const isReconnect = message.reconnect === true;
+        
+        if (isReconnect) {
+          console.log(`[${callId}] 🔄 Reconnect init received from bridge`);
+          // On reconnect, don't reinitialize everything - just acknowledge
+          socket.send(JSON.stringify({ type: "session_resumed", call_id: callId }));
+          return;
+        }
+        
         callId = message.call_id || callId;
         callStartAt = new Date().toISOString();
         
