@@ -79,7 +79,7 @@ serve(async (req) => {
   let audioBuffer: Uint8Array[] = [];
   let isProcessing = false;
   let silenceTimer: number | null = null;
-  const SILENCE_THRESHOLD_MS = 1200; // Wait for silence before processing (~1.2s gap)
+  const SILENCE_THRESHOLD_MS = 1000; // Wait for silence before processing (~1s gap)
   
   // Conversation history for context
   let conversationHistory: { role: string; content: string }[] = [];
