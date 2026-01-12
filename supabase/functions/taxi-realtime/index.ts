@@ -7400,18 +7400,23 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           return;
         }
         
-        // Forward binary audio to OpenAI as binary WebSocket frame
-        // OpenAI Realtime API supports binary frames for input_audio_buffer.append
+        // Forward audio to OpenAI
+        // NOTE: Some OpenAI Realtime sessions reject raw binary frames depending on protocol/version.
+        // To keep this robust, we always wrap audio in input_audio_buffer.append.
         if (openaiWs?.readyState === WebSocket.OPEN) {
           const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-          
-          // OpenAI accepts raw PCM16 binary frames directly
-          // This avoids base64 encoding overhead (~33% bandwidth savings)
-          openaiWs.send(audioBytes.buffer);
-          
+          const base64Audio = btoa(String.fromCharCode(...audioBytes));
+
+          openaiWs.send(
+            JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: base64Audio,
+            }),
+          );
+
           // Log periodically (not every frame to reduce noise)
           if (Math.random() < 0.01) {
-            console.log(`[${callId}] 🔊 Binary audio forwarded: ${audioBytes.length} bytes`);
+            console.log(`[${callId}] 🔊 Audio appended: ${audioBytes.length} bytes`);
           }
         }
         return;
