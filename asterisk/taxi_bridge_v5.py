@@ -77,23 +77,31 @@ MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_BASE_DELAY_S = 1.0  # 1s, 2s, 4s exponential backoff
 HEARTBEAT_INTERVAL_S = 15  # Log connection health every 15 seconds
 
-# Audio processing settings
-# REDUCED: Was 200, but was clipping quiet consonants (c, t, s, l) causing STT errors
-# "cancel it" → "call the speed" because soft sounds were being gated
-NOISE_GATE_THRESHOLD = 50  # Much lower - only gate actual silence/noise floor
-HIGH_PASS_CUTOFF = 80
-TARGET_RMS = 3000
-MAX_GAIN = 2.5  # Reduced from 4.0 to prevent over-amplifying noise
+# Audio processing settings v3 - OPTIMIZED FOR SOFT CONSONANTS (c, t, s, f, th)
+# Problem: "cancel" being heard as "council" or "thank you" - soft 'c' was being gated
+# Solution: Much gentler DSP - preserve quiet sounds, only remove actual noise floor
+NOISE_GATE_THRESHOLD = 25   # Very low - only gate true silence (was 50)
+NOISE_GATE_SOFT_KNEE = True # Soft knee instead of hard gate - preserves transients
+HIGH_PASS_CUTOFF = 60       # Lower cutoff to preserve more speech fundamentals (was 80)
+TARGET_RMS = 2500           # Slightly lower target to avoid over-compression (was 3000)
+MAX_GAIN = 3.0              # Moderate gain for quiet speakers (was 2.5)
+MIN_GAIN = 0.8              # Prevent gain reduction that would clip soft sounds
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Pre-compute high-pass filter coefficients
+# Pre-compute high-pass filter coefficients (gentler 60Hz cutoff)
 _highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype='high', fs=AST_RATE, output='sos')
 
 
 def apply_noise_reduction(audio_bytes: bytes) -> bytes:
-    """Apply noise reduction pipeline."""
+    """Apply noise reduction pipeline optimized for soft consonant preservation.
+    
+    Key improvements for STT accuracy:
+    - Soft knee gating preserves attack transients (c, t, p, k sounds)
+    - Lower threshold only gates true noise floor
+    - Gentler normalization prevents over-compression
+    """
     if not audio_bytes or len(audio_bytes) < 4:
         return audio_bytes
     
@@ -101,17 +109,33 @@ def apply_noise_reduction(audio_bytes: bytes) -> bytes:
     if audio_np.size == 0:
         return audio_bytes
     
-    # 1. High-pass filter
+    # 1. Gentle high-pass filter (60Hz) - remove DC and very low rumble only
     audio_np = sosfilt(_highpass_sos, audio_np)
     
-    # 2. Noise gate
-    mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
-    audio_np[mask] *= 0.1
+    # 2. Soft-knee noise gate - CRITICAL for soft consonants
+    # Instead of hard gating, use smooth transition to preserve transients
+    if NOISE_GATE_SOFT_KNEE:
+        # Soft knee: gradual attenuation from threshold to 2x threshold
+        abs_audio = np.abs(audio_np)
+        # Below threshold: attenuate smoothly (not to zero!)
+        # Above 2x threshold: full volume
+        # Between: smooth transition
+        knee_low = NOISE_GATE_THRESHOLD
+        knee_high = NOISE_GATE_THRESHOLD * 3  # Wide knee for gentle transition
+        
+        # Calculate gain curve: 0.15 at silence, 1.0 above knee_high
+        gain_curve = np.clip((abs_audio - knee_low) / (knee_high - knee_low), 0, 1)
+        gain_curve = 0.15 + 0.85 * gain_curve  # Never fully mute (0.15 floor)
+        audio_np *= gain_curve
+    else:
+        # Hard gate (legacy behavior)
+        mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
+        audio_np[mask] *= 0.1
     
-    # 3. Normalize
+    # 3. Gentle normalization - don't over-compress quiet speech
     rms = np.sqrt(np.mean(audio_np ** 2))
-    if rms > 50:
-        gain = min(TARGET_RMS / rms, MAX_GAIN)
+    if rms > 30:  # Lower threshold to catch quieter speech (was 50)
+        gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
         audio_np *= gain
     
     audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
