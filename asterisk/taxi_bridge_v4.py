@@ -227,6 +227,7 @@ class TaxiBridgeV2:
                 break
 
     async def ai_to_queue(self):
+        audio_chunks_received = 0
         try:
             async for message in self.ws:
                 # Handle binary audio from AI (future optimization)
@@ -235,19 +236,31 @@ class TaxiBridgeV2:
                     pcm_8k = resample_audio_linear16(message, AI_RATE, AST_RATE)
                     out = lin2ulaw(pcm_8k) if self.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
+                    audio_chunks_received += 1
+                    if audio_chunks_received % 50 == 1:
+                        logger.info(f"[{self.call_id}] 🔊 Binary audio chunk #{audio_chunks_received} ({len(message)} bytes in, {len(out)} bytes out)")
                     continue
                 
                 # JSON message (text)
                 data = json.loads(message)
-                if data.get("type") in ["audio", "address_tts"]:
+                msg_type = data.get("type")
+                
+                if msg_type in ["audio", "address_tts"]:
                     raw_24k = base64.b64decode(data["audio"])
                     pcm_8k = resample_audio_linear16(raw_24k, AI_RATE, AST_RATE)
                     out = lin2ulaw(pcm_8k) if self.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
-                elif data.get("type") == "transcript":
-                    logger.info(f"[{self.call_id}] 💬 {data.get('role').upper()}: {data.get('text')}")
-        except:
-            pass
+                    audio_chunks_received += 1
+                    if audio_chunks_received % 50 == 1:
+                        logger.info(f"[{self.call_id}] 🔊 JSON audio chunk #{audio_chunks_received} ({len(raw_24k)} bytes in, {len(out)} bytes out)")
+                elif msg_type == "transcript":
+                    logger.info(f"[{self.call_id}] 💬 {data.get('role', 'unknown').upper()}: {data.get('text', '')}")
+                elif msg_type not in ["heartbeat", "session_update"]:
+                    logger.info(f"[{self.call_id}] 📨 Received: {msg_type}")
+        except Exception as e:
+            logger.error(f"[{self.call_id}] ❌ ai_to_queue error: {e}")
+        finally:
+            logger.info(f"[{self.call_id}] 📊 Total audio chunks received: {audio_chunks_received}")
 
     async def queue_to_asterisk(self):
         start_time = time.time()
