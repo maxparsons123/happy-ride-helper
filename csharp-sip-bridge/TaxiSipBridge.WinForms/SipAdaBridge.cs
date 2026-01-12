@@ -268,7 +268,7 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            rtpSession.RtpSession.SendRtpRaw(
+                            rtpSession.SendRtpRaw(
                                 SDPMediaTypesEnum.audio,
                                 frame,
                                 rtpTimestamp,
