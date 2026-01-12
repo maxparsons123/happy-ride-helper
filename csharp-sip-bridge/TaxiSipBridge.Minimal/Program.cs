@@ -18,7 +18,7 @@ namespace TaxiSipBridge.Minimal;
 /// 1. Registers with a SIP server
 /// 2. Accepts incoming calls
 /// 3. Captures RTP audio (µ-law 8kHz)
-/// 4. Converts to PCM16 24kHz and sends to edge function
+/// 4. Converts to PCM16 24kHz and sends as BINARY WebSocket frames (33% less bandwidth)
 /// 5. Receives audio back and plays to caller
 /// </summary>
 public class Program
@@ -112,6 +112,7 @@ public class Program
 
     /// <summary>
     /// Called when RTP audio packet is received from caller
+    /// Uses BINARY WebSocket frames to reduce bandwidth by 33% (no base64 overhead)
     /// </summary>
     private static async void OnRtpPacketReceived(IPEndPoint remoteEP, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
@@ -126,19 +127,11 @@ public class Program
             // Convert µ-law 8kHz to PCM16 24kHz
             byte[] pcm24k = ConvertUlawToPcm24k(ulawData);
 
-            // Base64 encode for JSON transport
-            string base64Audio = Convert.ToBase64String(pcm24k);
-
-            // Send to edge function
-            var message = JsonSerializer.Serialize(new
-            {
-                type = "input_audio_buffer.append",
-                audio = base64Audio
-            });
-
+            // Send as BINARY frame directly - no base64 encoding needed!
+            // Edge function receives raw PCM16 bytes
             await _webSocket.SendAsync(
-                Encoding.UTF8.GetBytes(message),
-                WebSocketMessageType.Text,
+                new ArraySegment<byte>(pcm24k),
+                WebSocketMessageType.Binary,
                 true,
                 CancellationToken.None
             );
