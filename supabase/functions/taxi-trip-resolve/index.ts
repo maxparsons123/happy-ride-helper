@@ -201,6 +201,14 @@ const STT_CORRECTIONS: Record<string, string> = {
   "davie": "david",
   "davy": "david",
   "davies": "david",
+  // POI/Venue name mishearings - STT often confuses venue names with place names
+  "swaffham": "sweetspot",
+  "swaffam": "sweetspot",
+  "swap them": "sweetspot",
+  "swap him": "sweetspot",
+  "swapham": "sweetspot",
+  "sweet ham": "sweetspot",
+  "sweets bob": "sweetspot",
 };
 
 // Normalize address by fixing common STT mishearings
