@@ -268,8 +268,14 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send µ-law audio directly via RTPSession's SendAudio method
-                            rtpSession.SendAudio((uint)(framesPlayed * 160), frame);
+                            // Send raw RTP packet with µ-law payload (inherited from RTPSession)
+                            rtpSession.SendRtpRaw(
+                                SDPMediaTypesEnum.audio,
+                                frame,
+                                rtpTimestamp,
+                                0,  // Marker bit
+                                0   // Payload type 0 = PCMU (µ-law)
+                            );
 
                             rtpTimestamp += 160;
                             framesPlayed++;
