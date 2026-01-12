@@ -505,6 +505,12 @@ serve(async (req) => {
         return false;
       }
       
+      // CRITICAL: Reject reconnect if call has already ended
+      if (data.status === "ended") {
+        console.log(`[${callId}] 🚫 Rejecting reconnect - call has already ended`);
+        return false;
+      }
+      
       // Check if session is still resumable
       const resumeData = data.clarification_attempts as any;
       if (!resumeData?.resumable_until) {
@@ -7502,13 +7508,19 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
           console.log(`[${callId}] 📞 End call requested: ${args.reason}`);
           endCallInProgress = true;
+          callEnded = true; // Mark immediately to prevent reconnect from re-greeting
           clearAllCallTimers();
 
-          // Update call status
+          // Update call status in DB immediately to prevent reconnect attempts
           await broadcastLiveCall({
             status: "ended",
             ended_at: new Date().toISOString(),
           });
+          
+          // Clear any resume data so reconnects don't restart the call
+          await supabase.from("live_calls").update({
+            clarification_attempts: null // Clear resume data
+          }).eq("call_id", callId);
 
           // Send function result
           openaiWs?.send(
@@ -7525,8 +7537,6 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           // Delay sending call_ended so Ada's goodbye audio finishes playing
           // Asterisk bridge will hang up immediately on receiving this, so we wait
           setTimeout(() => {
-            if (callEnded) return;
-            callEnded = true;
             console.log(`[${callId}] 📞 Sending call_ended after goodbye audio delay`);
             socket.send(
               JSON.stringify({
