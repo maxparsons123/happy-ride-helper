@@ -4898,14 +4898,13 @@ Rules:
             input_audio_transcription: { 
               model: "whisper-1"
             },
-            // Server VAD - tuned for snappy response (reduced from 1000ms to 600ms)
-            // IMPORTANT: We DO NOT auto-create responses; we trigger response.create only after STT completes.
+            // Server VAD - ultra-snappy response (reduced to 500ms)
             turn_detection: {
               type: "server_vad",
-              threshold: agentConfig?.vad_threshold ?? 0.35,           // Lower = more sensitive to quiet speech
-              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 400,    // Reduced lead-in
-              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 600, // Faster turn-taking (was 1000)
-              create_response: false,    // Manual response.create after transcription.completed
+              threshold: agentConfig?.vad_threshold ?? 0.35,           // Lower = more sensitive
+              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 300,    // Minimal lead-in
+              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 500, // Fast turn-taking
+              create_response: false,
               interrupt_response: agentConfig?.allow_interruptions ?? true
             },
             tools: [
