@@ -5374,12 +5374,19 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         // IMPORTANT: Include common STT mishearings of "bye" like "you", "by", "buy"
         const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya|by|buy|you)\b[!. ]*$/.test(t);
         
+        // Catch "bye bye" anywhere in the transcript (e.g., "Thank you. Bye. Bye." or "bye bye")
+        // This is always an intentional goodbye, regardless of booking state
+        const containsByeBye = /\bbye[\s.,!]*bye\b/i.test(t) || /\bbye-bye\b/i.test(t);
+        
         // Also catch post-booking farewells like "thank you bye", "cheers bye", "thanks bye"
         // Use activeBooking to check if a booking has been completed
         const thankYouBye = /\b(thank\s*you|thanks|cheers|ta)\s*(bye|goodbye|by|you)?\s*[!.]*$/i.test(t) && t.length < 30;
         
-        if (explicitFarewellOnly || (thankYouBye && activeBooking)) {
-          console.log(`[${callId}] 👋 Explicit farewell detected: "${t}"`);
+        // Catch "thank you + bye" pattern even without activeBooking (customer wants to leave mid-call)
+        const thankYouWithBye = /\b(thank\s*you|thanks)\b.*\bbye\b/i.test(t) && t.length < 40;
+        
+        if (explicitFarewellOnly || containsByeBye || thankYouWithBye || (thankYouBye && activeBooking)) {
+          console.log(`[${callId}] 👋 Explicit farewell detected: "${t}" (byeBye=${containsByeBye}, thankYouBye=${thankYouBye}, thankYouWithBye=${thankYouWithBye})`);
           forcedResponseInstructions =
             "The customer has said goodbye. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'customer_request'. Do NOT ask any further questions.";
         }
