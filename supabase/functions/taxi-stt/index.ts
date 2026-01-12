@@ -66,17 +66,16 @@ serve(async (req) => {
     const fileName = `audio.${audioFormat === "ulaw" ? "wav" : audioFormat}`;
     formData.append("file", audioBlob, fileName);
     formData.append("model", "whisper-large-v3-turbo"); // Groq's fastest Whisper model
-    // No language specified - let Whisper auto-detect for multilingual support
     formData.append("response_format", "json");
-    // Add prompt for context - helps with taxi/address terminology
-    // Enhanced with West Midlands vocabulary for better UK address recognition
-    formData.append("prompt", `Taxi booking conversation in the West Midlands, UK. 
-Cities: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington, Warwick, Rugby.
-Common streets: David Road, School Road, Station Road, High Street, Church Lane, Park Road, London Road.
-Address formats: 52A David Road, 14 School Road, house numbers like fifty-two A, one-four.
-Terms: pickup, drop-off, destination, passengers, luggage, bags, estate car, saloon, minibus, MPV.
-Locations: Birmingham Airport, Coventry Station, New Street Station, Manchester Airport.
-UK postcodes: CV1, CV2, B1, WV1, WS1.`);
+    formData.append("temperature", "0"); // CRITICAL: Temperature=0 prevents creative hallucinations
+    formData.append("language", "en"); // Lock to English to prevent language drift
+    // Rich prompt with ALL local entities to bias decoder toward correct phonetics
+    formData.append("prompt", `Taxi booking phone call in the West Midlands, England, UK.
+CITIES: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington Spa, Warwick, Rugby, Bedworth, Kenilworth, Stratford-upon-Avon, Tamworth, Lichfield, Sutton Coldfield, Redditch, Bromsgrove, Halesowen, Stourbridge, West Bromwich, Oldbury, Smethwick, Tipton, Bilston, Willenhall, Bloxwich, Cannock.
+STREETS: School Road, Station Road, High Street, Church Lane, Park Road, London Road, David Road, Binley Road, Foleshill Road, Stoney Stanton Road, Allesley Old Road, Holyhead Road, Warwick Road, Kenilworth Road, Walsgrave Road, Ansty Road, Longford Road.
+LANDMARKS: Birmingham Airport, Coventry Station, Coventry City Centre, Birmingham New Street Station, Manchester Airport, Heathrow Airport, Gatwick Airport, Ricoh Arena, University of Warwick, Coventry University, Birmingham University.
+ADDRESS FORMATS: 52A David Road, 14 School Road, house numbers spoken as "fifty-two A", "one-four", UK postcodes CV1, CV2, CV3, CV4, CV5, CV6, B1, B2, WV1, WS1.
+COMMANDS: cancel, cancel it, cancel the booking, keep it, book it, yes please, no thanks, that's right, that's correct.`);
 
     const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
