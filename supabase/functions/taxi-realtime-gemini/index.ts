@@ -195,20 +195,24 @@ serve(async (req) => {
         formData.append("temperature", "0"); // CRITICAL: Temperature=0 prevents creative hallucinations
         // NO language lock - auto-detect for multilingual support (Urdu, Punjabi, Polish, Romanian, Arabic, etc.)
         
-        // DYNAMIC PROMPT CONDITIONING: Include Ada's last response for context
+        // DYNAMIC PROMPT CONDITIONING: Tell Whisper what the user is responding to
         // This dramatically improves transcription of "yes/no", addresses, postcodes that were just mentioned
-        const contextPrefix = lastAssistantResponse 
-          ? `Ada: "${lastAssistantResponse.slice(0, 200)}". Customer response:\n\n` 
+        const contextHeader = lastAssistantResponse 
+          ? `[USER WILL RESPOND TO THIS QUESTION]
+Ada asked: "${lastAssistantResponse.slice(0, 250)}"
+[NOW TRANSCRIBE THE USER'S RESPONSE]
+
+` 
           : "";
         
-        // Rich prompt with ALL local entities + dynamic context
-        formData.append("prompt", `${contextPrefix}Taxi booking phone call in the West Midlands, England, UK.
-CITIES: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington Spa, Warwick, Rugby, Bedworth, Kenilworth, Stratford-upon-Avon, Tamworth, Lichfield, Sutton Coldfield, Redditch, Bromsgrove, Halesowen, Stourbridge, West Bromwich, Oldbury, Smethwick, Tipton, Bilston, Willenhall, Bloxwich, Cannock.
-STREETS: School Road, Station Road, High Street, Church Lane, Park Road, London Road, David Road, Binley Road, Foleshill Road, Stoney Stanton Road, Allesley Old Road, Holyhead Road, Warwick Road, Kenilworth Road, Walsgrave Road, Ansty Road, Longford Road.
-LANDMARKS: Birmingham Airport, Coventry Station, Coventry City Centre, Birmingham New Street Station, Manchester Airport, Heathrow Airport, Gatwick Airport, Ricoh Arena, University of Warwick, Coventry University, Birmingham University.
-ADDRESS FORMATS: 52A David Road, 14 School Road, house numbers spoken as "fifty-two A", "one-four", UK postcodes CV1, CV2, CV3, CV4, CV5, CV6, B1, B2, WV1, WS1, M1, M18.
-COMMANDS: cancel, cancel it, cancel the booking, keep it, book it, yes please, no thanks, that's right, that's correct, yes, no, yeah, nope.
-MULTILINGUAL: This call may be in English, Urdu, Punjabi, Polish, Romanian, Arabic, Bengali, Hindi, or other languages.`);
+        // Rich prompt with context header + local entities
+        formData.append("prompt", `${contextHeader}Taxi booking phone call in the West Midlands, England, UK.
+LIKELY RESPONSES: yes, no, yeah, nope, correct, that's right, cancel, book it, keep it.
+CITIES: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington Spa, Warwick, Rugby, Manchester, London.
+STREETS: School Road, Station Road, High Street, Church Lane, Park Road, London Road, David Road, Binley Road, Foleshill Road.
+LANDMARKS: Birmingham Airport, Coventry Station, Manchester Airport, Heathrow Airport, Gatwick Airport.
+ADDRESS FORMATS: 52A David Road, UK postcodes CV1, CV2, B1, B2, M18, M1.
+MULTILINGUAL: English, Urdu, Punjabi, Polish, Romanian, Arabic.`);
         
         const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
