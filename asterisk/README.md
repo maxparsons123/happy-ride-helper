@@ -1,10 +1,19 @@
 # Taxi AI Asterisk Bridge - Installation Guide
 
+## Version: v2.5 (Resilient Reconnect with Session Resume)
+
+### Features
+- **WebSocket reconnection** with exponential backoff (survives network blips)
+- **True session resume** - Ada continues mid-conversation after reconnection
+- **Heartbeat monitoring** for connection health
+- **High-quality audio** with anti-aliased resampling and noise reduction
+
 ## Prerequisites
 
 ```bash
-# Install Python dependencies
-pip3 install websockets numpy
+# Install Python dependencies (scipy required for v2.4+)
+sudo apt install python3-numpy python3-scipy
+pip3 install websockets
 ```
 
 ## Installation

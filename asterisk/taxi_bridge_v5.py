@@ -150,6 +150,7 @@ class TaxiBridgeV25:
         self.reconnect_attempts = 0
         self.ws_connected = False
         self.last_ws_activity = time.time()
+        self.call_formally_ended = False  # Set when call_ended received from server
         
         # Audio buffer for reconnect (keep recent audio to resend after reconnect)
         self.pending_audio_buffer = deque(maxlen=50)  # ~1 second of audio frames
@@ -233,6 +234,11 @@ class TaxiBridgeV25:
                     
                     self.ws_connected = False
                     logger.warning(f"[{self.call_id}] 🔌 WebSocket disconnected: {e}")
+                    
+                    # DON'T reconnect if call was formally ended
+                    if self.call_formally_ended:
+                        logger.info(f"[{self.call_id}] ⏹️ Skipping reconnect - call was formally ended")
+                        break
                     
                     # Try to reconnect
                     self.reconnect_attempts += 1
@@ -354,7 +360,18 @@ class TaxiBridgeV25:
                 elif msg_type == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role', 'unknown').upper()}: {data.get('text', '')}")
                 elif msg_type == "session_resumed":
-                    logger.info(f"[{self.call_id}] ✅ Session resumed after reconnect")
+                    resumed = data.get("resumed", False)
+                    turn_count = data.get("transcript_count", 0)
+                    if resumed:
+                        logger.info(f"[{self.call_id}] ✅ Session resumed with {turn_count} conversation turns")
+                    else:
+                        logger.info(f"[{self.call_id}] ✅ Session resumed (fresh start)")
+                elif msg_type == "call_ended":
+                    # Call was formally ended - stop reconnection attempts
+                    logger.info(f"[{self.call_id}] 📴 Call ended by server: {data.get('reason', 'unknown')}")
+                    self.call_formally_ended = True
+                    self.running = False
+                    break
                 elif msg_type == "error":
                     err = data.get("error")
                     retrying = data.get("retrying")
