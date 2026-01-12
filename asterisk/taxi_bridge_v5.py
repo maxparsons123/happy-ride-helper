@@ -78,10 +78,12 @@ RECONNECT_BASE_DELAY_S = 1.0  # 1s, 2s, 4s exponential backoff
 HEARTBEAT_INTERVAL_S = 15  # Log connection health every 15 seconds
 
 # Audio processing settings
-NOISE_GATE_THRESHOLD = 200
+# REDUCED: Was 200, but was clipping quiet consonants (c, t, s, l) causing STT errors
+# "cancel it" → "call the speed" because soft sounds were being gated
+NOISE_GATE_THRESHOLD = 50  # Much lower - only gate actual silence/noise floor
 HIGH_PASS_CUTOFF = 80
 TARGET_RMS = 3000
-MAX_GAIN = 4.0
+MAX_GAIN = 2.5  # Reduced from 4.0 to prevent over-amplifying noise
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
