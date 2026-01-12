@@ -3536,22 +3536,18 @@ Rules:
               }
             }));
             
-            // NEW: If this is a new caller with no known city, ask for their area
-            // This allows us to bias geocoding for more accurate address resolution
+            // Area question is now asked in the initial greeting for new callers
+            // Just log if we're still awaiting the area (it may come in same response as name)
             if (!callerCity && Object.keys(callerKnownAreas).length === 0 && callerTotalBookings === 0) {
-              console.log(`[${callId}] 🏙️ New caller with no location history - will ask for their area`);
-              awaitingAreaResponse = true;
-              
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: `[SYSTEM: This is a NEW customer. After greeting them, ask what area they're calling from. Say: "Lovely to meet you ${callerName}! And what area are you calling from - Coventry, Birmingham, or somewhere else?" This helps us find their addresses accurately.]` }]
-                }
-              }));
-              
-              // Don't trigger response.create here - let the normal flow continue
+              console.log(`[${callId}] 🏙️ New caller "${callerName}" - checking if area was also provided...`);
+              // Try to extract city from the same transcript that had the name
+              const mentionedCityInNameResponse = extractCityFromAddress(transcript);
+              if (mentionedCityInNameResponse) {
+                callerCity = mentionedCityInNameResponse;
+                callerKnownAreas[mentionedCityInNameResponse] = 1;
+                awaitingAreaResponse = false;
+                console.log(`[${callId}] 🏙️ Area captured with name: ${callerCity}`);
+              }
             }
           }
         }
@@ -5165,8 +5161,12 @@ Say: "Hello ${callerName}! Lovely to hear from you again. Just so I can find add
 CRITICAL: Wait for them to answer the area question BEFORE proceeding with any booking details. Their area is needed for accurate address lookups.]`;
           }
         } else {
-          // New customer
-          greetingPrompt = `[Call connected - greet the NEW customer and ask for their name. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"]`;
+          // New customer - ask for name AND area to establish geocoding bias
+          greetingPrompt = `[Call connected - greet the NEW customer and ask for their name AND area. Say: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please, and whereabouts are you calling from?"
+          
+IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, Birmingham, etc). If they only give their name, follow up with "Lovely to meet you [name]! And whereabouts are you calling from - Coventry, Birmingham, or somewhere else?"]`;
+          // Mark that we're awaiting area from new caller
+          awaitingAreaResponse = true;
         }
         
         console.log(`[${callId}] Triggering initial greeting... (caller: ${callerName || 'new customer'})`);
