@@ -451,6 +451,160 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
+  
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSION RESUME - Persist state for reconnection after signal drops
+  // ═══════════════════════════════════════════════════════════════════════════
+  const SESSION_RESUME_GRACE_MS = 45000; // 45 seconds to reconnect
+  let isResumedSession = false; // True if this session was resumed from a disconnect
+  let sessionSavedAt = 0; // Timestamp when session was last saved for resume
+  
+  // Save session state to database for potential resume
+  const saveSessionForResume = async (): Promise<void> => {
+    if (!callId || callEnded) return;
+    
+    const resumableUntil = new Date(Date.now() + SESSION_RESUME_GRACE_MS).toISOString();
+    
+    try {
+      await supabase.from("live_calls").update({
+        // Store resume metadata in clarification_attempts (reusing existing JSONB column)
+        clarification_attempts: {
+          ...(typeof knownBooking === 'object' ? { booking: knownBooking } : {}),
+          resumable_until: resumableUntil,
+          transcript_count: transcriptHistory.length,
+          last_assistant_text: currentAssistantText || transcriptHistory.filter(t => t.role === 'assistant').slice(-1)[0]?.text || '',
+          session_state: {
+            callerName,
+            callerCity,
+            activeBookingId: activeBooking?.id || null,
+            greetingSent,
+            awaitingAreaResponse,
+          }
+        },
+        updated_at: new Date().toISOString()
+      }).eq("call_id", callId);
+      
+      sessionSavedAt = Date.now();
+      console.log(`[${callId}] 💾 Session saved for resume (valid until ${resumableUntil})`);
+    } catch (e) {
+      console.error(`[${callId}] Failed to save session for resume:`, e);
+    }
+  };
+  
+  // Load and restore session state on reconnect
+  const loadResumedSession = async (): Promise<boolean> => {
+    try {
+      const { data, error } = await supabase
+        .from("live_calls")
+        .select("*")
+        .eq("call_id", callId)
+        .single();
+      
+      if (error || !data) {
+        console.log(`[${callId}] No existing session found for resume`);
+        return false;
+      }
+      
+      // Check if session is still resumable
+      const resumeData = data.clarification_attempts as any;
+      if (!resumeData?.resumable_until) {
+        console.log(`[${callId}] Session has no resume data`);
+        return false;
+      }
+      
+      const resumableUntil = new Date(resumeData.resumable_until).getTime();
+      if (Date.now() > resumableUntil) {
+        console.log(`[${callId}] Session resume expired (was valid until ${resumeData.resumable_until})`);
+        return false;
+      }
+      
+      // Restore state from database
+      transcriptHistory = Array.isArray(data.transcripts) ? data.transcripts : [];
+      callerName = data.caller_name || '';
+      callerCity = resumeData.session_state?.callerCity || '';
+      userPhone = data.caller_phone || '';
+      greetingSent = true; // Already greeted before disconnect
+      awaitingAreaResponse = resumeData.session_state?.awaitingAreaResponse || false;
+      
+      // Restore booking state
+      if (resumeData.booking) {
+        knownBooking = resumeData.booking;
+      }
+      if (data.pickup) knownBooking.pickup = data.pickup;
+      if (data.destination) knownBooking.destination = data.destination;
+      if (data.passengers) knownBooking.passengers = data.passengers;
+      
+      // Restore active booking reference
+      if (resumeData.session_state?.activeBookingId) {
+        // Load from bookings table
+        const { data: bookingRow } = await supabase
+          .from("bookings")
+          .select("*")
+          .eq("id", resumeData.session_state.activeBookingId)
+          .single();
+        if (bookingRow) {
+          activeBooking = {
+            id: bookingRow.id,
+            pickup: bookingRow.pickup,
+            destination: bookingRow.destination,
+            passengers: bookingRow.passengers,
+            fare: bookingRow.fare || '',
+            booked_at: bookingRow.booked_at,
+            pickup_name: bookingRow.pickup_name,
+            destination_name: bookingRow.destination_name
+          };
+        }
+      }
+      
+      isResumedSession = true;
+      console.log(`[${callId}] ✅ Session restored: ${transcriptHistory.length} turns, caller: ${callerName}, booking: ${JSON.stringify(knownBooking)}`);
+      return true;
+    } catch (e) {
+      console.error(`[${callId}] Failed to load resumed session:`, e);
+      return false;
+    }
+  };
+  
+  // Prime OpenAI with conversation history after resume
+  const primeOpenAiWithHistory = (): void => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN || !isResumedSession) return;
+    if (transcriptHistory.length === 0) return;
+    
+    console.log(`[${callId}] 📜 Priming OpenAI with ${transcriptHistory.length} conversation turns`);
+    
+    // Send each turn as conversation items (OpenAI will have context)
+    for (const turn of transcriptHistory) {
+      openaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: turn.role === "assistant" ? "assistant" : "user",
+          content: [{ type: "input_text", text: turn.text }]
+        }
+      }));
+    }
+    
+    // Add a context message about the reconnection
+    const lastAssistantTurn = transcriptHistory.filter(t => t.role === 'assistant').slice(-1)[0];
+    const resumeContext = lastAssistantTurn 
+      ? `[The call was briefly interrupted. The customer is back on the line. Your last message was: "${lastAssistantTurn.text.slice(0, 100)}..." Continue the conversation naturally without repeating your greeting or re-asking questions already answered.]`
+      : `[The call was briefly interrupted. The customer is back. Continue naturally.]`;
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create", 
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: resumeContext }]
+      }
+    }));
+    
+    // Trigger a response to acknowledge the customer is back
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"] }
+    }));
+  };
   let awaitingClarificationFor: "pickup" | "destination" | null = null; // Which address are we awaiting clarification for?
   
   // UK locations loaded from database - used for disambiguation and country detection
@@ -4683,6 +4837,12 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
         // Trigger initial greeting ONLY ONCE
         if (greetingSent) {
           console.log(`[${callId}] ⏭️ Greeting already sent, skipping duplicate`);
+          
+          // If this is a resumed session, prime OpenAI with conversation history
+          if (isResumedSession && transcriptHistory.length > 0) {
+            console.log(`[${callId}] 🔄 Resumed session - priming OpenAI with history`);
+            primeOpenAiWithHistory();
+          }
           return;
         }
         greetingSent = true;
@@ -7468,12 +7628,33 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       // Set call ID from client
       if (message.type === "init") {
         const isReconnect = message.reconnect === true;
+        callId = message.call_id || callId;
         
         if (isReconnect) {
-          console.log(`[${callId}] 🔄 Reconnect init received from bridge`);
-          // On reconnect, don't reinitialize everything - just acknowledge
-          socket.send(JSON.stringify({ type: "session_resumed", call_id: callId }));
-          return;
+          console.log(`[${callId}] 🔄 Reconnect init received - attempting session resume...`);
+          
+          // Try to restore session from database
+          const resumed = await loadResumedSession();
+          
+          if (resumed) {
+            console.log(`[${callId}] ✅ Session resume successful - will prime OpenAI with history`);
+            socket.send(JSON.stringify({ 
+              type: "session_resumed", 
+              call_id: callId,
+              resumed: true,
+              transcript_count: transcriptHistory.length 
+            }));
+            // Note: primeOpenAiWithHistory() will be called after session.updated
+            return;
+          } else {
+            console.log(`[${callId}] ⚠️ Session resume failed - starting fresh`);
+            socket.send(JSON.stringify({ 
+              type: "session_resumed", 
+              call_id: callId,
+              resumed: false 
+            }));
+            // Continue with normal init flow below
+          }
         }
         
         callId = message.call_id || callId;
@@ -7606,7 +7787,25 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
   socket.onclose = async () => {
     console.log(`[${callId}] Client disconnected`);
-    callEnded = true;
+    
+    // DON'T mark as ended immediately - save for potential resume instead
+    // Only save if call wasn't already formally ended (e.g., via end_call tool)
+    if (!callEnded && transcriptHistory.length > 0) {
+      console.log(`[${callId}] 💾 Saving session for potential resume...`);
+      await saveSessionForResume();
+      
+      // Mark the call as "disconnected" (not "completed") so it can be resumed
+      await supabase.from("live_calls")
+        .update({ 
+          status: "disconnected",
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", callId);
+    } else {
+      // Call was formally ended - mark as completed
+      callEnded = true;
+    }
+    
     clearAllCallTimers();
 
     // Update call end time
@@ -7614,11 +7813,13 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       .update({ call_end_at: new Date().toISOString() })
       .eq("call_id", callId);
 
-    // Update live call status
-    await broadcastLiveCall({
-      status: "completed",
-      ended_at: new Date().toISOString()
-    });
+    // Only broadcast "completed" if the call is truly over
+    if (callEnded) {
+      await broadcastLiveCall({
+        status: "completed",
+        ended_at: new Date().toISOString()
+      });
+    }
 
     openaiWs?.close();
   };
