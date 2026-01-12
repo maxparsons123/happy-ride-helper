@@ -271,15 +271,31 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             });
 
-            // === Buffer → SIP (AI → Caller) - Direct RTP send ===
-            // Bypass AudioExtrasSource which throws NotImplementedException.
-            // Send µ-law frames directly via the RTP session.
+            // === Buffer → SIP (AI → Caller) - Direct RTP Raw ===
+            // VoIPMediaSession.SendAudio doesn't exist with that signature.
+            // Use the underlying RTP session's SendRtpRaw for direct µ-law injection.
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
-                ushort seqNum = (ushort)new Random().Next(0, 65535);
+                
+                // Get the audio RTP session for raw packet sending
+                var audioRtpSession = rtpSession.AudioRtpSession;
+                if (audioRtpSession == null)
+                {
+                    Log($"❌ [{callId}] No AudioRtpSession available!");
+                    return;
+                }
+                
+                // Determine the payload type from negotiated codec (PCMU=0, PCMA=8)
+                byte payloadType = 0; // Default to PCMU (µ-law)
+                var audioFormat = rtpSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+                if (audioFormat != null)
+                {
+                    payloadType = (byte)audioFormat.ID;
+                    Log($"📻 [{callId}] Using codec: {audioFormat.Name}, PT={payloadType}");
+                }
 
                 while (!cts.Token.IsCancellationRequested)
                 {
@@ -297,9 +313,9 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send µ-law audio directly - 160 samples = 20ms at 8kHz
-                            // VoIPMediaSession.SendAudio expects duration in RTP units and encoded payload
-                            rtpSession.SendAudio(160, frame);
+                            // Send raw RTP packet with µ-law payload
+                            // Duration = 160 samples = 20ms at 8kHz
+                            audioRtpSession.SendAudioFrame(rtpTimestamp, (int)payloadType, frame);
 
                             rtpTimestamp += 160;
                             framesPlayed++;
