@@ -4548,7 +4548,7 @@ Rules:
   const startHeartbeat = () => {
     if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
     
-    const logHeartbeat = () => {
+    const logHeartbeat = async () => {
       if (callEnded) return;
       
       const state = JSON.stringify({
@@ -4573,6 +4573,12 @@ Rules:
         if (elapsed > RESPONSE_TIMEOUT_MS * 0.8) {
           console.log(`[${callId}] ⚠️ Heartbeat: Response running long (${elapsed}ms)`);
         }
+      }
+      
+      // CRITICAL: Save session state periodically for reconnect resilience
+      // This ensures resume data is always fresh if WebSocket disconnects abruptly
+      if (greetingSent && transcriptHistory.length > 0) {
+        await saveSessionForResume();
       }
       
       // Re-arm heartbeat
@@ -7593,6 +7599,12 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         // Reset playback tracking for next response
         aiPlaybackBytesTotal = 0;
         aiPlaybackStartedAt = 0;
+        
+        // CRITICAL: Save session state after each response for reconnect resilience
+        // This ensures resume data is fresh even if heartbeat hasn't fired yet
+        if (greetingSent && transcriptHistory.length > 0 && !callEnded) {
+          saveSessionForResume().catch(e => console.error(`[${callId}] Session save failed:`, e));
+        }
         
         socket.send(JSON.stringify({ type: "response_done" }));
       }
