@@ -457,6 +457,7 @@ serve(async (req) => {
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   let needsHistoryPriming = false; // If OpenAI reconnects, prime it with transcript history (avoid re-greeting)
   let hangupReceived = false; // Set true when telephony sends explicit hangup
+  let lastUserAudioBroadcastAt = 0; // Throttle user audio broadcasts to dashboard
   // ═══════════════════════════════════════════════════════════════════════════
   // SESSION RESUME - Persist state for reconnection after signal drops
   // ═══════════════════════════════════════════════════════════════════════════
@@ -7746,8 +7747,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }),
           );
 
-          // NON-BLOCKING: Broadcast USER audio to monitoring channel (sample ~10% to reduce DB load)
-          if (Math.random() < 0.1) {
+          // NON-BLOCKING: Broadcast USER audio to monitoring channel (throttled to 2x/sec max)
+          const now = Date.now();
+          if (now - lastUserAudioBroadcastAt >= 500) {
+            lastUserAudioBroadcastAt = now;
             void supabase.from("live_call_audio").insert({
               call_id: callId,
               audio_chunk: base64Audio,
