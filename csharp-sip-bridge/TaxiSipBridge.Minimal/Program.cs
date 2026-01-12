@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
-using System.IO;
+using System.Diagnostics;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Media;
@@ -32,12 +32,12 @@ public class SipAdaBridge : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
 
-    // Byte-based jitter buffer (µ-law 8kHz bytes).
-    private readonly ConcurrentQueue<byte> _outboundAudio = new ConcurrentQueue<byte>();
+    // Frame-based queue for proper 20ms timing (each frame = 160 bytes µ-law)
+    private readonly ConcurrentQueue<byte[]> _outboundFrames = new ConcurrentQueue<byte[]>();
 
-    // Max µ-law bytes to keep in buffer (160 bytes = 20ms @ 8kHz).
-    // 4000 bytes ≈ 0.5s of audio.
-    private const int MaxOutboundBufferBytes = 4000;
+    // Max frames to buffer (~5 seconds = 250 frames at 20ms each)
+    // This allows Ada's full greeting to be buffered without dropping
+    private const int MaxOutboundFrames = 250;
 
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
@@ -107,11 +107,16 @@ public class SipAdaBridge : IDisposable
     {
         var callId = Guid.NewGuid().ToString("N")[..8];
         var caller = req.Header.From.FromURI.User ?? "unknown";
+
         Log($"📞 [{callId}] Call from {caller}");
         OnCallStarted?.Invoke(callId, caller);
 
         // Clear any stale audio from previous call.
-        while (_outboundAudio.TryDequeue(out _)) { }
+        while (_outboundFrames.TryDequeue(out _)) { }
+
+        // RTP state for direct packet injection
+        uint rtpTimestamp = 0;
+        ushort rtpSeqNum = (ushort)new Random().Next(0, 65535);
 
         var rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
         rtpSession.AcceptRtpFromAny = true;
@@ -127,7 +132,6 @@ public class SipAdaBridge : IDisposable
         }
 
         Log($"📗 [{callId}] Call answered");
-        await rtpSession.AudioExtrasSource.StartAudio();
         Log($"🎛 [{callId}] RTP session started");
 
         using var ws = new ClientWebSocket();
@@ -162,8 +166,6 @@ public class SipAdaBridge : IDisposable
                 var pcm8k = AudioCodecs.MuLawDecode(ulaw);
                 var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
                 var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
-
-                Log($"🎤 [{callId}] RTP→AI ulaw={ulaw.Length}B pcm24k={pcmBytes.Length}B (binary)");
 
                 // Send raw PCM24k as BINARY frame (per edge spec)
                 _ = ws.SendAsync(
@@ -247,26 +249,69 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             });
 
-            // === Buffer → SIP (AI → Caller) ===
+            // === Buffer → SIP (AI → Caller) using SendRtpRaw for precise timing ===
             _ = Task.Run(async () =>
             {
-                byte[] frame = new byte[160]; // 20ms @ 8kHz
+                var stopwatch = Stopwatch.StartNew();
+                long nextFrameTime = 0;
+                int framesPlayed = 0;
+
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    if (_outboundAudio.Count >= 160)
+                    try
                     {
-                        for (int i = 0; i < 160; i++)
-                            _outboundAudio.TryDequeue(out frame[i]);
+                        // Wait until it's time for the next frame (strict 20ms pacing)
+                        long now = stopwatch.ElapsedMilliseconds;
+                        if (now < nextFrameTime)
+                        {
+                            int delay = (int)(nextFrameTime - now);
+                            if (delay > 0 && delay < 100)
+                            {
+                                await Task.Delay(delay, cts.Token);
+                            }
+                        }
 
-                        await rtpSession.AudioExtrasSource.SendAudioFromStream(
-                            new MemoryStream(frame),
-                            AudioSamplingRatesEnum.Rate8KHz);
+                        // Try to dequeue and send a frame
+                        if (_outboundFrames.TryDequeue(out var frame))
+                        {
+                            // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
+                            rtpSession.RtpSession.SendRtpRaw(
+                                SDPMediaTypesEnum.audio,
+                                frame,
+                                rtpTimestamp,
+                                0,  // Marker bit
+                                0   // Payload type 0 = PCMU (µ-law)
+                            );
 
-                        Log($"🔊 [{callId}] RTP send 160B (queue={_outboundAudio.Count}B)");
+                            rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
+                            framesPlayed++;
+
+                            // Log every 25 frames (500ms) to reduce spam
+                            if (framesPlayed % 25 == 0)
+                            {
+                                Log($"🔊 [{callId}] Played {framesPlayed} frames, queue: {_outboundFrames.Count}");
+                            }
+
+                            nextFrameTime = stopwatch.ElapsedMilliseconds + 20;
+                        }
+                        else
+                        {
+                            // No audio available, wait a bit
+                            await Task.Delay(5, cts.Token);
+                            nextFrameTime = stopwatch.ElapsedMilliseconds;
+                        }
                     }
-                    // 20ms pacing = real-time 8kHz playout
-                    await Task.Delay(20);
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] Playback error: {ex.Message}");
+                    }
                 }
+
+                Log($"🔚 [{callId}] Playback loop ended - played {framesPlayed} total frames");
             });
 
             while (!cts.IsCancellationRequested && ws.State == WebSocketState.Open)
@@ -282,13 +327,14 @@ public class SipAdaBridge : IDisposable
             ua.Hangup();
             OnCallEnded?.Invoke(callId);
             // Drain buffer so next call starts clean.
-            while (_outboundAudio.TryDequeue(out _)) { }
+            while (_outboundFrames.TryDequeue(out _)) { }
         }
     }
 
     /// <summary>
-    /// Convert AI PCM24k bytes to µ-law 8kHz and enqueue into outbound buffer, 
-    /// with backlog trimming and OG-style logs.
+    /// Convert AI PCM24k bytes to µ-law 8kHz and enqueue as 160-byte frames.
+    /// Uses frame-based queuing for proper 20ms timing.
+    /// Buffer limit is ~5 seconds to handle full greetings without dropping.
     /// </summary>
     private void EnqueueAiPcm24(string callId, byte[] pcmBytes)
     {
@@ -299,23 +345,30 @@ public class SipAdaBridge : IDisposable
         // PCM16 8kHz → µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        Log($"🧠 [{callId}] AI→PCM24k {pcmBytes.Length}B → ulaw {ulaw.Length}B");
-
-        // Enqueue µ-law bytes
-        foreach (var b in ulaw)
-            _outboundAudio.Enqueue(b);
-
-        // Backlog control: keep roughly MaxOutboundBufferBytes
-        var current = _outboundAudio.Count;
-        if (current > MaxOutboundBufferBytes)
+        // Queue as 160-byte frames (20ms at 8kHz µ-law)
+        int framesAdded = 0;
+        for (int i = 0; i < ulaw.Length; i += 160)
         {
-            int toDrop = current - MaxOutboundBufferBytes;
-            int dropped = 0;
-            while (dropped < toDrop && _outboundAudio.TryDequeue(out _))
+            int len = Math.Min(160, ulaw.Length - i);
+            var frame = new byte[160];
+            Buffer.BlockCopy(ulaw, i, frame, 0, len);
+            _outboundFrames.Enqueue(frame);
+            framesAdded++;
+        }
+
+        int frameCount = _outboundFrames.Count;
+        Log($"🧠 [{callId}] AI→PCM24k {pcmBytes.Length}B → ulaw {ulaw.Length}B → {framesAdded} frames (queue: {frameCount})");
+
+        // Soft limit: if we exceed max frames, trim oldest
+        if (frameCount > MaxOutboundFrames)
+        {
+            int toTrim = frameCount - MaxOutboundFrames;
+            int trimmed = 0;
+            while (trimmed < toTrim && _outboundFrames.TryDequeue(out _))
             {
-                dropped++;
+                trimmed++;
             }
-            Log($"⚠️ [{callId}] Dropped {dropped}B, queue now ≈ {_outboundAudio.Count}B");
+            Log($"⚠️ [{callId}] Trimmed {trimmed} old frames, queue now: {_outboundFrames.Count}");
         }
     }
 
