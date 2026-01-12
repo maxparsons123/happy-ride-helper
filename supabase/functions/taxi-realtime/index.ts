@@ -4580,6 +4580,12 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
         }
         
         sessionReady = true;
+        
+        // CRITICAL: Clear any remnant audio buffer from bridge connection/previous call
+        // This prevents Whisper from transcribing stale audio as phantom utterances like "Bye"
+        console.log(`[${callId}] 🧹 Clearing audio buffer on session ready`);
+        openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+        
         socket.send(JSON.stringify({ type: "session_ready" }));
 
         // Broadcast call started (only once)
@@ -5042,9 +5048,7 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             /^silence\.?$/i,  // "Silence." - common Whisper hallucination on quiet audio
             /^\[silence\]$/i,  // "[Silence]" variant
             /^\.\.\.+$/,  // Just ellipsis
-            /^bye\.?$/i,  // "Bye." - echo from AI's goodbye, not a user utterance
-            /^goodbye\.?$/i,  // "Goodbye." - same echo issue
-            /^bye[\s-]?bye\.?$/i,  // "Bye-bye" or "Bye bye"
+            // NOTE: "bye" and "goodbye" are handled contextually below, not as unconditional hallucinations
             /thank you for watching/i,
             /thanks for watching/i,
             /please subscribe/i,
@@ -5069,6 +5073,17 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             /^\.+$/,  // Just dots
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
           ];
+          
+          // CONTEXTUAL BYE/GOODBYE FILTER:
+          // Only treat "bye" as hallucination if conversation is young (<2 user turns)
+          // If user has spoken substantively, they might genuinely be saying goodbye
+          const userTurnCount = transcriptHistory.filter(m => m.role === "user").length;
+          const byePatterns = [/^bye\.?$/i, /^goodbye\.?$/i, /^bye[\s-]?bye\.?$/i];
+          const isByePhrase = byePatterns.some(p => p.test(t));
+          if (isByePhrase && userTurnCount < 2) {
+            console.log(`[${callId}] 🚫 Hallucination detected: "${t}" appears too early (only ${userTurnCount} user turns)`);
+            return true;
+          }
           
           // Detect Welsh hallucinations - ONLY the specific pattern where Whisper
           // outputs Welsh sentence structure mixed with English addresses
