@@ -7,115 +7,122 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using SIPSorcery.Media;
-using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
+using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
+using SIPSorcery.Net;
 
-namespace TaxiSipBridge.Minimal;
+public enum SipTransportType { UDP, TCP }
 
-/// <summary>
-/// Fixed SIP-to-WebSocket bridge with proper RTP audio playback.
-/// Key fixes:
-/// 1. Uses SendRtpRaw() for direct µ-law RTP injection - NOT AudioExtrasSource
-/// 2. Proper 20ms frame pacing with Stopwatch
-/// 3. Binary WebSocket frames for inbound audio (33% bandwidth savings)
-/// 4. Anti-aliased resampling for better audio quality
-/// </summary>
-public class Program
+public class SipAdaBridgeConfig
 {
-    // Configuration - Update these for your setup
-    private const string EdgeFunctionUrl = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime";
-    private const string SipServer = "206.189.123.28";
-    private const string SipUsername = "max201";
-    private const string SipPassword = "qwe70954504118";
-    private const int SipPort = 5060;
+    public string SipServer { get; set; } = "206.189.123.28";
+    public int SipPort { get; set; } = 5060;
+    public string SipUser { get; set; } = "max201";
+    public string SipPassword { get; set; } = "qwe70954504118";
+    public string AdaWsUrl { get; set; } = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime";
+    public SipTransportType Transport { get; set; } = SipTransportType.UDP;
+}
 
-    private static ClientWebSocket? _webSocket;
-    private static RTPSession? _rtpSession;
-    private static CancellationTokenSource? _cts;
-    
-    // Frame-based queue for proper audio timing
-    private static readonly ConcurrentQueue<byte[]> _outboundFrames = new();
-    
-    // RTP timestamp tracking
-    private static uint _rtpTimestamp = 0;
-    private static ushort _rtpSeqNum = 0;
+public class SipAdaBridge : IDisposable
+{
+    private readonly SipAdaBridgeConfig _config;
+    private SIPTransport? _sipTransport;
+    private SIPRegistrationUserAgent? _regUserAgent;
+    private SIPUserAgent? _userAgent;
 
-    public static async Task Main(string[] args)
+    // Frame-based queue for proper 20ms timing (NOT byte-based)
+    private readonly ConcurrentQueue<byte[]> _outboundFrames = new();
+    
+    // RTP session for direct packet injection
+    private RTPSession? _rtpSession;
+    private uint _rtpTimestamp = 0;
+
+    // Max frames to buffer (~5 seconds = 250 frames at 20ms each)
+    // This allows Ada's full greeting to be buffered without dropping
+    private const int MaxOutboundFrames = 250;
+
+    public event Action? OnRegistered;
+    public event Action<string>? OnRegistrationFailed;
+    public event Action<string, string>? OnCallStarted;
+    public event Action<string>? OnCallEnded;
+    public event Action<string>? OnLog;
+
+    public SipAdaBridge(SipAdaBridgeConfig config)
     {
-        Console.WriteLine("🚕 Taxi SIP Bridge - Fixed RTP Audio");
-        Console.WriteLine("=====================================");
-
-        // Create SIP transport
-        var sipTransport = new SIPTransport();
-        sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, SipPort)));
-
-        // Register with SIP server
-        var regUserAgent = new SIPRegistrationUserAgent(
-            sipTransport,
-            SipUsername,
-            SipPassword,
-            SipServer,
-            120);
-
-        regUserAgent.RegistrationSuccessful += (uri, resp) =>
-        {
-            Console.WriteLine("📗 SIP REGISTER OK");
-        };
-
-        regUserAgent.RegistrationFailed += (uri, resp, err) =>
-        {
-            Console.WriteLine($"❌ SIP REGISTER FAILED: {err}");
-        };
-
-        // Create user agent
-        var userAgent = new SIPUserAgent(sipTransport, null);
-
-        // Handle incoming calls
-        userAgent.OnIncomingCall += async (ua, req) =>
-        {
-            Console.WriteLine($"📞 Incoming call from: {req.Header.From.FromURI}");
-            await HandleIncomingCall(ua, userAgent, req);
-        };
-
-        // Start registration
-        regUserAgent.Start();
-
-        Console.WriteLine($"🎧 Registering to {SipServer} as {SipUsername}...");
-        Console.WriteLine("Press Ctrl+C to exit");
-
-        // Keep running
-        var exitEvent = new ManualResetEventSlim(false);
-        Console.CancelKeyPress += (s, e) =>
-        {
-            e.Cancel = true;
-            exitEvent.Set();
-        };
-        exitEvent.Wait();
-
-        regUserAgent.Stop();
-        sipTransport.Shutdown();
+        _config = config;
     }
 
-    private static async Task HandleIncomingCall(SIPUserAgent ua, SIPUserAgent userAgent, SIPRequest req)
+    public void Start()
+    {
+        Log($"🚕 SipAdaBridge starting...");
+        Log($"➡ SIP Server: {_config.SipServer}:{_config.SipPort} ({_config.Transport})");
+        Log($"➡ SIP User: {_config.SipUser}");
+        Log($"➡ WS: {_config.AdaWsUrl}");
+        Log($"➡ Registering...");
+
+        _sipTransport = new SIPTransport();
+
+        switch (_config.Transport)
+        {
+            case SipTransportType.UDP:
+                var udpChannel = new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0));
+                _sipTransport.AddSIPChannel(udpChannel);
+                break;
+            case SipTransportType.TCP:
+                var tcpChannel = new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 0));
+                _sipTransport.AddSIPChannel(tcpChannel);
+                break;
+        }
+
+        _regUserAgent = new SIPRegistrationUserAgent(
+            _sipTransport,
+            _config.SipUser,
+            _config.SipPassword,
+            _config.SipServer,
+            120);
+
+        _regUserAgent.RegistrationSuccessful += (uri, resp) =>
+        {
+            Log("📗 SIP REGISTER OK");
+            OnRegistered?.Invoke();
+        };
+
+        _regUserAgent.RegistrationFailed += (uri, resp, err) =>
+        {
+            Log($"❌ SIP REGISTER FAILED: {err}");
+            OnRegistrationFailed?.Invoke(err);
+        };
+
+        _userAgent = new SIPUserAgent(_sipTransport, null);
+        _userAgent.OnIncomingCall += async (ua, req) =>
+        {
+            Log($"📞 Incoming INVITE from {req.Header.From.FromURI}");
+            await HandleIncomingCall(ua, req);
+        };
+
+        _regUserAgent.Start();
+        Log($"🟢 Bridge Ready (waiting for calls)");
+    }
+
+    private async Task HandleIncomingCall(SIPUserAgent ua, SIPRequest req)
     {
         var callId = Guid.NewGuid().ToString("N")[..8];
         var caller = req.Header.From.FromURI.User ?? "unknown";
-        
-        Console.WriteLine($"📞 [{callId}] Call from {caller}");
-        
-        // Clear stale audio from previous calls
+
+        Log($"📞 [{callId}] Call from {caller}");
+        OnCallStarted?.Invoke(callId, caller);
+
+        // Clear any stale audio from previous call
         while (_outboundFrames.TryDequeue(out _)) { }
         _rtpTimestamp = 0;
-        _rtpSeqNum = 0;
+
+        var cts = new CancellationTokenSource();
 
         try
         {
-            _cts = new CancellationTokenSource();
-            
-            // Create media session with µ-law codec - PCMU is payload type 0
+            // Create media session with µ-law codec
             var mediaSession = new VoIPMediaSession(new MediaEndPoints
             {
                 AudioSource = new AudioExtrasSource(
@@ -124,391 +131,383 @@ public class Program
                 ),
                 AudioSink = new AudioExtrasSource(new AudioEncoder())
             });
-
+            
             mediaSession.AcceptRtpFromAny = true;
-
-            // Get the RTP session for direct packet injection
+            
+            // Get RTP session for direct packet injection
             _rtpSession = mediaSession.RtpSession;
 
-            // Subscribe to RTP audio events from caller
-            _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
+            var uas = ua.AcceptCall(req);
+            bool answered = await ua.Answer(uas, mediaSession);
 
-            // Answer the call
-            var uas = userAgent.AcceptCall(req);
-            var result = await userAgent.Answer(uas, mediaSession);
-
-            if (!result)
+            if (!answered)
             {
-                Console.WriteLine($"❌ [{callId}] Failed to answer call");
+                Log($"❌ [{callId}] Failed to answer call");
+                OnCallEnded?.Invoke(callId);
                 return;
             }
 
-            Console.WriteLine($"✅ [{callId}] Call answered");
-            Console.WriteLine($"🎛️ [{callId}] RTP session started - using direct SendRtpRaw()");
+            Log($"📗 [{callId}] Call answered");
+            Log($"🎛 [{callId}] RTP session started");
 
-            // Connect to edge function
-            _webSocket = new ClientWebSocket();
-            var wsUrl = $"{EdgeFunctionUrl}?caller={Uri.EscapeDataString(caller)}";
-            Console.WriteLine($"🔌 [{callId}] Connecting to {wsUrl}");
-            
-            await _webSocket.ConnectAsync(new Uri(wsUrl), _cts.Token);
-            Console.WriteLine($"✅ [{callId}] WebSocket connected");
-
-            // Handle call hangup
-            userAgent.OnCallHungup += (dialog) =>
+            ua.OnCallHungup += (d) =>
             {
-                Console.WriteLine($"📵 [{callId}] Call ended");
-                _cts?.Cancel();
+                Log($"📕 [{callId}] Caller hung up");
+                OnCallEnded?.Invoke(callId);
+                cts.Cancel();
             };
 
-            // Start receive task
-            var receiveTask = Task.Run(() => ReceiveFromEdgeFunction(callId));
+            using var ws = new ClientWebSocket();
             
-            // Start playback task with proper RTP injection
-            var playbackTask = Task.Run(() => PlaybackWithRtpRaw(callId));
+            // Add caller as query param for edge function
+            var wsUri = new Uri($"{_config.AdaWsUrl}?caller={Uri.EscapeDataString(caller)}");
+            Log($"🔌 [{callId}] Connecting WS → {wsUri}");
+            await ws.ConnectAsync(wsUri, cts.Token);
+            Log($"🟢 [{callId}] WS Connected");
 
-            // Wait for call to end
-            while (!_cts.Token.IsCancellationRequested && 
-                   _webSocket?.State == WebSocketState.Open &&
-                   userAgent.IsCallActive)
+            // === SIP → WS (Caller → AI) ===
+            _rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
-                await Task.Delay(500);
-            }
+                if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
+                    return;
 
-            await Task.WhenAny(receiveTask, playbackTask);
+                var ulaw = rtp.Payload;
+                if (ulaw == null || ulaw.Length == 0) return;
+
+                // µ-law 8kHz → PCM16 24kHz
+                var pcm8k = AudioCodecs.MuLawDecode(ulaw);
+                var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+                var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+                // Send raw PCM24k as BINARY frame (per edge spec)
+                _ = ws.SendAsync(
+                    new ArraySegment<byte>(pcmBytes),
+                    WebSocketMessageType.Binary,
+                    true,
+                    CancellationToken.None);
+            };
+
+            // === WS → Queue (AI → Buffer) ===
+            _ = Task.Run(async () =>
+            {
+                var buffer = new byte[1024 * 128];
+                while (ws.State == WebSocketState.Open && !cts.Token.IsCancellationRequested)
+                {
+                    WebSocketReceiveResult result;
+                    try
+                    {
+                        result = await ws.ReceiveAsync(buffer, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] WS receive error: {ex.Message}");
+                        break;
+                    }
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        Log($"🔌 [{callId}] WS closed by server");
+                        break;
+                    }
+
+                    if (result.MessageType != WebSocketMessageType.Text)
+                        continue;
+
+                    var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    using var doc = JsonDocument.Parse(json);
+
+                    if (!doc.RootElement.TryGetProperty("type", out var t))
+                        continue;
+
+                    var typeStr = t.GetString();
+
+                    // OpenAI realtime style: { "type": "response.audio.delta", "delta": "<base64 pcm24k>" }
+                    if (typeStr == "response.audio.delta" &&
+                        doc.RootElement.TryGetProperty("delta", out var deltaEl))
+                    {
+                        var base64 = deltaEl.GetString();
+                        if (!string.IsNullOrEmpty(base64))
+                        {
+                            var pcmBytes = Convert.FromBase64String(base64);
+                            EnqueueAiPcm24(callId, pcmBytes);
+                        }
+                    }
+                    // Simple audio message: { "type": "audio", "audio": "<base64 pcm24k>" }
+                    else if (typeStr == "audio" &&
+                             doc.RootElement.TryGetProperty("audio", out var audioEl))
+                    {
+                        var base64 = audioEl.GetString();
+                        if (!string.IsNullOrEmpty(base64))
+                        {
+                            var pcmBytes = Convert.FromBase64String(base64);
+                            EnqueueAiPcm24(callId, pcmBytes);
+                        }
+                    }
+                    // Transcript delta
+                    else if (typeStr == "response.audio_transcript.delta" &&
+                             doc.RootElement.TryGetProperty("delta", out var textEl))
+                    {
+                        var text = textEl.GetString();
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            Console.Write(text); // Stream transcript to console
+                        }
+                    }
+                }
+                Log($"🔚 [{callId}] WS read loop ended");
+            });
+
+            // === Buffer → SIP (AI → Caller) using SendRtpRaw ===
+            _ = Task.Run(async () =>
+            {
+                var stopwatch = Stopwatch.StartNew();
+                long nextFrameTime = 0;
+                int framesPlayed = 0;
+                
+                Log($"🔊 [{callId}] Playback loop started - using SendRtpRaw()");
+
+                while (!cts.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        // Wait until it's time for the next frame (strict 20ms pacing)
+                        long now = stopwatch.ElapsedMilliseconds;
+                        if (now < nextFrameTime)
+                        {
+                            int delay = (int)(nextFrameTime - now);
+                            if (delay > 0 && delay < 100)
+                            {
+                                await Task.Delay(delay, cts.Token);
+                            }
+                        }
+
+                        // Try to dequeue and send a frame
+                        if (_outboundFrames.TryDequeue(out var frame) && _rtpSession != null)
+                        {
+                            // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
+                            _rtpSession.SendRtpRaw(
+                                SDPMediaTypesEnum.audio,
+                                frame,
+                                _rtpTimestamp,
+                                0,  // Marker bit
+                                0   // Payload type 0 = PCMU (µ-law)
+                            );
+                            
+                            _rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
+                            framesPlayed++;
+                            
+                            // Log every 25 frames (500ms) to reduce spam
+                            if (framesPlayed % 25 == 0)
+                            {
+                                Log($"🔊 [{callId}] Played {framesPlayed} frames, queue: {_outboundFrames.Count}");
+                            }
+                            
+                            nextFrameTime = stopwatch.ElapsedMilliseconds + 20;
+                        }
+                        else
+                        {
+                            // No audio available, wait a bit
+                            await Task.Delay(5, cts.Token);
+                            nextFrameTime = stopwatch.ElapsedMilliseconds;
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] Playback error: {ex.Message}");
+                    }
+                }
+                
+                Log($"🔚 [{callId}] Playback loop ended - played {framesPlayed} total frames");
+            });
+
+            while (!cts.IsCancellationRequested && ws.State == WebSocketState.Open)
+                await Task.Delay(500);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ [{callId}] Error: {ex.Message}");
+            Log($"❌ [{callId}] Error: {ex.Message}");
         }
         finally
         {
-            Console.WriteLine($"📴 [{callId}] Cleanup");
-            _cts?.Cancel();
-            _webSocket?.Dispose();
-            _webSocket = null;
+            Log($"📴 [{callId}] Hangup & cleanup");
+            ua.Hangup();
+            OnCallEnded?.Invoke(callId);
             _rtpSession = null;
+            
+            // Drain buffer so next call starts clean
+            while (_outboundFrames.TryDequeue(out _)) { }
         }
     }
 
     /// <summary>
-    /// Called when RTP audio packet is received from caller.
-    /// Sends as BINARY WebSocket frame for 33% bandwidth savings.
+    /// Convert AI PCM24k bytes to µ-law 8kHz and enqueue as 160-byte frames.
+    /// Uses frame-based queuing for proper 20ms timing.
+    /// Buffer limit is ~5 seconds to handle full greetings without dropping.
     /// </summary>
-    private static async void OnRtpPacketReceived(IPEndPoint remoteEP, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    private void EnqueueAiPcm24(string callId, byte[] pcmBytes)
     {
-        if (mediaType != SDPMediaTypesEnum.audio || _webSocket?.State != WebSocketState.Open)
-            return;
-
-        try
-        {
-            byte[] ulawData = rtpPacket.Payload;
-            byte[] pcm24k = ConvertUlawToPcm24k(ulawData);
-
-            // Send as BINARY frame - 33% less bandwidth than base64
-            await _webSocket.SendAsync(
-                new ArraySegment<byte>(pcm24k),
-                WebSocketMessageType.Binary,
-                true,
-                CancellationToken.None
-            );
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"⚠️ RTP→WS error: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Receive audio from edge function and queue for playback
-    /// </summary>
-    private static async Task ReceiveFromEdgeFunction(string callId)
-    {
-        var buffer = new byte[32768];
-
-        while (_webSocket?.State == WebSocketState.Open && !_cts!.Token.IsCancellationRequested)
-        {
-            try
-            {
-                var result = await _webSocket.ReceiveAsync(buffer, _cts.Token);
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    Console.WriteLine($"🔌 [{callId}] WebSocket closed");
-                    break;
-                }
-
-                if (result.MessageType == WebSocketMessageType.Text)
-                {
-                    var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    using var doc = JsonDocument.Parse(json);
-                    
-                    if (doc.RootElement.TryGetProperty("type", out var typeEl))
-                    {
-                        var type = typeEl.GetString();
-
-                        // Handle audio from AI - response.audio.delta format
-                        if (type == "response.audio.delta" && 
-                            doc.RootElement.TryGetProperty("delta", out var deltaEl))
-                        {
-                            var base64Audio = deltaEl.GetString();
-                            if (string.IsNullOrEmpty(base64Audio)) continue;
-
-                            var pcmData = Convert.FromBase64String(base64Audio);
-                            var ulawData = ConvertPcm24kToUlaw(pcmData);
-
-                            // Queue as 160-byte frames (20ms at 8kHz µ-law)
-                            for (int i = 0; i < ulawData.Length; i += 160)
-                            {
-                                int len = Math.Min(160, ulawData.Length - i);
-                                var frame = new byte[160];
-                                Buffer.BlockCopy(ulawData, i, frame, 0, len);
-                                _outboundFrames.Enqueue(frame);
-                            }
-
-                            Console.WriteLine($"🧠 [{callId}] Queued {ulawData.Length}B µ-law → {_outboundFrames.Count} frames");
-                        }
-                        // Handle transcripts
-                        else if (type == "response.audio_transcript.delta" &&
-                                 doc.RootElement.TryGetProperty("delta", out var textEl))
-                        {
-                            Console.Write(textEl.GetString());
-                        }
-                        // Also handle simple "audio" type from edge function wrapper
-                        else if (type == "audio" && 
-                                 doc.RootElement.TryGetProperty("audio", out var audioEl))
-                        {
-                            var base64Audio = audioEl.GetString();
-                            if (string.IsNullOrEmpty(base64Audio)) continue;
-
-                            var pcmData = Convert.FromBase64String(base64Audio);
-                            var ulawData = ConvertPcm24kToUlaw(pcmData);
-
-                            for (int i = 0; i < ulawData.Length; i += 160)
-                            {
-                                int len = Math.Min(160, ulawData.Length - i);
-                                var frame = new byte[160];
-                                Buffer.BlockCopy(ulawData, i, frame, 0, len);
-                                _outboundFrames.Enqueue(frame);
-                            }
-                            
-                            Console.WriteLine($"🧠 [{callId}] Queued {ulawData.Length}B µ-law → {_outboundFrames.Count} frames");
-                        }
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ [{callId}] Receive error: {ex.Message}");
-            }
-        }
-
-        Console.WriteLine($"🔚 [{callId}] Receive loop ended");
-    }
-
-    /// <summary>
-    /// Play audio to caller using SendRtpRaw for direct RTP packet injection.
-    /// This bypasses AudioExtrasSource which doesn't work for µ-law playback.
-    /// Maintains strict 20ms timing between frames.
-    /// </summary>
-    private static async Task PlaybackWithRtpRaw(string callId)
-    {
-        var stopwatch = Stopwatch.StartNew();
-        long nextFrameTime = 0;
-        int framesPlayed = 0;
-
-        Console.WriteLine($"🔊 [{callId}] Playback loop started - using SendRtpRaw()");
-
-        while (!_cts!.Token.IsCancellationRequested)
-        {
-            try
-            {
-                // Wait until it's time for the next frame
-                long now = stopwatch.ElapsedMilliseconds;
-                if (now < nextFrameTime)
-                {
-                    int delay = (int)(nextFrameTime - now);
-                    if (delay > 0 && delay < 100)
-                    {
-                        await Task.Delay(delay, _cts.Token);
-                    }
-                }
-
-                // Try to dequeue and send a frame
-                if (_outboundFrames.TryDequeue(out var frame) && _rtpSession != null)
-                {
-                    // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
-                    // The RTP session handles the packet construction
-                    _rtpSession.SendRtpRaw(
-                        SDPMediaTypesEnum.audio,
-                        frame,
-                        _rtpTimestamp,
-                        0,  // Marker bit - 0 for continuation
-                        0   // Payload type 0 = PCMU (µ-law)
-                    );
-                    
-                    _rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
-                    _rtpSeqNum++;
-                    framesPlayed++;
-                    
-                    // Log every 25 frames (500ms)
-                    if (framesPlayed % 25 == 0)
-                    {
-                        Console.WriteLine($"🔊 [{callId}] Played {framesPlayed} frames, queue: {_outboundFrames.Count}");
-                    }
-                    
-                    nextFrameTime = stopwatch.ElapsedMilliseconds + 20; // Schedule next frame in 20ms
-                }
-                else
-                {
-                    // No audio available, wait a bit and reset timing
-                    await Task.Delay(5, _cts.Token);
-                    nextFrameTime = stopwatch.ElapsedMilliseconds;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ [{callId}] Playback error: {ex.Message}");
-            }
-        }
-
-        Console.WriteLine($"🔚 [{callId}] Playback loop ended - played {framesPlayed} total frames");
-    }
-
-    #region Audio Conversion
-
-    /// <summary>
-    /// Convert µ-law 8kHz to PCM16 24kHz (3x upsample with interpolation)
-    /// </summary>
-    private static byte[] ConvertUlawToPcm24k(byte[] ulawData)
-    {
-        // Decode µ-law to PCM16 at 8kHz
-        short[] pcm8k = new short[ulawData.Length];
-        for (int i = 0; i < ulawData.Length; i++)
-        {
-            pcm8k[i] = MuLawDecode(ulawData[i]);
-        }
-
-        // Upsample 8kHz -> 24kHz with linear interpolation
-        short[] pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length - 1; i++)
-        {
-            short s0 = pcm8k[i];
-            short s1 = pcm8k[i + 1];
-
-            pcm24k[i * 3] = s0;
-            pcm24k[i * 3 + 1] = (short)((s0 * 2 + s1) / 3);
-            pcm24k[i * 3 + 2] = (short)((s0 + s1 * 2) / 3);
-        }
+        // Bytes → shorts (PCM16)
+        var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
         
-        // Handle last sample
-        int lastIdx = (pcm8k.Length - 1) * 3;
-        pcm24k[lastIdx] = pcm8k[^1];
-        pcm24k[lastIdx + 1] = pcm8k[^1];
-        pcm24k[lastIdx + 2] = pcm8k[^1];
+        // 24kHz → 8kHz downsample
+        var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
+        
+        // PCM16 8kHz → µ-law
+        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        // Convert to bytes (little-endian)
-        byte[] result = new byte[pcm24k.Length * 2];
-        Buffer.BlockCopy(pcm24k, 0, result, 0, result.Length);
-        return result;
-    }
-
-    /// <summary>
-    /// Convert PCM16 24kHz to µ-law 8kHz (3x downsample with averaging)
-    /// </summary>
-    private static byte[] ConvertPcm24kToUlaw(byte[] pcmData)
-    {
-        // Convert bytes to shorts
-        short[] pcm24k = new short[pcmData.Length / 2];
-        Buffer.BlockCopy(pcmData, 0, pcm24k, 0, pcmData.Length);
-
-        // Downsample 24kHz -> 8kHz with averaging for anti-aliasing
-        short[] pcm8k = new short[pcm24k.Length / 3];
-        for (int i = 0; i < pcm8k.Length; i++)
+        // Queue as 160-byte frames (20ms at 8kHz µ-law)
+        for (int i = 0; i < ulaw.Length; i += 160)
         {
-            int idx = i * 3;
-            if (idx + 2 < pcm24k.Length)
-            {
-                // Average 3 samples for anti-aliasing
-                pcm8k[i] = (short)((pcm24k[idx] + pcm24k[idx + 1] + pcm24k[idx + 2]) / 3);
-            }
-            else
-            {
-                pcm8k[i] = pcm24k[idx];
-            }
+            int len = Math.Min(160, ulaw.Length - i);
+            var frame = new byte[160];
+            Buffer.BlockCopy(ulaw, i, frame, 0, len);
+            _outboundFrames.Enqueue(frame);
         }
 
-        // Encode to µ-law
-        byte[] ulawData = new byte[pcm8k.Length];
-        for (int i = 0; i < pcm8k.Length; i++)
+        int frameCount = _outboundFrames.Count;
+        Log($"🧠 [{callId}] AI audio: {pcmBytes.Length}B PCM24k → {ulaw.Length}B µ-law → {frameCount} frames queued");
+
+        // Soft limit: if we exceed max frames, trim oldest (shouldn't happen with proper pacing)
+        if (frameCount > MaxOutboundFrames)
         {
-            ulawData[i] = MuLawEncode(pcm8k[i]);
-        }
-
-        return ulawData;
-    }
-
-    #endregion
-
-    #region µ-law Codec with Lookup Tables
-
-    private static readonly short[] MuLawDecompressTable = new short[256];
-    private static readonly byte[] MuLawCompressTable = new byte[65536];
-
-    static Program()
-    {
-        // Initialize µ-law lookup tables for fast conversion
-        for (int i = 0; i < 256; i++)
-        {
-            MuLawDecompressTable[i] = MuLawDecodeValue((byte)i);
-        }
-
-        for (int i = short.MinValue; i <= short.MaxValue; i++)
-        {
-            MuLawCompressTable[(ushort)i] = MuLawEncodeValue((short)i);
+            int toTrim = frameCount - MaxOutboundFrames;
+            for (int i = 0; i < toTrim && _outboundFrames.TryDequeue(out _); i++) { }
+            Log($"⚠️ [{callId}] Trimmed {toTrim} old frames, queue now: {_outboundFrames.Count}");
         }
     }
 
-    private static short MuLawDecode(byte ulaw) => MuLawDecompressTable[ulaw];
-    private static byte MuLawEncode(short pcm) => MuLawCompressTable[(ushort)pcm];
-
-    private static short MuLawDecodeValue(byte ulaw)
+    private void Log(string m)
     {
-        ulaw = (byte)~ulaw;
-        int sign = (ulaw & 0x80);
-        int exponent = (ulaw >> 4) & 0x07;
-        int mantissa = ulaw & 0x0F;
-        int sample = (mantissa << 4) + 8;
-        sample <<= exponent;
-        sample -= 128;
-        return (short)(sign != 0 ? -sample : sample);
+        string line = $"{DateTime.Now:HH:mm:ss.fff} {m}";
+        OnLog?.Invoke(line);
+        ConsoleLog(line);
     }
 
-    private static byte MuLawEncodeValue(short pcm)
+    private void ConsoleLog(string msg)
     {
-        const int BIAS = 0x84;
-        const int MAX = 32635;
-
-        int sign = (pcm >> 8) & 0x80;
-        if (sign != 0) pcm = (short)-pcm;
-        if (pcm > MAX) pcm = MAX;
-
-        pcm = (short)(pcm + BIAS);
-        int exponent = 7;
-        for (int expMask = 0x4000; (pcm & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-
-        int mantissa = (pcm >> (exponent + 3)) & 0x0F;
-        byte ulawByte = (byte)(sign | (exponent << 4) | mantissa);
-        return (byte)~ulawByte;
+        if (msg.Contains("📗")) Console.ForegroundColor = ConsoleColor.Green;
+        else if (msg.Contains("📕") || msg.Contains("❌")) Console.ForegroundColor = ConsoleColor.Red;
+        else if (msg.Contains("📞")) Console.ForegroundColor = ConsoleColor.Cyan;
+        else if (msg.Contains("🧠") || msg.Contains("🎤")) Console.ForegroundColor = ConsoleColor.Yellow;
+        else if (msg.Contains("🔊")) Console.ForegroundColor = ConsoleColor.Magenta;
+        else Console.ForegroundColor = ConsoleColor.Gray;
+        Console.WriteLine(msg);
+        Console.ResetColor();
     }
 
-    #endregion
+    public void Stop()
+    {
+        Log("🛑 Bridge stopping...");
+        _regUserAgent?.Stop();
+        _sipTransport?.Shutdown();
+        Log("🛑 Bridge stopped");
+    }
+
+    public void Dispose() => Stop();
+}
+
+// --- AUDIO HELPERS ---
+public static class AudioCodecs
+{
+    public static short[] MuLawDecode(byte[] data)
+    {
+        var pcm = new short[data.Length];
+        for (int i = 0; i < data.Length; i++)
+        {
+            int mulaw = ~data[i];
+            int sign = (mulaw & 0x80) != 0 ? -1 : 1;
+            int exponent = (mulaw >> 4) & 0x07;
+            int mantissa = mulaw & 0x0F;
+            pcm[i] = (short)(sign * (((mantissa << 3) + 0x84) << exponent) - 0x84);
+        }
+        return pcm;
+    }
+
+    public static byte[] MuLawEncode(short[] pcm)
+    {
+        var ulaw = new byte[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            int s = pcm[i];
+            int mask = 0x80, seg = 8;
+            if (s < 0) { s = -s; mask = 0x00; }
+            s += 0x84;
+            if (s > 0x7FFF) s = 0x7FFF;
+            for (int j = 0x4000; (s & j) == 0 && seg > 0; j >>= 1) seg--;
+            ulaw[i] = (byte)~(mask | (seg << 4) | ((s >> (seg + 3)) & 0x0F));
+        }
+        return ulaw;
+    }
+
+    public static short[] Resample(short[] input, int from, int to)
+    {
+        if (from == to) return input;
+        double ratio = (double)from / to;
+        var output = new short[(int)(input.Length / ratio)];
+        for (int i = 0; i < output.Length; i++)
+            output[i] = input[Math.Min((int)(i * ratio), input.Length - 1)];
+        return output;
+    }
+
+    public static short[] BytesToShorts(byte[] b)
+    {
+        var s = new short[b.Length / 2];
+        for (int i = 0; i < s.Length; i++)
+            s[i] = BitConverter.ToInt16(b, i * 2);
+        return s;
+    }
+
+    public static byte[] ShortsToBytes(short[] s)
+    {
+        var b = new byte[s.Length * 2];
+        Buffer.BlockCopy(s, 0, b, 0, b.Length);
+        return b;
+    }
+}
+
+// --- PROGRAM ENTRY POINT ---
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        var config = new SipAdaBridgeConfig();
+        
+        // Allow command-line overrides
+        foreach (var arg in args)
+        {
+            if (arg.StartsWith("--server="))
+                config.SipServer = arg.Substring("--server=".Length);
+            else if (arg.StartsWith("--user="))
+                config.SipUser = arg.Substring("--user=".Length);
+            else if (arg.StartsWith("--password="))
+                config.SipPassword = arg.Substring("--password=".Length);
+            else if (arg.StartsWith("--ws="))
+                config.AdaWsUrl = arg.Substring("--ws=".Length);
+            else if (arg == "--tcp")
+                config.Transport = SipTransportType.TCP;
+        }
+
+        using var bridge = new SipAdaBridge(config);
+        bridge.Start();
+
+        Console.WriteLine("Press Ctrl+C to exit...");
+        
+        var exitEvent = new ManualResetEventSlim(false);
+        Console.CancelKeyPress += (s, e) =>
+        {
+            e.Cancel = true;
+            exitEvent.Set();
+        };
+        exitEvent.Wait();
+
+        bridge.Stop();
+    }
 }
