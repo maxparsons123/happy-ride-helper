@@ -8030,9 +8030,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
     // CRITICAL: Close OpenAI connection FIRST to stop Ada from generating more audio
     // This prevents Ada from continuing to talk after caller hangs up
-    if (openaiWs?.readyState === WebSocket.OPEN) {
-      console.log(`[${callId}] 🛑 Closing OpenAI WebSocket to stop Ada`);
-      openaiWs.close();
+    // Close in any state (OPEN or CONNECTING)
+    if (openaiWs) {
+      const wsState = openaiWs.readyState;
+      console.log(`[${callId}] 🛑 Closing OpenAI WebSocket (state: ${wsState}) to stop Ada`);
+      try {
+        openaiWs.close();
+      } catch (e) {
+        console.log(`[${callId}] OpenAI WebSocket close error (expected):`, e);
+      }
     }
 
     // Clear all timers to prevent any delayed actions
