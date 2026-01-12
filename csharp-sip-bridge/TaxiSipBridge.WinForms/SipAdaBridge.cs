@@ -124,6 +124,25 @@ public class SipAdaBridge : IDisposable
         rtpSession.AcceptRtpFromAny = true;
 
         var uas = ua.AcceptCall(req);
+
+        // Send provisional response so softphones (e.g. Zoiper) play local ringback.
+        try
+        {
+            if (_sipTransport != null)
+            {
+                var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
+                await _sipTransport.SendResponseAsync(ringing);
+                Log($"☎️ [{callId}] Sent 180 Ringing");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Failed to send 180 Ringing: {ex.Message}");
+        }
+
+        // Give the caller a moment to hear ringback before we answer.
+        await Task.Delay(1000);
+
         bool answered = await ua.Answer(uas, rtpSession);
 
         if (!answered)
@@ -259,9 +278,9 @@ public class SipAdaBridge : IDisposable
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
 
-                // Set audio source to external mode for real-time feeding
-                audioSource.SetSource(AudioSourcesEnum.None);
-
+                // Note: do NOT call audioSource.SetSource(AudioSourcesEnum.None) here.
+                // Some SIPSorcery builds throw NotImplementedException for that combination.
+                // We feed PCM frames directly via ExternalAudioSourceRawSample below.
                 while (!cts.Token.IsCancellationRequested)
                 {
                     try
@@ -310,7 +329,7 @@ public class SipAdaBridge : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        Log($"⚠️ [{callId}] Playback error: {ex.Message}");
+                        Log($"⚠️ [{callId}] Playback error: {ex}");
                     }
                 }
 
