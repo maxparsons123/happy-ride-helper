@@ -112,8 +112,7 @@ public class SipAdaBridge : IDisposable
         // Clear any stale audio from previous call
         while (_outboundFrames.TryDequeue(out _)) { }
 
-        // RTP state for direct packet injection
-        uint rtpTimestamp = 0;
+        // RTP state handled by the RTP session helpers (sequence/timestamp managed internally).
 
         // Setup audio source with encoder (like your working code)
         var audioSource = new AudioExtrasSource(new AudioEncoder());
@@ -297,17 +296,15 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send raw RTP packet with µ-law payload directly on VoIPMediaSession
-                            // Payload type 0 = PCMU (µ-law), 160 samples = 20ms at 8kHz
-                            rtpSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
-                                frame,
-                                rtpTimestamp,
-                                0,  // Marker bit
-                                0   // Payload type 0 = PCMU (µ-law)
+                            // Send an encoded G.711 µ-law frame via the RTP session helpers.
+                            // This avoids manual RTP packet construction issues that can result
+                            // in "audio packets seen" but nothing audible in Zoiper.
+                            rtpSession.SendAudioFrame(
+                                (uint)frame.Length * 8, // timestamp increment used by SIPSorcery
+                                (int)SDPWellKnownMediaFormatsEnum.PCMU,
+                                frame
                             );
 
-                            rtpTimestamp += 160;
                             framesPlayed++;
 
                             if (framesPlayed % 25 == 0)
