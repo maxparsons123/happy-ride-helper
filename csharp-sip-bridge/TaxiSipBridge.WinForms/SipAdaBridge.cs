@@ -112,14 +112,12 @@ public class SipAdaBridge : IDisposable
         // Clear any stale audio from previous call
         while (_outboundFrames.TryDequeue(out _)) { }
 
-        // RTP state handled by the RTP session helpers (sequence/timestamp managed internally).
+        // RTP timestamp should start at a random value (per RTP best practice).
+        uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
 
-        // Setup audio source with encoder (like your working code)
-        var audioSource = new AudioExtrasSource(new AudioEncoder());
-        audioSource.RestrictFormats(x => x.Codec == AudioCodecsEnum.PCMU);
-        
-        var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
-        var rtpSession = new VoIPMediaSession(mediaEndPoints);
+        // Create a VoIP media session restricted to PCMU (G.711 µ-law).
+        // Keeping this consistent with Zoiper avoids "RTP packets but silent audio".
+        var rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
         rtpSession.AcceptRtpFromAny = true;
 
         var uas = ua.AcceptCall(req);
@@ -296,15 +294,17 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send an encoded G.711 µ-law frame via the RTP session helpers.
-                            // This avoids manual RTP packet construction issues that can result
-                            // in "audio packets seen" but nothing audible in Zoiper.
-                            rtpSession.SendAudioFrame(
-                                (uint)frame.Length * 8, // timestamp increment used by SIPSorcery
-                                (int)SDPWellKnownMediaFormatsEnum.PCMU,
-                                frame
+                            // Send raw RTP with PCMU payload type 0.
+                            // 160 bytes = 20ms at 8kHz for G.711.
+                            rtpSession.SendRtpRaw(
+                                SDPMediaTypesEnum.audio,
+                                frame,
+                                rtpTimestamp,
+                                0, // marker
+                                0  // payload type: PCMU
                             );
 
+                            rtpTimestamp += 160;
                             framesPlayed++;
 
                             if (framesPlayed % 25 == 0)
