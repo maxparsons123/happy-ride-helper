@@ -141,8 +141,9 @@ public class SipAdaBridge : IDisposable
             Log($"⚠️ [{callId}] Failed to send 180 Ringing: {ex.Message}");
         }
 
-        // Give the caller a moment to hear ringback before we answer.
-        await Task.Delay(1000);
+        // Give the caller a brief moment to hear ringback before we answer.
+        // Reduced from 1000ms to 300ms for faster response.
+        await Task.Delay(300);
 
         bool answered = await ua.Answer(uas, rtpSession);
 
