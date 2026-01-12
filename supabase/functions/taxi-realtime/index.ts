@@ -507,7 +507,7 @@ serve(async (req) => {
         // VAD & Voice Settings with defaults
         vad_threshold: data.vad_threshold ?? 0.45,
         vad_prefix_padding_ms: data.vad_prefix_padding_ms ?? 650,
-        vad_silence_duration_ms: data.vad_silence_duration_ms ?? 1200,
+        vad_silence_duration_ms: data.vad_silence_duration_ms ?? 1000,
         allow_interruptions: data.allow_interruptions ?? true,
         silence_timeout_ms: data.silence_timeout_ms ?? 8000,
         no_reply_timeout_ms: data.no_reply_timeout_ms ?? 9000,
@@ -4428,7 +4428,7 @@ Rules:
               type: "server_vad",
               threshold: agentConfig?.vad_threshold ?? 0.45,           // Agent's VAD sensitivity
               prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 650,    // Agent's lead-in capture
-              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 1200, // Agent's silence wait
+              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 1000, // Agent's silence wait
               create_response: false,    // Manual response.create after transcription.completed
               interrupt_response: agentConfig?.allow_interruptions ?? true   // Agent's barge-in setting
             },
