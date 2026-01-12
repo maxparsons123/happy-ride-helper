@@ -159,7 +159,10 @@ GREETING FLOW
 - For customers WITH AN ACTIVE BOOKING: "Hello [NAME]! I can see you have an active booking from [PICKUP] to [DESTINATION]. Would you like to keep that booking, or would you like to cancel it?"
   - If they say "cancel" or "cancel it": Use the cancel_booking tool IMMEDIATELY, then say "That's cancelled for you. Would you like to book a new taxi instead?"
   - If they say "keep" or "no" or "leave it": Say "No problem, your booking is still active. Is there anything else I can help with?"
-  - If they want to CHANGE the booking: Use modify_booking tool with the changes
+  - If they want to CHANGE/UPDATE/CORRECT the booking (e.g., "wrong address", "actually it's 52A", "can you update the pickup", "change it to..."):
+    → Call modify_booking IMMEDIATELY with the new details
+    → Say: "I've updated that to [NEW ADDRESS]. Your booking is now from [UPDATED PICKUP] to [DESTINATION]."
+    → DO NOT cancel and rebook - just modify!
 - For RETURNING customers WITH a usual destination (but NO active booking): "Hello [NAME]! Lovely to hear from you again. Shall I book you a taxi to [LAST_DESTINATION], or are you heading somewhere different today?"
 - For RETURNING customers WITHOUT a usual destination: "Hello [NAME]! Lovely to hear from you again. How can I help with your travels today?"
 - For NEW customers: "Hello and welcome to 247 Radio Carz! My name's Ada. What's your name please?"
@@ -4857,13 +4860,13 @@ Rules:
               {
                 type: "function",
                 name: "modify_booking",
-                description: "Modify an active booking. Use this when the customer wants to change their pickup, destination, or number of passengers without cancelling the entire booking.",
+                description: "IMMEDIATELY modify an active booking when the customer wants to correct or update ANY detail. Use this when they say things like: 'wrong address', 'that's not right', 'actually it's...', 'can you update...', 'change the pickup to...', 'it should be 52A not 52'. DO NOT cancel and rebook - use modify_booking to update in place. This preserves booking history and is faster for the customer.",
                 parameters: {
                   type: "object",
                   properties: {
-                    new_pickup: { type: "string", description: "New pickup address (only if customer wants to change it)" },
-                    new_destination: { type: "string", description: "New destination address (only if customer wants to change it)" },
-                    new_passengers: { type: "integer", description: "New number of passengers (only if customer wants to change it)" },
+                    new_pickup: { type: "string", description: "New pickup address - use when customer corrects the pickup (e.g., '52A David Road' instead of '52 David Road')" },
+                    new_destination: { type: "string", description: "New destination address - use when customer corrects the destination" },
+                    new_passengers: { type: "integer", description: "New number of passengers - use when customer corrects passenger count" },
                     new_vehicle_type: { type: "string", description: "New vehicle type (e.g., '6 seater', 'MPV', 'estate') - only if customer requests it" }
                   },
                   required: []
