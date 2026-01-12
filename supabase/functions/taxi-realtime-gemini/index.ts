@@ -55,6 +55,7 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   
   const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY"); // For Groq Whisper STT
+  const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY"); // For Deepgram Nova STT
   const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY"); // For TTS
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY"); // For Gemini
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -66,6 +67,7 @@ serve(async (req) => {
   let userPhone = "";
   let callerName = "";
   let sessionReady = false;
+  let sttProvider = "groq"; // Default to Groq, can be "groq" or "deepgram"
   
   // Booking state
   let currentBooking = {
@@ -112,57 +114,83 @@ serve(async (req) => {
     }
   };
 
-  // Step 1: STT - Convert audio to text using Groq Whisper (faster than OpenAI)
+  // Step 1: STT - Convert audio to text using Groq Whisper or Deepgram Nova
   const transcribeAudio = async (audioData: Uint8Array): Promise<string> => {
     const startTime = Date.now();
-    console.log(`[${callId}] 🎤 STT (Groq): Transcribing ${audioData.length} bytes...`);
+    const provider = sttProvider === "deepgram" && DEEPGRAM_API_KEY ? "Deepgram" : "Groq";
+    console.log(`[${callId}] 🎤 STT (${provider}): Transcribing ${audioData.length} bytes...`);
     
     try {
-      // Convert PCM16 to WAV format for Whisper
+      // Convert PCM16 to WAV format
       const wavHeader = createWavHeader(audioData.length, 24000, 1, 16);
       const wavData = new Uint8Array(wavHeader.length + audioData.length);
       wavData.set(wavHeader, 0);
       wavData.set(audioData, wavHeader.length);
       
-      const formData = new FormData();
-      formData.append("file", new Blob([wavData], { type: "audio/wav" }), "audio.wav");
-      formData.append("model", "whisper-large-v3-turbo"); // Groq's fastest Whisper model
-      // No language specified - let Whisper auto-detect for multilingual support
-      formData.append("response_format", "json");
-      // Enhanced with West Midlands vocabulary for better UK address recognition
-      formData.append("prompt", `Taxi booking conversation in the West Midlands, UK. 
+      let resultText = "";
+      
+      if (sttProvider === "deepgram" && DEEPGRAM_API_KEY) {
+        // Deepgram Nova-2 - optimized for telephony and UK accents
+        const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB&punctuate=true&smart_format=true", {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${DEEPGRAM_API_KEY}`,
+            "Content-Type": "audio/wav",
+          },
+          body: wavData,
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[${callId}] Deepgram error:`, response.status, errorText);
+          throw new Error(`Deepgram error: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        resultText = result.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        
+      } else {
+        // Groq Whisper (default)
+        const formData = new FormData();
+        formData.append("file", new Blob([wavData], { type: "audio/wav" }), "audio.wav");
+        formData.append("model", "whisper-large-v3-turbo");
+        formData.append("response_format", "json");
+        formData.append("prompt", `Taxi booking conversation in the West Midlands, UK. 
 Cities: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington, Warwick, Rugby.
 Common streets: David Road, School Road, Station Road, High Street, Church Lane, Park Road, London Road.
 Address formats: 52A David Road, 14 School Road, house numbers like fifty-two A, one-four.
 Terms: pickup, drop-off, destination, passengers, luggage, bags, estate car, saloon, minibus, MPV.
 Locations: Birmingham Airport, Coventry Station, New Street Station, Manchester Airport.
 UK postcodes: CV1, CV2, B1, WV1, WS1.`);
-      
-      const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
-        body: formData,
-      });
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[${callId}] Groq Whisper error:`, response.status, errorText);
-        throw new Error(`Groq Whisper error: ${response.status}`);
+        
+        const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+          body: formData,
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[${callId}] Groq Whisper error:`, response.status, errorText);
+          throw new Error(`Groq Whisper error: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        resultText = result.text || "";
       }
       
-      const result = await response.json();
-      const sttLatency = logTiming("STT (Groq)", startTime);
-      
-      console.log(`[${callId}] 🎤 STT result: "${result.text}"`);
+      const sttLatency = logTiming(`STT (${provider})`, startTime);
+      console.log(`[${callId}] 🎤 STT result: "${resultText}"`);
       
       // Send STT latency to client
       socket.send(JSON.stringify({ 
         type: "latency.stt", 
         latency_ms: sttLatency,
-        text: result.text 
+        provider: provider.toLowerCase(),
+        text: resultText 
       }));
       
-      return result.text || "";
+      return resultText;
     } catch (e) {
       console.error(`[${callId}] STT error:`, e);
       return "";
@@ -515,7 +543,8 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
           callId = msg.call_id || callId;
           callSource = msg.source || "web";
           userPhone = msg.phone || "";
-          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}`);
+          sttProvider = msg.stt_provider || "groq"; // "groq" or "deepgram"
+          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}`);
           
           // Lookup caller
           if (userPhone) {
@@ -523,7 +552,7 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
           }
           
           sessionReady = true;
-          socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini" }));
+          socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini", stt_provider: sttProvider }));
           
           // Send initial greeting
           await sendGreeting();

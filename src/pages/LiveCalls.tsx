@@ -133,6 +133,7 @@ export default function LiveCalls() {
   const [useTripResolver, setUseTripResolver] = useState(true);
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
   const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
+  const [sttProvider, setSttProvider] = useState<"groq" | "deepgram">("groq");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
@@ -659,10 +660,26 @@ export default function LiveCalls() {
                   Gemini
                 </span>
                 <span className={`text-[10px] ${useGeminiPipeline ? 'text-green-400/70' : 'text-muted-foreground/50'}`}>
-                  Groq STT
+                  {sttProvider === "deepgram" ? "Deepgram" : "Groq"} STT
                 </span>
               </div>
             </div>
+            {/* STT Provider Selector (only when Gemini pipeline active) */}
+            {useGeminiPipeline && (
+              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
+                <span className={`text-xs font-medium ${sttProvider === "groq" ? 'text-amber-400' : 'text-muted-foreground'}`}>
+                  Groq
+                </span>
+                <Switch
+                  id="stt-provider"
+                  checked={sttProvider === "deepgram"}
+                  onCheckedChange={(checked) => setSttProvider(checked ? "deepgram" : "groq")}
+                />
+                <span className={`text-xs font-medium ${sttProvider === "deepgram" ? 'text-cyan-400' : 'text-muted-foreground'}`}>
+                  Deepgram
+                </span>
+              </div>
+            )}
             {/* Address TTS Splicing Toggle */}
             <div className="flex items-center gap-2">
               <Switch
@@ -762,8 +779,8 @@ export default function LiveCalls() {
             </span>
             {useGeminiPipeline ? (
               <>
-                <Badge variant="outline" className="text-xs text-amber-400 border-amber-400/50">
-                  Groq STT
+                <Badge variant="outline" className={`text-xs ${sttProvider === "deepgram" ? 'text-cyan-400 border-cyan-400/50' : 'text-amber-400 border-amber-400/50'}`}>
+                  {sttProvider === "deepgram" ? 'Deepgram Nova' : 'Groq Whisper'} STT
                 </Badge>
                 <Badge variant="outline" className="text-xs text-green-400 border-green-400/50">
                   Gemini LLM
@@ -786,7 +803,9 @@ export default function LiveCalls() {
               {useGeminiPipeline ? 'FREE LLM' : '~$2.40/M tokens'}
             </Badge>
             <Badge variant="outline" className="text-xs">
-              {useGeminiPipeline ? '~600-1000ms' : '~400-500ms'}
+              {useGeminiPipeline 
+                ? (sttProvider === "deepgram" ? '~500-800ms (faster STT)' : '~600-1000ms') 
+                : '~400-500ms'}
             </Badge>
           </div>
           <code className="text-xs bg-muted px-2 py-1 rounded font-mono text-muted-foreground">
