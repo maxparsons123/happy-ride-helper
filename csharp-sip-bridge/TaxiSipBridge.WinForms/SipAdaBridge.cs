@@ -271,16 +271,16 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             });
 
-            // === Buffer → SIP (AI → Caller) using AudioExtrasSource ===
+            // === Buffer → SIP (AI → Caller) - Direct RTP send ===
+            // Bypass AudioExtrasSource which throws NotImplementedException.
+            // Send µ-law frames directly via the RTP session.
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
+                ushort seqNum = (ushort)new Random().Next(0, 65535);
 
-                // Note: do NOT call audioSource.SetSource(AudioSourcesEnum.None) here.
-                // Some SIPSorcery builds throw NotImplementedException for that combination.
-                // We feed PCM frames directly via ExternalAudioSourceRawSample below.
                 while (!cts.Token.IsCancellationRequested)
                 {
                     try
@@ -297,15 +297,9 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Decode µ-law to PCM16 samples for AudioExtrasSource
-                            var pcmSamples = AudioCodecs.MuLawDecode(frame);
-                            
-                            // Feed PCM samples to audio source (it handles encoding & RTP)
-                            audioSource.ExternalAudioSourceRawSample(
-                                AudioSamplingRatesEnum.Rate8KHz,
-                                20, // 20ms frame
-                                pcmSamples
-                            );
+                            // Send µ-law audio directly - 160 samples = 20ms at 8kHz
+                            // VoIPMediaSession.SendAudio expects duration in RTP units and encoded payload
+                            rtpSession.SendAudio(160, frame);
 
                             rtpTimestamp += 160;
                             framesPlayed++;
