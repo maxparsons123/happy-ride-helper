@@ -5588,6 +5588,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             /^silence\.?$/i,  // "Silence." - common Whisper hallucination on quiet audio
             /^\[silence\]$/i,  // "[Silence]" variant
             /^\.\.\.+$/,  // Just ellipsis
+            /^(thank you\.?\s*){2,}$/i,  // "Thank you. Thank you." - common hallucination on unclear audio
+            /^thank you\.?\s*thank you\.?$/i,  // Explicit pattern for "Thank you. Thank you."
             // NOTE: "bye" and "goodbye" are handled contextually below, not as unconditional hallucinations
             /thank you for watching/i,
             /thanks for watching/i,
