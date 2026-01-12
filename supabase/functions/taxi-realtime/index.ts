@@ -4253,43 +4253,10 @@ Rules:
               knownBooking.pickupVerified = true;
               console.log(`[${callId}] 🏠 Pickup auto-verified (known address): "${knownBooking.pickup}" → "${knownPickup}"`);
             } else {
-              // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
+              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
               const extractedPickup = knownBooking.pickup!;
-              const adaPickup = extractAddressFromAdaResponse("pickup");
-              
-              // Try extracted address first
               let pickupResult = await geocodeAddress(extractedPickup, shouldCheckAmbiguous, "pickup");
               let usedAddress = extractedPickup;
-              
-              // If extracted fails but Ada has a different interpretation, try that
-              if (!pickupResult.found && adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
-                console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed, trying Ada's interpretation: "${adaPickup}"`);
-                
-                // Add debug entry to transcript
-                transcriptHistory.push({
-                  role: "system",
-                  text: `🔄 DUAL-SOURCE: Extracted "${extractedPickup}" failed → trying Ada's interpretation "${adaPickup}"`,
-                  timestamp: new Date().toISOString()
-                });
-                queueLiveCallBroadcast({});
-                
-                const adaResult = await geocodeAddress(adaPickup, shouldCheckAmbiguous, "pickup");
-                if (adaResult.found) {
-                  pickupResult = adaResult;
-                  usedAddress = adaPickup;
-                  // Update knownBooking with Ada's corrected version
-                  knownBooking.pickup = adaPickup;
-                  console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaPickup}" succeeded! Updating booking.`);
-                  
-                  // Add success entry to transcript
-                  transcriptHistory.push({
-                    role: "system",
-                    text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaPickup}" (STT had "${extractedPickup}")`,
-                    timestamp: new Date().toISOString()
-                  });
-                  queueLiveCallBroadcast({});
-                }
-              }
               
               // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
               // If STT succeeded, trust it - don't double-check with Ada's version
@@ -4381,43 +4348,10 @@ Rules:
               knownBooking.destinationVerified = true;
               console.log(`[${callId}] 🏠 Destination auto-verified (known address): "${knownBooking.destination}" → "${knownDestination}"`);
             } else {
-              // DUAL-SOURCE GEOCODING: Try both extracted address AND Ada's interpretation
+              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
               const extractedDest = knownBooking.destination!;
-              const adaDest = extractAddressFromAdaResponse("destination");
-              
-              // Try extracted address first
               let destResult = await geocodeAddress(extractedDest, shouldCheckAmbiguous, "destination");
               let usedAddress = extractedDest;
-              
-              // If extracted fails but Ada has a different interpretation, try that
-              if (!destResult.found && adaDest && normalize(adaDest) !== normalize(extractedDest)) {
-                console.log(`[${callId}] 🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed, trying Ada's interpretation: "${adaDest}"`);
-                
-                // Add debug entry to transcript
-                transcriptHistory.push({
-                  role: "system",
-                  text: `🔄 DUAL-SOURCE: Extracted "${extractedDest}" failed → trying Ada's interpretation "${adaDest}"`,
-                  timestamp: new Date().toISOString()
-                });
-                queueLiveCallBroadcast({});
-                
-                const adaResult = await geocodeAddress(adaDest, shouldCheckAmbiguous, "destination");
-                if (adaResult.found) {
-                  destResult = adaResult;
-                  usedAddress = adaDest;
-                  // Update knownBooking with Ada's corrected version
-                  knownBooking.destination = adaDest;
-                  console.log(`[${callId}] ✅ DUAL-SOURCE: Ada's interpretation "${adaDest}" succeeded! Updating booking.`);
-                  
-                  // Add success entry to transcript
-                  transcriptHistory.push({
-                    role: "system",
-                    text: `✅ DUAL-SOURCE SUCCESS: Used Ada's "${adaDest}" (STT had "${extractedDest}")`,
-                    timestamp: new Date().toISOString()
-                  });
-                  queueLiveCallBroadcast({});
-                }
-              }
               
               // OPTIMIZATION: Skip Google Arbiter for now (adds extra latency)
               // If STT succeeded, trust it - don't double-check with Ada's version
