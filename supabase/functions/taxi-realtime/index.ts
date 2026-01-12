@@ -7763,6 +7763,23 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (isReconnect) {
           console.log(`[${callId}] 🔄 Reconnect init received - attempting session resume...`);
           
+          // Check if call has ended BEFORE attempting resume
+          const { data: callCheck } = await supabase
+            .from("live_calls")
+            .select("status")
+            .eq("call_id", callId)
+            .single();
+          
+          if (callCheck?.status === "ended") {
+            console.log(`[${callId}] 🚫 BLOCKING RECONNECT - call has already ended, closing connection`);
+            socket.send(JSON.stringify({ 
+              type: "error", 
+              message: "Call has already ended" 
+            }));
+            socket.close();
+            return;
+          }
+          
           // Try to restore session from database
           const resumed = await loadResumedSession();
           
@@ -7777,13 +7794,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             // Note: primeOpenAiWithHistory() will be called after session.updated
             return;
           } else {
-            console.log(`[${callId}] ⚠️ Session resume failed - starting fresh`);
+            // Resume failed but this IS a reconnect attempt - don't start fresh, just close
+            console.log(`[${callId}] ⚠️ Session resume failed (expired/no data) - closing reconnect attempt`);
             socket.send(JSON.stringify({ 
               type: "session_resumed", 
               call_id: callId,
               resumed: false 
             }));
-            // Continue with normal init flow below
+            socket.close();
+            return;
           }
         }
         
