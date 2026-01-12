@@ -4898,11 +4898,11 @@ Rules:
             input_audio_transcription: { 
               model: "whisper-1"
             },
-            // Server VAD - ultra-snappy response (reduced to 500ms)
+            // Server VAD - balanced for accuracy + responsiveness
             turn_detection: {
               type: "server_vad",
               threshold: agentConfig?.vad_threshold ?? 0.35,           // Lower = more sensitive
-              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 300,    // Minimal lead-in
+              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 500,    // Increased from 300 to capture start of words like "cancel"
               silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 500, // Fast turn-taking
               create_response: false,
               interrupt_response: agentConfig?.allow_interruptions ?? true
@@ -5501,7 +5501,36 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           lastAssistantTextLower.includes("is there anything else i can help") ||
           lastAssistantTextLower.includes("anything else i can help");
 
-        const t = rawTranscript.toLowerCase().trim();
+        // === COMMAND STT CORRECTIONS ===
+        // Fix common mishearings of taxi commands BEFORE processing
+        // These are phonetic mistakes on phone lines, not address-related
+        const COMMAND_CORRECTIONS: Record<string, string> = {
+          "council": "cancel",      // "council" often mishears as "cancel"
+          "console": "cancel",
+          "counsel": "cancel", 
+          "cancels": "cancel",
+          "candle": "cancel",
+          "kensal": "cancel",
+          "council it": "cancel it",
+          "console it": "cancel it",
+          "counsel it": "cancel it",
+          "asap time": "ASAP",
+          "a sap": "ASAP",
+          "8ap": "ASAP",
+          "hey sap": "ASAP",
+        };
+        
+        let correctedTranscript = rawTranscript;
+        for (const [mishearing, correction] of Object.entries(COMMAND_CORRECTIONS)) {
+          const regex = new RegExp(`\\b${mishearing}\\b`, "gi");
+          if (regex.test(correctedTranscript)) {
+            const before = correctedTranscript;
+            correctedTranscript = correctedTranscript.replace(regex, correction);
+            console.log(`[${callId}] 🔧 STT COMMAND CORRECTION: "${mishearing}" → "${correction}" (full: "${before}" → "${correctedTranscript}")`);
+          }
+        }
+
+        const t = correctedTranscript.toLowerCase().trim();
 
         // Explicit farewells should always end the call (these are NOT ambiguous like "cheers")
         // IMPORTANT: Include common STT mishearings of "bye" like "you", "by", "buy"
@@ -5716,8 +5745,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           return false;
         };
         
-        if (isContextualPhantom(rawTranscript)) {
-          console.log(`[${callId}] 🔇 Skipping contextual phantom: "${rawTranscript}"`);
+        if (isContextualPhantom(correctedTranscript)) {
+          console.log(`[${callId}] 🔇 Skipping contextual phantom: "${correctedTranscript}"`);
           awaitingResponseAfterCommit = false;
           responseCreatedSinceCommit = true;
           return;
@@ -5725,28 +5754,29 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         
         // === ALL FILTERS PASSED - NOW BROADCAST ===
         // CRITICAL: We broadcast AFTER echo/hallucination/phantom filters to prevent phantom UI updates
+        // Show the CORRECTED transcript to the UI
         socket.send(JSON.stringify({
           type: "transcript",
-          text: rawTranscript,
+          text: correctedTranscript,
           role: "user",
         }));
         
-        // Save to history now that we know it's valid
+        // Save to history now that we know it's valid (use corrected version)
         transcriptHistory.push({
           role: "user",
-          text: rawTranscript,
+          text: correctedTranscript,
           timestamp: new Date().toISOString()
         });
         queueLiveCallBroadcast({});
         
-        console.log(`[${callId}] User said: ${rawTranscript}`);
-        lastFinalUserTranscript = rawTranscript;
+        console.log(`[${callId}] User said: ${correctedTranscript}${correctedTranscript !== rawTranscript ? ` (raw: "${rawTranscript}")` : ''}`);
+        lastFinalUserTranscript = correctedTranscript;
         lastFinalUserTranscriptAt = Date.now();
 
         // Detect and lock the customer's language from their FIRST valid transcript.
         // This prevents Ada from defaulting to English when the caller speaks Urdu (or other non-English languages).
         if (!languageLocked) {
-          const hint = detectLanguageHint(rawTranscript);
+          const hint = detectLanguageHint(correctedTranscript);
           if (hint) applyLanguageLock(hint);
         }
 
@@ -5786,7 +5816,7 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         };
         
         // Check for name CORRECTION first (works even if we already have a name)
-        const correctedName = detectNameCorrection(rawTranscript);
+        const correctedName = detectNameCorrection(correctedTranscript);
         if (correctedName && correctedName.toLowerCase() !== (callerName || '').toLowerCase()) {
           const previousName = callerName;
           callerName = correctedName;
@@ -5857,7 +5887,7 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             return null;
           };
           
-          const quickName = quickExtractName(rawTranscript);
+          const quickName = quickExtractName(correctedTranscript);
           if (quickName && openaiWs?.readyState === WebSocket.OPEN) {
             callerName = quickName;
             console.log(`[${callId}] 👤 Quick name injection: "${callerName}"`);
@@ -5899,7 +5929,7 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           return matches || [];
         };
         
-        const addresses = quickExtractAddresses(rawTranscript);
+        const addresses = quickExtractAddresses(correctedTranscript);
         if (addresses.length > 0 && openaiWs?.readyState === WebSocket.OPEN) {
           // Inject the exact addresses as a USER message so Ada MUST use them in her response
           // Using role: "user" ensures this becomes part of the input context, not a memory note
