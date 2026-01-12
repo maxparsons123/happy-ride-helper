@@ -4898,17 +4898,15 @@ Rules:
             input_audio_transcription: { 
               model: "whisper-1"
             },
-            // Server VAD - tuned for phone audio where pauses can be longer
-            // Give user more time to complete their response before committing
+            // Server VAD - tuned for snappy response (reduced from 1000ms to 600ms)
             // IMPORTANT: We DO NOT auto-create responses; we trigger response.create only after STT completes.
-            // This prevents Ada responding before Whisper has finalized the user's words ("out-of-order" turns).
             turn_detection: {
               type: "server_vad",
-              threshold: agentConfig?.vad_threshold ?? 0.45,           // Agent's VAD sensitivity
-              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 650,    // Agent's lead-in capture
-              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 1000, // Agent's silence wait
+              threshold: agentConfig?.vad_threshold ?? 0.35,           // Lower = more sensitive to quiet speech
+              prefix_padding_ms: agentConfig?.vad_prefix_padding_ms ?? 400,    // Reduced lead-in
+              silence_duration_ms: agentConfig?.vad_silence_duration_ms ?? 600, // Faster turn-taking (was 1000)
               create_response: false,    // Manual response.create after transcription.completed
-              interrupt_response: agentConfig?.allow_interruptions ?? true   // Agent's barge-in setting
+              interrupt_response: agentConfig?.allow_interruptions ?? true
             },
             tools: [
               {
