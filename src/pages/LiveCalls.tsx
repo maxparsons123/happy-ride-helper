@@ -134,6 +134,7 @@ export default function LiveCalls() {
   const [addressTtsSplicing, setAddressTtsSplicing] = useState(false);
   const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
   const [sttProvider, setSttProvider] = useState<"groq" | "deepgram">("groq");
+  const [ttsProvider, setTtsProvider] = useState<"elevenlabs" | "deepgram">("elevenlabs");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
@@ -680,6 +681,22 @@ export default function LiveCalls() {
                 </span>
               </div>
             )}
+            {/* TTS Provider Selector (only when Gemini pipeline active) */}
+            {useGeminiPipeline && (
+              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
+                <span className={`text-xs font-medium ${ttsProvider === "elevenlabs" ? 'text-purple-400' : 'text-muted-foreground'}`}>
+                  11Labs
+                </span>
+                <Switch
+                  id="tts-provider"
+                  checked={ttsProvider === "deepgram"}
+                  onCheckedChange={(checked) => setTtsProvider(checked ? "deepgram" : "elevenlabs")}
+                />
+                <span className={`text-xs font-medium ${ttsProvider === "deepgram" ? 'text-cyan-400' : 'text-muted-foreground'}`}>
+                  Deepgram
+                </span>
+              </div>
+            )}
             {/* Address TTS Splicing Toggle */}
             <div className="flex items-center gap-2">
               <Switch
@@ -785,8 +802,8 @@ export default function LiveCalls() {
                 <Badge variant="outline" className="text-xs text-green-400 border-green-400/50">
                   Gemini LLM
                 </Badge>
-                <Badge variant="outline" className="text-xs text-purple-400 border-purple-400/50">
-                  ElevenLabs TTS
+                <Badge variant="outline" className={`text-xs ${ttsProvider === "deepgram" ? 'text-cyan-400 border-cyan-400/50' : 'text-purple-400 border-purple-400/50'}`}>
+                  {ttsProvider === "deepgram" ? 'Deepgram Aura' : 'ElevenLabs'} TTS
                 </Badge>
               </>
             ) : (
@@ -804,7 +821,11 @@ export default function LiveCalls() {
             </Badge>
             <Badge variant="outline" className="text-xs">
               {useGeminiPipeline 
-                ? (sttProvider === "deepgram" ? '~500-800ms (faster STT)' : '~600-1000ms') 
+                ? (sttProvider === "deepgram" && ttsProvider === "deepgram" 
+                    ? '~400-600ms (full Deepgram)' 
+                    : sttProvider === "deepgram" 
+                      ? '~500-800ms' 
+                      : '~600-1000ms') 
                 : '~400-500ms'}
             </Badge>
           </div>

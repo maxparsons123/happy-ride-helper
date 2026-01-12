@@ -55,8 +55,8 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   
   const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY"); // For Groq Whisper STT
-  const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY"); // For Deepgram Nova STT
-  const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY"); // For TTS
+  const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY"); // For Deepgram Nova STT & Aura TTS
+  const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY"); // For ElevenLabs TTS
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY"); // For Gemini
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -68,6 +68,7 @@ serve(async (req) => {
   let callerName = "";
   let sessionReady = false;
   let sttProvider = "groq"; // Default to Groq, can be "groq" or "deepgram"
+  let ttsProvider = "elevenlabs"; // Default to ElevenLabs, can be "elevenlabs" or "deepgram"
   
   // Booking state
   let currentBooking = {
@@ -285,42 +286,70 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
     }
   };
 
-  // Step 3: TTS - Convert text to speech using ElevenLabs
+  // Step 3: TTS - Convert text to speech using ElevenLabs or Deepgram Aura
   const synthesizeSpeech = async (text: string): Promise<Uint8Array | null> => {
     const startTime = Date.now();
-    console.log(`[${callId}] 🔊 TTS: Synthesizing "${text.substring(0, 50)}..."`);
+    const provider = ttsProvider === "deepgram" && DEEPGRAM_API_KEY ? "Deepgram" : "ElevenLabs";
+    console.log(`[${callId}] 🔊 TTS (${provider}): Synthesizing "${text.substring(0, 50)}..."`);
     
     try {
-      const voiceId = "Xb7hH8MSUJpSbSDYk0k2"; // Alice - British female
+      let audioBuffer: ArrayBuffer;
       
-      const response = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_24000`,
-        {
-          method: "POST",
-          headers: {
-            "xi-api-key": ELEVENLABS_API_KEY!,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text,
-            model_id: "eleven_turbo_v2_5",
-            voice_settings: {
-              stability: 0.5,
-              similarity_boost: 0.75,
-              style: 0.3,
-              use_speaker_boost: true,
-              speed: 1.1,
+      if (ttsProvider === "deepgram" && DEEPGRAM_API_KEY) {
+        // Deepgram Aura TTS - British female voice, linear16 PCM output
+        const response = await fetch(
+          "https://api.deepgram.com/v1/speak?model=aura-luna-en&encoding=linear16&sample_rate=24000",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Token ${DEEPGRAM_API_KEY}`,
+              "Content-Type": "application/json",
             },
-          }),
+            body: JSON.stringify({ text }),
+          }
+        );
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[${callId}] Deepgram Aura error:`, response.status, errorText);
+          throw new Error(`Deepgram Aura error: ${response.status}`);
         }
-      );
-      
-      if (!response.ok) {
-        throw new Error(`ElevenLabs error: ${response.status}`);
+        
+        audioBuffer = await response.arrayBuffer();
+      } else {
+        // ElevenLabs TTS (default)
+        const voiceId = "Xb7hH8MSUJpSbSDYk0k2"; // Alice - British female
+        
+        const response = await fetch(
+          `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_24000`,
+          {
+            method: "POST",
+            headers: {
+              "xi-api-key": ELEVENLABS_API_KEY!,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text,
+              model_id: "eleven_turbo_v2_5",
+              voice_settings: {
+                stability: 0.5,
+                similarity_boost: 0.75,
+                style: 0.3,
+                use_speaker_boost: true,
+                speed: 1.1,
+              },
+            }),
+          }
+        );
+        
+        if (!response.ok) {
+          throw new Error(`ElevenLabs error: ${response.status}`);
+        }
+        
+        audioBuffer = await response.arrayBuffer();
       }
       
-      const audioBuffer = await response.arrayBuffer();
-      const ttsLatency = logTiming("TTS (ElevenLabs)", startTime);
+      const ttsLatency = logTiming(`TTS (${provider})`, startTime);
       
       console.log(`[${callId}] 🔊 TTS generated: ${audioBuffer.byteLength} bytes`);
       
@@ -328,6 +357,7 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
       socket.send(JSON.stringify({ 
         type: "latency.tts", 
         latency_ms: ttsLatency,
+        provider: provider.toLowerCase(),
         audio_bytes: audioBuffer.byteLength 
       }));
       
@@ -544,7 +574,8 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
           callSource = msg.source || "web";
           userPhone = msg.phone || "";
           sttProvider = msg.stt_provider || "groq"; // "groq" or "deepgram"
-          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}`);
+          ttsProvider = msg.tts_provider || "elevenlabs"; // "elevenlabs" or "deepgram"
+          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}, TTS: ${ttsProvider}`);
           
           // Lookup caller
           if (userPhone) {
@@ -552,7 +583,7 @@ UK postcodes: CV1, CV2, B1, WV1, WS1.`);
           }
           
           sessionReady = true;
-          socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini", stt_provider: sttProvider }));
+          socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini", stt_provider: sttProvider, tts_provider: ttsProvider }));
           
           // Send initial greeting
           await sendGreeting();
