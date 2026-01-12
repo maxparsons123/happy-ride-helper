@@ -1106,6 +1106,72 @@ export default function LiveCalls() {
                     </div>
                   )}
 
+                  {/* Address Sources Panel - shows STT vs Ada comparison */}
+                  {(() => {
+                    // Extract address source comparisons from transcript
+                    const addressSources = selectedCallData.transcripts
+                      .filter(t => t.role === "system" && t.text.includes("ADDRESS SOURCES"))
+                      .map(t => {
+                        const pickupMatch = t.text.match(/ADDRESS SOURCES \(pickup\) - STT: "([^"]+)" \| Ada: "([^"]+)"/);
+                        const destMatch = t.text.match(/ADDRESS SOURCES \(destination\) - STT: "([^"]+)" \| Ada: "([^"]+)"/);
+                        return {
+                          type: pickupMatch ? "pickup" : destMatch ? "destination" : null,
+                          stt: pickupMatch?.[1] || destMatch?.[1] || null,
+                          ada: pickupMatch?.[2] || destMatch?.[2] || null,
+                          timestamp: t.timestamp
+                        };
+                      })
+                      .filter(s => s.type !== null);
+                    
+                    // Get the latest of each type
+                    const latestPickup = addressSources.filter(s => s.type === "pickup").slice(-1)[0];
+                    const latestDest = addressSources.filter(s => s.type === "destination").slice(-1)[0];
+                    
+                    if (!latestPickup && !latestDest) return null;
+                    
+                    return (
+                      <div className="mt-4 p-3 bg-blue-500/10 rounded-lg border border-blue-500/30">
+                        <p className="text-sm font-semibold text-blue-400 mb-3 flex items-center gap-2">
+                          📊 Address Sources (STT vs Ada)
+                        </p>
+                        <div className="space-y-3 text-sm">
+                          {latestPickup && (
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="bg-muted/30 rounded p-2">
+                                <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-green-400" /> Pickup (STT)
+                                </p>
+                                <p className="font-mono text-xs">{latestPickup.stt}</p>
+                              </div>
+                              <div className="bg-primary/10 rounded p-2 border border-primary/30">
+                                <p className="text-xs text-primary mb-1 flex items-center gap-1">
+                                  <Bot className="w-3 h-3" /> Pickup (Ada) ✓
+                                </p>
+                                <p className="font-mono text-xs text-primary">{latestPickup.ada}</p>
+                              </div>
+                            </div>
+                          )}
+                          {latestDest && (
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="bg-muted/30 rounded p-2">
+                                <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-red-400" /> Destination (STT)
+                                </p>
+                                <p className="font-mono text-xs">{latestDest.stt}</p>
+                              </div>
+                              <div className="bg-primary/10 rounded p-2 border border-primary/30">
+                                <p className="text-xs text-primary mb-1 flex items-center gap-1">
+                                  <Bot className="w-3 h-3" /> Destination (Ada) ✓
+                                </p>
+                                <p className="font-mono text-xs text-primary">{latestDest.ada}</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Booking Info */}
                   {selectedCallData.booking_confirmed && (
                     <div className="mt-4 p-3 bg-primary/10 rounded-lg border border-primary/30">
