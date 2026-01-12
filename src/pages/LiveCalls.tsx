@@ -223,20 +223,44 @@ export default function LiveCalls() {
   }, [calls, selectedCall]);
 
   useEffect(() => {
-    // Cleanup stale active calls older than 10 minutes
+    // Cleanup stale calls - mark old active/disconnected calls as completed
     const cleanupStaleCalls = async () => {
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-      const { error } = await supabase
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      
+      // Clean up stale "active" calls
+      const { error: activeError } = await supabase
         .from("live_calls")
         .update({ status: "completed", ended_at: new Date().toISOString() })
         .eq("status", "active")
-        .lt("started_at", tenMinutesAgo);
+        .lt("started_at", fiveMinutesAgo);
 
-      if (error) {
-        console.error("Error cleaning up stale calls:", error);
-      } else {
-        console.log("[LiveCalls] Cleaned up stale active calls older than 10 minutes");
+      if (activeError) {
+        console.error("Error cleaning up stale active calls:", activeError);
       }
+
+      // Clean up stale "disconnected" calls (older than 2 minutes - unlikely to reconnect)
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      const { error: disconnectedError } = await supabase
+        .from("live_calls")
+        .update({ status: "completed", ended_at: new Date().toISOString() })
+        .eq("status", "disconnected")
+        .lt("updated_at", twoMinutesAgo);
+
+      if (disconnectedError) {
+        console.error("Error cleaning up stale disconnected calls:", disconnectedError);
+      }
+
+      // Also mark any "ended" calls as "completed" for consistency
+      const { error: endedError } = await supabase
+        .from("live_calls")
+        .update({ status: "completed" })
+        .eq("status", "ended");
+
+      if (endedError) {
+        console.error("Error normalizing ended calls:", endedError);
+      }
+
+      console.log("[LiveCalls] Cleaned up stale calls");
     };
 
     // Fetch initial calls on mount
@@ -246,7 +270,7 @@ export default function LiveCalls() {
       const { data, error } = await supabase
         .from("live_calls")
         .select("*")
-        .in("status", ["active", "completed"])
+        .in("status", ["active", "completed", "ended", "disconnected"])
         .order("started_at", { ascending: false })
         .limit(20);
 
