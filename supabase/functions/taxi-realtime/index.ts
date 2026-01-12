@@ -5049,14 +5049,19 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
         }
 
         if (!forcedResponseInstructions && adaAskedAnythingElse) {
+          // Expanded patterns for "no" responses - catch "no that's brilliant", "no no that's good", etc.
           const saidNo =
-            /^(no|nope|nah)\b/.test(t) ||
-            /\b(no\s+thanks|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|i'?m\s+good|im\s+good|i'?m\s+fine|im\s+fine)\b/.test(t);
-          const saidYes = /\b(yes|yeah|yep|sure|please|ok|okay)\b/.test(t);
+            /^no[\s,!.]*/.test(t) ||  // Starts with "no" followed by anything
+            /^(nope|nah|na)\b/.test(t) ||
+            /\b(no\s+thanks|no\s+thank\s+you|nothing\s+else|that'?s\s+all|that\s+is\s+all|all\s+good|i'?m\s+good|im\s+good|i'?m\s+fine|im\s+fine|that'?s\s+(brilliant|great|fine|good|perfect|lovely))\b/.test(t);
+          
+          // Only block if they're explicitly asking for something more
+          const saidYes = /\b(yes|yeah|yep|actually|one more|another)\b/.test(t) && !/^no/.test(t);
 
           if (saidNo && !saidYes) {
+            console.log(`[${callId}] 👋 Customer said no to "anything else": "${t}"`);
             forcedResponseInstructions =
-              "The customer has said they do NOT need anything else. Say a short polite goodbye, then IMMEDIATELY call the end_call tool with reason 'no_further_assistance'. Do NOT ask any further questions.";
+              "The customer has said they do NOT need anything else. Say ONLY: 'You're welcome! Have a great journey, goodbye!' then IMMEDIATELY call the end_call tool with reason 'no_further_assistance'. Do NOT ask any further questions.";
           }
         }
         
