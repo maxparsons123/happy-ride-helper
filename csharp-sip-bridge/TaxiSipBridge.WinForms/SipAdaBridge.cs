@@ -268,12 +268,13 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            rtpSession.SendRtpRaw(
+                            // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
+                            rtpSession.RtpSession.SendRtpRaw(
                                 SDPMediaTypesEnum.audio,
                                 frame,
                                 rtpTimestamp,
-                                0,
-                                0
+                                0,  // Marker bit
+                                0   // Payload type 0 = PCMU (µ-law)
                             );
 
                             rtpTimestamp += 160;
