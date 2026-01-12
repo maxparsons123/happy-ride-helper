@@ -1042,73 +1042,81 @@ export default function LiveCalls() {
                       <p className="text-sm font-semibold text-primary mb-2">✅ Booking Confirmed</p>
                       <div className="grid grid-cols-2 gap-4 text-sm">
                         {/* Pickup with verification */}
-                        <div className="space-y-1">
+                        <div className="space-y-1 min-h-[60px]">
                           <div className="flex items-center gap-2">
                             <MapPin className="w-4 h-4 text-green-400" />
                             <span className="font-medium">Pickup</span>
-                            {addressVerification && pickupGeocode && (
-                              pickupGeocode.loading ? (
-                                <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                              ) : pickupGeocode.found ? (
-                                <CheckCircle2 className="w-4 h-4 text-green-500" />
-                              ) : pickupGeocode.needs_disambiguation ? (
-                                <AlertCircle className="w-4 h-4 text-amber-500" />
-                              ) : (
-                                <XCircle className="w-4 h-4 text-red-500" />
-                              )
-                            )}
+                            <div className="w-4 h-4 flex items-center justify-center">
+                              {addressVerification && pickupGeocode && (
+                                pickupGeocode.loading ? (
+                                  <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                                ) : pickupGeocode.found ? (
+                                  <CheckCircle2 className="w-4 h-4 text-green-500" />
+                                ) : pickupGeocode.needs_disambiguation ? (
+                                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                                ) : (
+                                  <XCircle className="w-4 h-4 text-red-500" />
+                                )
+                              )}
+                            </div>
                           </div>
                           <p className="text-muted-foreground pl-6">{selectedCallData.pickup || "—"}</p>
-                          {addressVerification && pickupGeocode && !pickupGeocode.loading && (
-                            <p className={`text-xs pl-6 ${
-                              pickupGeocode.found 
+                          <p className={`text-xs pl-6 min-h-[16px] ${
+                            !addressVerification || !pickupGeocode || pickupGeocode.loading
+                              ? "text-transparent"
+                              : pickupGeocode.found 
                                 ? "text-green-400" 
                                 : pickupGeocode.needs_disambiguation 
                                   ? "text-amber-400" 
                                   : "text-red-400"
-                            }`}>
-                              {pickupGeocode.found 
-                                ? `✓ ${pickupGeocode.place_name ? `${pickupGeocode.place_name} - ` : ""}${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}`
-                                : pickupGeocode.needs_disambiguation
-                                  ? `⚠ Disambiguation needed${pickupGeocode.disambiguation_areas?.length ? `: ${pickupGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
-                                  : `✗ ${pickupGeocode.error || "Not found"}`}
-                            </p>
-                          )}
+                          }`}>
+                            {addressVerification && pickupGeocode && !pickupGeocode.loading
+                              ? (pickupGeocode.found 
+                                  ? `✓ ${pickupGeocode.place_name ? `${pickupGeocode.place_name} - ` : ""}${pickupGeocode.display_name?.split(",").slice(0, 3).join(",")}`
+                                  : pickupGeocode.needs_disambiguation
+                                    ? `⚠ Disambiguation needed${pickupGeocode.disambiguation_areas?.length ? `: ${pickupGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
+                                    : `✗ ${pickupGeocode.error || "Not found"}`)
+                              : "—"}
+                          </p>
                         </div>
                         
                         {/* Destination with verification */}
-                        <div className="space-y-1">
+                        <div className="space-y-1 min-h-[60px]">
                           <div className="flex items-center gap-2">
                             <MapPin className="w-4 h-4 text-red-400" />
                             <span className="font-medium">Destination</span>
-                            {addressVerification && destinationGeocode && (
-                              destinationGeocode.loading ? (
-                                <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                              ) : destinationGeocode.found ? (
-                                <CheckCircle2 className="w-4 h-4 text-green-500" />
-                              ) : destinationGeocode.needs_disambiguation ? (
-                                <AlertCircle className="w-4 h-4 text-amber-500" />
-                              ) : (
-                                <XCircle className="w-4 h-4 text-red-500" />
-                              )
-                            )}
+                            <div className="w-4 h-4 flex items-center justify-center">
+                              {addressVerification && destinationGeocode && (
+                                destinationGeocode.loading ? (
+                                  <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                                ) : destinationGeocode.found ? (
+                                  <CheckCircle2 className="w-4 h-4 text-green-500" />
+                                ) : destinationGeocode.needs_disambiguation ? (
+                                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                                ) : (
+                                  <XCircle className="w-4 h-4 text-red-500" />
+                                )
+                              )}
+                            </div>
                           </div>
                           <p className="text-muted-foreground pl-6">{selectedCallData.destination || "—"}</p>
-                          {addressVerification && destinationGeocode && !destinationGeocode.loading && (
-                            <p className={`text-xs pl-6 ${
-                              destinationGeocode.found 
+                          <p className={`text-xs pl-6 min-h-[16px] ${
+                            !addressVerification || !destinationGeocode || destinationGeocode.loading
+                              ? "text-transparent"
+                              : destinationGeocode.found 
                                 ? "text-green-400" 
                                 : destinationGeocode.needs_disambiguation 
                                   ? "text-amber-400" 
                                   : "text-red-400"
-                            }`}>
-                              {destinationGeocode.found 
-                                ? `✓ ${destinationGeocode.place_name ? `${destinationGeocode.place_name} - ` : ""}${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}`
-                                : destinationGeocode.needs_disambiguation
-                                  ? `⚠ Disambiguation needed${destinationGeocode.disambiguation_areas?.length ? `: ${destinationGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
-                                  : `✗ ${destinationGeocode.error || "Not found"}`}
-                            </p>
-                          )}
+                          }`}>
+                            {addressVerification && destinationGeocode && !destinationGeocode.loading
+                              ? (destinationGeocode.found 
+                                  ? `✓ ${destinationGeocode.place_name ? `${destinationGeocode.place_name} - ` : ""}${destinationGeocode.display_name?.split(",").slice(0, 3).join(",")}`
+                                  : destinationGeocode.needs_disambiguation
+                                    ? `⚠ Disambiguation needed${destinationGeocode.disambiguation_areas?.length ? `: ${destinationGeocode.disambiguation_areas.slice(0, 3).join(", ")}` : ""}`
+                                    : `✗ ${destinationGeocode.error || "Not found"}`)
+                              : "—"}
+                          </p>
                         </div>
                       </div>
                       
