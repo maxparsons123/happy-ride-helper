@@ -239,6 +239,7 @@ export default function VoiceTest() {
           call_id: "voice-test-" + Date.now(),
           addressTtsSplicing: true,
           agent: selectedAgent,
+          useUnifiedExtraction: false, // Toggle to true to use AI-first extraction (taxi-extract-unified)
         }));
       };
 

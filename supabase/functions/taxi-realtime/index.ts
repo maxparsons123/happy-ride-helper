@@ -456,6 +456,7 @@ serve(async (req) => {
   let lastAudioCommitAt = 0; // ms epoch when last user turn was committed
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
+  let useUnifiedExtraction = false; // Use taxi-extract-unified instead of inline regex parsing
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   let needsHistoryPriming = false; // If OpenAI reconnects, prime it with transcript history (avoid re-greeting)
@@ -3364,6 +3365,110 @@ Rules:
     }
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UNIFIED AI EXTRACTION (calls taxi-extract-unified when enabled)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const extractWithUnifiedAI = async (transcript: string): Promise<void> => {
+    if (!useUnifiedExtraction) return;
+    
+    try {
+      console.log(`[${callId}] 🧪 UNIFIED EXTRACTION: Processing transcript: "${transcript}"`);
+      
+      // Build full conversation history for context
+      const conversationHistory = transcriptHistory.map(t => ({
+        role: t.role,
+        text: t.text
+      }));
+      
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          transcript: conversationHistory,
+          current_booking: knownBooking,
+          caller_name: callerName || null,
+          caller_city: callerCity || null,
+          pickup_history: callerPickupAddresses || [],
+          dropoff_history: callerDropoffAddresses || [],
+        }),
+      });
+
+      if (!response.ok) {
+        console.error(`[${callId}] 🧪 Unified extraction API error: ${response.status}`);
+        return;
+      }
+
+      const extracted = await response.json();
+      console.log(`[${callId}] 🧪 UNIFIED EXTRACTED:`, extracted);
+      
+      // Update knownBooking with extracted fields
+      let anyUpdate = false;
+      
+      if (extracted.pickup && !knownBooking.pickup) {
+        knownBooking.pickup = extracted.pickup;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated pickup: ${extracted.pickup}`);
+      }
+      
+      if (extracted.destination && !knownBooking.destination) {
+        knownBooking.destination = extracted.destination;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated destination: ${extracted.destination}`);
+      }
+      
+      if (extracted.passengers && !knownBooking.passengers) {
+        knownBooking.passengers = extracted.passengers;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated passengers: ${extracted.passengers}`);
+      }
+      
+      if (extracted.luggage && !knownBooking.luggage) {
+        knownBooking.luggage = extracted.luggage;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated luggage: ${extracted.luggage}`);
+      }
+      
+      if (extracted.pickup_time && !knownBooking.pickupTime) {
+        knownBooking.pickupTime = extracted.pickup_time;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated pickup_time: ${extracted.pickup_time}`);
+      }
+      
+      if (extracted.vehicle_type && !knownBooking.vehicleType) {
+        knownBooking.vehicleType = extracted.vehicle_type;
+        anyUpdate = true;
+        console.log(`[${callId}] 🧪 Updated vehicle_type: ${extracted.vehicle_type}`);
+      }
+      
+      // Log missing fields for debugging
+      if (extracted.missing_fields && extracted.missing_fields.length > 0) {
+        console.log(`[${callId}] 🧪 Missing fields: ${extracted.missing_fields.join(', ')}`);
+      }
+      
+      if (anyUpdate) {
+        // Broadcast updated booking to dashboard
+        queueLiveCallBroadcast({
+          pickup: knownBooking.pickup,
+          destination: knownBooking.destination,
+          passengers: knownBooking.passengers,
+        });
+        
+        // Add system note to transcript
+        transcriptHistory.push({
+          role: "system",
+          text: `🧪 UNIFIED: pickup="${knownBooking.pickup || '?'}" dest="${knownBooking.destination || '?'}" pax=${knownBooking.passengers || '?'} bags="${knownBooking.luggage || '?'}"`,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+    } catch (e) {
+      console.error(`[${callId}] 🧪 Unified extraction error:`, e);
+    }
+  };
+
   // Call the AI extraction function to get structured booking data from transcript
   const extractBookingFromTranscript = async (transcript: string): Promise<void> => {
     try {
@@ -5830,7 +5935,38 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         // - Simple responses → Send response.create IMMEDIATELY (no waiting)
         // - Address-containing responses → Await extraction first (preserve address flow)
         
-        if (isSimpleResponse) {
+        // ═══════════════════════════════════════════════════════════════════════════
+        // UNIFIED EXTRACTION MODE: Use AI-first extraction instead of inline regex
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (useUnifiedExtraction) {
+          console.log(`[${callId}] 🧪 UNIFIED MODE: Using taxi-extract-unified for: "${rawTranscript}"`);
+          
+          // Call unified extraction (runs in parallel, doesn't block response)
+          extractWithUnifiedAI(rawTranscript).catch(err => {
+            console.error(`[${callId}] 🧪 Unified extraction error:`, err);
+          });
+          
+          // Still send response.create immediately - AI has full context
+          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+            if (openAiResponseInProgress) {
+              deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "unified-extraction" };
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] ⏸️ Deferring response.create (unified-extraction) - response already in progress`);
+            } else {
+              openAiResponseInProgress = true;
+              startResponseTimeout();
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["audio", "text"] },
+              }));
+              responseCreatedSinceCommit = true;
+              console.log(`[${callId}] >>> response.create sent (unified-extraction)`);
+            }
+          }
+          
+          awaitingResponseAfterCommit = false;
+          // Skip the inline regex fast-path entirely
+        } else if (isSimpleResponse) {
           console.log(`[${callId}] ⚡ FAST-PATH: simple response: "${rawTranscript}" - sending response.create IMMEDIATELY`);
           
           // Number word to digit mapping
@@ -8016,6 +8152,12 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (message.addressTtsSplicing !== undefined) {
           addressTtsSplicingEnabled = message.addressTtsSplicing;
           console.log(`[${callId}] 🔊 Address TTS Splicing: ${addressTtsSplicingEnabled ? "ENABLED" : "DISABLED"}`);
+        }
+        
+        // Enable/disable unified AI extraction (default: false - uses inline regex)
+        if (message.useUnifiedExtraction !== undefined) {
+          useUnifiedExtraction = message.useUnifiedExtraction;
+          console.log(`[${callId}] 🧪 Unified Extraction: ${useUnifiedExtraction ? "ENABLED (taxi-extract-unified)" : "DISABLED (inline regex)"}`);
         }
         
         // Set caller's city for location-biased geocoding
