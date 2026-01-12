@@ -255,9 +255,17 @@ class TaxiBridgeV2:
                         logger.info(f"[{self.call_id}] 🔊 JSON audio chunk #{audio_chunks_received} ({len(raw_24k)} bytes in, {len(out)} bytes out)")
                 elif msg_type == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role', 'unknown').upper()}: {data.get('text', '')}")
+                elif msg_type == "error":
+                    # Surface backend/OpenAI errors clearly in the bridge logs
+                    err = data.get("error")
+                    retrying = data.get("retrying")
+                    next_attempt = data.get("next_attempt")
+                    if retrying:
+                        logger.error(f"[{self.call_id}] 🧨 Backend error (will retry, next_attempt={next_attempt}): {err}")
+                    else:
+                        logger.error(f"[{self.call_id}] 🧨 Backend error: {err}")
                 elif msg_type not in ["heartbeat", "session_update"]:
                     logger.info(f"[{self.call_id}] 📨 Received: {msg_type}")
-        except Exception as e:
             logger.error(f"[{self.call_id}] ❌ ai_to_queue error: {e}")
         finally:
             logger.info(f"[{self.call_id}] 📊 Total audio chunks received: {audio_chunks_received}")

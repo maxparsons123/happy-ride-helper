@@ -409,6 +409,14 @@ serve(async (req) => {
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
   
   let openaiWs: WebSocket | null = null;
+
+  // OpenAI reconnect (handles transient OpenAI "server_error" cases)
+  let openAiReconnectAttempts = 0;
+  const OPENAI_MAX_RECONNECTS = 3;
+  const OPENAI_RECONNECT_BASE_DELAY_MS = 750;
+  let openAiReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let openAiClosingForReconnect = false;
+
   let callId = `call-${Date.now()}`;
   let callStartAt = new Date().toISOString();
   let bookingData: any = {};
@@ -4386,6 +4394,55 @@ Rules:
     heartbeatTimer = setTimeout(logHeartbeat, HEARTBEAT_INTERVAL_MS);
   };
 
+  const scheduleOpenAiReconnect = (reason: string) => {
+    if (callEnded) return;
+    if (openAiReconnectTimer) return; // already scheduled
+
+    if (openAiReconnectAttempts >= OPENAI_MAX_RECONNECTS) {
+      console.error(
+        `[${callId}] ❌ OpenAI reconnect failed after ${openAiReconnectAttempts} attempts (reason: ${reason})`,
+      );
+      try {
+        socket.send(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "openai_reconnect_failed",
+              message: `OpenAI reconnect failed: ${reason}`,
+            },
+            attempts: openAiReconnectAttempts,
+          }),
+        );
+      } catch (_) {
+        // ignore
+      }
+      forceHangup("openai_reconnect_failed");
+      return;
+    }
+
+    openAiReconnectAttempts += 1;
+    const delayMs = OPENAI_RECONNECT_BASE_DELAY_MS * openAiReconnectAttempts;
+
+    console.log(
+      `[${callId}] 🔁 Reconnecting to OpenAI in ${delayMs}ms (attempt ${openAiReconnectAttempts}/${OPENAI_MAX_RECONNECTS}) - ${reason}`,
+    );
+
+    // Reset readiness so we buffer audio until the new session.update is applied
+    sessionReady = false;
+    greetingSent = false;
+
+    openAiReconnectTimer = setTimeout(() => {
+      openAiReconnectTimer = null;
+      openAiClosingForReconnect = true;
+      try {
+        openaiWs?.close();
+      } catch (_) {
+        // ignore
+      }
+      connectToOpenAI();
+    }, delayMs);
+  };
+
   // Connect to OpenAI Realtime API
   const connectToOpenAI = () => {
     console.log(`[${callId}] Connecting to OpenAI Realtime API...`);
@@ -4396,6 +4453,8 @@ Rules:
     );
 
     openaiWs.onopen = () => {
+      openAiReconnectAttempts = 0;
+      openAiClosingForReconnect = false;
       console.log(`[${callId}] Connected to OpenAI`);
     };
 
@@ -7281,7 +7340,27 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       // Error handling
       if (data.type === "error") {
         console.error(`[${callId}] OpenAI error:`, data.error);
-        socket.send(JSON.stringify({ type: "error", error: data.error }));
+
+        const errType = (data as any)?.error?.type;
+
+        // OpenAI sometimes returns transient server_error; auto-reconnect instead of killing the call
+        if (errType === "server_error") {
+          try {
+            socket.send(
+              JSON.stringify({
+                type: "error",
+                error: data.error,
+                retrying: true,
+                next_attempt: openAiReconnectAttempts + 1,
+              }),
+            );
+          } catch (_) {
+            // ignore
+          }
+          scheduleOpenAiReconnect("server_error");
+        } else {
+          socket.send(JSON.stringify({ type: "error", error: data.error }));
+        }
       }
     };
 
@@ -7291,6 +7370,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
     openaiWs.onclose = () => {
       console.log(`[${callId}] OpenAI connection closed`);
+      if (callEnded) return;
+
+      // If we closed on purpose to reconnect, don't schedule twice.
+      if (openAiClosingForReconnect) {
+        openAiClosingForReconnect = false;
+        return;
+      }
+
+      scheduleOpenAiReconnect("onclose");
     };
   };
 
