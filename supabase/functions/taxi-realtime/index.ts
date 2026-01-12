@@ -6427,26 +6427,59 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             return;
           }
 
-          // CRITICAL FIX: Ada has the full conversation context, so her args should be trusted
-          // for the DESTINATION field. The extraction layer can mistakenly pick up stray location
-          // mentions (e.g., user saying "Third Street" when Ada asked about passengers).
+          // DUAL-SOURCE ADDRESS HANDLING
+          // Ada has the full conversation context and often interprets addresses more accurately
+          // than raw STT extraction (e.g., "Davie Road" → "David Road", "School Rhodes" → "School Road")
           //
-          // Priority logic:
-          // - PICKUP: prefer knownBooking (user's exact words) over Ada's paraphrase
-          // - DESTINATION: prefer Ada's args (she confirmed with user) over stray extractions
+          // Priority logic (UPDATED):
+          // - PICKUP: prefer Ada's args (she has context to correct mishearings) 
+          // - DESTINATION: prefer Ada's args (she confirmed with user)
           // - PASSENGERS: prefer knownBooking (user's exact count)
           // - TIME: prefer knownBooking (user's exact time)
           //
-          // This prevents late/out-of-context utterances from overwriting confirmed bookings.
+          // If both sources exist, log the comparison for monitoring.
+          
+          const sttPickup = knownBooking.pickup;
+          const adaPickup = args.pickup;
+          const sttDestination = knownBooking.destination;
+          const adaDestination = args.destination;
+          
+          // Log dual-source comparison for visibility
+          if (sttPickup && adaPickup && normalize(sttPickup) !== normalize(adaPickup)) {
+            console.log(`[${callId}] 📊 BOOK_TAXI DUAL-SOURCE (pickup):`);
+            console.log(`[${callId}]    STT extracted: "${sttPickup}"`);
+            console.log(`[${callId}]    Ada interpreted: "${adaPickup}"`);
+            transcriptHistory.push({
+              role: "system",
+              text: `📊 ADDRESS SOURCES (pickup) - STT: "${sttPickup}" | Ada: "${adaPickup}" → Using Ada's`,
+              timestamp: new Date().toISOString()
+            });
+            queueLiveCallBroadcast({});
+          }
+          
+          if (sttDestination && adaDestination && normalize(sttDestination) !== normalize(adaDestination)) {
+            console.log(`[${callId}] 📊 BOOK_TAXI DUAL-SOURCE (destination):`);
+            console.log(`[${callId}]    STT extracted: "${sttDestination}"`);
+            console.log(`[${callId}]    Ada interpreted: "${adaDestination}"`);
+            transcriptHistory.push({
+              role: "system",
+              text: `📊 ADDRESS SOURCES (destination) - STT: "${sttDestination}" | Ada: "${adaDestination}" → Using Ada's`,
+              timestamp: new Date().toISOString()
+            });
+            queueLiveCallBroadcast({});
+          }
+          
+          // PREFER ADA'S INTERPRETATION for addresses - she has conversation context
+          // to correct STT mishearings like "Davie" → "David", "Rhodes" → "Road"
           const finalBooking = {
-            pickup: knownBooking.pickup ?? args.pickup,
-            destination: args.destination ?? knownBooking.destination, // Ada's confirmed destination takes priority
+            pickup: adaPickup ?? sttPickup,  // Ada's interpretation preferred
+            destination: adaDestination ?? sttDestination,  // Ada's interpretation preferred
             passengers: knownBooking.passengers ?? args.passengers,
             pickupTime: knownBooking.pickupTime ?? args.pickup_time ?? "ASAP",
-            vehicleType: knownBooking.vehicleType ?? args.vehicle_type ?? null, // e.g., "6 seater", "MPV"
-            luggage: knownBooking.luggage ?? args.luggage ?? null, // Include luggage in final booking
-            pickupName: knownBooking.pickupName ?? null, // Business name from Google (e.g., "Birmingham Airport")
-            destinationName: knownBooking.destinationName ?? null, // Business name from Google (e.g., "Sweet Spot Cafe")
+            vehicleType: knownBooking.vehicleType ?? args.vehicle_type ?? null,
+            luggage: knownBooking.luggage ?? args.luggage ?? null,
+            pickupName: knownBooking.pickupName ?? null,
+            destinationName: knownBooking.destinationName ?? null,
           };
 
           bookingData = finalBooking;
