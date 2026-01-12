@@ -3204,7 +3204,9 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       'could', 'just', 'actually', 'really', 'well', 'um', 'uh', 'er', 'ah', 'oh',
       'good', 'morning', 'afternoon', 'evening', 'night', 'today', 'now', 'soon',
       'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four',
-      'not', 'wrong', 'incorrect', 'correct', 'actually', 'change', 'update', 'fix'
+      'not', 'wrong', 'incorrect', 'correct', 'actually', 'change', 'update', 'fix',
+      'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'them', 'it',
+      'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine', 'alright'
     ]);
     
     // Helper to capitalize name properly (handles multi-word names like "Mary Jane")
@@ -5667,7 +5669,9 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             const nonNames = new Set([
               'yes', 'no', 'yeah', 'yep', 'okay', 'ok', 'sure', 'please', 'thanks',
               'hello', 'hi', 'hey', 'taxi', 'cab', 'booking', 'book', 'need', 'want',
-              'good', 'morning', 'afternoon', 'evening', 'just', 'actually', 'um', 'uh'
+              'good', 'morning', 'afternoon', 'evening', 'just', 'actually', 'um', 'uh',
+              'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'it',
+              'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine'
             ]);
             
             for (const pattern of patterns) {
@@ -7288,9 +7292,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           const providedName = (args.name || "").trim();
           console.log(`[${callId}] 👤 save_customer_name called with: "${providedName}"`);
           
+          // Blocklist for invalid "names" that are actually common words or pronouns
+          const invalidNames = new Set([
+            'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'them', 'it',
+            'yes', 'no', 'yeah', 'yep', 'okay', 'ok', 'sure', 'please', 'thanks', 'thank',
+            'hello', 'hi', 'hey', 'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely',
+            'great', 'fine', 'good', 'morning', 'afternoon', 'evening', 'alright'
+          ]);
+          
           // Validate the name before saving
-          if (!providedName || providedName.length < 2 || providedName.length > 30) {
-            console.log(`[${callId}] ⚠️ Invalid name rejected: "${providedName}"`);
+          const nameLower = providedName.toLowerCase();
+          if (!providedName || providedName.length < 2 || providedName.length > 30 || invalidNames.has(nameLower)) {
+            console.log(`[${callId}] ⚠️ Invalid name rejected: "${providedName}" (blocklisted or invalid length)`);
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
