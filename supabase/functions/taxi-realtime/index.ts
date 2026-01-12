@@ -5867,8 +5867,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         console.log(`[${callId}] >>> User started speaking (barge-in)`);
         noteUserActivity("speech_started");
         socket.send(JSON.stringify({ type: "user_speaking", speaking: true }));
-        // If Ada is speaking, cancel the current response so the caller can answer.
-        if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN) openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        
+        // If Ada is speaking, cancel the current response AND clear the audio buffer
+        // CRITICAL: Clearing the buffer removes any TTS echo/residue that was captured
+        // before the barge-in was detected - prevents garbage transcripts like "Can I make that fucking face"
+        if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN) {
+          console.log(`[${callId}] 🧹 Barge-in during AI speech - clearing audio buffer to prevent echo contamination`);
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        }
       }
 
       // Speech stopped
