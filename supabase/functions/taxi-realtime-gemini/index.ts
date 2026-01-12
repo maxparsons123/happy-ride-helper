@@ -86,6 +86,9 @@ serve(async (req) => {
   
   // Conversation history for context
   let conversationHistory: { role: string; content: string }[] = [];
+  
+  // Last assistant response for Whisper prompt conditioning
+  let lastAssistantResponse = "";
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
 
@@ -119,7 +122,8 @@ serve(async (req) => {
   const transcribeAudio = async (audioData: Uint8Array): Promise<string> => {
     const startTime = Date.now();
     const provider = sttProvider === "deepgram" && DEEPGRAM_API_KEY ? "Deepgram" : "Groq";
-    console.log(`[${callId}] 🎤 STT (${provider}): Transcribing ${audioData.length} bytes...`);
+    const hasContext = !!lastAssistantResponse;
+    console.log(`[${callId}] 🎤 STT (${provider}${hasContext ? '+ctx' : ''}): Transcribing ${audioData.length} bytes...`);
     
     try {
       // Convert PCM16 to WAV format
@@ -133,13 +137,35 @@ serve(async (req) => {
       if (sttProvider === "deepgram" && DEEPGRAM_API_KEY) {
         // Deepgram Nova-2 - optimized for telephony and UK accents
         // CRITICAL: Add keyword boosting for taxi commands and UK locations
-        const keywords = [
+        // Also add dynamic keywords from Ada's last response for context
+        const baseKeywords = [
           "cancel:2", "cancel it:2", "cancel the booking:2", "keep it:2", "book it:2",
-          "yes please:1.5", "no thanks:1.5", "that's right:1.5", "that's correct:1.5",
-          "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Wolverhampton:1.5",
+          "yes please:1.5", "no thanks:1.5", "that's right:1.5", "that's correct:1.5", "yes:1.5", "no:1.5", "yeah:1.5",
+          "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Wolverhampton:1.5", "Manchester:1.5",
           "School Road:1.5", "David Road:1.5", "Station Road:1.5", "High Street:1.5",
-          "Birmingham Airport:1.5", "Heathrow:1.5", "Gatwick:1.5"
-        ].join("&keywords=");
+          "Birmingham Airport:1.5", "Heathrow:1.5", "Gatwick:1.5", "Manchester Airport:1.5"
+        ];
+        
+        // DYNAMIC CONTEXT: Extract key terms from Ada's last response to boost recognition
+        if (lastAssistantResponse) {
+          // Boost postcodes mentioned by Ada (e.g., "M18 7RH" -> "M18:2", "7RH:2")
+          const postcodeMatches = lastAssistantResponse.match(/[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}/gi);
+          if (postcodeMatches) {
+            postcodeMatches.forEach(pc => {
+              baseKeywords.push(`${pc}:2`);
+              // Also add parts separately
+              const parts = pc.split(/\s+/);
+              parts.forEach(part => baseKeywords.push(`${part}:1.8`));
+            });
+          }
+          // Boost addresses/places mentioned (basic extraction)
+          const addressMatch = lastAssistantResponse.match(/\d+[A-Z]?\s+\w+\s+(?:Road|Street|Lane|Avenue|Drive)/gi);
+          if (addressMatch) {
+            addressMatch.forEach(addr => baseKeywords.push(`${addr}:1.8`));
+          }
+        }
+        
+        const keywords = baseKeywords.join("&keywords=");
         
         // Remove language lock for multilingual support, add keywords
         const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&keywords=${keywords}`, {
@@ -168,13 +194,20 @@ serve(async (req) => {
         formData.append("response_format", "json");
         formData.append("temperature", "0"); // CRITICAL: Temperature=0 prevents creative hallucinations
         // NO language lock - auto-detect for multilingual support (Urdu, Punjabi, Polish, Romanian, Arabic, etc.)
-        // Rich prompt with ALL local entities to bias decoder toward correct phonetics
-        formData.append("prompt", `Taxi booking phone call in the West Midlands, England, UK.
+        
+        // DYNAMIC PROMPT CONDITIONING: Include Ada's last response for context
+        // This dramatically improves transcription of "yes/no", addresses, postcodes that were just mentioned
+        const contextPrefix = lastAssistantResponse 
+          ? `Ada: "${lastAssistantResponse.slice(0, 200)}". Customer response:\n\n` 
+          : "";
+        
+        // Rich prompt with ALL local entities + dynamic context
+        formData.append("prompt", `${contextPrefix}Taxi booking phone call in the West Midlands, England, UK.
 CITIES: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington Spa, Warwick, Rugby, Bedworth, Kenilworth, Stratford-upon-Avon, Tamworth, Lichfield, Sutton Coldfield, Redditch, Bromsgrove, Halesowen, Stourbridge, West Bromwich, Oldbury, Smethwick, Tipton, Bilston, Willenhall, Bloxwich, Cannock.
 STREETS: School Road, Station Road, High Street, Church Lane, Park Road, London Road, David Road, Binley Road, Foleshill Road, Stoney Stanton Road, Allesley Old Road, Holyhead Road, Warwick Road, Kenilworth Road, Walsgrave Road, Ansty Road, Longford Road.
 LANDMARKS: Birmingham Airport, Coventry Station, Coventry City Centre, Birmingham New Street Station, Manchester Airport, Heathrow Airport, Gatwick Airport, Ricoh Arena, University of Warwick, Coventry University, Birmingham University.
-ADDRESS FORMATS: 52A David Road, 14 School Road, house numbers spoken as "fifty-two A", "one-four", UK postcodes CV1, CV2, CV3, CV4, CV5, CV6, B1, B2, WV1, WS1.
-COMMANDS: cancel, cancel it, cancel the booking, keep it, book it, yes please, no thanks, that's right, that's correct.
+ADDRESS FORMATS: 52A David Road, 14 School Road, house numbers spoken as "fifty-two A", "one-four", UK postcodes CV1, CV2, CV3, CV4, CV5, CV6, B1, B2, WV1, WS1, M1, M18.
+COMMANDS: cancel, cancel it, cancel the booking, keep it, book it, yes please, no thanks, that's right, that's correct, yes, no, yeah, nope.
 MULTILINGUAL: This call may be in English, Urdu, Punjabi, Polish, Romanian, Arabic, Bengali, Hindi, or other languages.`);
         
         const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
@@ -284,6 +317,9 @@ MULTILINGUAL: This call may be in English, Urdu, Punjabi, Polish, Romanian, Arab
       
       // Add assistant response to history
       conversationHistory.push({ role: "assistant", content: parsed.response });
+      
+      // Store for Whisper prompt conditioning (dynamic context for next STT)
+      lastAssistantResponse = parsed.response;
       
       // Send LLM latency to client
       socket.send(JSON.stringify({ 
