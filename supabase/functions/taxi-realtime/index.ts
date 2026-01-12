@@ -27,6 +27,11 @@ RETURNING CALLER (has active booking): "Hello [NAME]! I see you have a booking f
 → CRITICAL: If their response is unclear, off-topic, or doesn't mention cancellation → ask: "Would you like to keep the booking or cancel it?"
 → NEVER say "cancelled" or "that's cancelled" UNLESS you have called cancel_booking and received success.
 
+NAME CORRECTIONS (CRITICAL):
+→ If a returning caller says "That's not my name", "I'm not [X], I'm [Y]", "Actually it's [NAME]", "Call me [NAME]":
+   Call save_customer_name IMMEDIATELY with the CORRECT name, then say "Sorry about that [CORRECT_NAME]!"
+→ ALWAYS call save_customer_name when a customer corrects their name, even for returning callers.
+
 ═══════════════════════════════════
 BOOKING FLOW
 ═══════════════════════════════════
@@ -5008,7 +5013,7 @@ Rules:
               {
                 type: "function",
                 name: "save_customer_name",
-                description: "Save the customer's name when they tell you their name. Call this IMMEDIATELY after the customer tells you their name (e.g., 'My name is John', 'I'm Sarah', 'It's Max'). Use the EXACT name they said - do NOT guess or make up names. Only call this once per call when you first learn their name.",
+                description: "Save or UPDATE the customer's name. Call this: 1) When a NEW customer tells you their name (e.g., 'My name is John'), 2) When a RETURNING customer CORRECTS their name (e.g., 'Actually it's Sarah', 'My name isn't Max, it's Mike', 'Call me Dave'), 3) When you greet someone by wrong name and they correct you. Use the EXACT name they said - do NOT guess.",
                 parameters: {
                   type: "object",
                   properties: {
@@ -5777,8 +5782,78 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           if (hint) applyLanguageLock(hint);
         }
 
-        // This prevents misheard names from being used in Ada's greeting
-        if (!callerName) {
+        // === NAME EXTRACTION & CORRECTION ===
+        // Detect name corrections for returning callers (e.g., "I'm not Max, I'm Mike")
+        const detectNameCorrection = (text: string): string | null => {
+          const t = text.trim();
+          const correctionPatterns = [
+            // "That's not my name" / "I'm not Max" / "My name isn't Max"
+            /(?:that's not my name|i'm not|my name(?:'s| is)n't|i am not|that is not my name)[,.\s]+(?:i'm|it's|my name(?:'s| is)|call me)\s+([A-Za-z]+)/i,
+            // "Actually it's Sarah" / "It's actually Mike"
+            /(?:actually|no)[,.\s]+(?:i'm|it's|my name(?:'s| is)|call me)\s+([A-Za-z]+)/i,
+            // "Call me Dave instead" / "Just call me Sarah"
+            /(?:just\s+)?call me\s+([A-Za-z]+)(?:\s+instead)?/i,
+            // "No, I'm Sarah" / "No it's Mike"
+            /^no[,.\s]+(?:i'm|it's|my name(?:'s| is))\s+([A-Za-z]+)/i,
+            // "Wrong name, it's Sarah"
+            /wrong(?:\s+name)?[,.\s]+(?:i'm|it's|my name(?:'s| is))\s+([A-Za-z]+)/i,
+          ];
+          
+          const nonNames = new Set([
+            'you', 'your', 'me', 'my', 'i', 'we', 'us', 'they', 'it', 'yes', 'no', 'yeah',
+            'okay', 'ok', 'sure', 'please', 'thanks', 'hello', 'hi', 'hey', 'bye', 'goodbye',
+            'for', 'asap', 'now', 'today', 'taxi', 'cab', 'car', 'booking', 'book'
+          ]);
+          
+          for (const pattern of correctionPatterns) {
+            const match = t.match(pattern);
+            if (match?.[1]) {
+              const name = match[1].trim();
+              if (name.length >= 2 && name.length <= 20 && !nonNames.has(name.toLowerCase())) {
+                return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+              }
+            }
+          }
+          return null;
+        };
+        
+        // Check for name CORRECTION first (works even if we already have a name)
+        const correctedName = detectNameCorrection(rawTranscript);
+        if (correctedName && correctedName.toLowerCase() !== (callerName || '').toLowerCase()) {
+          const previousName = callerName;
+          callerName = correctedName;
+          console.log(`[${callId}] 👤 Name CORRECTION detected: "${previousName}" → "${callerName}"`);
+          
+          // Inject the corrected name into Ada's context
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: `[CRITICAL: Customer CORRECTED their name to "${callerName}". Apologize briefly and use this name going forward.]` }]
+              }
+            }));
+          }
+          
+          // Update database async
+          if (userPhone) {
+            (async () => {
+              try {
+                await supabase.from("callers").upsert({
+                  phone_number: userPhone,
+                  name: callerName,
+                  updated_at: new Date().toISOString()
+                }, { onConflict: "phone_number" });
+                console.log(`[${callId}] 💾 Updated name ${callerName} (was ${previousName}) for ${userPhone}`);
+              } catch (e) {
+                console.error(`[${callId}] Failed to update name:`, e);
+              }
+            })();
+          }
+        }
+        // For NEW callers, also extract name from first response
+        else if (!callerName) {
           const quickExtractName = (text: string): string | null => {
             const t = text.trim();
             // Quick patterns for common name responses
@@ -5798,7 +5873,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
               'hello', 'hi', 'hey', 'taxi', 'cab', 'booking', 'book', 'need', 'want',
               'good', 'morning', 'afternoon', 'evening', 'just', 'actually', 'um', 'uh',
               'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'it',
-              'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine'
+              'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine',
+              'for', 'asap', 'now', 'today'
             ]);
             
             for (const pattern of patterns) {
@@ -7488,18 +7564,21 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           }));
         }
         
-        // Handle save_customer_name function
+        // Handle save_customer_name function - supports both NEW names and UPDATES
         if (data.name === "save_customer_name") {
           const args = JSON.parse(data.arguments);
           const providedName = (args.name || "").trim();
-          console.log(`[${callId}] 👤 save_customer_name called with: "${providedName}"`);
+          const previousName = callerName;
+          const isUpdate = !!previousName && previousName.toLowerCase() !== providedName.toLowerCase();
+          console.log(`[${callId}] 👤 save_customer_name called with: "${providedName}"${isUpdate ? ` (updating from "${previousName}")` : ''}`);
           
           // Blocklist for invalid "names" that are actually common words or pronouns
           const invalidNames = new Set([
             'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'them', 'it',
             'yes', 'no', 'yeah', 'yep', 'okay', 'ok', 'sure', 'please', 'thanks', 'thank',
             'hello', 'hi', 'hey', 'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely',
-            'great', 'fine', 'good', 'morning', 'afternoon', 'evening', 'alright'
+            'great', 'fine', 'good', 'morning', 'afternoon', 'evening', 'alright',
+            'for', 'asap', 'now', 'today', 'taxi', 'cab', 'car', 'booking', 'book'
           ]);
           
           // Validate the name before saving
@@ -7545,6 +7624,9 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             // Update live call with caller name
             queueLiveCallBroadcast({});
             
+            // Determine appropriate response based on whether this is an update
+            const isNameUpdate = previousName && previousName.toLowerCase() !== formattedName.toLowerCase();
+            
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -7552,9 +7634,15 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 call_id: data.call_id,
                 output: JSON.stringify({
                   success: true,
-                  customer_name: callerName,
-                  message: `Customer name saved: ${callerName}. Use this name to address them throughout the call.`,
-                  next_action: `Say "Lovely to meet you ${callerName}!" and continue with the booking flow.`
+                  customer_name: formattedName,
+                  was_update: isNameUpdate,
+                  previous_name: isNameUpdate ? previousName : null,
+                  message: isNameUpdate 
+                    ? `Customer name UPDATED from "${previousName}" to "${formattedName}". Apologize briefly and use the new name.`
+                    : `Customer name saved: ${formattedName}. Use this name to address them throughout the call.`,
+                  next_action: isNameUpdate
+                    ? `Say "Sorry about that ${formattedName}!" and continue with whatever you were doing.`
+                    : `Say "Lovely to meet you ${formattedName}!" and continue with the booking flow.`
                 })
               }
             }));
