@@ -268,11 +268,12 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send audio frame using VoIPMediaSession's built-in method
-                            rtpSession.SendAudioFrame(
-                                rtpTimestamp,
-                                (int)SDPWellKnownMediaFormatsEnum.PCMU,
-                                frame
+                            // Decode µ-law to PCM16 and send via AudioExtrasSource
+                            var pcmSamples = AudioCodecs.MuLawDecode(frame);
+                            rtpSession.AudioExtrasSource.ExternalAudioSourceRawSample(
+                                AudioSamplingRatesEnum.Rate8KHz,
+                                20, // 20ms frame duration
+                                pcmSamples
                             );
 
                             rtpTimestamp += 160;
