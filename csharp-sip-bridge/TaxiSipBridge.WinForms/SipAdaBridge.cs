@@ -37,11 +37,15 @@ public class SipAdaBridge : IDisposable
     // Max frames to buffer (~5 seconds = 250 frames at 20ms each)
     private const int MaxOutboundFrames = 250;
 
+    // Audio monitor for debugging (plays outbound audio through speakers)
+    public AudioMonitor? AudioMonitor { get; set; }
+
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
     public event Action<string, string>? OnCallStarted;
     public event Action<string>? OnCallEnded;
     public event Action<string>? OnLog;
+    public event Action<byte[]>? OnAudioFrame; // Fired when audio frame is sent
 
     public SipAdaBridge(SipAdaBridgeConfig config)
     {
@@ -303,6 +307,10 @@ public class SipAdaBridge : IDisposable
                                 0, // marker
                                 0  // payload type: PCMU
                             );
+
+                            // Feed audio monitor for local playback (debugging)
+                            AudioMonitor?.AddFrame(frame);
+                            OnAudioFrame?.Invoke(frame);
 
                             rtpTimestamp += 160;
                             framesPlayed++;

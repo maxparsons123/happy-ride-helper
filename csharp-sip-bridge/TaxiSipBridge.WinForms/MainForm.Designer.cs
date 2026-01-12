@@ -131,7 +131,19 @@ partial class MainForm
         btnClearLogs.FlatAppearance.BorderSize = 0;
         btnClearLogs.Click += btnClearLogs_Click;
 
-        grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs });
+        // Audio Monitor Toggle
+        chkAudioMonitor = new CheckBox
+        {
+            Text = "🔊 Monitor Audio",
+            Location = new Point(120, 253),
+            Size = new Size(130, 24),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            ForeColor = Color.DarkSlateGray,
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold)
+        };
+        chkAudioMonitor.CheckedChanged += chkAudioMonitor_CheckedChanged;
+
+        grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs, chkAudioMonitor });
 
         // Add all to form
         this.Controls.AddRange(new Control[] { grpConfig, grpStatus, grpLogs });
@@ -151,4 +163,5 @@ partial class MainForm
     private Label lblActiveCall;
     private Label lblCallId;
     private ListBox lstLogs;
+    private CheckBox chkAudioMonitor;
 }

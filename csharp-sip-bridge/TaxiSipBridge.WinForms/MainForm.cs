@@ -3,12 +3,16 @@ namespace TaxiSipBridge;
 public partial class MainForm : Form
 {
     private SipAdaBridge? _bridge;
+    private AudioMonitor? _audioMonitor;
     private bool _isRunning = false;
 
     public MainForm()
     {
         InitializeComponent();
         LoadSettings();
+        
+        // Initialize audio monitor
+        _audioMonitor = new AudioMonitor();
     }
 
     private void LoadSettings()
@@ -49,6 +53,9 @@ public partial class MainForm : Form
             };
 
             _bridge = new SipAdaBridge(config);
+            
+            // Attach audio monitor
+            _bridge.AudioMonitor = _audioMonitor;
 
             // Subscribe to events with UI thread marshaling
             _bridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
@@ -164,12 +171,22 @@ public partial class MainForm : Form
         lstLogs.Items.Clear();
     }
 
+    private void chkAudioMonitor_CheckedChanged(object sender, EventArgs e)
+    {
+        if (_audioMonitor != null)
+        {
+            _audioMonitor.IsEnabled = chkAudioMonitor.Checked;
+            AddLog(chkAudioMonitor.Checked ? "🔊 Audio monitor enabled" : "🔇 Audio monitor disabled");
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (_isRunning)
         {
             StopBridge();
         }
+        _audioMonitor?.Dispose();
         base.OnFormClosing(e);
     }
 }
