@@ -115,7 +115,12 @@ public class SipAdaBridge : IDisposable
         // RTP state for direct packet injection
         uint rtpTimestamp = 0;
 
-        var rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+        // Setup audio source with encoder (like your working code)
+        var audioSource = new AudioExtrasSource(new AudioEncoder());
+        audioSource.RestrictFormats(x => x.Codec == AudioCodecsEnum.PCMU);
+        
+        var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
+        var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
         var uas = ua.AcceptCall(req);
@@ -128,6 +133,8 @@ public class SipAdaBridge : IDisposable
             return;
         }
 
+        // Start the media session
+        await rtpSession.Start();
         Log($"📗 [{callId}] Call answered");
         Log($"🎛 [{callId}] RTP session started");
 
@@ -245,12 +252,15 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             });
 
-            // === Buffer → SIP (AI → Caller) ===
+            // === Buffer → SIP (AI → Caller) using AudioExtrasSource ===
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
                 long nextFrameTime = 0;
                 int framesPlayed = 0;
+
+                // Set audio source to external mode for real-time feeding
+                audioSource.SetSource(AudioSourcesEnum.None);
 
                 while (!cts.Token.IsCancellationRequested)
                 {
@@ -268,13 +278,14 @@ public class SipAdaBridge : IDisposable
 
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
-                            // Send raw RTP packet with µ-law payload (inherited from RTPSession)
-                            rtpSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
-                                frame,
-                                rtpTimestamp,
-                                0,  // Marker bit
-                                0   // Payload type 0 = PCMU (µ-law)
+                            // Decode µ-law to PCM16 samples for AudioExtrasSource
+                            var pcmSamples = AudioCodecs.MuLawDecode(frame);
+                            
+                            // Feed PCM samples to audio source (it handles encoding & RTP)
+                            audioSource.ExternalAudioSourceRawSample(
+                                AudioSamplingRatesEnum.Rate8KHz,
+                                20, // 20ms frame
+                                pcmSamples
                             );
 
                             rtpTimestamp += 160;
