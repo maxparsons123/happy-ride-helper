@@ -593,7 +593,7 @@ serve(async (req) => {
         item: {
           type: "message",
           role: turn.role === "assistant" ? "assistant" : "user",
-          content: [{ type: "text", text: turn.text }]
+          content: [{ type: turn.role === "assistant" ? "text" : "input_text", text: turn.text }]
         }
       }));
     }
@@ -609,7 +609,7 @@ serve(async (req) => {
       item: {
         type: "message",
         role: "user",
-        content: [{ type: "text", text: resumeContext }]
+        content: [{ type: "input_text", text: resumeContext }]
       }
     }));
     
@@ -1910,7 +1910,7 @@ Ask them: "What's the house number for ${streetAddress}?"`;
       item: {
         type: "message",
         role: "user",
-        content: [{ type: "text", text: message }]
+        content: [{ type: "input_text", text: message }]
       }
     }));
     
@@ -2143,7 +2143,7 @@ Wait for their response before proceeding.`;
       item: {
         type: "message",
         role: "user",
-        content: [{ type: "text", text: message }]
+        content: [{ type: "input_text", text: message }]
       }
     }));
     
@@ -2574,7 +2574,7 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       item: {
         type: "message",
         role: "user",
-        content: [{ type: "text", text: message }],
+        content: [{ type: "input_text", text: message }],
       },
     }));
   };
@@ -3418,7 +3418,7 @@ Rules:
                 item: {
                   type: "message",
                   role: "user",
-                  content: [{ type: "text", text: `[SYSTEM: This is a NEW customer. After greeting them, ask what area they're calling from. Say: "Lovely to meet you ${callerName}! And what area are you calling from - Coventry, Birmingham, or somewhere else?" This helps us find their addresses accurately.]` }]
+                  content: [{ type: "input_text", text: `[SYSTEM: This is a NEW customer. After greeting them, ask what area they're calling from. Say: "Lovely to meet you ${callerName}! And what area are you calling from - Coventry, Birmingham, or somewhere else?" This helps us find their addresses accurately.]` }]
                 }
               }));
               
@@ -3724,7 +3724,7 @@ Rules:
               type: "message",
               role: "user",
               content: [{ 
-                type: "text", 
+                type: "input_text", 
                 text: `[SYSTEM CLARIFICATION REQUIRED: The customer said "${spokenAddr}" but this looks like a fuzzy match to their known address "${knownAddr}". Ask: "Just to check - did you mean ${knownAddr} (your usual address), or is ${spokenAddr} a different location?" Wait for confirmation before proceeding.]` 
               }]
             }
@@ -3753,7 +3753,7 @@ Rules:
               type: "message",
               role: "user",
               content: [{ 
-                type: "text", 
+                type: "input_text", 
                 text: `[SYSTEM CLARIFICATION REQUIRED: The customer said "${spokenAddr}" but this looks like a fuzzy match to their known destination "${knownAddr}". Ask: "Just to confirm - did you mean ${knownAddr}, or is ${spokenAddr} somewhere different?" Wait for confirmation before proceeding.]` 
               }]
             }
@@ -3869,7 +3869,7 @@ Rules:
                 type: "message",
                 role: "user",
                 content: [{ 
-                  type: "text", 
+                  type: "input_text", 
                   text: `[SYSTEM: The customer said "${transcript}" but did NOT provide the postcode or area you asked for. You MUST ask again: "I still need the postcode or area for ${currentAddress} please - could you give me the first part of the postcode, like CV1 or B27?" Do NOT proceed without a postcode or area name.]`
                 }]
               }
@@ -4082,9 +4082,9 @@ Rules:
               type: "conversation.item.create",
               item: {
                 type: "message",
-                role: "system",
+                role: "user",
                 content: [{ 
-                  type: "text", 
+                  type: "input_text", 
                   text: `[STOP - MANDATORY LUGGAGE CHECK] This trip is to/from an airport or station. You MUST ask about luggage RIGHT NOW before doing anything else. Do NOT summarize the booking. Do NOT ask "shall I book?". Simply ask: "How many bags will you have for this trip?" Wait for their answer before proceeding.` 
                 }]
               }
@@ -4578,7 +4578,7 @@ Rules:
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "text", text: "[SYSTEM: Audio was received but transcription failed. Say: 'Sorry, I didn\'t quite catch that. Could you repeat that for me?']" }]
+              content: [{ type: "input_text", text: "[SYSTEM: Audio was received but transcription failed. Say: 'Sorry, I didn\'t quite catch that. Could you repeat that for me?']" }]
             }
           }));
           
@@ -5046,7 +5046,7 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
           item: {
             type: "message",
             role: "user",
-            content: [{ type: "text", text: greetingPrompt }]
+            content: [{ type: "input_text", text: greetingPrompt }]
           }
         }));
         openaiWs?.send(JSON.stringify({
@@ -5065,7 +5065,7 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
                 item: {
                   type: "message",
                   role: "user",
-                  content: [{ type: "text", text: msg.text }],
+                  content: [{ type: "input_text", text: msg.text }],
                 },
               }),
             );
@@ -7991,7 +7991,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "text", text: message.text }]
+              content: [{ type: "input_text", text: message.text }]
             }
           }));
           openaiWs.send(JSON.stringify({
