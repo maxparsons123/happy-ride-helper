@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
-using System.Diagnostics;
+using System.IO;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Media;
@@ -32,16 +32,12 @@ public class SipAdaBridge : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
 
-    // Frame-based queue for proper 20ms timing (NOT byte-based)
-    private readonly ConcurrentQueue<byte[]> _outboundFrames = new();
-    
-    // RTP session for direct packet injection
-    private RTPSession? _rtpSession;
-    private uint _rtpTimestamp = 0;
+    // Byte-based jitter buffer (µ-law 8kHz bytes).
+    private readonly ConcurrentQueue<byte> _outboundAudio = new ConcurrentQueue<byte>();
 
-    // Max frames to buffer (~5 seconds = 250 frames at 20ms each)
-    // This allows Ada's full greeting to be buffered without dropping
-    private const int MaxOutboundFrames = 250;
+    // Max µ-law bytes to keep in buffer (160 bytes = 20ms @ 8kHz).
+    // 4000 bytes ≈ 0.5s of audio.
+    private const int MaxOutboundBufferBytes = 4000;
 
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
@@ -96,6 +92,7 @@ public class SipAdaBridge : IDisposable
         };
 
         _userAgent = new SIPUserAgent(_sipTransport, null);
+
         _userAgent.OnIncomingCall += async (ua, req) =>
         {
             Log($"📞 Incoming INVITE from {req.Header.From.FromURI}");
@@ -110,63 +107,50 @@ public class SipAdaBridge : IDisposable
     {
         var callId = Guid.NewGuid().ToString("N")[..8];
         var caller = req.Header.From.FromURI.User ?? "unknown";
-
         Log($"📞 [{callId}] Call from {caller}");
         OnCallStarted?.Invoke(callId, caller);
 
-        // Clear any stale audio from previous call
-        while (_outboundFrames.TryDequeue(out _)) { }
-        _rtpTimestamp = 0;
+        // Clear any stale audio from previous call.
+        while (_outboundAudio.TryDequeue(out _)) { }
 
+        var rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+        rtpSession.AcceptRtpFromAny = true;
+
+        var uas = ua.AcceptCall(req);
+        bool answered = await ua.Answer(uas, rtpSession);
+
+        if (!answered)
+        {
+            Log($"❌ [{callId}] Failed to answer call");
+            OnCallEnded?.Invoke(callId);
+            return;
+        }
+
+        Log($"📗 [{callId}] Call answered");
+        await rtpSession.AudioExtrasSource.StartAudio();
+        Log($"🎛 [{callId}] RTP session started");
+
+        using var ws = new ClientWebSocket();
         var cts = new CancellationTokenSource();
+
+        ua.OnCallHungup += (d) =>
+        {
+            Log($"📕 [{callId}] Caller hung up");
+            OnCallEnded?.Invoke(callId);
+            cts.Cancel();
+        };
 
         try
         {
-            // Create media session with µ-law codec
-            var mediaSession = new VoIPMediaSession(new MediaEndPoints
-            {
-                AudioSource = new AudioExtrasSource(
-                    new AudioEncoder(),
-                    new AudioSourceOptions { AudioSource = AudioSourcesEnum.Silence }
-                ),
-                AudioSink = new AudioExtrasSource(new AudioEncoder())
-            });
-            
-            mediaSession.AcceptRtpFromAny = true;
-            
-            // Get RTP session for direct packet injection
-            _rtpSession = mediaSession.RtpSession;
-
-            var uas = ua.AcceptCall(req);
-            bool answered = await ua.Answer(uas, mediaSession);
-
-            if (!answered)
-            {
-                Log($"❌ [{callId}] Failed to answer call");
-                OnCallEnded?.Invoke(callId);
-                return;
-            }
-
-            Log($"📗 [{callId}] Call answered");
-            Log($"🎛 [{callId}] RTP session started");
-
-            ua.OnCallHungup += (d) =>
-            {
-                Log($"📕 [{callId}] Caller hung up");
-                OnCallEnded?.Invoke(callId);
-                cts.Cancel();
-            };
-
-            using var ws = new ClientWebSocket();
-            
             // Add caller as query param for edge function
             var wsUri = new Uri($"{_config.AdaWsUrl}?caller={Uri.EscapeDataString(caller)}");
             Log($"🔌 [{callId}] Connecting WS → {wsUri}");
+
             await ws.ConnectAsync(wsUri, cts.Token);
             Log($"🟢 [{callId}] WS Connected");
 
             // === SIP → WS (Caller → AI) ===
-            _rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
+            rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
                     return;
@@ -178,6 +162,8 @@ public class SipAdaBridge : IDisposable
                 var pcm8k = AudioCodecs.MuLawDecode(ulaw);
                 var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
                 var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+                Log($"🎤 [{callId}] RTP→AI ulaw={ulaw.Length}B pcm24k={pcmBytes.Length}B (binary)");
 
                 // Send raw PCM24k as BINARY frame (per edge spec)
                 _ = ws.SendAsync(
@@ -254,78 +240,33 @@ public class SipAdaBridge : IDisposable
                         var text = textEl.GetString();
                         if (!string.IsNullOrEmpty(text))
                         {
-                            Console.Write(text); // Stream transcript to console
+                            Log($"📝 [{callId}] {text}");
                         }
                     }
                 }
                 Log($"🔚 [{callId}] WS read loop ended");
             });
 
-            // === Buffer → SIP (AI → Caller) using SendRtpRaw ===
+            // === Buffer → SIP (AI → Caller) ===
             _ = Task.Run(async () =>
             {
-                var stopwatch = Stopwatch.StartNew();
-                long nextFrameTime = 0;
-                int framesPlayed = 0;
-                
-                Log($"🔊 [{callId}] Playback loop started - using SendRtpRaw()");
-
+                byte[] frame = new byte[160]; // 20ms @ 8kHz
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    try
+                    if (_outboundAudio.Count >= 160)
                     {
-                        // Wait until it's time for the next frame (strict 20ms pacing)
-                        long now = stopwatch.ElapsedMilliseconds;
-                        if (now < nextFrameTime)
-                        {
-                            int delay = (int)(nextFrameTime - now);
-                            if (delay > 0 && delay < 100)
-                            {
-                                await Task.Delay(delay, cts.Token);
-                            }
-                        }
+                        for (int i = 0; i < 160; i++)
+                            _outboundAudio.TryDequeue(out frame[i]);
 
-                        // Try to dequeue and send a frame
-                        if (_outboundFrames.TryDequeue(out var frame) && _rtpSession != null)
-                        {
-                            // Send raw RTP packet with µ-law payload (payload type 0 = PCMU)
-                            _rtpSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
-                                frame,
-                                _rtpTimestamp,
-                                0,  // Marker bit
-                                0   // Payload type 0 = PCMU (µ-law)
-                            );
-                            
-                            _rtpTimestamp += 160; // 160 samples per 20ms frame at 8kHz
-                            framesPlayed++;
-                            
-                            // Log every 25 frames (500ms) to reduce spam
-                            if (framesPlayed % 25 == 0)
-                            {
-                                Log($"🔊 [{callId}] Played {framesPlayed} frames, queue: {_outboundFrames.Count}");
-                            }
-                            
-                            nextFrameTime = stopwatch.ElapsedMilliseconds + 20;
-                        }
-                        else
-                        {
-                            // No audio available, wait a bit
-                            await Task.Delay(5, cts.Token);
-                            nextFrameTime = stopwatch.ElapsedMilliseconds;
-                        }
+                        await rtpSession.AudioExtrasSource.SendAudioFromStream(
+                            new MemoryStream(frame),
+                            AudioSamplingRatesEnum.Rate8KHz);
+
+                        Log($"🔊 [{callId}] RTP send 160B (queue={_outboundAudio.Count}B)");
                     }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"⚠️ [{callId}] Playback error: {ex.Message}");
-                    }
+                    // 20ms pacing = real-time 8kHz playout
+                    await Task.Delay(20);
                 }
-                
-                Log($"🔚 [{callId}] Playback loop ended - played {framesPlayed} total frames");
             });
 
             while (!cts.IsCancellationRequested && ws.State == WebSocketState.Open)
@@ -340,47 +281,41 @@ public class SipAdaBridge : IDisposable
             Log($"📴 [{callId}] Hangup & cleanup");
             ua.Hangup();
             OnCallEnded?.Invoke(callId);
-            _rtpSession = null;
-            
-            // Drain buffer so next call starts clean
-            while (_outboundFrames.TryDequeue(out _)) { }
+            // Drain buffer so next call starts clean.
+            while (_outboundAudio.TryDequeue(out _)) { }
         }
     }
 
     /// <summary>
-    /// Convert AI PCM24k bytes to µ-law 8kHz and enqueue as 160-byte frames.
-    /// Uses frame-based queuing for proper 20ms timing.
-    /// Buffer limit is ~5 seconds to handle full greetings without dropping.
+    /// Convert AI PCM24k bytes to µ-law 8kHz and enqueue into outbound buffer, 
+    /// with backlog trimming and OG-style logs.
     /// </summary>
     private void EnqueueAiPcm24(string callId, byte[] pcmBytes)
     {
         // Bytes → shorts (PCM16)
         var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
-        
         // 24kHz → 8kHz downsample
         var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
-        
         // PCM16 8kHz → µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        // Queue as 160-byte frames (20ms at 8kHz µ-law)
-        for (int i = 0; i < ulaw.Length; i += 160)
-        {
-            int len = Math.Min(160, ulaw.Length - i);
-            var frame = new byte[160];
-            Buffer.BlockCopy(ulaw, i, frame, 0, len);
-            _outboundFrames.Enqueue(frame);
-        }
+        Log($"🧠 [{callId}] AI→PCM24k {pcmBytes.Length}B → ulaw {ulaw.Length}B");
 
-        int frameCount = _outboundFrames.Count;
-        Log($"🧠 [{callId}] AI audio: {pcmBytes.Length}B PCM24k → {ulaw.Length}B µ-law → {frameCount} frames queued");
+        // Enqueue µ-law bytes
+        foreach (var b in ulaw)
+            _outboundAudio.Enqueue(b);
 
-        // Soft limit: if we exceed max frames, trim oldest (shouldn't happen with proper pacing)
-        if (frameCount > MaxOutboundFrames)
+        // Backlog control: keep roughly MaxOutboundBufferBytes
+        var current = _outboundAudio.Count;
+        if (current > MaxOutboundBufferBytes)
         {
-            int toTrim = frameCount - MaxOutboundFrames;
-            for (int i = 0; i < toTrim && _outboundFrames.TryDequeue(out _); i++) { }
-            Log($"⚠️ [{callId}] Trimmed {toTrim} old frames, queue now: {_outboundFrames.Count}");
+            int toDrop = current - MaxOutboundBufferBytes;
+            int dropped = 0;
+            while (dropped < toDrop && _outboundAudio.TryDequeue(out _))
+            {
+                dropped++;
+            }
+            Log($"⚠️ [{callId}] Dropped {dropped}B, queue now ≈ {_outboundAudio.Count}B");
         }
     }
 
@@ -473,25 +408,25 @@ public static class AudioCodecs
     }
 }
 
-// --- PROGRAM ENTRY POINT ---
+// --- MAIN ENTRY POINT ---
 public class Program
 {
     public static void Main(string[] args)
     {
         var config = new SipAdaBridgeConfig();
-        
-        // Allow command-line overrides
-        foreach (var arg in args)
+
+        // Parse command-line args
+        for (int i = 0; i < args.Length; i++)
         {
-            if (arg.StartsWith("--server="))
-                config.SipServer = arg.Substring("--server=".Length);
-            else if (arg.StartsWith("--user="))
-                config.SipUser = arg.Substring("--user=".Length);
-            else if (arg.StartsWith("--password="))
-                config.SipPassword = arg.Substring("--password=".Length);
-            else if (arg.StartsWith("--ws="))
-                config.AdaWsUrl = arg.Substring("--ws=".Length);
-            else if (arg == "--tcp")
+            if (args[i] == "--server" && i + 1 < args.Length)
+                config.SipServer = args[++i];
+            else if (args[i] == "--user" && i + 1 < args.Length)
+                config.SipUser = args[++i];
+            else if (args[i] == "--password" && i + 1 < args.Length)
+                config.SipPassword = args[++i];
+            else if (args[i] == "--ws" && i + 1 < args.Length)
+                config.AdaWsUrl = args[++i];
+            else if (args[i] == "--tcp")
                 config.Transport = SipTransportType.TCP;
         }
 
@@ -499,14 +434,9 @@ public class Program
         bridge.Start();
 
         Console.WriteLine("Press Ctrl+C to exit...");
-        
-        var exitEvent = new ManualResetEventSlim(false);
-        Console.CancelKeyPress += (s, e) =>
-        {
-            e.Cancel = true;
-            exitEvent.Set();
-        };
-        exitEvent.Wait();
+        var exitEvent = new ManualResetEvent(false);
+        Console.CancelKeyPress += (s, e) => { e.Cancel = true; exitEvent.Set(); };
+        exitEvent.WaitOne();
 
         bridge.Stop();
     }
