@@ -97,7 +97,9 @@ async function validateAddressWithAutocomplete({
   }
 }
 
-// Check if a specific house number exists on a street using Google Places
+// Check if a specific house number exists on a street using Google Text Search ONLY
+// NOTE: Autocomplete is unreliable for house number validation - it often returns false negatives
+// Text Search with location bias is much more accurate for this purpose
 async function checkHouseNumberExists({
   houseNumber,
   streetName,
@@ -113,19 +115,8 @@ async function checkHouseNumberExists({
 }): Promise<{ exists: boolean; formattedAddress?: string }> {
   const fullAddress = `${houseNumber} ${streetName}`;
   
-  // First try Autocomplete for better validation
-  const autocompleteResult = await validateAddressWithAutocomplete({
-    fullAddress,
-    lat,
-    lon,
-    googleApiKey
-  });
-  
-  if (autocompleteResult.valid) {
-    return { exists: true, formattedAddress: autocompleteResult.formattedAddress };
-  }
-  
-  // Fallback to Text Search
+  // Use Text Search ONLY - Autocomplete is unreliable for address validation
+  // and often returns false negatives for valid addresses
   try {
     const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
       `?query=${encodeURIComponent(fullAddress)}` +
@@ -133,7 +124,7 @@ async function checkHouseNumberExists({
       `&radius=2000` + // 2km radius around the street
       `&key=${googleApiKey}`;
     
-    console.log(`[street-disambiguate] Fallback: checking house number via Text Search: "${fullAddress}"`);
+    console.log(`[street-disambiguate] Checking house number via Text Search: "${fullAddress}"`);
     
     const response = await fetch(url);
     if (!response.ok) {

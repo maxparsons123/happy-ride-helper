@@ -455,8 +455,9 @@ function extractStreetNameWithType(input: string): string {
   return cleaned.trim();
 }
 
-// Check if a road actually exists in the given area using Google Places Autocomplete
-// This prevents matching wrong streets like "David St" when user says "David Road"
+// Check if a road actually exists in the given area using Google Text Search
+// NOTE: Autocomplete is unreliable and often returns false negatives for valid roads
+// Text Search is more reliable for road existence validation
 async function doesRoadExist(
   userInput: string,
   apiKey: string,
@@ -478,47 +479,45 @@ async function doesRoadExist(
   const queryRoadType = extractRoadType(userInput);
   const queryStreetName = extractStreetName(userInput);
 
-  // 2️⃣ Build autocomplete query (address-only)
-  const searchQuery = city ? `${street}, ${city}` : street;
+  // 2️⃣ Build Text Search query (more reliable than Autocomplete)
+  const searchQuery = city ? `${street}, ${city}, UK` : `${street}, UK`;
 
-  const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json` +
-    `?input=${encodeURIComponent(searchQuery)}` +
-    `&types=address` +
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json` +
+    `?query=${encodeURIComponent(searchQuery)}` +
     `&location=${lat},${lon}` +
     `&radius=8000` +
-    `&components=country:gb` +
     `&key=${apiKey}`;
 
-  console.log(`[Geocode] doesRoadExist: checking "${searchQuery}" near ${lat},${lon}`);
+  console.log(`[Geocode] doesRoadExist (TextSearch): checking "${searchQuery}" near ${lat},${lon}`);
 
   try {
     const response = await fetch(url);
     const data = await response.json();
 
-    if (data.status !== "OK" || !data.predictions || data.predictions.length === 0) {
-      console.log(`[Geocode] doesRoadExist: no predictions found for "${street}"`);
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      console.log(`[Geocode] doesRoadExist: no results found for "${street}"`);
       return false;
     }
 
     // 3️⃣ Compare street names safely - must match BOTH road type AND street name
-    for (const pred of data.predictions) {
-      const description = pred.description || "";
-      if (!description) continue;
+    for (const result of data.results) {
+      const formattedAddress = result.formatted_address || "";
+      if (!formattedAddress) continue;
 
-      const predRoadType = extractRoadType(description);
-      const predStreetName = extractStreetName(description);
+      const resultRoadType = extractRoadType(formattedAddress);
+      const resultStreetName = extractStreetName(formattedAddress);
 
       // Check road type match (Road ≠ Street)
-      const roadTypeOk = roadTypesMatch(queryRoadType, predRoadType);
+      const roadTypeOk = roadTypesMatch(queryRoadType, resultRoadType);
       
       // Check street name match (David ≠ Davids)
-      const streetNameOk = streetNamesMatch(queryStreetName, predStreetName);
+      const streetNameOk = streetNamesMatch(queryStreetName, resultStreetName);
 
       if (roadTypeOk && streetNameOk) {
-        console.log(`[Geocode] doesRoadExist: ✅ FOUND "${description}" matches "${street}" (roadType: ${predRoadType}, streetName: ${predStreetName})`);
+        console.log(`[Geocode] doesRoadExist: ✅ FOUND "${formattedAddress}" matches "${street}" (roadType: ${resultRoadType}, streetName: ${resultStreetName})`);
         return true;
       } else {
-        console.log(`[Geocode] doesRoadExist: ❌ REJECTED "${description}" - roadType: ${queryRoadType}→${predRoadType} (${roadTypeOk ? 'OK' : 'MISMATCH'}), streetName: ${queryStreetName}→${predStreetName} (${streetNameOk ? 'OK' : 'MISMATCH'})`);
+        console.log(`[Geocode] doesRoadExist: ❌ REJECTED "${formattedAddress}" - roadType: ${queryRoadType}→${resultRoadType} (${roadTypeOk ? 'OK' : 'MISMATCH'}), streetName: ${queryStreetName}→${resultStreetName} (${streetNameOk ? 'OK' : 'MISMATCH'})`);
       }
     }
 
