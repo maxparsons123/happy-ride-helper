@@ -199,11 +199,14 @@ function checkFuzzyMatch(
     const historyHouseNum = extractHouseNumber(historyAddr);
     const historyStreet = extractStreetName(historyAddr);
     
-    // Same street name (or very close)
-    const streetDistance = levenshteinDistance(extractedStreet, historyStreet);
+    // Same street name (or very close) - AFTER normalizing with STT corrections
+    const normalizedExtractedStreet = normalizeAddress(extractedStreet);
+    const normalizedHistoryStreet = normalizeAddress(historyStreet);
+    
+    const streetDistance = levenshteinDistance(normalizedExtractedStreet, normalizedHistoryStreet);
     const streetSimilar = streetDistance <= 2 || 
-      extractedStreet.includes(historyStreet) || 
-      historyStreet.includes(extractedStreet);
+      normalizedExtractedStreet.includes(normalizedHistoryStreet) || 
+      normalizedHistoryStreet.includes(normalizedExtractedStreet);
 
     if (streetSimilar && extractedHouseNum && historyHouseNum) {
       // Check if house numbers are fuzzy variants of each other
@@ -245,6 +248,35 @@ function checkFuzzyMatch(
           confidence: 0.7,
         };
       }
+      
+      // NEW: If streets match after STT correction but house numbers are exact match
+      // This catches "Davie Road" -> "David Road" with same house number
+      if (extractedHouseNum.toUpperCase() === historyHouseNum.toUpperCase() && streetDistance > 0) {
+        // Exact house number on similar street (likely STT mishearing of street name)
+        return {
+          isExactMatch: false,
+          isFuzzyMatch: true,
+          matchedAddress: historyAddr,
+          extractedAddress: extractedAddr,
+          needsClarification: true,
+          clarificationReason: `"${extractedAddr}" sounds like your usual address "${historyAddr}" - confirming`,
+          confidence: 0.85,
+        };
+      }
+    }
+    
+    // NEW: Check if street names match after normalization even without house numbers
+    if (streetSimilar && !extractedHouseNum && !historyHouseNum) {
+      // Both are bare street names that match after correction
+      return {
+        isExactMatch: false,
+        isFuzzyMatch: true,
+        matchedAddress: historyAddr,
+        extractedAddress: extractedAddr,
+        needsClarification: true,
+        clarificationReason: `"${extractedAddr}" may be "${historyAddr}" from your history`,
+        confidence: 0.7,
+      };
     }
   }
 

@@ -7871,7 +7871,17 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
   };
 
   socket.onclose = async () => {
-    console.log(`[${callId}] Client disconnected`);
+    console.log(`[${callId}] 📞 Client disconnected - STOPPING Ada immediately`);
+    
+    // CRITICAL: Close OpenAI connection FIRST to stop Ada from generating more audio
+    // This prevents Ada from continuing to talk after caller hangs up
+    if (openaiWs?.readyState === WebSocket.OPEN) {
+      console.log(`[${callId}] 🛑 Closing OpenAI WebSocket to stop Ada`);
+      openaiWs.close();
+    }
+    
+    // Clear all timers to prevent any delayed actions
+    clearAllCallTimers();
     
     // DON'T mark as ended immediately - save for potential resume instead
     // Only save if call wasn't already formally ended (e.g., via end_call tool)
@@ -7890,8 +7900,6 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       // Call was formally ended - mark as completed
       callEnded = true;
     }
-    
-    clearAllCallTimers();
 
     // Update call end time
     await supabase.from("call_logs")
@@ -7905,8 +7913,6 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         ended_at: new Date().toISOString()
       });
     }
-
-    openaiWs?.close();
   };
 
   socket.onerror = (error) => {
