@@ -470,6 +470,118 @@ export default function VoiceTest() {
     }, 500);
   }, [stopRecordingInternal]);
 
+  // === µ-LAW CODEC (Phone line simulation) ===
+  const ULAW_BIAS = 0x84;
+  const ULAW_CLIP = 32635;
+
+  const linearToUlaw = (sample: number): number => {
+    let sign = (sample < 0) ? 0x80 : 0;
+    if (sign) sample = -sample;
+    if (sample > ULAW_CLIP) sample = ULAW_CLIP;
+    sample += ULAW_BIAS;
+    let exponent = Math.floor(Math.log2(sample)) - 7;
+    if (exponent < 0) exponent = 0;
+    if (exponent > 7) exponent = 7;
+    let mantissa = (sample >> (exponent + 3)) & 0x0F;
+    return ~(sign | (exponent << 4) | mantissa) & 0xFF;
+  };
+
+  const ulawToLinear = (ulaw: number): number => {
+    let u = ~ulaw & 0xFF;
+    let sign = (u & 0x80) ? -1 : 1;
+    let exponent = (u >> 4) & 0x07;
+    let mantissa = u & 0x0F;
+    let sample = ((mantissa << 3) + ULAW_BIAS) << exponent;
+    return sign * (sample - ULAW_BIAS);
+  };
+
+  // Convert AudioBuffer to WAV blob
+  const audioBufferToWav = (buffer: AudioBuffer): Blob => {
+    const numChannels = 1;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    const samples = buffer.getChannelData(0);
+    const byteRate = sampleRate * numChannels * bitDepth / 8;
+    const blockAlign = numChannels * bitDepth / 8;
+    const dataSize = samples.length * numChannels * bitDepth / 8;
+    const bufferSize = 44 + dataSize;
+    
+    const arrayBuffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(arrayBuffer);
+    
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, bufferSize - 8, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+    
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      offset += 2;
+    }
+    
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+  };
+
+  // Simulate phone line: resample to 8kHz, apply µ-law, then decode back
+  const simulatePhoneLine = async (audioBuffer: AudioBuffer): Promise<AudioBuffer> => {
+    const inputRate = audioBuffer.sampleRate;
+    const outputRate = 8000;
+    const inputData = audioBuffer.getChannelData(0);
+    
+    // Resample to 8kHz
+    const ratio = outputRate / inputRate;
+    const outputLength = Math.floor(inputData.length * ratio);
+    const resampled = new Float32Array(outputLength);
+    
+    for (let i = 0; i < outputLength; i++) {
+      const srcIndex = i / ratio;
+      const srcIndexFloor = Math.floor(srcIndex);
+      const srcIndexCeil = Math.min(srcIndexFloor + 1, inputData.length - 1);
+      const t = srcIndex - srcIndexFloor;
+      resampled[i] = inputData[srcIndexFloor] * (1 - t) + inputData[srcIndexCeil] * t;
+    }
+
+    // Apply µ-law encode/decode (lossy!) + noise gate
+    const processed = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const sample16 = Math.max(-32768, Math.min(32767, Math.round(resampled[i] * 32768)));
+      const ulaw = linearToUlaw(sample16);
+      const decoded = ulawToLinear(ulaw);
+      // Soft-knee noise gate (threshold 25, floor 0.15) - matches bridge DSP
+      const abs = Math.abs(decoded);
+      const kneeHigh = 75;
+      const gain = abs < 25 ? 0.15 : abs > kneeHigh ? 1.0 : 0.15 + 0.85 * ((abs - 25) / 50);
+      processed[i] = (decoded * gain) / 32768;
+    }
+
+    const offlineCtx = new OfflineAudioContext(1, outputLength, outputRate);
+    const buffer = offlineCtx.createBuffer(1, outputLength, outputRate);
+    buffer.getChannelData(0).set(processed);
+    return buffer;
+  };
+
+  // Phone simulation state
+  const [phoneSimEnabled, setPhoneSimEnabled] = useState(true);
+  const [phoneSimAudioUrl, setPhoneSimAudioUrl] = useState<string | null>(null);
+
   // === AUDIO QUALITY TEST FUNCTIONS ===
   const startAudioTest = useCallback(async () => {
     setTestTranscript(null);
@@ -527,13 +639,32 @@ export default function VoiceTest() {
           testAnimationRef.current = null;
         }
         testAnalyserRef.current = null;
-        audioCtx.close();
         stream.getTracks().forEach(t => t.stop());
 
-        // Create playback URL
+        // Create original playback URL
         const blob = new Blob(testAudioChunksRef.current, { type: 'audio/webm' });
         const url = URL.createObjectURL(blob);
         setTestAudioUrl(url);
+
+        // Apply phone line simulation if enabled
+        if (phoneSimEnabled) {
+          try {
+            const arrayBuffer = await blob.arrayBuffer();
+            const tempCtx = new AudioContext();
+            const originalBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+            const phoneBuffer = await simulatePhoneLine(originalBuffer);
+            const wavBlob = audioBufferToWav(phoneBuffer);
+            const phoneUrl = URL.createObjectURL(wavBlob);
+            setPhoneSimAudioUrl(phoneUrl);
+            tempCtx.close();
+          } catch (err) {
+            console.error('Phone simulation error:', err);
+          }
+        } else {
+          setPhoneSimAudioUrl(null);
+        }
+
+        audioCtx.close();
 
         // Send to STT
         const startTime = Date.now();
@@ -776,7 +907,7 @@ export default function VoiceTest() {
         <div className="bg-card rounded-xl border border-chat-border p-4">
           <h3 className="font-semibold text-primary mb-3">🎤 Audio Quality Test</h3>
           <p className="text-xs text-muted-foreground mb-4">
-            Record your voice to see exactly what STT hears. Say "cancel" to test.
+            Record your voice to hear what it sounds like on a phone line. Say "cancel" to test.
           </p>
           
           <div className="flex items-center gap-4 mb-4">
@@ -788,11 +919,35 @@ export default function VoiceTest() {
               <Mic className="w-4 h-4 mr-2" />
               {isTestRecording ? "Stop Recording" : "Test Audio"}
             </Button>
-            
-            {testAudioUrl && (
-              <audio controls src={testAudioUrl} className="h-10 flex-1" />
-            )}
+
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={phoneSimEnabled}
+                onChange={(e) => setPhoneSimEnabled(e.target.checked)}
+                className="rounded border-muted-foreground"
+              />
+              <span className="text-muted-foreground">📞 Phone simulation</span>
+            </label>
           </div>
+
+          {/* Audio Playback */}
+          {(testAudioUrl || phoneSimAudioUrl) && (
+            <div className="space-y-2 mb-4">
+              {testAudioUrl && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground w-20">Original:</span>
+                  <audio controls src={testAudioUrl} className="h-8 flex-1" />
+                </div>
+              )}
+              {phoneSimAudioUrl && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-orange-400 w-20">📞 Phone:</span>
+                  <audio controls src={phoneSimAudioUrl} className="h-8 flex-1" />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Audio Level Visualization */}
           {testAudioLevels.length > 0 && (
