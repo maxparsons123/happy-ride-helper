@@ -611,17 +611,27 @@ export default function LiveCalls() {
             </div>
             {/* Pipeline Selector */}
             <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
-              <span className={`text-xs font-medium ${!useGeminiPipeline ? 'text-primary' : 'text-muted-foreground'}`}>
-                OpenAI
-              </span>
+              <div className="flex flex-col items-center">
+                <span className={`text-xs font-bold ${!useGeminiPipeline ? 'text-primary' : 'text-muted-foreground'}`}>
+                  OpenAI
+                </span>
+                <span className={`text-[10px] ${!useGeminiPipeline ? 'text-primary/70' : 'text-muted-foreground/50'}`}>
+                  Realtime
+                </span>
+              </div>
               <Switch
                 id="pipeline-select"
                 checked={useGeminiPipeline}
                 onCheckedChange={setUseGeminiPipeline}
               />
-              <span className={`text-xs font-medium ${useGeminiPipeline ? 'text-green-400' : 'text-muted-foreground'}`}>
-                Gemini
-              </span>
+              <div className="flex flex-col items-center">
+                <span className={`text-xs font-bold ${useGeminiPipeline ? 'text-green-400' : 'text-muted-foreground'}`}>
+                  Gemini
+                </span>
+                <span className={`text-[10px] ${useGeminiPipeline ? 'text-green-400/70' : 'text-muted-foreground/50'}`}>
+                  Groq STT
+                </span>
+              </div>
             </div>
             {/* Address TTS Splicing Toggle */}
             <div className="flex items-center gap-2">
@@ -693,21 +703,43 @@ export default function LiveCalls() {
         {/* Pipeline Status Bar */}
         <div className="mb-4 p-3 rounded-lg bg-card/50 border border-border flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className={`w-2 h-2 rounded-full ${useGeminiPipeline ? 'bg-green-400' : 'bg-primary'}`} />
+            <div className={`w-2 h-2 rounded-full ${useGeminiPipeline ? 'bg-green-400' : 'bg-primary'} animate-pulse`} />
             <span className="text-sm font-medium">
-              Pipeline: {useGeminiPipeline ? 'Gemini (STT → LLM → TTS)' : 'OpenAI Realtime (Audio-to-Audio)'}
+              {useGeminiPipeline ? 'Gemini Pipeline' : 'OpenAI Realtime'}
             </span>
+            {useGeminiPipeline ? (
+              <>
+                <Badge variant="outline" className="text-xs text-amber-400 border-amber-400/50">
+                  Groq STT
+                </Badge>
+                <Badge variant="outline" className="text-xs text-green-400 border-green-400/50">
+                  Gemini LLM
+                </Badge>
+                <Badge variant="outline" className="text-xs text-purple-400 border-purple-400/50">
+                  ElevenLabs TTS
+                </Badge>
+              </>
+            ) : (
+              <>
+                <Badge variant="outline" className="text-xs text-primary border-primary/50">
+                  Whisper-1 STT
+                </Badge>
+                <Badge variant="outline" className="text-xs text-primary border-primary/50">
+                  GPT-4o Realtime
+                </Badge>
+              </>
+            )}
             <Badge variant="outline" className="text-xs">
               {useGeminiPipeline ? 'FREE LLM' : '~$2.40/M tokens'}
             </Badge>
             <Badge variant="outline" className="text-xs">
-              {useGeminiPipeline ? '~800-1200ms latency' : '~400-500ms latency'}
+              {useGeminiPipeline ? '~600-1000ms' : '~400-500ms'}
             </Badge>
           </div>
           <code className="text-xs bg-muted px-2 py-1 rounded font-mono text-muted-foreground">
             {useGeminiPipeline 
-              ? 'wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime-gemini'
-              : 'wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime'
+              ? 'taxi-realtime-gemini'
+              : 'taxi-realtime'
             }
           </code>
         </div>
