@@ -455,7 +455,8 @@ serve(async (req) => {
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
-  
+  let needsHistoryPriming = false; // If OpenAI reconnects, prime it with transcript history (avoid re-greeting)
+  let hangupReceived = false; // Set true when telephony sends explicit hangup
   // ═══════════════════════════════════════════════════════════════════════════
   // SESSION RESUME - Persist state for reconnection after signal drops
   // ═══════════════════════════════════════════════════════════════════════════
@@ -534,6 +535,8 @@ serve(async (req) => {
       callerCity = resumeData.session_state?.callerCity || '';
       userPhone = data.caller_phone || '';
       greetingSent = true; // Already greeted before disconnect
+      isResumedSession = true;
+      needsHistoryPriming = true;
       awaitingAreaResponse = resumeData.session_state?.awaitingAreaResponse || false;
       
       // Restore booking state
@@ -4665,7 +4668,12 @@ Rules:
 
     // Reset readiness so we buffer audio until the new session.update is applied
     sessionReady = false;
-    greetingSent = false;
+
+    // If we already greeted / have an ongoing conversation, DO NOT re-greet.
+    // Instead we will prime the new OpenAI session with transcript history after session.updated.
+    if (greetingSent) {
+      needsHistoryPriming = true;
+    }
 
     openAiReconnectTimer = setTimeout(() => {
       openAiReconnectTimer = null;
@@ -4891,10 +4899,12 @@ You MUST use the cancel_booking or modify_booking tools when requested - they wi
         // Trigger initial greeting ONLY ONCE
         if (greetingSent) {
           console.log(`[${callId}] ⏭️ Greeting already sent, skipping duplicate`);
-          
-          // If this is a resumed session, prime OpenAI with conversation history
-          if (isResumedSession && transcriptHistory.length > 0) {
-            console.log(`[${callId}] 🔄 Resumed session - priming OpenAI with history`);
+
+          // If this session was resumed OR OpenAI reconnected, prime OpenAI with conversation history.
+          if ((isResumedSession || needsHistoryPriming) && transcriptHistory.length > 0) {
+            console.log(`[${callId}] 🔄 Priming OpenAI with history (resumed=${isResumedSession}, openai_reconnect=${needsHistoryPriming})`);
+            needsHistoryPriming = false;
+            isResumedSession = false;
             primeOpenAiWithHistory();
           }
           return;
@@ -7897,6 +7907,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       // Hangup from Asterisk
       if (message.type === "hangup") {
         console.log(`[${callId}] Hangup received`);
+        hangupReceived = true;
         socket.close();
       }
 
@@ -7907,28 +7918,55 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
 
   socket.onclose = async () => {
     console.log(`[${callId}] 📞 Client disconnected - STOPPING Ada immediately`);
-    
+
     // CRITICAL: Close OpenAI connection FIRST to stop Ada from generating more audio
     // This prevents Ada from continuing to talk after caller hangs up
     if (openaiWs?.readyState === WebSocket.OPEN) {
       console.log(`[${callId}] 🛑 Closing OpenAI WebSocket to stop Ada`);
       openaiWs.close();
     }
-    
+
     // Clear all timers to prevent any delayed actions
     clearAllCallTimers();
-    
-    // DON'T mark as ended immediately - save for potential resume instead
+
+    // If we received an explicit hangup from telephony, the call is OVER and must NOT be resumable.
+    if (!callEnded && hangupReceived) {
+      console.log(`[${callId}] ✅ Treating disconnect as HANGUP - marking call as ended and clearing resume data`);
+      callEnded = true;
+
+      // Mark ended in DB to prevent session resume / re-greeting loops
+      await broadcastLiveCall({
+        status: "ended",
+        ended_at: new Date().toISOString(),
+      });
+
+      // Clear any resume data so reconnects don't restart the call
+      await supabase
+        .from("live_calls")
+        .update({ clarification_attempts: null })
+        .eq("call_id", callId);
+
+      // Update call end time
+      await supabase
+        .from("call_logs")
+        .update({ call_end_at: new Date().toISOString() })
+        .eq("call_id", callId);
+
+      return;
+    }
+
+    // Otherwise: save for potential resume (temporary network drop)
     // Only save if call wasn't already formally ended (e.g., via end_call tool)
     if (!callEnded && transcriptHistory.length > 0) {
       console.log(`[${callId}] 💾 Saving session for potential resume...`);
       await saveSessionForResume();
-      
+
       // Mark the call as "disconnected" (not "completed") so it can be resumed
-      await supabase.from("live_calls")
-        .update({ 
+      await supabase
+        .from("live_calls")
+        .update({
           status: "disconnected",
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq("call_id", callId);
     } else {
@@ -7937,7 +7975,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
     }
 
     // Update call end time
-    await supabase.from("call_logs")
+    await supabase
+      .from("call_logs")
       .update({ call_end_at: new Date().toISOString() })
       .eq("call_id", callId);
 
@@ -7945,7 +7984,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
     if (callEnded) {
       await broadcastLiveCall({
         status: "completed",
-        ended_at: new Date().toISOString()
+        ended_at: new Date().toISOString(),
       });
     }
   };
