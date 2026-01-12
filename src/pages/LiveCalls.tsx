@@ -136,6 +136,7 @@ export default function LiveCalls() {
   const [useGeminiPipeline, setUseGeminiPipeline] = useState(false);
   const [sttProvider, setSttProvider] = useState<"groq" | "deepgram">("groq");
   const [ttsProvider, setTtsProvider] = useState<"elevenlabs" | "deepgram">("elevenlabs");
+  const [useUnifiedExtraction, setUseUnifiedExtraction] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [pickupGeocode, setPickupGeocode] = useState<GeocodeResult | null>(null);
@@ -764,6 +765,20 @@ export default function LiveCalls() {
                 </span>
               </div>
             )}
+            {/* Unified AI Extraction Toggle */}
+            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-amber-500/30">
+              <span className={`text-xs font-medium ${!useUnifiedExtraction ? 'text-muted-foreground' : 'text-muted-foreground'}`}>
+                Inline
+              </span>
+              <Switch
+                id="unified-extraction"
+                checked={useUnifiedExtraction}
+                onCheckedChange={setUseUnifiedExtraction}
+              />
+              <span className={`text-xs font-medium ${useUnifiedExtraction ? 'text-amber-400' : 'text-muted-foreground'}`}>
+                AI Extract
+              </span>
+            </div>
             {/* Audio controls */}
             <div className="flex items-center gap-2">
               <Button
@@ -868,6 +883,11 @@ export default function LiveCalls() {
                 </Badge>
               </>
             )}
+            {useUnifiedExtraction && (
+              <Badge variant="outline" className="text-xs text-amber-400 border-amber-400/50">
+                🧪 AI Extract
+              </Badge>
+            )}
             <Badge variant="outline" className="text-xs">
               {useGeminiPipeline ? 'FREE LLM' : '~$2.40/M tokens'}
             </Badge>
@@ -886,6 +906,7 @@ export default function LiveCalls() {
               ? 'taxi-realtime-gemini'
               : 'taxi-realtime'
             }
+            {useUnifiedExtraction ? ' + taxi-extract-unified' : ''}
           </code>
         </div>
 
