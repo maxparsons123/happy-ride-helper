@@ -22,8 +22,10 @@ NEW CALLER: "Hello, welcome to {{company_name}}! I'm Ada. What's your name?"
 RETURNING CALLER (no active booking): "Hello [NAME]! Where can I take you today?"
 
 RETURNING CALLER (has active booking): "Hello [NAME]! I see you have a booking from [PICKUP] to [DESTINATION]. Is that still okay, or would you like to change it?"
-→ If cancel: call cancel_booking, then ask "Would you like to book another?"
+→ If they CLEARLY say "cancel" or "cancel it": call cancel_booking FIRST, wait for response, then say "That's cancelled. Would you like to book another?"
 → If change: use modify_booking
+→ CRITICAL: If their response is unclear, off-topic, or doesn't mention cancellation → ask: "Would you like to keep the booking or cancel it?"
+→ NEVER say "cancelled" or "that's cancelled" UNLESS you have called cancel_booking and received success.
 
 ═══════════════════════════════════
 BOOKING FLOW
@@ -95,13 +97,14 @@ TOOLS
 ═══════════════════════════════════
 
 - book_taxi → creates booking, returns fare/ETA
-- cancel_booking → cancels active booking  
+- cancel_booking → cancels active booking (MUST call before saying "cancelled")
 - modify_booking → edits existing booking
 - save_customer_name → when user gives their name
 - find_nearby_places → recommends venues
 - end_call → after goodbye
 
 NEVER invent fares. Only quote what book_taxi returns.
+NEVER say "cancelled" or "that's cancelled" without calling cancel_booking FIRST.
 
 ═══════════════════════════════════
 AFTER BOOKING (ULTRA-SHORT)
@@ -125,7 +128,9 @@ ABSOLUTE RULES
 3. Never invent information (fares, times, addresses)
 4. Accept corrections immediately
 5. Keep responses SHORT (1-2 sentences max)
-6. Never say "booking confirmed" until book_taxi returns success`;
+6. Never say "booking confirmed" until book_taxi returns success
+7. Never say "cancelled" until cancel_booking returns success
+8. If customer's response is unclear or off-topic, ask a clarifying question`;
 
 // Legacy fallback prompt (preserved for reference)
 const SYSTEM_INSTRUCTIONS_FALLBACK = `You are Ada, a global AI taxi dispatcher for 247 Radio Carz.
@@ -3203,10 +3208,10 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     // Expanded list of non-name words to filter out - including "not" to prevent "my name is not X" errors
     const nonNames = new Set([
       'yes', 'no', 'yeah', 'yep', 'nope', 'okay', 'ok', 'sure', 'please', 'thanks', 'thank',
-      'hello', 'hi', 'hey', 'hiya', 'the', 'from', 'to', 'a', 'an', 'and', 'or', 'but',
+      'hello', 'hi', 'hey', 'hiya', 'the', 'from', 'to', 'a', 'an', 'and', 'or', 'but', 'for',
       'taxi', 'cab', 'car', 'booking', 'book', 'need', 'want', 'would', 'like', 'can',
       'could', 'just', 'actually', 'really', 'well', 'um', 'uh', 'er', 'ah', 'oh',
-      'good', 'morning', 'afternoon', 'evening', 'night', 'today', 'now', 'soon',
+      'good', 'morning', 'afternoon', 'evening', 'night', 'today', 'now', 'soon', 'asap',
       'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four',
       'not', 'wrong', 'incorrect', 'correct', 'actually', 'change', 'update', 'fix',
       'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'them', 'it',
