@@ -198,26 +198,8 @@ serve(async (req) => {
         formData.append("model", "whisper-large-v3-turbo");
         formData.append("response_format", "json");
         formData.append("temperature", "0"); // CRITICAL: Temperature=0 prevents creative hallucinations
-        // NO language lock - auto-detect for multilingual support (Urdu, Punjabi, Polish, Romanian, Arabic, etc.)
-        
-        // DYNAMIC PROMPT CONDITIONING: Tell Whisper what the user is responding to
-        // This dramatically improves transcription of "yes/no", addresses, postcodes that were just mentioned
-        const contextHeader = lastAssistantResponse 
-          ? `[USER WILL RESPOND TO THIS QUESTION]
-Ada asked: "${lastAssistantResponse.slice(0, 250)}"
-[NOW TRANSCRIBE THE USER'S RESPONSE]
-
-` 
-          : "";
-        
-        // Rich prompt with context header + local entities
-        formData.append("prompt", `${contextHeader}Taxi booking phone call in the West Midlands, England, UK.
-LIKELY RESPONSES: yes, no, yeah, nope, correct, that's right, cancel, book it, keep it.
-CITIES: Coventry, Birmingham, Wolverhampton, Walsall, Dudley, Solihull, Nuneaton, Leamington Spa, Warwick, Rugby, Manchester, London.
-STREETS: School Road, Station Road, High Street, Church Lane, Park Road, London Road, David Road, Binley Road, Foleshill Road.
-LANDMARKS: Birmingham Airport, Coventry Station, Manchester Airport, Heathrow Airport, Gatwick Airport.
-ADDRESS FORMATS: 52A David Road, UK postcodes CV1, CV2, B1, B2, M18, M1.
-MULTILINGUAL: English, Urdu, Punjabi, Polish, Romanian, Arabic.`);
+        // NO language lock - auto-detect for multilingual support
+        // NO prompt conditioning - let Whisper transcribe naturally without context bias
         
         const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
