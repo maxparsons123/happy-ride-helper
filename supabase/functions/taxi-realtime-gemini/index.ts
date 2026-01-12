@@ -54,7 +54,7 @@ serve(async (req) => {
   // Upgrade to WebSocket
   const { socket, response } = Deno.upgradeWebSocket(req);
   
-  const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY"); // For Whisper STT
+  const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY"); // For Groq Whisper STT
   const ELEVENLABS_API_KEY = Deno.env.get("ELEVENLABS_API_KEY"); // For TTS
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY"); // For Gemini
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -112,10 +112,10 @@ serve(async (req) => {
     }
   };
 
-  // Step 1: STT - Convert audio to text using Whisper
+  // Step 1: STT - Convert audio to text using Groq Whisper (faster than OpenAI)
   const transcribeAudio = async (audioData: Uint8Array): Promise<string> => {
     const startTime = Date.now();
-    console.log(`[${callId}] 🎤 STT: Transcribing ${audioData.length} bytes...`);
+    console.log(`[${callId}] 🎤 STT (Groq): Transcribing ${audioData.length} bytes...`);
     
     try {
       // Convert PCM16 to WAV format for Whisper
@@ -126,22 +126,25 @@ serve(async (req) => {
       
       const formData = new FormData();
       formData.append("file", new Blob([wavData], { type: "audio/wav" }), "audio.wav");
-      formData.append("model", "whisper-1");
+      formData.append("model", "whisper-large-v3-turbo"); // Groq's fastest Whisper model
       // No language specified - let Whisper auto-detect for multilingual support
-      formData.append("prompt", "Taxi booking conversation. Common terms: pickup, destination, passengers, estate car, saloon, minibus, airport, train station. Addresses may include UK postcodes.");
+      formData.append("response_format", "json");
+      formData.append("prompt", "Taxi booking conversation. Common terms: pickup, destination, passengers, estate car, saloon, minibus, airport, train station. Addresses may include UK postcodes like SW1A 1AA, B1 1AA. Names of places and streets.");
       
-      const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
         method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
         body: formData,
       });
       
       if (!response.ok) {
-        throw new Error(`Whisper error: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`[${callId}] Groq Whisper error:`, response.status, errorText);
+        throw new Error(`Groq Whisper error: ${response.status}`);
       }
       
       const result = await response.json();
-      const sttLatency = logTiming("STT (Whisper)", startTime);
+      const sttLatency = logTiming("STT (Groq)", startTime);
       
       console.log(`[${callId}] 🎤 STT result: "${result.text}"`);
       
