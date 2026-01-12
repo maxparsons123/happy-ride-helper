@@ -1465,8 +1465,8 @@ serve(async (req) => {
   }
   
   const {
-    pickup_input,
-    dropoff_input,
+    pickup_input: rawPickupInput,
+    dropoff_input: rawDropoffInput,
     caller_city_hint,
     caller_coords,
     country = "GB",
@@ -1474,7 +1474,16 @@ serve(async (req) => {
     nearby_query,
   } = body;
   
-  console.log(`🚕 Trip Resolve Request:`, JSON.stringify(body, null, 2));
+  // CRITICAL: Apply STT corrections to fix common mishearings BEFORE geocoding
+  // e.g., "Davie Road" → "David Road", "School Rhodes" → "School Road"
+  const pickup_input = rawPickupInput ? normalizeSTTAddress(rawPickupInput) : undefined;
+  const dropoff_input = rawDropoffInput ? normalizeSTTAddress(rawDropoffInput) : undefined;
+  
+  console.log(`🚕 Trip Resolve Request:`, JSON.stringify({ 
+    ...body, 
+    pickup_normalized: pickup_input !== rawPickupInput ? pickup_input : undefined,
+    dropoff_normalized: dropoff_input !== rawDropoffInput ? dropoff_input : undefined 
+  }, null, 2));
   
   try {
     const response: TripResolveResponse = { ok: true };
