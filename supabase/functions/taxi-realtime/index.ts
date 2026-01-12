@@ -21,10 +21,10 @@ NEW CALLER: "Hello, welcome to {{company_name}}! I'm Ada. What's your name?"
 
 RETURNING CALLER (no active booking): "Hello [NAME]! Where can I take you today?"
 
-RETURNING CALLER (has active booking): "Hello [NAME]! I see you have a booking from [PICKUP] to [DESTINATION]. Is that still okay, or would you like to change it?"
+RETURNING CALLER (has active booking): "Hello [NAME]! I can see you have an active booking. Would you like to keep it, change it, or cancel it?"
 → If they CLEARLY say "cancel" or "cancel it": call cancel_booking FIRST, wait for response, then say "That's cancelled. Would you like to book another?"
 → If change: use modify_booking
-→ CRITICAL: If their response is unclear, off-topic, or doesn't mention cancellation → ask: "Would you like to keep the booking or cancel it?"
+→ CRITICAL: If their response is unclear, off-topic, or doesn't mention cancellation/change → ask: "Would you like to keep it, change it, or cancel it?"
 → NEVER say "cancelled" or "that's cancelled" UNLESS you have called cancel_booking and received success.
 
 NAME CORRECTIONS (CRITICAL):
@@ -740,14 +740,25 @@ serve(async (req) => {
   // Get effective system prompt (replace placeholders)
   const getEffectiveSystemPrompt = (): string => {
     if (!agentConfig) return SYSTEM_INSTRUCTIONS;
-    
+
     let prompt = agentConfig.system_prompt;
-    
+
     // Replace placeholders
     prompt = prompt.replace(/\{\{agent_name\}\}/g, agentConfig.name);
     prompt = prompt.replace(/\{\{company_name\}\}/g, agentConfig.company_name);
     prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig.personality_traits.join(", "));
-    
+
+    // Non-negotiable overrides (prevents verbose/repetitive DB prompts from degrading UX)
+    prompt += `
+
+NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
+- Be concise (usually 1 short sentence).
+- NEVER repeat back pickup/destination addresses or summarize what the caller just said.
+- During collection, acknowledge briefly ("Lovely", "Got it") and move on to the next missing question.
+- Do NOT ask "when do you need the taxi" unless the caller explicitly mentions a time or asks to book for later.
+- Once you have pickup + destination + passengers (and bags for airport/station trips), call book_taxi immediately.
+- For active bookings: do NOT say the route; just ask keep/change/cancel.`;
+
     return prompt;
   };
 
@@ -5248,7 +5259,7 @@ DROPOFFS: ${callerDropoffAddresses.length > 0 ? callerDropoffAddresses.slice(-5)
           const pickupDisplay = activeBooking.pickup_name || activeBooking.pickup;
           const destDisplay = activeBooking.destination_name || activeBooking.destination;
           
-          // Customer has an outstanding booking - offer to cancel/keep
+          // Customer has an outstanding booking - offer to keep/change/cancel (WITHOUT repeating route)
           greetingPrompt = `[Call connected - customer has an ACTIVE BOOKING. Their name is ${callerName || 'unknown'}. 
 ACTIVE BOOKING DETAILS:
 - Booking ID: ${activeBooking.id}
@@ -5258,7 +5269,7 @@ ACTIVE BOOKING DETAILS:
 - Fare: ${activeBooking.fare}
 ${addressHistoryContext}
 
-Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking from ${pickupDisplay} to ${destDisplay}. Would you like to keep that booking, or would you like to cancel it?"
+Say EXACTLY: "Hello${callerName ? ` ${callerName}` : ''}! I can see you have an active booking. Would you like to keep it, change it, or cancel it?"
 
 Then WAIT for the customer to respond. Do NOT cancel until they explicitly say "cancel" or "cancel it".]`;
         } else if (callerName && callerLastDestination) {
@@ -7274,8 +7285,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 output: JSON.stringify({
                   success: false,
                   blocked: true,
-                  message: "Cancellation blocked: I didn't hear a clear request to cancel.",
-                  next_action: "Ask the customer to confirm: say 'cancel it' to cancel, or 'keep it' to keep the booking."
+                  message: "Cancellation blocked: no clear cancel request.",
+                  next_action: "Ask: keep it, change it, or cancel it (say 'cancel it')."
                 })
               }
             }));
@@ -7284,7 +7295,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               type: "response.create",
               response: {
                 modalities: ["audio", "text"],
-                instructions: "You may have misheard the customer. Ask ONE clear question: 'Did you want me to cancel your booking? Please say cancel it, or keep it.' Do NOT cancel yet."
+                instructions: "Ask ONE short question: 'Sorry—do you want to keep it, change it, or cancel it? Say keep it, change it, or cancel it.' Do NOT cancel yet."
               }
             }));
 
