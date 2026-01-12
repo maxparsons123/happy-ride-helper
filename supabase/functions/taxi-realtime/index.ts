@@ -5042,6 +5042,9 @@ CRITICAL: Wait for them to answer the area question BEFORE proceeding with any b
             /^silence\.?$/i,  // "Silence." - common Whisper hallucination on quiet audio
             /^\[silence\]$/i,  // "[Silence]" variant
             /^\.\.\.+$/,  // Just ellipsis
+            /^bye\.?$/i,  // "Bye." - echo from AI's goodbye, not a user utterance
+            /^goodbye\.?$/i,  // "Goodbye." - same echo issue
+            /^bye[\s-]?bye\.?$/i,  // "Bye-bye" or "Bye bye"
             /thank you for watching/i,
             /thanks for watching/i,
             /please subscribe/i,
