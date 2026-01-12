@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
-"""Taxi AI Asterisk Bridge (v2.3 - Binary WebSocket)
+"""Taxi AI Asterisk Bridge (v2.4 - Noise Reduction)
 
 Combines the working v2 auto-detection with:
 - Binary UUID fix
 - High-quality resample_poly for anti-aliased audio (no hiss)
 - Binary WebSocket frames for audio (~33% bandwidth savings)
+- NEW: Noise gate, high-pass filter, and audio normalization
 
 """
 
@@ -19,7 +20,7 @@ import audioop
 from typing import Optional
 from collections import deque
 import numpy as np
-from scipy.signal import resample_poly
+from scipy.signal import resample_poly, butter, sosfilt
 import websockets
 
 # --- Configuration ---
@@ -36,8 +37,51 @@ MSG_HANGUP = 0x00
 MSG_UUID = 0x01
 MSG_AUDIO = 0x10
 
+# Audio processing settings
+NOISE_GATE_THRESHOLD = 200  # Samples below this are considered noise (int16 range)
+HIGH_PASS_CUTOFF = 80  # Hz - removes low rumble (HVAC, traffic)
+TARGET_RMS = 3000  # Target RMS level for normalization (int16 range)
+MAX_GAIN = 4.0  # Maximum gain to prevent distortion
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+# Pre-compute high-pass filter coefficients (Butterworth, 2nd order)
+# We compute for 8kHz since we filter before upsampling
+_highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype='high', fs=AST_RATE, output='sos')
+
+
+def apply_noise_reduction(audio_bytes: bytes) -> bytes:
+    """
+    Apply noise reduction pipeline:
+    1. High-pass filter (remove low-frequency rumble)
+    2. Noise gate (suppress background noise)
+    3. Normalize audio levels
+    """
+    if not audio_bytes or len(audio_bytes) < 4:
+        return audio_bytes
+    
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    if audio_np.size == 0:
+        return audio_bytes
+    
+    # 1. High-pass filter - removes low-frequency rumble (HVAC, traffic, etc.)
+    audio_np = sosfilt(_highpass_sos, audio_np)
+    
+    # 2. Noise gate - suppress samples below threshold
+    # This reduces background hiss and ambient noise
+    mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
+    audio_np[mask] *= 0.1  # Reduce noise floor by 90%, don't zero completely
+    
+    # 3. Normalize - boost quiet audio to consistent level
+    rms = np.sqrt(np.mean(audio_np ** 2))
+    if rms > 50:  # Only normalize if there's actual signal
+        gain = min(TARGET_RMS / rms, MAX_GAIN)
+        audio_np *= gain
+    
+    # Clip to int16 range
+    audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
+    return audio_np.tobytes()
 
 
 def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
@@ -129,7 +173,10 @@ class TaxiBridgeV2:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
                     linear16 = audioop.ulaw2lin(payload, 2) if self.ast_codec == "ulaw" else payload
-                    upsampled = resample_audio_linear16(linear16, AST_RATE, AI_RATE)
+                    
+                    # NEW: Apply noise reduction pipeline (high-pass, noise gate, normalize)
+                    cleaned = apply_noise_reduction(linear16)
+                    upsampled = resample_audio_linear16(cleaned, AST_RATE, AI_RATE)
                     
                     # BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
                     # This reduces CPU usage and bandwidth by ~33%
