@@ -783,14 +783,25 @@ serve(async (req) => {
       console.log(`[${callId}] ⏰ Follow-up silence timeout hit - requesting goodbye + end_call`);
 
       if (sessionReady && openaiWs?.readyState === WebSocket.OPEN) {
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions:
-              "The customer has not replied. Say EXACTLY: \"Alright then. Thanks for calling. Goodbye.\" Then immediately call the end_call tool with reason 'silence_timeout'. Do NOT ask any further questions.",
-          },
-        }));
+        const silenceResponse = {
+          modalities: ["audio", "text"],
+          instructions:
+            "The customer has not replied. Say EXACTLY: \"Alright then. Thanks for calling. Goodbye.\" Then immediately call the end_call tool with reason 'silence_timeout'. Do NOT ask any further questions.",
+        };
+        
+        // CONCURRENCY GUARD: Don't send response.create if one is already in progress
+        if (openAiResponseInProgress) {
+          deferredResponseCreate = { response: silenceResponse as Record<string, unknown>, label: "silence_timeout" };
+          console.log(`[${callId}] ⏸️ Deferring response.create (silence_timeout) - response already in progress`);
+        } else {
+          openAiResponseInProgress = true;
+          startResponseTimeout();
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: silenceResponse,
+          }));
+          console.log(`[${callId}] >>> response.create sent (silence_timeout)`);
+        }
 
         // Failsafe: if the model still doesn't end the call, hang up anyway.
         // IMPORTANT: allow plenty of time so the goodbye audio can be heard.
@@ -861,15 +872,24 @@ serve(async (req) => {
         ? `You did not hear a reply from the customer. Repeat this exact question verbatim (no extra words): "${q}" Then STOP speaking and wait for their answer.`
         : "You did not hear a reply from the customer. Briefly repeat your last question, clearly and politely, and wait for their answer.";
 
-      openaiWs.send(
-        JSON.stringify({
+      // CONCURRENCY GUARD: Don't send response.create if one is already in progress
+      const repromptResponse = {
+        modalities: ["audio", "text"],
+        instructions,
+      };
+      
+      if (openAiResponseInProgress) {
+        deferredResponseCreate = { response: repromptResponse as Record<string, unknown>, label: "no_reply_reprompt" };
+        console.log(`[${callId}] ⏸️ Deferring response.create (no_reply_reprompt) - response already in progress`);
+      } else {
+        openAiResponseInProgress = true;
+        startResponseTimeout();
+        openaiWs.send(JSON.stringify({
           type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions,
-          },
-        }),
-      );
+          response: repromptResponse,
+        }));
+        console.log(`[${callId}] >>> response.create sent (no_reply_reprompt)`);
+      }
 
       // Re-arm for a second attempt if needed
       if (noReplyRepromptCount < MAX_NO_REPLY_REPROMPTS) {
@@ -3391,14 +3411,22 @@ Rules:
           clearDisambiguationTimeout(); // SAFEGUARD 3: Clear timeout since resolved
           
           // CRITICAL: Trigger Ada to respond now that disambiguation is resolved
+          // CONCURRENCY GUARD: Don't send response.create if one is already in progress
           if (openaiWs?.readyState === WebSocket.OPEN) {
-            openAiResponseInProgress = true;
-            startResponseTimeout(); // SAFEGUARD 1
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response: { modalities: ["audio", "text"] }
-            }));
-            console.log(`[${callId}] >>> response.create sent after disambiguation resolved`);
+            const disambigResponse = { modalities: ["audio", "text"] };
+            
+            if (openAiResponseInProgress) {
+              deferredResponseCreate = { response: disambigResponse as Record<string, unknown>, label: "disambiguation_resolved" };
+              console.log(`[${callId}] ⏸️ Deferring response.create (disambiguation_resolved) - response already in progress`);
+            } else {
+              openAiResponseInProgress = true;
+              startResponseTimeout(); // SAFEGUARD 1
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: disambigResponse
+              }));
+              console.log(`[${callId}] >>> response.create sent after disambiguation resolved`);
+            }
           }
           
           // Broadcast update to live_calls
@@ -5770,13 +5798,21 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               
               // CRITICAL: Trigger Ada to respond to the blocking message
               // Without this, she stays silent after the tool call fails
-              openAiResponseInProgress = true;
-              startResponseTimeout(); // SAFEGUARD 1
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response: { modalities: ["audio", "text"] }
-              }));
-              console.log(`[${callId}] ✈️ Triggered luggage question after book_taxi block`);
+              // CONCURRENCY GUARD: Don't send response.create if one is already in progress
+              const luggageResponse = { modalities: ["audio", "text"] };
+              
+              if (openAiResponseInProgress) {
+                deferredResponseCreate = { response: luggageResponse as Record<string, unknown>, label: "luggage_block" };
+                console.log(`[${callId}] ⏸️ Deferring response.create (luggage_block) - response already in progress`);
+              } else {
+                openAiResponseInProgress = true;
+                startResponseTimeout(); // SAFEGUARD 1
+                openaiWs.send(JSON.stringify({
+                  type: "response.create",
+                  response: luggageResponse
+                }));
+                console.log(`[${callId}] ✈️ Triggered luggage question after book_taxi block`);
+              }
               
               // SAFEGUARD 4: Start tool block retry in case Ada doesn't respond
               startToolBlockRetry("luggage_block");
