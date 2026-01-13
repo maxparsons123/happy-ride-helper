@@ -9370,10 +9370,22 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         }
         
         // RAW PASSTHROUGH MODE: Skip all validation, send booking details to your webhook
-        if (message.bookingMode === "raw") {
+        // Can be triggered by: 1) bookingMode="raw", 2) extension="adadirect", 3) agent="adadirect"
+        const isAdaDirectExtension = message.extension === "adadirect" || message.agent === "adadirect";
+        
+        if (message.bookingMode === "raw" || isAdaDirectExtension) {
           bookingMode = "raw";
-          rawPassthroughEndpoint = message.rawPassthroughEndpoint || message.webhook_url || "";
-          console.log(`[${callId}] 📦 BOOKING MODE: RAW PASSTHROUGH (endpoint: ${rawPassthroughEndpoint || "none - will use default dispatch endpoint"})`);
+          
+          // Priority: explicit endpoint > ADADIRECT_WEBHOOK_URL (for adadirect extension) > generic raw endpoint
+          if (isAdaDirectExtension) {
+            const adadirectWebhook = Deno.env.get("ADADIRECT_WEBHOOK_URL");
+            rawPassthroughEndpoint = message.rawPassthroughEndpoint || message.webhook_url || adadirectWebhook || "";
+            console.log(`[${callId}] 📦 BOOKING MODE: ADADIRECT (extension-triggered raw passthrough)`);
+          } else {
+            rawPassthroughEndpoint = message.rawPassthroughEndpoint || message.webhook_url || "";
+          }
+          
+          console.log(`[${callId}] 📦 Raw passthrough endpoint: ${rawPassthroughEndpoint || "none - will use default dispatch endpoint"}`);
           // In raw mode, disable geocoding since your system will validate
           geocodingEnabled = false;
         } else {
@@ -9403,8 +9415,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           console.log(`[${callId}] ⚠️ Rejected invalid name from Asterisk: "${message.user_name}"`);
         }
         
-        // Load agent configuration (default to 'ada' if not specified)
-        const agentSlug = message.agent || "ada";
+        // Load agent configuration (default to 'ada' if not specified or if adadirect extension)
+        const agentSlug = isAdaDirectExtension ? "ada" : (message.agent || "ada");
         await loadAgentConfig(agentSlug);
         
         // Voice override from client (allows testing different voices without changing agent)
