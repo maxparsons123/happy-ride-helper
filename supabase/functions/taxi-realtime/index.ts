@@ -463,6 +463,15 @@ serve(async (req) => {
   let currentAssistantText = ""; // Buffer for assistant transcript (text or audio transcript)
   let forbiddenPhraseInterrupted = false; // Flag to prevent multiple interruptions
   let dropAiAudio = false; // When true, we suppress AI audio deltas (used when cancelling for prompt violations)
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TOKEN BUFFER: Hold first N tokens + audio before sending to client.
+  // This allows early forbidden-phrase detection before ANY audio plays.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const TOKEN_BUFFER_SIZE = 8; // Number of text tokens to buffer before releasing audio
+  let tokenBufferTokens: string[] = []; // Accumulated text tokens
+  let tokenBufferAudio: string[] = []; // Corresponding audio chunks
+  let tokenBufferFlushed = false; // Once true, we stream directly without buffering
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
   let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let aiPlaybackStartedAt = 0; // Timestamp when AI audio playback started
@@ -5649,6 +5658,11 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         forbiddenPhraseInterrupted = false; // Reset interruption flag
         dropAiAudio = false; // Allow audio for this new response
 
+        // Reset token buffer for forbidden-phrase pre-screening
+        tokenBufferTokens = [];
+        tokenBufferAudio = [];
+        tokenBufferFlushed = false;
+
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
           console.log(`[${callId}] >>> response.created observed for committed audio turn`);
@@ -5677,12 +5691,18 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         // Accumulate transcript for early detection
         currentAssistantText += delta;
 
+        // Add token to buffer
+        tokenBufferTokens.push(delta);
+
         // Check for forbidden phrases early in the stream
         const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(currentAssistantText);
         if (hasForbidden && !forbiddenPhraseInterrupted) {
           forbiddenPhraseInterrupted = true;
           dropAiAudio = true;
-          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED (text): [${detectedPhrases.join(", ")}]`);
+          // CRITICAL: Clear buffers so no forbidden audio ever plays
+          tokenBufferAudio = [];
+          tokenBufferTokens = [];
+          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED (text): [${detectedPhrases.join(", ")}] - BLOCKING ALL AUDIO`);
           console.warn(`[${callId}] 🚨 Cancelling response and triggering replacement...`);
 
           if (openaiWs?.readyState === WebSocket.OPEN) {
@@ -5719,13 +5739,40 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           return; // don't forward this delta
         }
 
-        socket.send(
-          JSON.stringify({
-            type: "transcript",
-            text: delta,
-            role: "assistant",
-          }),
-        );
+        // If buffer has reached threshold, flush it and switch to direct streaming
+        if (!tokenBufferFlushed && tokenBufferTokens.length >= TOKEN_BUFFER_SIZE) {
+          tokenBufferFlushed = true;
+          console.log(`[${callId}] ✅ Token buffer full (${TOKEN_BUFFER_SIZE} tokens) - flushing ${tokenBufferAudio.length} audio chunks`);
+
+          // Flush all buffered audio
+          for (const audioChunk of tokenBufferAudio) {
+            socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: audioChunk,
+              audio_source: "ai",
+              created_at: new Date().toISOString(),
+            });
+          }
+          tokenBufferAudio = [];
+
+          // Flush all buffered transcript tokens
+          for (const token of tokenBufferTokens) {
+            socket.send(JSON.stringify({ type: "transcript", text: token, role: "assistant" }));
+          }
+          tokenBufferTokens = [];
+        }
+
+        // If already flushed, send transcript directly
+        if (tokenBufferFlushed) {
+          socket.send(
+            JSON.stringify({
+              type: "transcript",
+              text: delta,
+              role: "assistant",
+            }),
+          );
+        }
       }
 
       // Forward audio to client AND broadcast to monitoring channel
@@ -5736,13 +5783,24 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         }
 
         const deltaLen = data.delta?.length || 0;
-        console.log(`[${callId}] >>> AUDIO DELTA received, length: ${deltaLen}`);
 
         // Track playback timing: mark start on first delta, accumulate bytes
         if (aiPlaybackBytesTotal === 0) {
           aiPlaybackStartedAt = Date.now();
         }
         aiPlaybackBytesTotal += deltaLen;
+
+        // If we haven't flushed the token buffer yet, hold audio
+        if (!tokenBufferFlushed) {
+          tokenBufferAudio.push(data.delta);
+          // Log periodically to avoid noise
+          if (tokenBufferAudio.length <= 3 || tokenBufferAudio.length % 10 === 0) {
+            console.log(`[${callId}] 🔒 Buffering audio chunk #${tokenBufferAudio.length} (waiting for ${TOKEN_BUFFER_SIZE} tokens)`);
+          }
+          return;
+        }
+
+        console.log(`[${callId}] >>> AUDIO DELTA received, length: ${deltaLen}`);
 
         socket.send(
           JSON.stringify({
