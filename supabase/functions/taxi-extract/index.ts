@@ -227,6 +227,37 @@ function checkFuzzyMatch(
         confidence: 1.0,
       };
     }
+    
+    // Check for STRONG match: extracted is a prefix/subset of history (same address without postcode)
+    // e.g., "52A David Road, Coventry" matches "52A David Rd, Coventry CV1 2BW, UK"
+    if (normalizedHistory.startsWith(normalizedExtracted) || 
+        normalizedExtracted.startsWith(normalizedHistory.split(',').slice(0, 2).join(','))) {
+      // Additional validation: house number + street must match
+      const historyHouseNum = extractHouseNumber(historyAddr);
+      const historyStreet = extractStreetName(historyAddr);
+      
+      if (extractedHouseNum && historyHouseNum && 
+          extractedHouseNum.toUpperCase() === historyHouseNum.toUpperCase() &&
+          extractedStreet && historyStreet) {
+        const normalizedExtractedStreet = normalizeAddress(extractedStreet);
+        const normalizedHistoryStreet = normalizeAddress(historyStreet);
+        
+        if (normalizedExtractedStreet === normalizedHistoryStreet ||
+            normalizedHistoryStreet.includes(normalizedExtractedStreet) ||
+            normalizedExtractedStreet.includes(normalizedHistoryStreet)) {
+          console.log(`[taxi-extract] Strong history match (prefix): "${extractedAddr}" → "${historyAddr}"`);
+          return {
+            isExactMatch: true, // Treat as exact - no clarification needed
+            isFuzzyMatch: false,
+            matchedAddress: historyAddr, // Use the full address from history
+            extractedAddress: extractedAddr,
+            needsClarification: false,
+            clarificationReason: null,
+            confidence: 0.95,
+          };
+        }
+      }
+    }
 
     // Check for fuzzy house number match on same street
     const historyHouseNum = extractHouseNumber(historyAddr);
