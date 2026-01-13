@@ -2917,23 +2917,40 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     // Vary the message based on attempt number to avoid sounding robotic
     const attemptContext = attempts > 1 ? ` (Attempt ${attempts}/${MAX_CLARIFICATION_ATTEMPTS} - be patient and helpful)` : "";
 
+    // INTERNATIONAL CALLERS: Many countries don't have postcodes - ask for landmarks/areas instead
+    const isInternational = callerIsInternational;
+
     const message = (() => {
       if (addressType === "pickup") {
         if (attempts === 1) {
+          if (isInternational) {
+            // International: skip postcode requests entirely
+            return looksLikeStreetAddress
+              ? `[SYSTEM: The pickup address "${address}" could not be verified. This is an INTERNATIONAL address - do NOT ask for a postcode (many countries don't use them). Ask for a nearby landmark or area. Say: "Could you tell me a nearby landmark or the area for that pickup address, please?"]`
+              : `[SYSTEM: The pickup address "${address}" could not be verified. This is an INTERNATIONAL address. Politely ask for a nearby landmark or main road. Say something like "I'm having a little trouble finding that address. Could you tell me a nearby landmark or main road?"]`;
+          }
           return looksLikeStreetAddress
             ? `[SYSTEM: The pickup address "${address}" could not be verified. The customer already gave the street name/house number. Ask ONLY for the POSTCODE (or a nearby landmark/area). Say: "Could you tell me the postcode for that pickup address, please?"]`
             : `[SYSTEM: The pickup address "${address}" could not be verified. Politely ask the customer to confirm or provide the correct address. Say something like "I'm having a little trouble finding that address. Could you give me the full street name and postcode please?"]`;
         } else if (attempts === 2) {
-          return `[SYSTEM: Second attempt for pickup "${address}". Be MORE specific - ask: "Could you spell out the street name for me, or give me a nearby landmark I can use?"]`;
+          return isInternational
+            ? `[SYSTEM: Second attempt for pickup "${address}". Ask: "Could you spell out the street name for me, or tell me a nearby landmark or main road I can use?"]`
+            : `[SYSTEM: Second attempt for pickup "${address}". Be MORE specific - ask: "Could you spell out the street name for me, or give me a nearby landmark I can use?"]`;
         }
         return `[SYSTEM: Final attempt for pickup "${address}". Ask clearly: "I'm still having trouble with that address. What's the nearest main road or a business nearby I can look up?"]`;
       }
 
       // destination
       if (attempts === 1) {
+        if (isInternational) {
+          // International: skip postcode requests entirely
+          return `[SYSTEM: The destination address "${address}" could not be verified. This is an INTERNATIONAL address - do NOT ask for a postcode (many countries don't use them). Ask for a nearby landmark or area. Say something like "Could you tell me a nearby landmark or the area for that destination, please?"]`;
+        }
         return `[SYSTEM: The destination address "${address}" could not be verified. Ask for the POSTCODE / area (or a nearby landmark) to confirm it safely. Say something like "Could you tell me the postcode or the area for that destination, please?"]`;
       } else if (attempts === 2) {
-        return `[SYSTEM: Second attempt for destination "${address}". Be MORE specific - ask: "Could you spell out the name for me, or is there a landmark nearby I can search for?"]`;
+        return isInternational
+          ? `[SYSTEM: Second attempt for destination "${address}". Ask: "Could you spell out the name for me, or tell me a nearby landmark I can search for?"]`
+          : `[SYSTEM: Second attempt for destination "${address}". Be MORE specific - ask: "Could you spell out the name for me, or is there a landmark nearby I can search for?"]`;
       }
       return `[SYSTEM: Final attempt for destination "${address}". Ask clearly: "What's the nearest main road or a well-known place nearby?"]`;
     })();
@@ -4546,7 +4563,9 @@ Rules:
 
                     transcriptHistory.push({
                       role: "system",
-                      text: `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the street name — ask ONLY for postcode (or nearby landmark), do NOT ask for the street name again.`,
+                      text: callerIsInternational
+                        ? `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: This is an INTERNATIONAL address. Ask for a nearby landmark or area — do NOT ask for a postcode.`
+                        : `⚠️ GOOGLE MISMATCH (pickup): "${extractedPickup}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the street name — ask ONLY for postcode (or nearby landmark), do NOT ask for the street name again.`,
                       timestamp: new Date().toISOString(),
                     });
                     queueLiveCallBroadcast({});
@@ -4654,7 +4673,9 @@ Rules:
 
                      transcriptHistory.push({
                        role: "system",
-                       text: `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the place name — ask ONLY for postcode / area (or a nearby landmark), do NOT ask them to repeat the name unless they correct it.`,
+                       text: callerIsInternational
+                         ? `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: This is an INTERNATIONAL address. Ask for a nearby landmark or area — do NOT ask for a postcode.`
+                         : `⚠️ GOOGLE MISMATCH (destination): "${extractedDest}" ≠ "${cleanGoogleAddress}" (not auto-applying). IMPORTANT: The customer already gave the place name — ask ONLY for postcode / area (or a nearby landmark), do NOT ask them to repeat the name unless they correct it.`,
                        timestamp: new Date().toISOString(),
                      });
                     queueLiveCallBroadcast({});
