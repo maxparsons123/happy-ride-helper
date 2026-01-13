@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2 } from "lucide-react";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2, Receipt } from "lucide-react";
 import { toast } from "sonner";
 
 interface Agent {
@@ -880,6 +880,13 @@ export default function LiveCalls() {
             <Badge variant="outline" className="text-muted-foreground">
               {calls.length} Total
             </Badge>
+            {/* Billing Page Link */}
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/billing">
+                <Receipt className="w-4 h-4 mr-2" />
+                Billing
+              </Link>
+            </Button>
             {/* Clear Database Button */}
             <AlertDialog>
               <AlertDialogTrigger asChild>
