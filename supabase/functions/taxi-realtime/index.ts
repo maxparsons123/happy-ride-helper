@@ -432,11 +432,19 @@ serve(async (req) => {
   let openAiReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let openAiClosingForReconnect = false;
 
+  // Guard against OpenAI WS that never reaches onopen/onclose (hangs)
+  const OPENAI_CONNECT_TIMEOUT_MS = 4000;
+  let openAiConnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  let openAiLastConnectAt = 0;
+
   let callId = `call-${Date.now()}`;
   let callStartAt = new Date().toISOString();
   let bookingData: any = {};
   let sessionReady = false;
   let pendingMessages: any[] = [];
+  const MAX_PENDING_MESSAGES = 250; // prevents runaway memory if OpenAI session never becomes ready
+  let lastPreReadyAudioLogAt = 0;
+  let preReadyAudioQueued = 0;
   let callSource = "web"; // 'web' or 'asterisk'
   let userPhone = ""; // Phone number from Asterisk
   let callerName = ""; // Known caller's name from database
@@ -5239,14 +5247,39 @@ Rules:
 
   // Connect to OpenAI Realtime API
   const connectToOpenAI = () => {
+    openAiLastConnectAt = Date.now();
+
+    // Clear any prior connect timeout
+    if (openAiConnectTimeout) {
+      clearTimeout(openAiConnectTimeout);
+      openAiConnectTimeout = null;
+    }
+
     console.log(`[${callId}] Connecting to OpenAI Realtime API...`);
-    
+
     openaiWs = new WebSocket(
       "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17",
-      ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]
+      ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"],
     );
 
+    // If OpenAI WS gets stuck (no onopen/onclose), force a reconnect.
+    openAiConnectTimeout = setTimeout(() => {
+      if (callEnded) return;
+      if (!sessionReady && openaiWs && openaiWs.readyState !== WebSocket.OPEN) {
+        console.log(
+          `[${callId}] ⏱️ OpenAI connect timeout after ${Date.now() - openAiLastConnectAt}ms (state=${openaiWs.readyState}) - forcing reconnect`,
+        );
+        scheduleOpenAiReconnect("connect_timeout");
+      }
+    }, OPENAI_CONNECT_TIMEOUT_MS);
+
     openaiWs.onopen = () => {
+      // Connection succeeded; clear connect timeout
+      if (openAiConnectTimeout) {
+        clearTimeout(openAiConnectTimeout);
+        openAiConnectTimeout = null;
+      }
+
       openAiReconnectAttempts = 0;
       openAiClosingForReconnect = false;
       console.log(`[${callId}] Connected to OpenAI`);
@@ -9439,10 +9472,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
     };
 
     openaiWs.onerror = (error) => {
+      if (openAiConnectTimeout) {
+        clearTimeout(openAiConnectTimeout);
+        openAiConnectTimeout = null;
+      }
       console.error(`[${callId}] OpenAI WebSocket error:`, error);
     };
 
     openaiWs.onclose = () => {
+      if (openAiConnectTimeout) {
+        clearTimeout(openAiConnectTimeout);
+        openAiConnectTimeout = null;
+      }
       console.log(`[${callId}] OpenAI connection closed`);
       if (callEnded) return;
 
@@ -9482,8 +9523,23 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           // Queue binary audio until session is ready
           const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
           const base64Audio = btoa(String.fromCharCode(...audioBytes));
+
+          // Cap pending queue to prevent runaway memory usage if session never becomes ready
+          while (pendingMessages.length >= MAX_PENDING_MESSAGES) {
+            pendingMessages.shift();
+          }
           pendingMessages.push({ type: "audio", audio: base64Audio });
-          console.log(`[${callId}] ⏳ Binary audio received before session ready - queueing (${audioBytes.length} bytes)`);
+
+          // Throttle logging (otherwise it drowns out the important OpenAI connect/error logs)
+          preReadyAudioQueued += 1;
+          const now = Date.now();
+          if (now - lastPreReadyAudioLogAt > 1000) {
+            lastPreReadyAudioLogAt = now;
+            console.log(
+              `[${callId}] ⏳ Pre-ready audio: +${preReadyAudioQueued} chunks in last ~1s, last=${audioBytes.length} bytes, pending=${pendingMessages.length}`,
+            );
+            preReadyAudioQueued = 0;
+          }
           return;
         }
         
