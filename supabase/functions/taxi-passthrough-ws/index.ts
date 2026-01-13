@@ -394,6 +394,74 @@ function isCoherentResponse(transcript: string, expectedType: string): boolean {
 }
 
 // ============================================================================
+// RESPONSE SANITIZATION
+// ============================================================================
+
+const FORBIDDEN_PHRASES = [
+  // Confirmation-seeking phrases (Ada should NEVER ask to confirm)
+  "just to double-check",
+  "double-check",
+  "let me confirm",
+  "just to confirm",
+  "to confirm",
+  "is that correct",
+  "is that right",
+  "did i get that right",
+  "did i get that correct",
+  "shall i confirm",
+  "confirm that",
+  "want me to confirm",
+  "confirm your booking",
+  "confirm the booking",
+  
+  // Address repetition patterns
+  "so that's",
+  "so that is",
+  "so you're going from",
+  "so i have you going",
+  "let me read that back",
+  "i'll read that back",
+  "just to be sure",
+  
+  // Overly verbose phrases
+  "i understand you want",
+  "if i understand correctly",
+  "let me make sure i have this right",
+  "just to make sure",
+  "perfect, so",
+];
+
+function sanitizeAssistantResponse(text: string, callId: string): string {
+  if (!text) return text;
+  
+  const lower = text.toLowerCase();
+  
+  // Check for forbidden phrases
+  const violations = FORBIDDEN_PHRASES.filter(phrase => lower.includes(phrase));
+  
+  if (violations.length > 0) {
+    console.warn(`[${callId}] ⚠️ PROMPT VIOLATION: Ada said forbidden phrase(s): ${violations.join(", ")}`);
+    
+    // For severe violations (confirmation-seeking), replace entirely
+    const severeViolations = ["double-check", "shall i confirm", "confirm that", "is that correct"];
+    if (severeViolations.some(v => lower.includes(v))) {
+      console.warn(`[${callId}] 🔄 Replacing response with safe fallback`);
+      return "Got it. I'll book that for you now.";
+    }
+  }
+  
+  // Limit to 2 sentences max for voice clarity
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  if (sentences.length > 2) {
+    const truncated = sentences.slice(0, 2).join(" ");
+    console.log(`[${callId}] ✂️ Truncated from ${sentences.length} to 2 sentences`);
+    return truncated;
+  }
+  
+  return text;
+}
+
+// ============================================================================
 // TTS (Text-to-Speech)
 // ============================================================================
 
@@ -628,6 +696,11 @@ serve(async (req) => {
                         
                         if (webhookResponse.end_call && webhookResponse.end_message) {
                           adaText = webhookResponse.end_message;
+                        }
+                        
+                        // SANITIZE: Filter forbidden phrases and limit length
+                        if (adaText) {
+                          adaText = sanitizeAssistantResponse(adaText, session.call_id);
                         }
                         
                         if (adaText) {
