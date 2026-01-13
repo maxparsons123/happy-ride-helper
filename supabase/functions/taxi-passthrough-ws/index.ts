@@ -539,8 +539,9 @@ serve(async (req) => {
     let deepgramSTT: DeepgramStreamingSTT | null = null;
     let processingTranscript = false;
     
-    // 🔇 ECHO GUARD: Discard audio for 400ms after Ada stops speaking
-    const ECHO_GUARD_MS = 400;
+    // 🔇 ECHO GUARD: Discard audio for 600ms after Ada stops speaking
+    // Increased from 400ms to handle phone line echo/reverb
+    const ECHO_GUARD_MS = 600;
     let echoGuardUntil = 0; // Timestamp until which audio should be discarded
     
     console.log(`[${session.call_id}] WebSocket connection opened`);
