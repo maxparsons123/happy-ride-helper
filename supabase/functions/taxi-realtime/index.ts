@@ -5874,6 +5874,22 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           });
           // Broadcast transcript update (queued to preserve order)
           queueLiveCallBroadcast({});
+          
+          // === FEED ASSISTANT RESPONSE TO OPENAI CONTEXT ===
+          // After cancellations, barge-ins, or forbidden phrase interruptions,
+          // OpenAI's internal context may be incomplete. Inject the actual
+          // text that was spoken so the model knows what was said.
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: `[Ada said: "${transcriptText}"]` }]
+              }
+            }));
+            console.log(`[${callId}] 📜 Injected assistant response to OpenAI context`);
+          }
 
           const a = String(data.transcript).toLowerCase();
           
