@@ -132,20 +132,13 @@ The customer already knows the details — just confirm it's done.
 If goodbye → "Safe travels!" + call end_call. Nothing more.
 
 ═══════════════════════════════════
-INTERNATIONAL CALLERS
+GLOBAL SERVICE
 ═══════════════════════════════════
 
-If a caller says they are in a country OUTSIDE the UK (e.g., "I'm in Trinidad", "calling from Jamaica", "I'm in the USA"):
-→ Politely explain: "I'm sorry, we only operate within the UK. If you need a taxi here, I'd be happy to help!"
-→ If they want to book a UK taxi (e.g., for a friend/family member in the UK), you can proceed normally.
-→ Ask: "Are you booking for someone in the UK, or do you need a taxi where you are?"
-
-Countries that indicate the caller is NOT in the UK include:
-- Caribbean: Trinidad, Tobago, Jamaica, Barbados, Bahamas, St Lucia, Grenada, Antigua, etc.
-- Americas: USA, Canada, Mexico, Brazil, etc.
-- Other: India, Pakistan, Nigeria, Australia, UAE, etc.
-
-If they ARE booking for someone in the UK, proceed with the booking flow as normal but clarify the pickup location is in the UK.
+This is a GLOBAL taxi booking service. You can book taxis anywhere in the world.
+- Accept addresses from any country without restriction
+- Proceed with normal booking flow regardless of caller location
+- If the address seems unusual, simply confirm it with the caller
 
 ═══════════════════════════════════
 ABSOLUTE RULES
@@ -5833,25 +5826,23 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
 
         const t = correctedTranscript.toLowerCase().trim();
 
-        // === INTERNATIONAL CALLER DETECTION ===
-        // Check if caller mentions being in a foreign country
+        // === INTERNATIONAL CALLER DETECTION (INFO ONLY) ===
+        // Log international callers for visibility but DON'T reject - this is a global service
         if (!callerIsInternational) {
           const countryDetection = detectCallerCountry(correctedTranscript);
           if (countryDetection && !countryDetection.isUk) {
             callerCountry = countryDetection.country;
             callerIsInternational = true;
-            console.log(`[${callId}] 🌍 INTERNATIONAL CALLER DETECTED: ${callerCountry}`);
+            console.log(`[${callId}] 🌍 INTERNATIONAL CALLER: ${callerCountry} (proceeding with global service)`);
             
-            // Add to transcript for visibility
+            // Add to transcript for visibility only - no rejection
             transcriptHistory.push({
               role: "system",
-              text: `🌍 INTERNATIONAL: Caller is in ${callerCountry} (outside UK)`,
+              text: `🌍 INTERNATIONAL: Caller is in ${callerCountry}`,
               timestamp: new Date().toISOString()
             });
             queueLiveCallBroadcast({});
-            
-            // FORCE Ada to respond with international rejection - don't let her continue processing the foreign address
-            forcedResponseInstructions = `The caller is in ${callerCountry}, which is OUTSIDE the UK. You MUST politely explain: "I'm sorry, but we only operate within the UK. Are you perhaps booking a taxi for someone here in the UK?" Do NOT try to process their address. Do NOT ask for postcodes. If they confirm they want to book for someone IN the UK, then proceed with normal booking asking for the UK pickup address.`;
+            // No forced rejection - allow booking to proceed normally
           }
         }
 
