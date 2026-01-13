@@ -5303,7 +5303,7 @@ Rules:
             voice: agentConfig?.voice || "shimmer", // Use agent's voice
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
-            temperature: 0.1, // Low temperature for consistent, less creative responses
+            temperature: 0.6, // OpenAI Realtime minimum is 0.6
             input_audio_transcription: { 
               model: "whisper-1"
             },
