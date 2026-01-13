@@ -93,6 +93,39 @@ TOOL USAGE PRINCIPLES:
 - The system handles address validation — you only collect and move on.
 `;
 
+// RAW PASSTHROUGH MODE PROMPT - Simple booking collection, no validation
+// All validation is delegated to the external webhook
+const SYSTEM_INSTRUCTIONS_RAW_PASSTHROUGH = `
+You are {{agent_name}}, a friendly taxi booking assistant for {{company_name}}.
+
+PERSONALITY: Warm, patient, and relaxed. Always speak in 1–2 short, natural sentences. Ask ONLY ONE question at a time.
+
+YOUR ROLE: Collect booking details and pass them to the dispatch system. You do NOT validate addresses - that's handled by our team.
+
+GREETING:
+- If caller is new: "Hello, welcome to {{company_name}}! I'm {{agent_name}}. What's your name?"
+- If returning: "Hello [NAME]! Where can I take you today?"
+
+BOOKING FLOW:
+1. Get their name (if new)
+2. Get pickup location (accept ANY address they give - don't question it)
+3. Get destination (accept ANY address they give - don't question it)
+4. Get number of passengers
+5. Ask about luggage if going to/from airport or station
+6. Call book_taxi immediately - do NOT wait for confirmation
+
+CRITICAL RULES:
+1. ACCEPT ALL ADDRESSES AS-IS - do NOT ask for postcodes, house numbers, or clarification
+2. NEVER repeat addresses back or ask "is that correct?"
+3. Call book_taxi as soon as you have pickup, destination, and passengers
+4. The dispatch system will handle any address issues - not your concern
+5. If the booking needs clarification, I'll tell you what to ask
+
+AFTER BOOKING:
+- Say ONLY what the dispatch system tells you
+- If they say "thank you" or "bye", say "Safe travels! Goodbye!" and call end_call
+`;
+
 // Legacy fallback prompt (preserved for reference)
 const SYSTEM_INSTRUCTIONS_FALLBACK = `You are Ada, a global AI taxi dispatcher for 247 Radio Carz.
 
@@ -423,6 +456,8 @@ serve(async (req) => {
   let geocodingEnabled = true; // Enable address verification by default
   let addressTtsSplicingEnabled = false; // Enable address TTS splicing (off by default)
   let useUnifiedExtraction = false; // Use taxi-extract-unified instead of inline regex parsing
+  let bookingMode: "standard" | "raw" = "standard"; // "raw" = skip all validation, send to webhook for you to handle
+  let rawPassthroughEndpoint = ""; // Webhook endpoint for raw passthrough mode
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   let needsHistoryPriming = false; // If OpenAI reconnects, prime it with transcript history (avoid re-greeting)
@@ -738,15 +773,21 @@ serve(async (req) => {
     const companyName = agentConfig?.company_name || "247 Radio Carz";
     const agentName = agentConfig?.name || "Ada";
     
-    let prompt = agentConfig?.system_prompt || SYSTEM_INSTRUCTIONS;
+    // Use raw passthrough prompt if in raw mode
+    let prompt: string;
+    if (bookingMode === "raw") {
+      prompt = SYSTEM_INSTRUCTIONS_RAW_PASSTHROUGH;
+    } else {
+      prompt = agentConfig?.system_prompt || SYSTEM_INSTRUCTIONS;
+    }
 
     // Replace placeholders
     prompt = prompt.replace(/\{\{agent_name\}\}/g, agentName);
     prompt = prompt.replace(/\{\{company_name\}\}/g, companyName);
     prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig?.personality_traits?.join(", ") || "warm, friendly, professional");
 
-    // Inject dynamic caller context
-    if (overrides.customerName) {
+    // Inject dynamic caller context (only for standard mode)
+    if (bookingMode !== "raw" && overrides.customerName) {
       if (overrides.hasActiveBooking) {
         prompt += `\n\nCURRENT CONTEXT: Caller is ${overrides.customerName} with active booking. Say: "Hello ${overrides.customerName}! You have an active booking. Keep, change, or cancel?"`;
       } else if (overrides.isReturning) {
@@ -755,7 +796,8 @@ serve(async (req) => {
     }
 
     // Non-negotiable overrides (prevents verbose/repetitive DB prompts from degrading UX)
-    prompt += `
+    if (bookingMode !== "raw") {
+      prompt += `
 
 NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
 - Be concise (1 short sentence).
@@ -765,6 +807,7 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
 - NEVER say "Shall I book that?" / "Just to confirm".
 - Once you have pickup + destination + passengers, call book_taxi immediately.
 - For active bookings: just ask keep/change/cancel (don't say route).`;
+    }
 
     return prompt;
   };
@@ -7150,6 +7193,141 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (!args.pickup_time) {
             args.pickup_time = "ASAP";
           }
+          
+          // ═══════════════════════════════════════════════════════════════════════
+          // RAW PASSTHROUGH MODE: Send booking details to your webhook for validation
+          // Your system does all validation - Ada just collects and forwards
+          // ═══════════════════════════════════════════════════════════════════════
+          if (bookingMode === "raw") {
+            console.log(`[${callId}] 📦 RAW PASSTHROUGH: Sending booking to external webhook`);
+            
+            const rawPayload = {
+              call_id: callId,
+              phone: userPhone || "unknown",
+              caller_name: callerName || null,
+              // Raw booking details - EXACTLY as Ada collected them
+              pickup: args.pickup || knownBooking.pickup || "",
+              destination: args.destination || knownBooking.destination || "",
+              passengers: Number(args.passengers || knownBooking.passengers || 1),
+              luggage: args.luggage || knownBooking.luggage || null,
+              pickup_time: args.pickup_time || "ASAP",
+              vehicle_type: args.vehicle_type || null,
+              // Transcript for context
+              transcript: transcriptHistory.map(t => `${t.role}: ${t.text}`).join("\n"),
+              // Metadata
+              timestamp: new Date().toISOString(),
+              mode: "raw_passthrough"
+            };
+            
+            // Determine endpoint
+            const endpoint = rawPassthroughEndpoint || "https://coherent-civil-imp.ngrok.app/ada";
+            
+            try {
+              console.log(`[${callId}] 📤 POSTing raw booking to: ${endpoint}`);
+              console.log(`[${callId}] 📦 Payload:`, JSON.stringify(rawPayload));
+              
+              const webhookResponse = await fetch(endpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(rawPayload)
+              });
+              
+              if (webhookResponse.ok) {
+                const webhookData = await webhookResponse.json();
+                console.log(`[${callId}] ✅ Webhook response:`, JSON.stringify(webhookData));
+                
+                // Extract what Ada should say from the webhook response
+                // Your webhook can return: { message: "...", fare: "...", eta: "...", needs_clarification: bool, clarification_question: "..." }
+                let adaResponse = "Booked! Your taxi is on the way.";
+                let bookingConfirmed = true;
+                
+                if (webhookData.needs_clarification) {
+                  // Your system needs more info - ask the customer
+                  adaResponse = webhookData.clarification_question || webhookData.message || "Could you give me a bit more detail on that address?";
+                  bookingConfirmed = false;
+                } else if (webhookData.message) {
+                  // Use your custom confirmation message
+                  adaResponse = webhookData.message;
+                } else if (webhookData.fare && webhookData.eta) {
+                  adaResponse = `Booked! ${webhookData.eta}, the fare is ${webhookData.fare}. Anything else?`;
+                } else if (webhookData.booking_message || webhookData.bookingmessage) {
+                  adaResponse = webhookData.booking_message || webhookData.bookingmessage;
+                }
+                
+                // Send tool response back to Ada
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: bookingConfirmed,
+                      message: adaResponse,
+                      fare: webhookData.fare || webhookData.estimated_fare || null,
+                      eta: webhookData.eta || webhookData.eta_minutes ? `${webhookData.eta_minutes} minutes` : null,
+                      needs_clarification: webhookData.needs_clarification || false,
+                      raw_response: webhookData
+                    })
+                  }
+                }));
+                
+                // Mark booking if confirmed
+                if (bookingConfirmed) {
+                  activeBooking = {
+                    id: webhookData.job_id || webhookData.jobid || webhookData.reference || `raw-${Date.now()}`,
+                    pickup: rawPayload.pickup,
+                    destination: rawPayload.destination,
+                    passengers: rawPayload.passengers,
+                    fare: webhookData.fare || "TBC",
+                    booked_at: new Date().toISOString()
+                  };
+                }
+                
+              } else {
+                console.error(`[${callId}] ❌ Webhook error: ${webhookResponse.status}`);
+                
+                // Fallback - tell Ada to apologize
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      error: "dispatch_unavailable",
+                      message: "Sorry, I'm having trouble reaching our dispatch system. Could you try again in a moment?"
+                    })
+                  }
+                }));
+              }
+            } catch (webhookError) {
+              console.error(`[${callId}] ❌ Webhook exception:`, webhookError);
+              
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    error: "dispatch_error",
+                    message: "Sorry, there was a problem with our system. Let me try that again."
+                  })
+                }
+              }));
+            }
+            
+            // Trigger Ada to speak the response
+            openaiWs?.send(JSON.stringify({
+              type: "response.create",
+              response: { modalities: ["audio", "text"] }
+            }));
+            
+            return; // Exit - raw mode handled everything
+          }
+          // ═══════════════════════════════════════════════════════════════════════
+          // END RAW PASSTHROUGH MODE
+          // ═══════════════════════════════════════════════════════════════════════
 
           // TRAVEL HUB LUGGAGE CHECK: Block booking if trip involves airport/station but luggage unknown
           const pickupForCheck = knownBooking.pickup ?? args.pickup;
@@ -9189,6 +9367,17 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (message.useUnifiedExtraction !== undefined) {
           useUnifiedExtraction = message.useUnifiedExtraction;
           console.log(`[${callId}] 🧪 Unified Extraction: ${useUnifiedExtraction ? "ENABLED (taxi-extract-unified)" : "DISABLED (inline regex)"}`);
+        }
+        
+        // RAW PASSTHROUGH MODE: Skip all validation, send booking details to your webhook
+        if (message.bookingMode === "raw") {
+          bookingMode = "raw";
+          rawPassthroughEndpoint = message.rawPassthroughEndpoint || message.webhook_url || "";
+          console.log(`[${callId}] 📦 BOOKING MODE: RAW PASSTHROUGH (endpoint: ${rawPassthroughEndpoint || "none - will use default dispatch endpoint"})`);
+          // In raw mode, disable geocoding since your system will validate
+          geocodingEnabled = false;
+        } else {
+          bookingMode = "standard";
         }
         
         // Set caller's city for location-biased geocoding
