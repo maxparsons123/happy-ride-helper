@@ -137,6 +137,7 @@ export default function LiveCalls() {
   const [sttProvider, setSttProvider] = useState<"groq" | "deepgram">("groq");
   const [ttsProvider, setTtsProvider] = useState<"elevenlabs" | "deepgram">("elevenlabs");
   const [useUnifiedExtraction, setUseUnifiedExtraction] = useState(false);
+  const [usePassthroughMode, setUsePassthroughMode] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [selectedVoice, setSelectedVoice] = useState<string>("shimmer");
@@ -799,6 +800,20 @@ export default function LiveCalls() {
               />
               <span className={`text-xs font-medium ${useUnifiedExtraction ? 'text-amber-400' : 'text-muted-foreground'}`}>
                 AI Extract
+              </span>
+            </div>
+            {/* Passthrough Mode Toggle - webhook-driven flow */}
+            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-blue-500/30">
+              <span className={`text-xs font-medium ${!usePassthroughMode ? 'text-green-400' : 'text-muted-foreground'}`}>
+                Full AI
+              </span>
+              <Switch
+                id="passthrough-mode"
+                checked={usePassthroughMode}
+                onCheckedChange={setUsePassthroughMode}
+              />
+              <span className={`text-xs font-medium ${usePassthroughMode ? 'text-blue-400' : 'text-muted-foreground'}`}>
+                Passthrough
               </span>
             </div>
             {/* Audio controls */}
