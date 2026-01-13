@@ -6750,6 +6750,22 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         console.log(`[${callId}] User said: ${correctedTranscript}${correctedTranscript !== rawTranscript ? ` (raw: "${rawTranscript}")` : ''}`);
         lastFinalUserTranscript = correctedTranscript;
         lastFinalUserTranscriptAt = Date.now();
+        
+        // === FEED CORRECTED TRANSCRIPT TO OPENAI ===
+        // OpenAI Realtime has audio-based transcription, but it can be lossy.
+        // Inject the corrected text version so the model has accurate context.
+        // This ensures history is complete even after cancellations/barge-ins.
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[Customer said: "${correctedTranscript}"]` }]
+            }
+          }));
+          console.log(`[${callId}] 📜 Injected corrected transcript to OpenAI context`);
+        }
 
         // Detect and lock the customer's language from their FIRST valid transcript.
         // This prevents Ada from defaulting to English when the caller speaks Urdu (or other non-English languages).
