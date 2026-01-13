@@ -41,6 +41,35 @@ namespace TaxiSipBridge.WinForms
         }
 
         /// <summary>
+        /// Parse RAW PASSTHROUGH webhook payload (sent when bookingMode="raw")
+        /// Ada collects details without validation, your system handles all validation.
+        /// </summary>
+        public static RawPassthroughPayload ParseRawPassthroughPayload(string json)
+        {
+            return JsonSerializer.Deserialize<RawPassthroughPayload>(json, _jsonOptions) ?? new RawPassthroughPayload();
+        }
+
+        /// <summary>
+        /// Convert RAW passthrough payload to your BookTaxiResponse for validation
+        /// </summary>
+        public static BookTaxiResponse ToBookTaxiResponse(RawPassthroughPayload payload)
+        {
+            return new BookTaxiResponse
+            {
+                pickup_location = payload.Pickup ?? "",
+                dropoff_location = payload.Destination ?? "",
+                pickup_time = payload.PickupTime ?? "",
+                number_of_passengers = payload.Passengers,
+                luggage = payload.Luggage ?? "",
+                username = payload.CallerName ?? "",
+                usertelephone = payload.Phone ?? "",
+                jobid = payload.CallId ?? "",
+                vehicle_type = payload.VehicleType ?? "",
+                timestamp = payload.Timestamp ?? ""
+            };
+        }
+
+        /// <summary>
         /// Convert Ada booking payload to your BookTaxiResponse for processing
         /// </summary>
         public static BookTaxiResponse ToBookTaxiResponse(AdaBookingPayload payload)
@@ -72,11 +101,76 @@ namespace TaxiSipBridge.WinForms
         }
 
         /// <summary>
-        /// Serialize response to JSON for HTTP response body
+        /// Serialize WebhookResponse to JSON for HTTP response body
         /// </summary>
         public static string SerializeResponse(WebhookResponse response)
         {
             return JsonSerializer.Serialize(response, _jsonOptions);
+        }
+
+        /// <summary>
+        /// Serialize RawPassthroughResponse to JSON for HTTP response body
+        /// </summary>
+        public static string SerializeResponse(RawPassthroughResponse response)
+        {
+            return JsonSerializer.Serialize(response, _jsonOptions);
+        }
+
+        #endregion
+
+        #region Raw Passthrough Response Builders
+
+        /// <summary>
+        /// Ask Ada to request clarification from the caller
+        /// </summary>
+        public static RawPassthroughResponse AskClarification(string question)
+        {
+            return new RawPassthroughResponse
+            {
+                NeedsClarification = true,
+                ClarificationQuestion = question
+            };
+        }
+
+        /// <summary>
+        /// Confirm booking with fare and ETA
+        /// </summary>
+        public static RawPassthroughResponse ConfirmBooking(string fare, int etaMinutes, string jobId = null, string message = null)
+        {
+            return new RawPassthroughResponse
+            {
+                NeedsClarification = false,
+                Fare = fare,
+                EtaMinutes = etaMinutes,
+                Eta = $"{etaMinutes} minutes",
+                JobId = jobId ?? "",
+                Message = message ?? $"Booked! Your taxi will be with you in {etaMinutes} minutes, the fare is {fare}. Is there anything else I can help with?"
+            };
+        }
+
+        /// <summary>
+        /// Confirm booking with custom message
+        /// </summary>
+        public static RawPassthroughResponse ConfirmWithMessage(string message, string jobId = null)
+        {
+            return new RawPassthroughResponse
+            {
+                NeedsClarification = false,
+                Message = message,
+                JobId = jobId ?? ""
+            };
+        }
+
+        /// <summary>
+        /// Report an error to Ada
+        /// </summary>
+        public static RawPassthroughResponse Error(string message)
+        {
+            return new RawPassthroughResponse
+            {
+                NeedsClarification = true,
+                ClarificationQuestion = message
+            };
         }
 
         #endregion
@@ -800,5 +894,92 @@ namespace TaxiSipBridge.WinForms
 
         [JsonPropertyName("timestamp")]
         public string Timestamp { get; set; } = "";
+    }
+
+    /// <summary>
+    /// RAW PASSTHROUGH MODE: Payload sent when bookingMode="raw"
+    /// Ada collects details without validation and sends them here for YOUR system to validate.
+    /// Parse with ParseRawPassthroughPayload(), then call your ValidateAddressTest().
+    /// Respond with RawPassthroughResponse to control what Ada says.
+    /// </summary>
+    public class RawPassthroughPayload
+    {
+        [JsonPropertyName("call_id")]
+        public string CallId { get; set; } = "";
+
+        [JsonPropertyName("phone")]
+        public string Phone { get; set; } = "";
+
+        [JsonPropertyName("caller_name")]
+        public string CallerName { get; set; } = "";
+
+        // RAW booking details - exactly as the caller said them
+        [JsonPropertyName("pickup")]
+        public string Pickup { get; set; } = "";
+
+        [JsonPropertyName("destination")]
+        public string Destination { get; set; } = "";
+
+        [JsonPropertyName("passengers")]
+        public int Passengers { get; set; } = 1;
+
+        [JsonPropertyName("luggage")]
+        public string Luggage { get; set; } = "";
+
+        [JsonPropertyName("pickup_time")]
+        public string PickupTime { get; set; } = "";
+
+        [JsonPropertyName("vehicle_type")]
+        public string VehicleType { get; set; } = "";
+
+        // Conversation transcript for context
+        [JsonPropertyName("transcript")]
+        public string Transcript { get; set; } = "";
+
+        [JsonPropertyName("timestamp")]
+        public string Timestamp { get; set; } = "";
+
+        [JsonPropertyName("mode")]
+        public string Mode { get; set; } = "raw_passthrough";
+    }
+
+    /// <summary>
+    /// RAW PASSTHROUGH MODE: Your response to control Ada's speech.
+    /// If needs_clarification=true, Ada will ask the clarification_question.
+    /// If needs_clarification=false, Ada will confirm with the message.
+    /// </summary>
+    public class RawPassthroughResponse
+    {
+        /// <summary>If true, booking not confirmed - Ada asks clarification_question</summary>
+        [JsonPropertyName("needs_clarification")]
+        public bool NeedsClarification { get; set; }
+
+        /// <summary>Question for Ada to ask if needs_clarification=true</summary>
+        [JsonPropertyName("clarification_question")]
+        public string ClarificationQuestion { get; set; } = "";
+
+        /// <summary>Confirmation message for Ada (if booking confirmed)</summary>
+        [JsonPropertyName("message")]
+        public string Message { get; set; } = "";
+
+        /// <summary>Fare to quote (e.g., "£12.50")</summary>
+        [JsonPropertyName("fare")]
+        public string Fare { get; set; } = "";
+
+        /// <summary>ETA in minutes (e.g., "6")</summary>
+        [JsonPropertyName("eta_minutes")]
+        public int? EtaMinutes { get; set; }
+
+        /// <summary>Full ETA string (e.g., "6 minutes")</summary>
+        [JsonPropertyName("eta")]
+        public string Eta { get; set; } = "";
+
+        /// <summary>Job reference from your system</summary>
+        [JsonPropertyName("job_id")]
+        public string JobId { get; set; } = "";
+
+        /// <summary>Booking confirmation message (alternative to message)</summary>
+        [JsonPropertyName("booking_message")]
+        public string BookingMessage { get; set; } = "";
     }
 }
