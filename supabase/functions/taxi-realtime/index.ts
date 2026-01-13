@@ -746,12 +746,12 @@ serve(async (req) => {
   } | null = null;
   
   // Function to load agent configuration
-  const loadAgentConfig = async (agentSlug: string = "ada"): Promise<boolean> => {
+  const loadAgentConfig = async (agentSlug: string = "ada"): Promise<{ loaded: boolean; useSimpleMode: boolean }> => {
     try {
       console.log(`[${callId}] 🤖 Loading agent config for: ${agentSlug}`);
       const { data, error } = await supabase
         .from("agents")
-        .select("name, slug, voice, system_prompt, company_name, personality_traits, greeting_style, vad_threshold, vad_prefix_padding_ms, vad_silence_duration_ms, allow_interruptions, silence_timeout_ms, no_reply_timeout_ms, max_no_reply_reprompts, echo_guard_ms, goodbye_grace_ms")
+        .select("name, slug, voice, system_prompt, company_name, personality_traits, greeting_style, vad_threshold, vad_prefix_padding_ms, vad_silence_duration_ms, allow_interruptions, silence_timeout_ms, no_reply_timeout_ms, max_no_reply_reprompts, echo_guard_ms, goodbye_grace_ms, use_simple_mode")
         .eq("slug", agentSlug)
         .eq("is_active", true)
         .single();
@@ -762,8 +762,11 @@ serve(async (req) => {
         if (agentSlug !== "ada") {
           return loadAgentConfig("ada");
         }
-        return false;
+        return { loaded: false, useSimpleMode: false };
       }
+      
+      // Check for simple mode BEFORE setting config
+      const useSimpleMode = data.use_simple_mode === true;
       
       agentConfig = {
         name: data.name,
@@ -787,11 +790,11 @@ serve(async (req) => {
         goodbye_grace_ms: data.goodbye_grace_ms ?? 4500
       };
       
-      console.log(`[${callId}] ✅ Agent loaded: ${agentConfig.name} (voice: ${agentConfig.voice}, VAD threshold: ${agentConfig.vad_threshold})`);
-      return true;
+      console.log(`[${callId}] ✅ Agent loaded: ${agentConfig.name} (voice: ${agentConfig.voice}, VAD threshold: ${agentConfig.vad_threshold}, simple_mode: ${useSimpleMode})`);
+      return { loaded: true, useSimpleMode };
     } catch (e) {
       console.error(`[${callId}] Failed to load agent:`, e);
-      return false;
+      return { loaded: false, useSimpleMode: false };
     }
   };
   
@@ -9863,7 +9866,32 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // Load agent configuration (default to 'ada' if not specified or if adadirect extension)
         const agentSlug = isAdaDirectExtension ? "ada" : (message.agent || "ada");
-        await loadAgentConfig(agentSlug);
+        const { loaded: agentLoaded, useSimpleMode } = await loadAgentConfig(agentSlug);
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // SIMPLE MODE REDIRECT
+        // If agent has use_simple_mode enabled, tell bridge to reconnect to simple endpoint
+        // ═══════════════════════════════════════════════════════════════════
+        if (useSimpleMode) {
+          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-realtime-simple`);
+          
+          // Send redirect message to bridge
+          socket.send(JSON.stringify({
+            type: "redirect",
+            endpoint: "taxi-realtime-simple",
+            url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-simple`,
+            reason: "simple_mode_enabled",
+            call_id: callId,
+            // Pass through all init data so bridge can forward it
+            init_data: message
+          }));
+          
+          // Close this socket - bridge should reconnect to simple endpoint
+          skipDbWrites = true;
+          callEnded = true;
+          try { socket.close(1000, "Redirecting to simple mode"); } catch (_) { /* ignore */ }
+          return;
+        }
         
         // Voice override from client (allows testing different voices without changing agent)
         if (message.voice && typeof message.voice === "string") {
