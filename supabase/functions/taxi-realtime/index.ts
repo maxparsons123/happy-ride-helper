@@ -4558,24 +4558,29 @@ Rules:
               // Use AI-based extraction for better accuracy (falls back to regex if AI fails)
               const adaPickup = await extractAddressFromAdaResponseAI("pickup") || extractAddressFromAdaResponse("pickup");
               
-              // Log both sources for comparison (but trust STT for geocoding)
+              // PRIORITIZE ADA'S INTERPRETATION: Ada often corrects STT mishearings (e.g., "Street spot" → "Sweet Spot")
+              // If Ada mentioned a different address, use hers for geocoding as she maintains better context
+              let addressToGeocode = extractedPickup;
               if (adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
                 console.log(`[${callId}] 📊 DUAL-SOURCE COMPARISON:`);
                 console.log(`[${callId}]    STT extracted: "${extractedPickup}"`);
-                console.log(`[${callId}]    Ada said: "${adaPickup}"`);
+                console.log(`[${callId}]    Ada said: "${adaPickup}" ← USING THIS FOR GEOCODING`);
                 
                 // Add comparison to transcript for UI visibility
                 transcriptHistory.push({
                   role: "system",
-                  text: `📊 ADDRESS SOURCES - STT: "${extractedPickup}" | Ada: "${adaPickup}"`,
+                  text: `📊 ADDRESS SOURCES (pickup) - STT: "${extractedPickup}" | Ada: "${adaPickup}" ✓`,
                   timestamp: new Date().toISOString()
                 });
                 queueLiveCallBroadcast({});
+                
+                // Use Ada's interpretation for geocoding (she often has better context)
+                addressToGeocode = adaPickup;
               }
               
-              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
-              let pickupResult = await geocodeAddress(extractedPickup, shouldCheckAmbiguous, "pickup");
-              let usedAddress = extractedPickup;
+              // GEOCODE USING ADA'S INTERPRETATION (or STT if Ada didn't mention an address)
+              let pickupResult = await geocodeAddress(addressToGeocode, shouldCheckAmbiguous, "pickup");
+              let usedAddress = addressToGeocode;
               
               // Clear any stale alternatives
               knownBooking.pickupAlternative = undefined;
@@ -4670,24 +4675,29 @@ Rules:
               // Use AI-based extraction for better accuracy (falls back to regex if AI fails)
               const adaDest = await extractAddressFromAdaResponseAI("destination") || extractAddressFromAdaResponse("destination");
               
-              // Log both sources for comparison (but trust STT for geocoding)
+              // PRIORITIZE ADA'S INTERPRETATION: Ada often corrects STT mishearings (e.g., "Street spot" → "Sweet Spot")
+              // If Ada mentioned a different address, use hers for geocoding as she maintains better context
+              let addressToGeocode = extractedDest;
               if (adaDest && normalize(adaDest) !== normalize(extractedDest)) {
                 console.log(`[${callId}] 📊 DUAL-SOURCE COMPARISON:`);
                 console.log(`[${callId}]    STT extracted: "${extractedDest}"`);
-                console.log(`[${callId}]    Ada said: "${adaDest}"`);
+                console.log(`[${callId}]    Ada said: "${adaDest}" ← USING THIS FOR GEOCODING`);
                 
                 // Add comparison to transcript for UI visibility
                 transcriptHistory.push({
                   role: "system",
-                  text: `📊 ADDRESS SOURCES - STT: "${extractedDest}" | Ada: "${adaDest}"`,
+                  text: `📊 ADDRESS SOURCES (destination) - STT: "${extractedDest}" | Ada: "${adaDest}" ✓`,
                   timestamp: new Date().toISOString()
                 });
                 queueLiveCallBroadcast({});
+                
+                // Use Ada's interpretation for geocoding (she often has better context)
+                addressToGeocode = adaDest;
               }
               
-              // GEOCODE THE EXTRACTED ADDRESS - trust STT, ask for clarification if it fails
-              let destResult = await geocodeAddress(extractedDest, shouldCheckAmbiguous, "destination");
-              let usedAddress = extractedDest;
+              // GEOCODE USING ADA'S INTERPRETATION (or STT if Ada didn't mention an address)
+              let destResult = await geocodeAddress(addressToGeocode, shouldCheckAmbiguous, "destination");
+              let usedAddress = addressToGeocode;
               
               // Clear any stale alternatives
               knownBooking.destinationAlternative = undefined;
