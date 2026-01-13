@@ -6,6 +6,48 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// =============================================
+// FORBIDDEN PHRASE DETECTION & SANITIZATION
+// Enforces prompt rules at runtime
+// =============================================
+const FORBIDDEN_PHRASES = [
+  "double-check",
+  "just to double-check",
+  "confirm that",
+  "shall i confirm",
+  "is that correct",
+  "let me confirm",
+  "shall i book that",
+  "just to be sure",
+  "can i confirm",
+  "let me just confirm",
+  "so to confirm",
+  "just confirming",
+];
+
+/**
+ * Detects forbidden phrases in assistant responses.
+ * Returns { hasForbidden, detectedPhrases } for logging/action.
+ */
+function detectForbiddenPhrases(text: string): { hasForbidden: boolean; detectedPhrases: string[] } {
+  const lower = text.toLowerCase();
+  const detected = FORBIDDEN_PHRASES.filter(phrase => lower.includes(phrase));
+  return { hasForbidden: detected.length > 0, detectedPhrases: detected };
+}
+
+/**
+ * Sanitizes assistant response by removing forbidden phrases.
+ * Used for logging/fallback generation when OpenAI produces non-compliant output.
+ */
+function sanitizeAssistantResponse(text: string): string {
+  const { hasForbidden } = detectForbiddenPhrases(text);
+  if (!hasForbidden) return text;
+  
+  // For now, if forbidden phrases detected, return a clean fallback
+  // This is used when regenerating after detecting a violation
+  return "Got it. Anything else?";
+}
+
 // Optimized prompt - token-efficient with all critical rules
 const SYSTEM_INSTRUCTIONS = `
 You are {{agent_name}}, a friendly taxi booking assistant for {{company_name}}.
@@ -5545,6 +5587,25 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         if (data.transcript) {
           const now = Date.now();
           const transcriptText = String(data.transcript);
+          
+          // =============================================
+          // FORBIDDEN PHRASE DETECTION (Post-hoc)
+          // Since OpenAI Realtime generates audio directly,
+          // we detect violations AFTER they occur and log them.
+          // This helps identify prompt tuning needs.
+          // =============================================
+          const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(transcriptText);
+          if (hasForbidden) {
+            console.warn(`[${callId}] ⚠️ FORBIDDEN PHRASE DETECTED in Ada's response: [${detectedPhrases.join(", ")}]`);
+            console.warn(`[${callId}] ⚠️ Full response: "${transcriptText}"`);
+            
+            // Log to transcript for visibility in monitoring UI
+            transcriptHistory.push({
+              role: "system",
+              text: `⚠️ PROMPT VIOLATION: Ada said forbidden phrase(s): ${detectedPhrases.join(", ")}`,
+              timestamp: new Date().toISOString(),
+            });
+          }
           
           // DEDUPLICATION: Skip if this is the same text we just saved (within 2s)
           // This prevents duplicates when OpenAI sends the same transcript multiple times
