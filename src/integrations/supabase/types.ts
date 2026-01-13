@@ -73,6 +73,7 @@ export type Database = {
           slug: string
           system_prompt: string
           updated_at: string
+          use_simple_mode: boolean
           vad_prefix_padding_ms: number | null
           vad_silence_duration_ms: number | null
           vad_threshold: number | null
@@ -97,6 +98,7 @@ export type Database = {
           slug: string
           system_prompt: string
           updated_at?: string
+          use_simple_mode?: boolean
           vad_prefix_padding_ms?: number | null
           vad_silence_duration_ms?: number | null
           vad_threshold?: number | null
@@ -121,6 +123,7 @@ export type Database = {
           slug?: string
           system_prompt?: string
           updated_at?: string
+          use_simple_mode?: boolean
           vad_prefix_padding_ms?: number | null
           vad_silence_duration_ms?: number | null
           vad_threshold?: number | null
