@@ -757,9 +757,10 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
 - Be concise (usually 1 short sentence).
 - NEVER repeat back pickup/destination addresses or summarize what the caller just said.
 - During collection, acknowledge briefly ("Lovely", "Got it") and move on to the next missing question.
-- Do NOT ask "when do you need the taxi" unless the caller explicitly mentions a time or asks to book for later.
-- Once you have pickup + destination + passengers (and bags for airport/station trips), call book_taxi immediately.
-- For active bookings: do NOT say the route; just ask keep/change/cancel.`;
+- NEVER ask "when do you need the taxi?" or "is this for now or later?" - TIME DEFAULTS TO ASAP. Only discuss time if the CALLER mentions scheduling for later.
+- Once you have pickup + destination + passengers (and bags for airport/station trips), call book_taxi immediately with pickup_time="ASAP".
+- For active bookings: do NOT say the route; just ask keep/change/cancel.
+- If the caller says "now", "right now", "for now", "as soon as possible" = ASAP. Proceed to next question, don't confirm.`;
 
     return prompt;
   };
@@ -5744,11 +5745,19 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           "council it": "cancel it",
           "console it": "cancel it",
           "counsel it": "cancel it",
+          "count to this": "cancel it",  // Common mishearing of "cancel it"
+          "count to it": "cancel it",
+          "count it": "cancel it",
+          "can't to it": "cancel it",
           // ASAP command mishearings
           "asap time": "ASAP",
           "a sap": "ASAP",
           "8ap": "ASAP",
           "hey sap": "ASAP",
+          "enough for now": "ASAP",  // "right now" / "for now" = ASAP
+          "right now": "ASAP",
+          "for now": "ASAP",
+          "as soon as": "ASAP",
         };
         
         let correctedTranscript = rawTranscript;
