@@ -5849,6 +5849,9 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
               timestamp: new Date().toISOString()
             });
             queueLiveCallBroadcast({});
+            
+            // FORCE Ada to respond with international rejection - don't let her continue processing the foreign address
+            forcedResponseInstructions = `The caller is in ${callerCountry}, which is OUTSIDE the UK. You MUST politely explain: "I'm sorry, but we only operate within the UK. Are you perhaps booking a taxi for someone here in the UK?" Do NOT try to process their address. Do NOT ask for postcodes. If they confirm they want to book for someone IN the UK, then proceed with normal booking asking for the UK pickup address.`;
           }
         }
 
