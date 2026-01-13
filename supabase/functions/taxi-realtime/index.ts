@@ -7533,6 +7533,53 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             ]
           };
           
+          // ═══════════════════════════════════════════════════════════════════════
+          // DISPATCH WEBHOOK INTEGRATION
+          // POST booking to external dispatch system for verification and dispatch
+          // ═══════════════════════════════════════════════════════════════════════
+          const DISPATCH_ENDPOINT = "https://coherent-civil-imp.ngrok.app/ada";
+          
+          const dispatchPayload = {
+            call_id: callId,
+            reference: bookingRef,
+            phone: userPhone || phoneKey,
+            caller_name: callerName || null,
+            pickup: finalBooking.pickup,
+            pickup_name: finalBooking.pickupName || null,
+            destination: finalBooking.destination,
+            destination_name: finalBooking.destinationName || null,
+            passengers: finalBooking.passengers,
+            luggage: finalBooking.luggage || null,
+            vehicle_type: finalBooking.vehicleType || null,
+            pickup_time: finalBooking.pickupTime || "ASAP",
+            is_asap: isAsap,
+            scheduled_for: scheduledTime,
+            estimated_fare: `£${fare}`,
+            estimated_eta: isAsap ? eta : null,
+            pickup_verified: knownBooking.pickupVerified || false,
+            destination_verified: knownBooking.destinationVerified || false,
+            timestamp: new Date().toISOString()
+          };
+          
+          console.log(`[${callId}] 📤 POSTing to dispatch system:`, JSON.stringify(dispatchPayload));
+          
+          // Fire and forget - don't wait for dispatch response to confirm to customer
+          // The dispatch system can call our webhook later with driver/ETA updates
+          fetch(DISPATCH_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(dispatchPayload)
+          }).then(async (dispatchResp) => {
+            if (dispatchResp.ok) {
+              const dispatchData = await dispatchResp.json();
+              console.log(`[${callId}] ✅ Dispatch response:`, JSON.stringify(dispatchData));
+            } else {
+              console.error(`[${callId}] ⚠️ Dispatch error: ${dispatchResp.status}`);
+            }
+          }).catch(err => {
+            console.error(`[${callId}] ❌ Dispatch POST failed:`, err);
+          });
+          
           // Run all database operations in PARALLEL (don't await sequentially)
           const dbPromises = Promise.all([
             // 1. Log to call_logs

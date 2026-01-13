@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.taxi-extract-unified]
 verify_jwt = false
+
+[functions.taxi-dispatch-callback]
+verify_jwt = false
