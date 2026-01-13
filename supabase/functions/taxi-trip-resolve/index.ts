@@ -225,19 +225,23 @@ const STT_CORRECTIONS: Record<string, string> = {
   "davy": "david",
   "davies": "david",
   // POI/Venue name mishearings - STT often confuses venue names with place names
-  "swaffham": "sweetspot",
-  "swaffam": "sweetspot",
-  "swap them": "sweetspot",
-  "swap him": "sweetspot",
-  "swapham": "sweetspot",
-  "sweet ham": "sweetspot",
-  "sweets bob": "sweetspot",
+  "swaffham": "sweet spot",
+  "swaffam": "sweet spot",
+  "swap them": "sweet spot",
+  "swap him": "sweet spot",
+  "swapham": "sweet spot",
+  "sweet ham": "sweet spot",
+  "sweets bob": "sweet spot",
   "three spots": "sweet spot",
   "street spot": "sweet spot", 
   "sweet spots": "sweet spot",
   "street sports": "sweet spot",
   "sweet sport": "sweet spot",
   "street sport": "sweet spot",
+  "sweetspot": "sweet spot",
+  "several sweet": "sweet spot",  // Common STT fragment
+  "several sweet-sweet": "sweet spot",
+  "sweet-sweet": "sweet spot",
 };
 
 // Normalize address by fixing common STT mishearings
@@ -629,14 +633,47 @@ function isRelevantTextSearchMatch(
   resultName?: string,
   formattedAddress?: string
 ): boolean {
-  const tokens = extractKeyTokens(query);
+  // Normalize query first to handle STT corrections
+  const normalizedQuery = normalizeSTTAddress(query);
+  const tokens = extractKeyTokens(normalizedQuery);
   if (tokens.length === 0) return true;
 
   const hay = `${resultName || ""} ${formattedAddress || ""}`.toLowerCase();
   const hayNoSpaces = hay.replace(/\s+/g, "");
+  const queryNoSpaces = normalizedQuery.replace(/\s+/g, "");
 
-  // Allow matches where the place name has spaces but the query doesn't (e.g. "sweetspot" vs "sweet spot")
-  return tokens.some((t) => hay.includes(t) || hayNoSpaces.includes(t));
+  // Check if key tokens from query appear in the result
+  const hasTokenMatch = tokens.some((t) => hay.includes(t) || hayNoSpaces.includes(t));
+  
+  // For short POI names (1-2 words), require a stronger match
+  const queryWords = normalizedQuery.split(/\s+/).filter(w => w.length >= 3);
+  if (queryWords.length <= 2) {
+    // For short queries like "sweet spot", require the name to contain the query
+    const resultNameLower = (resultName || "").toLowerCase();
+    const resultNameNoSpaces = resultNameLower.replace(/\s+/g, "");
+    
+    // Check if result name contains the query (with or without spaces)
+    const nameContainsQuery = resultNameLower.includes(normalizedQuery) || 
+                              resultNameNoSpaces.includes(queryNoSpaces);
+    
+    // Check if query contains the result name
+    const queryContainsName = normalizedQuery.includes(resultNameLower) ||
+                              queryNoSpaces.includes(resultNameNoSpaces);
+    
+    if (!nameContainsQuery && !queryContainsName && !hasTokenMatch) {
+      console.warn(`[Relevance] Short query "${normalizedQuery}" rejected: result="${resultName}" has no match`);
+      return false;
+    }
+    
+    // Extra check: reject if result is clearly a different type of place
+    const genericPlaces = ["city centre", "shopping centre", "cathedral", "lanes", "mall", "market"];
+    if (genericPlaces.some(g => resultNameLower.includes(g)) && !normalizedQuery.includes("centre") && !normalizedQuery.includes("mall")) {
+      console.warn(`[Relevance] Rejected generic place "${resultName}" for query "${normalizedQuery}"`);
+      return false;
+    }
+  }
+
+  return hasTokenMatch || hay.includes(normalizedQuery);
 }
 
 /**
