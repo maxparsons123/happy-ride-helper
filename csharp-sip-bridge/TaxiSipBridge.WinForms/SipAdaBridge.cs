@@ -116,6 +116,15 @@ public class SipAdaBridge : IDisposable
         // Clear any stale audio from previous call
         while (_outboundFrames.TryDequeue(out _)) { }
 
+        // === INBOUND AUDIO FLUSH GUARD ===
+        // Skip the first N RTP packets to flush any residual audio from:
+        // - Previous call endings ("thank you bye-bye")
+        // - Asterisk buffer remnants
+        // - Network jitter buffer leftovers
+        const int FLUSH_PACKETS = 25; // ~500ms at 20ms per packet
+        int inboundPacketCount = 0;
+        bool inboundFlushComplete = false;
+
         // RTP timestamp should start at a random value (per RTP best practice).
         uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
 
@@ -177,11 +186,30 @@ public class SipAdaBridge : IDisposable
             await ws.ConnectAsync(wsUri, cts.Token);
             Log($"🟢 [{callId}] WS Connected");
 
-            // === SIP → WS (Caller → AI) ===
+            // === SIP → WS (Caller → AI) with INBOUND FLUSH ===
             rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
                     return;
+
+                // FLUSH GUARD: Skip first N packets to discard stale/ghost audio
+                inboundPacketCount++;
+                if (!inboundFlushComplete)
+                {
+                    if (inboundPacketCount <= FLUSH_PACKETS)
+                    {
+                        if (inboundPacketCount == 1)
+                        {
+                            Log($"🧹 [{callId}] Flushing inbound audio buffer ({FLUSH_PACKETS} packets)...");
+                        }
+                        return; // Discard this packet
+                    }
+                    else
+                    {
+                        inboundFlushComplete = true;
+                        Log($"✅ [{callId}] Inbound flush complete, now forwarding audio to AI");
+                    }
+                }
 
                 var ulaw = rtp.Payload;
                 if (ulaw == null || ulaw.Length == 0) return;
