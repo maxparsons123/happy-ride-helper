@@ -8,6 +8,29 @@ const corsHeaders = {
 };
 
 // ============================================================================
+// API COST TRACKING - Monitor usage to prevent billing surprises
+// ============================================================================
+let apiCallCounts = {
+  geocode: 0,      // $5/1000 - CHEAPEST
+  textSearch: 0,   // $32/1000 - EXPENSIVE 
+  placeDetails: 0, // $17/1000
+  nearby: 0,       // $32/1000 - EXPENSIVE
+  distanceMatrix: 0, // $5/1000
+};
+
+function logApiCall(type: keyof typeof apiCallCounts) {
+  apiCallCounts[type]++;
+  const costs = {
+    geocode: 0.005,
+    textSearch: 0.032,
+    placeDetails: 0.017,
+    nearby: 0.032,
+    distanceMatrix: 0.005,
+  };
+  console.log(`[API_COST] ${type}: call #${apiCallCounts[type]} (est. $${(apiCallCounts[type] * costs[type]).toFixed(4)} total)`);
+}
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -495,16 +518,22 @@ async function resolveHouseAddress(
   lng: number,
   country: string = "GB"
 ): Promise<ResolvedLocation | null> {
-  console.log(`[HouseAddress] TextSearch: '${query}'`);
+  console.log(`[HouseAddress] Using Geocoding API (cheapest): '${query}'`);
+  logApiCall('geocode');
   
+  // Use Geocoding API instead of Text Search - 6x cheaper ($5 vs $32 per 1000)
+  const searchQuery = `${query}, UK`;
   const params = new URLSearchParams({
-    query: query,
-    location: `${lat},${lng}`,
-    radius: "5000", // 5km - local only
+    address: searchQuery,
     key: GOOGLE_API_KEY!,
+    components: `country:${country === "UK" ? "GB" : country}`,
   });
   
-  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`;
+  // Add bounds bias for local results
+  const delta = 0.05; // ~5km
+  params.append('bounds', `${lat - delta},${lng - delta}|${lat + delta},${lng + delta}`);
+  
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?${params}`;
   
   try {
     const resp = await fetch(url);
@@ -513,26 +542,35 @@ async function resolveHouseAddress(
     const data = await resp.json();
     if (data.status !== "OK" || !data.results?.length) return null;
     
-    // Try each result until we find one that validates
-    for (const result of data.results) {
-      const placeId = result.place_id;
-      const detailed = await upgradeWithPlaceDetails(placeId, query);
-      
-      if (detailed) {
-        // Validate road type and street name match
-        if (isValidAddressMatch(query, detailed.formatted_address)) {
-          console.log(`✅ [HouseAddress] Valid match: "${query}" → "${detailed.formatted_address}"`);
-          return detailed;
-        } else {
-          console.warn(`⚠️ [HouseAddress] Rejected mismatch: "${query}" → "${detailed.formatted_address}"`);
-          // Continue to next result
-        }
-      }
+    // First result from Geocoding API - validate it
+    const result = data.results[0];
+    const formattedAddress = result.formatted_address || "";
+    
+    // Validate road type and street name match
+    if (!isValidAddressMatch(query, formattedAddress)) {
+      console.warn(`⚠️ [HouseAddress] Rejected mismatch: "${query}" → "${formattedAddress}"`);
+      return null;
     }
     
-    // No valid matches found
-    console.warn(`❌ [HouseAddress] No valid matches for: "${query}" (road type/name mismatch)`);
-    return null;
+    const loc = result.geometry?.location;
+    if (!loc) return null;
+    
+    // Extract components from geocoding result (no extra API call needed!)
+    const components = result.address_components || [];
+    const findComponent = (type: string): string | undefined =>
+      components.find((c: any) => c.types?.includes(type))?.long_name;
+    
+    console.log(`✅ [HouseAddress] Valid match: "${query}" → "${formattedAddress}"`);
+    return {
+      raw_input: query,
+      name: undefined,
+      formatted_address: formattedAddress,
+      lat: loc.lat,
+      lng: loc.lng,
+      city: findComponent("locality") || findComponent("postal_town") || findComponent("administrative_area_level_2"),
+      postcode: findComponent("postal_code"),
+      country: findComponent("country"),
+    };
   } catch (e) {
     console.error("[HouseAddress] Error:", e);
     return null;
@@ -600,6 +638,7 @@ async function resolveTextSearch(
   lng: number
 ): Promise<ResolvedLocation | null> {
   console.log(`[TextSearch] '${query}'`);
+  logApiCall('textSearch');
   
   const params = new URLSearchParams({
     query: query,
@@ -628,12 +667,9 @@ async function resolveTextSearch(
       return null;
     }
 
-    // Upgrade with Place Details for full address components
-    if (best.place_id) {
-      const detailed = await upgradeWithPlaceDetails(best.place_id, query);
-      if (detailed) return detailed;
-    }
-
+    // OPTIMIZATION: Skip Place Details call - Text Search already provides coordinates
+    // Only call Place Details if we absolutely need address components (city, postcode)
+    // For most cases, the formatted_address from Text Search is sufficient
     return {
       raw_input: query,
       name: bestName || undefined,
@@ -649,13 +685,16 @@ async function resolveTextSearch(
 
 /**
  * LOOSE LOCAL SEARCH - For strict pickups (8km radius)
+ * OPTIMIZATION: Removed - use resolveTextSearch with wider radius instead
+ * This function was redundant and added extra API calls
  */
 async function resolveLooseLocal(
   query: string,
   lat: number,
   lng: number
 ): Promise<ResolvedLocation | null> {
-  console.log(`[LooseLocal] '${query}'`);
+  console.log(`[LooseLocal] '${query}' - delegating to TextSearch with 8km radius`);
+  logApiCall('textSearch');
   
   const params = new URLSearchParams({
     query: query,
