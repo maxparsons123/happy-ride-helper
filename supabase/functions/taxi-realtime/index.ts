@@ -2134,8 +2134,8 @@ Ask them: "What's the house number for ${streetAddress}?"`;
       'St Kitts': ['st kitts', 'saint kitts', 'nevis', 'st kitts and nevis'],
       'St Vincent': ['st vincent', 'saint vincent', 'grenadines'],
       'Guyana': ['guyana'],
-      // Americas
-      'USA': ['usa', 'united states', 'america', 'the states', 'u.s.a', 'u.s.', 'us'],
+      // Americas - NOTE: 'us' removed as it matches inside words like "Russell"
+      'USA': ['usa', 'united states', 'america', 'the states', 'u.s.a', 'u.s.'],
       'Canada': ['canada', 'canadian'],
       'Mexico': ['mexico'],
       // Europe
@@ -2199,8 +2199,9 @@ Ask them: "What's the house number for ${streetAddress}?"`;
     // Also check for direct mentions without "I'm in" pattern
     for (const [countryName, variations] of Object.entries(internationalCountries)) {
       for (const variation of variations) {
-        // Match "trinidad and tobago" as a standalone or in context
-        if (lowerTranscript.includes(variation) && 
+        // Use word boundary check to avoid matching "us" inside "Russell", "bus", etc.
+        const wordBoundaryPattern = new RegExp(`\\b${variation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (wordBoundaryPattern.test(lowerTranscript) && 
             (lowerTranscript.includes('from ') || lowerTranscript.includes('in ') || 
              lowerTranscript.includes('calling') || lowerTranscript.includes('live') ||
              lowerTranscript.includes('based') || lowerTranscript.includes('located'))) {
