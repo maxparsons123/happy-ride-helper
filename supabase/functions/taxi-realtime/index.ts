@@ -7327,7 +7327,65 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (!args.pickup_time) {
             args.pickup_time = "ASAP";
           }
-          
+
+          // ═══════════════════════════════════════════════════════════════════════
+          // POSTCODE VERIFICATION GUARD: Block booking if we asked for postcode but didn't receive one
+          // This prevents Ada from hallucinating "thank you for the postcode" when VAD triggers on silence
+          // ═══════════════════════════════════════════════════════════════════════
+          if (awaitingClarificationFor && bookingMode !== "raw") {
+            // Check the last user transcript for an actual postcode
+            const lastUserTranscripts = transcriptHistory
+              .filter((t) => t.role === "user")
+              .slice(-3) // Check last 3 user turns
+              .map((t) => t.text)
+              .join(" ");
+
+            const hasActualPostcode = /[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}/i.test(lastUserTranscripts);
+            const hasLandmarkCue = /\b(near|by|next\s+to|opposite|behind|landmark|area)\b/i.test(lastUserTranscripts.toLowerCase());
+            const hasCityName = /\b(birmingham|coventry|london|manchester|liverpool|leeds|sheffield|bristol|nottingham|leicester|derby|wolverhampton|dudley|walsall|solihull|sandwell|nuneaton|bedworth|rugby)\b/i.test(lastUserTranscripts.toLowerCase());
+
+            if (!hasActualPostcode && !hasLandmarkCue && !hasCityName) {
+              console.log(`[${callId}] ⛔ BLOCKING book_taxi: Still awaiting ${awaitingClarificationFor} clarification but no postcode/landmark/city in recent transcripts`);
+              console.log(`[${callId}] 📝 Recent user transcripts: "${lastUserTranscripts}"`);
+
+              // Inject system message to Ada instructing her to re-ask for postcode
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                const fieldAddress = awaitingClarificationFor === "pickup" ? knownBooking.pickup : knownBooking.destination;
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: `[BOOKING BLOCKED: You asked for a postcode for "${fieldAddress}" but the customer hasn't provided one yet. Do NOT thank them for providing a postcode - they haven't. Ask again: "Could you give me the postcode for that address, please?"]`,
+                        },
+                      ],
+                    },
+                  })
+                );
+
+                // Trigger Ada to respond
+                const postcodeResponse = { modalities: ["audio", "text"] };
+                if (openAiResponseInProgress) {
+                  deferredResponseCreate = { response: postcodeResponse as Record<string, unknown>, label: "postcode_block" };
+                } else {
+                  openAiResponseInProgress = true;
+                  startResponseTimeout();
+                  openaiWs.send(JSON.stringify({ type: "response.create", response: postcodeResponse }));
+                }
+              }
+
+              return; // Block this book_taxi call
+            } else {
+              // User provided clarification - clear the flag
+              console.log(`[${callId}] ✅ Postcode verification passed: postcode=${hasActualPostcode}, landmark=${hasLandmarkCue}, city=${hasCityName}`);
+              awaitingClarificationFor = null;
+            }
+          }
+
           // ═══════════════════════════════════════════════════════════════════════
           // RAW PASSTHROUGH MODE: Send booking details to your webhook for validation
           // Your system does all validation - Ada just collects and forwards
