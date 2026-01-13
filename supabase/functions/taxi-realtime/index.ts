@@ -1557,26 +1557,27 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
     const customerText = customerInputs.map(r => r.text).join(" | ");
     
     try {
-      const extractionPrompt = `Extract the ${addressType} address from Ada's taxi booking conversation.
+      const extractionPrompt = `Extract the ${addressType} address that Ada CONFIRMED from the customer's input.
 
 CUSTOMER SAID: "${customerText}"
 
 ADA RESPONDED: "${adaText}"
 
-RULES:
-1. Extract ONLY actual addresses or place names that Ada mentioned as the ${addressType}
-2. Return ONLY the address/place name, nothing else
-3. If Ada mentioned a place like "Sweetspot", "Sweet Spot", "Manchester", "52 David Road" - extract exactly that
-4. If Ada didn't mention any ${addressType} address, return "NONE"
-5. DO NOT extract conversational phrases like "hear from you", "help you", "meet you"
-6. DO NOT extract generic words like "you", "that", "there", "today"
+CRITICAL RULES:
+1. Extract ONLY addresses that Ada CONFIRMED or ACKNOWLEDGED from what the CUSTOMER said
+2. DO NOT extract addresses from Ada's SUGGESTIONS or GREETINGS (e.g., "Shall I book you to Manchester?" is a SUGGESTION, not a confirmation)
+3. Look for CONFIRMATION patterns: "Got it", "So that's", "from X to Y", "heading to X"
+4. IGNORE SUGGESTION patterns: "Shall I book you to", "Would you like to go to", "or are you heading somewhere different"
 
 Examples:
-- "Shall I book you to Manchester?" → "Manchester"
-- "So from 52A David Road?" → "52A David Road" (if asking about pickup)
-- "Lovely to hear from you again!" → "NONE"
-- "Is that to Sweetspot?" → "Sweetspot"
-- "Got it, heading to the airport" → "the airport"
+- Customer: "to Sweet Spot" + Ada: "Got it, heading to Sweet Spot" → "Sweet Spot" (CONFIRMED)
+- Customer: "to Sweet Spot" + Ada: "Shall I book you to Manchester?" → "NONE" (that's a suggestion, not confirming Sweet Spot)
+- Customer: "from 7 Russell" + Ada: "So from 7 Russell Street?" → "7 Russell Street" (CONFIRMED)
+- Ada: "Lovely to hear from you again!" → "NONE"
+- Ada: "So, you'd like a taxi from 7 Russell Street to Sweet Spot" → Extract "${addressType === 'pickup' ? '7 Russell Street' : 'Sweet Spot'}" (CONFIRMED)
+
+The customer's address takes priority. If Ada mentioned what the CUSTOMER said, extract that.
+If Ada only mentioned her own suggestion that differs from the customer, return "NONE".
 
 Return ONLY the ${addressType} address, or "NONE" if not found.`;
 
