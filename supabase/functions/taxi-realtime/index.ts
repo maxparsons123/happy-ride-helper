@@ -5980,8 +5980,15 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           "counsel it": "cancel it",
           "count to this": "cancel it", // Common mishearing of "cancel it"
           "count to it": "cancel it",
+          "count to three": "cancel it", // Deepgram hallucination
+          "count to three please": "cancel it please",
+          "can i count to three": "can i cancel it",
           "count it": "cancel it",
           "can't to it": "cancel it",
+          "can't sell it": "cancel it",
+          "can't sell": "cancel",
+          "concert": "cancel",
+          "counter": "cancel",
 
           // Observed mishearings of "cancel it" on first utterance
           "come see it": "cancel it",
