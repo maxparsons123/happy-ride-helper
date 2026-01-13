@@ -812,8 +812,10 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
 - NEVER repeat back pickup/destination addresses or summarize what the caller just said.
 - During collection, acknowledge briefly ("Lovely", "Got it") and move on to the next missing question.
 - NEVER ask "when do you need the taxi?" or "is this for now or later?" - TIME DEFAULTS TO ASAP. Only discuss time if the CALLER mentions scheduling for later.
+- NEVER say "Shall I book that for you?" / "Shall I proceed?" / "Just to confirm" (unless a specific fare-verification system message instructs it).
 - Once you have pickup + destination + passengers (and bags for airport/station trips), call book_taxi immediately with pickup_time="ASAP".
 - For active bookings: do NOT say the route; just ask keep/change/cancel.
+- For quick rebooking greetings: if they accept the usual destination, go straight to the NEXT missing question (usually passengers) — do NOT restate the route.
 - If the caller says "now", "right now", "for now", "as soon as possible" = ASAP. Proceed to next question, don't confirm.`;
 
     return prompt;
@@ -5893,26 +5895,33 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           // Cancel command mishearings - phone line STT errors
           "council": "cancel",
           "console": "cancel",
-          "counsel": "cancel", 
+          "counsel": "cancel",
           "cancels": "cancel",
           "candle": "cancel",
           "kensal": "cancel",
           "kansai": "cancel",
-          "kind of speak for you": "cancel",  // Severe mishearing on phone lines
+          "kind of speak for you": "cancel", // Severe mishearing on phone lines
           "kind of speak": "cancel",
           "council it": "cancel it",
           "console it": "cancel it",
           "counsel it": "cancel it",
-          "count to this": "cancel it",  // Common mishearing of "cancel it"
+          "count to this": "cancel it", // Common mishearing of "cancel it"
           "count to it": "cancel it",
           "count it": "cancel it",
           "can't to it": "cancel it",
+
+          // Quick-rebook choice mishearings
+          // "somewhere different" sometimes comes through as odd affirmations on phone lines
+          "so may it be done": "somewhere different",
+          "so may it be done so": "somewhere different",
+          "some where different": "somewhere different",
+
           // ASAP command mishearings
           "asap time": "ASAP",
           "a sap": "ASAP",
           "8ap": "ASAP",
           "hey sap": "ASAP",
-          "enough for now": "ASAP",  // "right now" / "for now" = ASAP
+          "enough for now": "ASAP", // "right now" / "for now" = ASAP
           "right now": "ASAP",
           "for now": "ASAP",
           "as soon as": "ASAP",
