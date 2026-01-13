@@ -455,6 +455,11 @@ class TaxiBridgeV25:
                         logger.info(f"[{self.call_id}] 🔊 JSON audio chunk #{audio_chunks_received}")
                 elif msg_type == "transcript":
                     logger.info(f"[{self.call_id}] 💬 {data.get('role', 'unknown').upper()}: {data.get('text', '')}")
+                elif msg_type == "ai_interrupted":
+                    # AI response was cancelled (e.g., forbidden phrase detected) - FLUSH audio queue immediately!
+                    queue_size = len(self.audio_queue)
+                    self.audio_queue.clear()
+                    logger.info(f"[{self.call_id}] 🛑 AI interrupted - flushed {queue_size} audio chunks from queue")
                 elif msg_type == "user_speaking":
                     speaking = data.get("speaking")
                     if speaking is True:
