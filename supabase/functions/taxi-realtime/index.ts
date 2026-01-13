@@ -6185,6 +6185,26 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             /msrtn\./i,
             /^\.+$/,  // Just dots
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
+            
+            // ===== PHONE LINE GIBBERISH HALLUCINATIONS (STT misreading noise) =====
+            // These are nonsensical phrases that Whisper outputs when it hears static/noise
+            /you can bring them apples/i,  // Common gibberish from noise
+            /bring them apples/i,
+            /you can bring them/i,
+            /can bring them/i,
+            /you can bring/i,  // "you can bring" is almost never a valid taxi booking phrase
+            /bring them/i,     // Similarly nonsense in taxi context
+            /them apples/i,
+            /green apples/i,
+            /red apples/i,
+            /some apples/i,
+            // Other observed phone-line gibberish patterns
+            /i see you there/i,
+            /you are there/i,
+            /are you there\??$/i,  // "Are you there?" is often noise, not real speech
+            /can you hear me/i,    // If they're asking this, audio is broken - let system timeout
+            /^hello\?+$/i,         // Just "hello?" repeated = connection issue
+            /^(hello\s*){2,}/i,    // "hello hello" = connection check, not booking
           ];
           
           // GHOST AUDIO FILTER (CRITICAL):
