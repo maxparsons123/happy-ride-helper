@@ -186,7 +186,9 @@ public class SipAdaBridge : IDisposable
             await ws.ConnectAsync(wsUri, cts.Token);
             Log($"🟢 [{callId}] WS Connected");
 
-            // === SIP → WS (Caller → AI) with INBOUND FLUSH ===
+        // === SIP → WS (Caller → AI) with INBOUND FLUSH ===
+            // NEW: Send native 8kHz µ-law directly - no upsampling!
+            // Deepgram nova-2-phonecall is optimized for telephony audio
             rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
@@ -207,21 +209,17 @@ public class SipAdaBridge : IDisposable
                     else
                     {
                         inboundFlushComplete = true;
-                        Log($"✅ [{callId}] Inbound flush complete, now forwarding audio to AI");
+                        Log($"✅ [{callId}] Inbound flush complete, now forwarding native 8kHz µ-law to AI");
                     }
                 }
 
                 var ulaw = rtp.Payload;
                 if (ulaw == null || ulaw.Length == 0) return;
 
-                // µ-law 8kHz → PCM16 24kHz
-                var pcm8k = AudioCodecs.MuLawDecode(ulaw);
-                var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
-                var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
-
-                // Send raw PCM24k as BINARY frame
+                // Send native 8kHz µ-law directly as BINARY frame
+                // No conversion needed - Deepgram nova-2-phonecall expects this!
                 _ = ws.SendAsync(
-                    new ArraySegment<byte>(pcmBytes),
+                    new ArraySegment<byte>(ulaw),
                     WebSocketMessageType.Binary,
                     true,
                     CancellationToken.None);

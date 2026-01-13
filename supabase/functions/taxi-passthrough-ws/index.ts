@@ -10,10 +10,11 @@ const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY");
 // CONFIGURATION
 // ============================================================================
 
-const SAMPLE_RATE = 24000; // AI audio rate (bridge sends 24kHz)
+const TELEPHONY_SAMPLE_RATE = 8000; // Native telephony rate (µ-law from SIP)
+const TTS_SAMPLE_RATE = 24000; // TTS output rate for Deepgram Aura
 const VAD_SILENCE_MS = 800; // Silence threshold for end of speech
 const VAD_MIN_SPEECH_MS = 200; // Minimum speech duration
-const VAD_ENERGY_THRESHOLD = 0.005; // RMS energy threshold for speech
+const VAD_ENERGY_THRESHOLD = 0.008; // RMS energy threshold (adjusted for 8kHz)
 const MAX_AUDIO_BUFFER_MS = 30000; // Max 30 seconds of audio buffer
 
 // ============================================================================
@@ -59,6 +60,24 @@ interface WebhookResponse {
 // ============================================================================
 // AUDIO UTILITIES
 // ============================================================================
+
+// µ-law decode table (pre-computed for speed)
+const ULAW_DECODE_TABLE = new Int16Array(256);
+for (let i = 0; i < 256; i++) {
+  const mulaw = ~i;
+  const sign = (mulaw & 0x80) !== 0 ? -1 : 1;
+  const exponent = (mulaw >> 4) & 0x07;
+  const mantissa = mulaw & 0x0F;
+  ULAW_DECODE_TABLE[i] = sign * (((mantissa << 3) + 0x84) << exponent) - 0x84;
+}
+
+function mulawDecode(ulawData: Uint8Array): Int16Array {
+  const pcm = new Int16Array(ulawData.length);
+  for (let i = 0; i < ulawData.length; i++) {
+    pcm[i] = ULAW_DECODE_TABLE[ulawData[i]];
+  }
+  return pcm;
+}
 
 function calculateRMS(samples: Int16Array): number {
   if (samples.length === 0) return 0;
@@ -132,7 +151,7 @@ class SimpleVAD {
   private readonly maxBufferMs: number;
   
   constructor(
-    sampleRate = SAMPLE_RATE,
+    sampleRate = TELEPHONY_SAMPLE_RATE,
     silenceMs = VAD_SILENCE_MS,
     minSpeechMs = VAD_MIN_SPEECH_MS,
     energyThreshold = VAD_ENERGY_THRESHOLD,
@@ -145,9 +164,10 @@ class SimpleVAD {
     this.maxBufferMs = maxBufferMs;
   }
   
-  addAudio(chunk: Uint8Array): { utteranceComplete: boolean; audio?: Uint8Array } {
+  addAudio(chunk: Uint8Array, isUlaw = true): { utteranceComplete: boolean; audio?: Uint8Array } {
     const now = Date.now();
-    const samples = bytesToInt16(chunk);
+    // Decode µ-law to PCM for energy calculation
+    const samples = isUlaw ? mulawDecode(chunk) : bytesToInt16(chunk);
     const rms = calculateRMS(samples);
     const hasSpeech = rms > this.energyThreshold;
     
@@ -210,22 +230,70 @@ class SimpleVAD {
 }
 
 // ============================================================================
-// STT (Speech-to-Text)
+// STT (Speech-to-Text) - Native 8kHz µ-law telephony mode
 // ============================================================================
 
-async function transcribeAudio(audioBytes: Uint8Array, sampleRate: number = SAMPLE_RATE): Promise<string> {
-  // Create WAV file
-  const wavHeader = createWavHeader(audioBytes.length, sampleRate, 1, 16);
-  const wavFile = new Uint8Array(wavHeader.length + audioBytes.length);
-  wavFile.set(wavHeader, 0);
-  wavFile.set(audioBytes, wavHeader.length);
+async function transcribeAudio(audioBytes: Uint8Array, isUlaw = true): Promise<string> {
+  // Deepgram Nova-2 Phone Call is optimized for 8kHz telephony audio
+  // Send native µ-law directly - no upsampling needed!
+  if (DEEPGRAM_API_KEY) {
+    try {
+      // Keyword boosting for taxi booking context
+      const keywords = [
+        "cancel:2", "book it:2", "yes:1.5", "no:1.5",
+        "Coventry:1.5", "Birmingham:1.5", "Manchester:1.5",
+        "David Road:1.5", "Sweet Spot:1.8", "airport:1.5",
+        "saloon:1.5", "estate:1.5", "passengers:1.5"
+      ].join("&keywords=");
+      
+      // Use native telephony format - what nova-2-phonecall was trained on
+      const encoding = isUlaw ? "mulaw" : "linear16";
+      const sampleRate = TELEPHONY_SAMPLE_RATE;
+      
+      console.log(`[STT] Sending ${audioBytes.length} bytes as ${encoding}@${sampleRate}Hz to Deepgram`);
+      
+      const response = await fetch(
+        `https://api.deepgram.com/v1/listen?model=nova-2-phonecall&language=en-GB&punctuate=true&smart_format=true&numerals=true&keywords=${keywords}`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Token ${DEEPGRAM_API_KEY}`,
+            "Content-Type": `audio/raw;encoding=${encoding};sample_rate=${sampleRate};channels=1`,
+          },
+          body: audioBytes as unknown as BodyInit,
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        console.log(`[STT] Deepgram nova-2-phonecall: "${text}"`);
+        
+        if (isValidTranscript(text)) {
+          return text;
+        }
+      } else {
+        console.error(`[STT] Deepgram error: ${response.status}`);
+      }
+    } catch (error) {
+      console.error("[STT] Deepgram error:", error);
+    }
+  }
   
-  // Try gpt-4o-mini-transcribe first
+  // Fallback to OpenAI Whisper - needs WAV with PCM
   try {
+    // Convert µ-law to PCM for Whisper
+    const pcmSamples = isUlaw ? mulawDecode(audioBytes) : bytesToInt16(audioBytes);
+    const pcmBytes = int16ToBytes(pcmSamples);
+    
+    const wavHeader = createWavHeader(pcmBytes.length, TELEPHONY_SAMPLE_RATE, 1, 16);
+    const wavFile = new Uint8Array(wavHeader.length + pcmBytes.length);
+    wavFile.set(wavHeader, 0);
+    wavFile.set(pcmBytes, wavHeader.length);
+    
     const formData = new FormData();
     formData.append("file", new Blob([wavFile], { type: "audio/wav" }), "audio.wav");
     formData.append("model", "gpt-4o-mini-transcribe");
-    formData.append("prompt", "Transcribe UK taxi booking speech. Preserve place names and numbers.");
     formData.append("temperature", "0");
     
     const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
@@ -237,48 +305,11 @@ async function transcribeAudio(audioBytes: Uint8Array, sampleRate: number = SAMP
     if (response.ok) {
       const data = await response.json();
       const text = data.text || "";
-      console.log(`[STT] gpt-4o-mini-transcribe: "${text}"`);
-      
-      if (isValidTranscript(text)) {
-        return text;
-      }
+      console.log(`[STT] Whisper fallback: "${text}"`);
+      return text;
     }
   } catch (error) {
-    console.error("[STT] gpt-4o-mini-transcribe error:", error);
-  }
-  
-  // Fallback to Deepgram Nova-2 Phone Call (telephony-optimized)
-  if (DEEPGRAM_API_KEY) {
-    try {
-      // Keyword boosting for taxi booking context
-      const keywords = [
-        "cancel:2", "book it:2", "yes:1.5", "no:1.5",
-        "Coventry:1.5", "Birmingham:1.5", "Manchester:1.5",
-        "David Road:1.5", "Sweet Spot:1.8", "airport:1.5",
-        "saloon:1.5", "estate:1.5", "passengers:1.5"
-      ].join("&keywords=");
-      
-      const response = await fetch(
-        `https://api.deepgram.com/v1/listen?model=nova-2-phonecall&language=en-GB&punctuate=true&smart_format=true&numerals=true&keywords=${keywords}`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-            "Content-Type": `audio/raw;encoding=linear16;sample_rate=${sampleRate};channels=1`,
-          },
-          body: audioBytes as unknown as BodyInit,
-        }
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log(`[STT] Deepgram: "${text}"`);
-        return text;
-      }
-    } catch (error) {
-      console.error("[STT] Deepgram error:", error);
-    }
+    console.error("[STT] Whisper error:", error);
   }
   
   return "";
@@ -370,8 +401,9 @@ async function synthesizeSpeech(text: string, voice = "aura-asteria-en"): Promis
   if (!DEEPGRAM_API_KEY) return null;
   
   try {
+    // TTS outputs at 24kHz for quality, bridge will downsample to 8kHz
     const response = await fetch(
-      `https://api.deepgram.com/v1/speak?model=${voice}&encoding=linear16&sample_rate=${SAMPLE_RATE}`,
+      `https://api.deepgram.com/v1/speak?model=${voice}&encoding=linear16&sample_rate=${TTS_SAMPLE_RATE}`,
       {
         method: "POST",
         headers: {
@@ -482,7 +514,7 @@ serve(async (req) => {
       conversation_history: [],
     };
     
-    const vad = new SimpleVAD();
+    const vad = new SimpleVAD(TELEPHONY_SAMPLE_RATE);
     let isAiTalking = false;
     
     console.log(`[${session.call_id}] WebSocket connection opened`);
@@ -498,14 +530,14 @@ serve(async (req) => {
           // Skip processing if AI is talking (prevent echo)
           if (isAiTalking) return;
           
-          // Add to VAD
-          const { utteranceComplete, audio } = vad.addAudio(audioBytes);
+          // Feed audio to VAD (native 8kHz µ-law)
+          const { utteranceComplete, audio } = vad.addAudio(audioBytes, true); // true = µ-law input
           
           if (utteranceComplete && audio && audio.length > 0) {
-            console.log(`[${session.call_id}] 🎤 Utterance complete: ${audio.length} bytes`);
+            console.log(`[${session.call_id}] 🎤 Utterance complete: ${audio.length} bytes (8kHz µ-law)`);
             
-            // Transcribe
-            const transcript = await transcribeAudio(audio);
+            // Transcribe - send native µ-law directly to Deepgram
+            const transcript = await transcribeAudio(audio, true); // true = µ-law
             
             if (transcript) {
               console.log(`[${session.call_id}] 📝 Transcript: "${transcript}"`);
