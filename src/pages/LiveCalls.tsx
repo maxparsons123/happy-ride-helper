@@ -4,11 +4,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2, Receipt } from "lucide-react";
 import { toast } from "sonner";
+import { LiveCallsSettings } from "@/components/LiveCallsSettings";
 
 interface Agent {
   id: string;
@@ -671,215 +671,78 @@ export default function LiveCalls() {
             <Radio className="w-8 h-8 text-primary animate-pulse" />
             <h1 className="text-3xl font-display font-bold text-primary">Live Asterisk Streams</h1>
           </div>
-          <div className="flex items-center gap-4">
-            {/* Agent Selector */}
-            <div className="flex items-center gap-2">
-              <Bot className="w-4 h-4 text-muted-foreground" />
-              <Select value={selectedAgent} onValueChange={setSelectedAgent}>
-                <SelectTrigger className="w-32 h-8 text-sm bg-card border-border">
-                  <SelectValue placeholder="Select Agent" />
-                </SelectTrigger>
-                <SelectContent className="bg-popover border-border">
-                  {agents.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.slug}>
-                      {agent.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Voice Selector */}
-            <div className="flex items-center gap-2">
-              <Volume2 className="w-4 h-4 text-muted-foreground" />
-              <Select value={selectedVoice} onValueChange={setSelectedVoice}>
-                <SelectTrigger className="w-28 h-8 text-sm bg-card border-border">
-                  <SelectValue placeholder="Voice" />
-                </SelectTrigger>
-                <SelectContent className="bg-popover border-border">
-                  <SelectItem value="shimmer">Shimmer</SelectItem>
-                  <SelectItem value="alloy">Alloy</SelectItem>
-                  <SelectItem value="echo">Echo</SelectItem>
-                  <SelectItem value="fable">Fable</SelectItem>
-                  <SelectItem value="onyx">Onyx</SelectItem>
-                  <SelectItem value="nova">Nova</SelectItem>
-                  <SelectItem value="ash">Ash</SelectItem>
-                  <SelectItem value="coral">Coral</SelectItem>
-                  <SelectItem value="sage">Sage</SelectItem>
-                  <SelectItem value="verse">Verse</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Pipeline Selector */}
-            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
-              <div className="flex flex-col items-center">
-                <span className={`text-xs font-bold ${!useGeminiPipeline ? 'text-primary' : 'text-muted-foreground'}`}>
-                  OpenAI
-                </span>
-                <span className={`text-[10px] ${!useGeminiPipeline ? 'text-primary/70' : 'text-muted-foreground/50'}`}>
-                  Realtime
-                </span>
-              </div>
-              <Switch
-                id="pipeline-select"
-                checked={useGeminiPipeline}
-                onCheckedChange={setUseGeminiPipeline}
-              />
-              <div className="flex flex-col items-center">
-                <span className={`text-xs font-bold ${useGeminiPipeline ? 'text-green-400' : 'text-muted-foreground'}`}>
-                  Gemini
-                </span>
-                <span className={`text-[10px] ${useGeminiPipeline ? 'text-green-400/70' : 'text-muted-foreground/50'}`}>
-                  {sttProvider === "deepgram" ? "Deepgram" : "Groq"} STT
-                </span>
-              </div>
-            </div>
-            {/* STT Provider Selector (only when Gemini pipeline active) */}
-            {useGeminiPipeline && (
-              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
-                <span className={`text-xs font-medium ${sttProvider === "groq" ? 'text-amber-400' : 'text-muted-foreground'}`}>
-                  Groq
-                </span>
-                <Switch
-                  id="stt-provider"
-                  checked={sttProvider === "deepgram"}
-                  onCheckedChange={(checked) => setSttProvider(checked ? "deepgram" : "groq")}
-                />
-                <span className={`text-xs font-medium ${sttProvider === "deepgram" ? 'text-cyan-400' : 'text-muted-foreground'}`}>
-                  Deepgram
-                </span>
-              </div>
-            )}
-            {/* TTS Provider Selector (only when Gemini pipeline active) */}
-            {useGeminiPipeline && (
-              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
-                <span className={`text-xs font-medium ${ttsProvider === "elevenlabs" ? 'text-purple-400' : 'text-muted-foreground'}`}>
-                  11Labs
-                </span>
-                <Switch
-                  id="tts-provider"
-                  checked={ttsProvider === "deepgram"}
-                  onCheckedChange={(checked) => setTtsProvider(checked ? "deepgram" : "elevenlabs")}
-                />
-                <span className={`text-xs font-medium ${ttsProvider === "deepgram" ? 'text-cyan-400' : 'text-muted-foreground'}`}>
-                  Deepgram
-                </span>
-              </div>
-            )}
-            {/* Address TTS Splicing Toggle */}
-            <div className="flex items-center gap-2">
-              <Switch
-                id="address-tts"
-                checked={addressTtsSplicing}
-                onCheckedChange={setAddressTtsSplicing}
-              />
-              <label htmlFor="address-tts" className="text-sm text-muted-foreground cursor-pointer">
-                Address TTS
-              </label>
-            </div>
-            {/* Address Verification Toggle */}
-            <div className="flex items-center gap-2">
-              <Switch
-                id="address-verify"
-                checked={addressVerification}
-                onCheckedChange={setAddressVerification}
-              />
-              <label htmlFor="address-verify" className="text-sm text-muted-foreground cursor-pointer">
-                Verify Addresses
-              </label>
-            </div>
-            {/* Trip Resolver Toggle (uses taxi-trip-resolve function) */}
-            {addressVerification && (
-              <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-border">
-                <span className={`text-xs font-medium ${!useTripResolver ? 'text-primary' : 'text-muted-foreground'}`}>
-                  Basic
-                </span>
-                <Switch
-                  id="trip-resolver"
-                  checked={useTripResolver}
-                  onCheckedChange={setUseTripResolver}
-                />
-                <span className={`text-xs font-medium ${useTripResolver ? 'text-green-400' : 'text-muted-foreground'}`}>
-                  Trip Resolver
-                </span>
-              </div>
-            )}
-            {/* Unified AI Extraction Toggle */}
-            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-amber-500/30">
-              <span className={`text-xs font-medium ${!useUnifiedExtraction ? 'text-muted-foreground' : 'text-muted-foreground'}`}>
-                Inline
-              </span>
-              <Switch
-                id="unified-extraction"
-                checked={useUnifiedExtraction}
-                onCheckedChange={setUseUnifiedExtraction}
-              />
-              <span className={`text-xs font-medium ${useUnifiedExtraction ? 'text-amber-400' : 'text-muted-foreground'}`}>
-                AI Extract
-              </span>
-            </div>
-            {/* Passthrough Mode Toggle - webhook-driven flow */}
-            <div className="flex items-center gap-2 bg-card/50 rounded-lg px-3 py-1.5 border border-blue-500/30">
-              <span className={`text-xs font-medium ${!usePassthroughMode ? 'text-green-400' : 'text-muted-foreground'}`}>
-                Full AI
-              </span>
-              <Switch
-                id="passthrough-mode"
-                checked={usePassthroughMode}
-                onCheckedChange={setUsePassthroughMode}
-              />
-              <span className={`text-xs font-medium ${usePassthroughMode ? 'text-blue-400' : 'text-muted-foreground'}`}>
-                Passthrough
-              </span>
-            </div>
+          <div className="flex items-center gap-3">
             {/* Audio controls */}
-            <div className="flex items-center gap-2">
-              <Button
-                variant={audioEnabled ? "default" : "outline"}
-                size="sm"
-                onClick={audioEnabled ? disableAudio : enableAudio}
-                className={audioEnabled ? "bg-green-600 hover:bg-green-700" : ""}
-              >
-                {audioEnabled ? (
-                  <>
-                    <Volume2 className="w-4 h-4 mr-2" />
-                    {isListening ? "Listening..." : "Audio On"}
-                  </>
-                ) : (
-                  <>
-                    <VolumeX className="w-4 h-4 mr-2" />
-                    Enable Audio
-                  </>
-                )}
-              </Button>
-              {audioEnabled && (
-                <Select value={audioSource} onValueChange={(v) => setAudioSource(v as "ai" | "user")}>
-                  <SelectTrigger className="w-[120px] h-8">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ai">
-                      <div className="flex items-center gap-2">
-                        <Bot className="w-3 h-3" />
-                        Ada
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="user">
-                      <div className="flex items-center gap-2">
-                        <User className="w-3 h-3" />
-                        Caller
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+            <Button
+              variant={audioEnabled ? "default" : "outline"}
+              size="sm"
+              onClick={audioEnabled ? disableAudio : enableAudio}
+              className={audioEnabled ? "bg-green-600 hover:bg-green-700" : ""}
+            >
+              {audioEnabled ? (
+                <>
+                  <Volume2 className="w-4 h-4 mr-2" />
+                  {isListening ? "Listening..." : "Audio On"}
+                </>
+              ) : (
+                <>
+                  <VolumeX className="w-4 h-4 mr-2" />
+                  Enable Audio
+                </>
               )}
-            </div>
+            </Button>
+            {audioEnabled && (
+              <Select value={audioSource} onValueChange={(v) => setAudioSource(v as "ai" | "user")}>
+                <SelectTrigger className="w-[100px] h-8">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ai">
+                    <div className="flex items-center gap-2">
+                      <Bot className="w-3 h-3" />
+                      Ada
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="user">
+                    <div className="flex items-center gap-2">
+                      <User className="w-3 h-3" />
+                      Caller
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            )}
+
             <Badge variant="outline" className="text-green-400 border-green-400">
               <span className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
               {activeCalls.length} Active
             </Badge>
-            <Badge variant="outline" className="text-muted-foreground">
-              {calls.length} Total
-            </Badge>
+
+            {/* Settings Button */}
+            <LiveCallsSettings
+              useGeminiPipeline={useGeminiPipeline}
+              setUseGeminiPipeline={setUseGeminiPipeline}
+              sttProvider={sttProvider}
+              setSttProvider={setSttProvider}
+              ttsProvider={ttsProvider}
+              setTtsProvider={setTtsProvider}
+              agents={agents}
+              selectedAgent={selectedAgent}
+              setSelectedAgent={setSelectedAgent}
+              selectedVoice={selectedVoice}
+              setSelectedVoice={setSelectedVoice}
+              addressVerification={addressVerification}
+              setAddressVerification={setAddressVerification}
+              useTripResolver={useTripResolver}
+              setUseTripResolver={setUseTripResolver}
+              addressTtsSplicing={addressTtsSplicing}
+              setAddressTtsSplicing={setAddressTtsSplicing}
+              useUnifiedExtraction={useUnifiedExtraction}
+              setUseUnifiedExtraction={setUseUnifiedExtraction}
+              usePassthroughMode={usePassthroughMode}
+              setUsePassthroughMode={setUsePassthroughMode}
+            />
+
             {/* Billing Page Link */}
             <Button variant="outline" size="sm" asChild>
               <Link to="/billing">
@@ -887,6 +750,7 @@ export default function LiveCalls() {
                 Billing
               </Link>
             </Button>
+
             {/* Clear Database Button */}
             <AlertDialog>
               <AlertDialogTrigger asChild>
