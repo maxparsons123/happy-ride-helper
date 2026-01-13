@@ -9456,13 +9456,26 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
     };
   };
 
+  // Track if OpenAI connection has been initiated (guards against onopen race condition)
+  let openAiConnectionInitiated = false;
+
   socket.onopen = () => {
     console.log(`[${callId}] Client connected`);
-    connectToOpenAI();
+    if (!openAiConnectionInitiated) {
+      openAiConnectionInitiated = true;
+      connectToOpenAI();
+    }
   };
 
   socket.onmessage = async (event) => {
     try {
+      // GUARD: Ensure OpenAI connection is started even if onopen didn't fire (Deno race condition)
+      if (!openAiConnectionInitiated && !openaiWs) {
+        console.log(`[${callId}] ⚠️ onmessage fired before onopen - initiating OpenAI connection now`);
+        openAiConnectionInitiated = true;
+        connectToOpenAI();
+      }
+
       // BINARY AUDIO PATH: Handle raw PCM bytes directly (no base64 overhead)
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
         if (!sessionReady) {
