@@ -20,7 +20,7 @@ from collections import deque
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://xsdlzoyaosfbbwzmcinq.supabase.co/functions/v1/taxi-realtime"
+WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-passthrough-ws"
 
 # Audio Settings
 AST_RATE = 8000   # Asterisk standard
