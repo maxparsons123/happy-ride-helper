@@ -160,6 +160,15 @@ class DeepgramStreamingSTT {
           this.isConnected = true;
           this.isConnecting = false;
           
+          // 🔇 SILENCE PRIME: Send 200ms of silence to warm up Deepgram's model
+          // This helps prevent mishearing on the first real utterance
+          const silenceDurationMs = 200;
+          const silenceBytes = silenceDurationMs * (TELEPHONY_SAMPLE_RATE / 1000); // 200ms at 8kHz = 1600 bytes
+          const silenceBuffer = new Uint8Array(silenceBytes);
+          silenceBuffer.fill(0xFF); // 0xFF is silence in µ-law
+          this.ws?.send(silenceBuffer);
+          console.log(`[${this.callId}] [STT] 🔇 Sent ${silenceBytes} bytes of silence prime`);
+          
           // Send any pending audio
           if (this.pendingAudio.length > 0) {
             console.log(`[${this.callId}] [STT] Flushing ${this.pendingAudio.length} pending audio chunks`);
@@ -539,9 +548,9 @@ serve(async (req) => {
     let deepgramSTT: DeepgramStreamingSTT | null = null;
     let processingTranscript = false;
     
-    // 🔇 ECHO GUARD: Discard audio for 600ms after Ada stops speaking
-    // Increased from 400ms to handle phone line echo/reverb
-    const ECHO_GUARD_MS = 600;
+    // 🔇 ECHO GUARD: Discard audio for 800ms after Ada stops speaking
+    // Increased from 600ms to handle phone line echo/reverb on first utterance
+    const ECHO_GUARD_MS = 800;
     let echoGuardUntil = 0; // Timestamp until which audio should be discarded
     
     console.log(`[${session.call_id}] WebSocket connection opened`);
