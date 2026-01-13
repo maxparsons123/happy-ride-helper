@@ -286,12 +286,72 @@ function isValidTranscript(text: string): boolean {
     "subscribe to my channel",
     "[music]",
     "[applause]",
+    "you can bring them",
+    "bring them apples",
   ];
   
   if (phantomPhrases.some(p => lower.includes(p))) return false;
   
   const words = lower.split(/\s+/).filter(w => w.length > 0);
   return words.length >= 2;
+}
+
+// Determine expected response type based on Ada's last statement
+function getExpectedResponseType(adaText: string): string {
+  const t = adaText.toLowerCase();
+  if (/keep.*change.*cancel|keep it.*cancel|would you like to (keep|cancel)|active booking/.test(t)) return "booking_choice";
+  if (/would you like to book|book a new|book another|instead\?/.test(t)) return "yes_no";
+  if (/where.*pick|pickup.*address|pick you up from|where.*from|where.*going|destination|drop.*off|where to/i.test(t)) return "address";
+  if (/how many (passengers|people)|passengers.*there/i.test(t)) return "number";
+  if (/when.*need|what time|for now or later|asap or/i.test(t)) return "time";
+  if (/postcode|post code|zip|area code/i.test(t)) return "postcode";
+  if (/shall i book|want me to book|is that correct|confirm|right\?|ok\?|okay\?/i.test(t)) return "yes_no";
+  if (/anything else|else i can help|else for you/i.test(t)) return "farewell_or_request";
+  if (/\?$/.test(t.trim())) return "question";
+  return "unknown";
+}
+
+// Check if transcript is semantically coherent with expected response
+function isCoherentResponse(transcript: string, expectedType: string): boolean {
+  const t = transcript.trim().toLowerCase();
+  const wordCount = t.split(/\s+/).length;
+  
+  // Short transcripts (1-3 words) need stricter validation
+  if (wordCount <= 3) {
+    const universallyValid = /^(yes|no|yeah|yep|nope|nah|please|okay|ok|cancel|asap|now|one|two|three|four|five|six|seven|eight|nine|ten|\d+)$/i;
+    if (universallyValid.test(t)) return true;
+    
+    switch (expectedType) {
+      case "booking_choice":
+        return /\b(keep|cancel|change|yes|no)\b/i.test(t);
+      case "yes_no":
+        return /\b(yes|no|yeah|yep|nope|nah|please|correct|right|sure|okay|ok|can i|i would|i'd like)\b/i.test(t);
+      case "address":
+        return /\b(street|road|avenue|drive|lane|close|way|place|court|terrace|station|airport|hospital|hotel|home|work|centre|center|\d+)\b/i.test(t);
+      case "number":
+        return /\b\d+\b|^(one|two|three|four|five|six|seven|eight|nine|ten|just me|myself)$/i.test(t);
+      case "time":
+        return /\b(now|asap|later|today|tomorrow|morning|afternoon|evening|\d+)\b/i.test(t);
+      default:
+        // Filter obvious nonsense
+        return !/\b(apples?|oranges?|bananas?|bring them|can bring)\b/i.test(t);
+    }
+  }
+  
+  // Longer transcripts - check for obvious nonsense phrases
+  const nonsensePhrases = [
+    "you can bring",
+    "bring them apples",
+    "bring them oranges",
+    "can bring them",
+  ];
+  
+  if (nonsensePhrases.some(p => t.includes(p))) {
+    console.warn(`[Coherence] Rejected nonsense phrase: "${t}"`);
+    return false;
+  }
+  
+  return true;
 }
 
 // ============================================================================
@@ -441,6 +501,17 @@ serve(async (req) => {
             
             if (transcript) {
               console.log(`[${session.call_id}] 📝 Transcript: "${transcript}"`);
+              
+              // SEMANTIC COHERENCE CHECK: Get Ada's last response and validate
+              const lastAdaResponse = [...session.conversation_history]
+                .reverse()
+                .find(m => m.role === "assistant")?.text || "";
+              const expectedType = getExpectedResponseType(lastAdaResponse);
+              
+              if (!isCoherentResponse(transcript, expectedType)) {
+                console.warn(`[${session.call_id}] ⚠️ Incoherent response rejected: "${transcript}" (expected: ${expectedType})`);
+                return; // Skip processing this utterance
+              }
               
               // Send transcript to client
               socket.send(JSON.stringify({
