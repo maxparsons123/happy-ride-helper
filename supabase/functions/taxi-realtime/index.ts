@@ -9468,15 +9468,11 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             .single();
           
           if (callCheck?.status === "ended") {
-            // CRITICAL: Set skipDbWrites to prevent phantom call creation in onclose handler
+            // CRITICAL: Immediately close socket - no message, no delay
             skipDbWrites = true;
             callEnded = true;
-            console.log(`[${callId}] 🚫 BLOCKING RECONNECT - call has already ended, closing connection (skipDbWrites=true)`);
-            socket.send(JSON.stringify({ 
-              type: "error", 
-              message: "Call has already ended" 
-            }));
-            socket.close();
+            console.log(`[${callId}] 🚫 BLOCKING RECONNECT - call ended, closing socket IMMEDIATELY`);
+            try { socket.close(1000, "Call ended"); } catch (_) { /* ignore */ }
             return;
           }
           
@@ -9494,17 +9490,11 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             // Note: primeOpenAiWithHistory() will be called after session.updated
             return;
           } else {
-            // Resume failed but this IS a reconnect attempt - don't start fresh, just close
-            // CRITICAL: Set skipDbWrites to prevent phantom call creation in onclose handler
+            // Resume failed - close socket IMMEDIATELY, no messages
             skipDbWrites = true;
-            callEnded = true; // Treat as ended to prevent any DB upserts
-            console.log(`[${callId}] ⚠️ Session resume failed (expired/no data) - closing reconnect attempt (skipDbWrites=true)`);
-            socket.send(JSON.stringify({ 
-              type: "session_resumed", 
-              call_id: callId,
-              resumed: false 
-            }));
-            socket.close();
+            callEnded = true;
+            console.log(`[${callId}] ⚠️ Session resume failed - closing socket IMMEDIATELY`);
+            try { socket.close(1000, "Session expired"); } catch (_) { /* ignore */ }
             return;
           }
         }
@@ -9887,7 +9877,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
   };
 
   socket.onerror = (error) => {
-    console.error(`[${callId}] WebSocket error:`, error);
+    console.error(`[${callId}] WebSocket error - closing immediately:`, error);
+    skipDbWrites = true;
+    callEnded = true;
+    try { socket.close(1000, "Error"); } catch (_) { /* ignore */ }
   };
 
   return response;
