@@ -739,14 +739,16 @@ serve(async (req) => {
   
   // Get effective system prompt (replace placeholders)
   const getEffectiveSystemPrompt = (): string => {
-    if (!agentConfig) return SYSTEM_INSTRUCTIONS;
+    // Default company name if agent not loaded yet
+    const companyName = agentConfig?.company_name || "247 Radio Carz";
+    const agentName = agentConfig?.name || "Ada";
+    
+    let prompt = agentConfig?.system_prompt || SYSTEM_INSTRUCTIONS;
 
-    let prompt = agentConfig.system_prompt;
-
-    // Replace placeholders
-    prompt = prompt.replace(/\{\{agent_name\}\}/g, agentConfig.name);
-    prompt = prompt.replace(/\{\{company_name\}\}/g, agentConfig.company_name);
-    prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig.personality_traits.join(", "));
+    // ALWAYS replace placeholders, even in fallback case
+    prompt = prompt.replace(/\{\{agent_name\}\}/g, agentName);
+    prompt = prompt.replace(/\{\{company_name\}\}/g, companyName);
+    prompt = prompt.replace(/\{\{personality_description\}\}/g, agentConfig?.personality_traits?.join(", ") || "warm, friendly, professional");
 
     // Non-negotiable overrides (prevents verbose/repetitive DB prompts from degrading UX)
     prompt += `
