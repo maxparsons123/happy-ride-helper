@@ -41,6 +41,17 @@ interface WebhookPayload {
     intent?: string;
     confirmed?: boolean;
   };
+  // Address comparison: STT-extracted vs Ada's interpretation
+  address_sources: {
+    stt: {
+      pickup?: string;
+      destination?: string;
+    };
+    ada: {
+      pickup?: string;
+      destination?: string;
+    };
+  };
   session_state: Record<string, unknown>;
   conversation: Array<{ role: string; text: string }>;
 }
@@ -51,6 +62,9 @@ interface WebhookResponse {
   end_call?: boolean;
   end_message?: string;
   session_state?: Record<string, unknown>;
+  // Ada's confirmed/interpreted addresses (for comparison tracking)
+  ada_pickup?: string;
+  ada_destination?: string;
 }
 
 // ============================================================================
@@ -577,6 +591,10 @@ serve(async (req) => {
         
         // Send to webhook
         if (session.webhook_url) {
+          // Extract Ada's addresses from session state (accumulated from previous webhook responses)
+          const adaPickup = session.session_state.ada_pickup as string | undefined;
+          const adaDestination = session.session_state.ada_destination as string | undefined;
+          
           const webhookPayload: WebhookPayload = {
             call_id: session.call_id,
             caller_phone: session.caller_phone,
@@ -584,6 +602,16 @@ serve(async (req) => {
             timestamp: new Date().toISOString(),
             transcript,
             booking,
+            address_sources: {
+              stt: {
+                pickup: booking.pickup,
+                destination: booking.destination,
+              },
+              ada: {
+                pickup: adaPickup,
+                destination: adaDestination,
+              },
+            },
             session_state: session.session_state,
             conversation: session.conversation_history.map(c => ({
               role: c.role,
@@ -619,6 +647,14 @@ serve(async (req) => {
                       ...session.session_state,
                       ...webhookResponse.session_state,
                     };
+                  }
+                  
+                  // Store Ada's addresses for comparison tracking
+                  if (webhookResponse.ada_pickup) {
+                    session.session_state.ada_pickup = webhookResponse.ada_pickup;
+                  }
+                  if (webhookResponse.ada_destination) {
+                    session.session_state.ada_destination = webhookResponse.ada_destination;
                   }
                   
                   let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";
