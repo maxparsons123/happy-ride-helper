@@ -14,16 +14,21 @@ const FORBIDDEN_PHRASES = [
   // Confirmation / re-confirmation language (Ada must not ask for confirmation)
   "double-check",
   "just to double-check",
+  "just to check",
   "confirm that",
   "shall i confirm",
   "is that correct",
   "let me confirm",
   "shall i book that",
+  "shall i go ahead",
+  "shall i book",
   "just to be sure",
   "can i confirm",
   "let me just confirm",
   "so to confirm",
   "just confirming",
+  "did you mean",
+  "is this correct",
 
   // Additional patterns we observed in production
   "would you like to confirm",
@@ -35,6 +40,10 @@ const FORBIDDEN_PHRASES = [
   "confirm destination",
   "confirm the booking",
   "confirm the details",
+  "shall i confirm that booking",
+  "can i book that",
+  "want me to book",
+  "should i book",
 ];
 
 /**
