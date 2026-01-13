@@ -6196,6 +6196,9 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             /can you hear me/i,    // If they're asking this, audio is broken - let system timeout
             /^hello\?+$/i,         // Just "hello?" repeated = connection issue
             /^(hello\s*){2,}/i,    // "hello hello" = connection check, not booking
+            /fasten your seatbelt/i,  // TTS echo contamination from car safety announcements
+            /buckle up/i,             // Similar TTS artifact
+            /seat\s*belt/i,           // Seatbelt references are never valid taxi booking content
           ];
           
           // GHOST AUDIO FILTER (CRITICAL):
