@@ -452,8 +452,9 @@ serve(async (req) => {
   let callerAddressAliases: Record<string, string> = {}; // {"home": "52A David Road", "work": "Coventry Train Station"}
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string; pickup_name?: string | null; destination_name?: string | null } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
-  let currentAssistantText = ""; // Buffer for assistant transcript
+  let currentAssistantText = ""; // Buffer for assistant transcript (text or audio transcript)
   let forbiddenPhraseInterrupted = false; // Flag to prevent multiple interruptions
+  let dropAiAudio = false; // When true, we suppress AI audio deltas (used when cancelling for prompt violations)
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
   let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let aiPlaybackStartedAt = 0; // Timestamp when AI audio playback started
@@ -5605,8 +5606,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         openAiResponseInProgress = true;
         aiPlaybackBytesTotal = 0;
         aiPlaybackStartedAt = 0;
-        currentAssistantText = ""; // Reset transcript buffer for new response
         forbiddenPhraseInterrupted = false; // Reset interruption flag
+        dropAiAudio = false; // Allow audio for this new response
 
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
@@ -5627,44 +5628,95 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
       }
 
       // If the model responds in TEXT modality, forward it as assistant transcript
+      // IMPORTANT: We do EARLY forbidden-phrase detection here because it arrives earlier than audio transcripts.
       if (data.type === "response.text.delta" || data.type === "response.output_text.delta") {
         const delta = data.delta || "";
         console.log(`[${callId}] >>> text delta: "${delta}"`);
-        if (delta) {
-          socket.send(
-            JSON.stringify({
-              type: "transcript",
-              text: delta,
-              role: "assistant",
-            }),
-          );
+        if (!delta) return;
+
+        // Accumulate transcript for early detection
+        currentAssistantText += delta;
+
+        // Check for forbidden phrases early in the stream
+        const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(currentAssistantText);
+        if (hasForbidden && !forbiddenPhraseInterrupted) {
+          forbiddenPhraseInterrupted = true;
+          dropAiAudio = true;
+          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED (text): [${detectedPhrases.join(", ")}]`);
+          console.warn(`[${callId}] 🚨 Cancelling response and triggering replacement...`);
+
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            socket.send(JSON.stringify({ type: "ai_interrupted" }));
+
+            setTimeout(() => {
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: "[SYSTEM: You just violated a hard rule by asking for confirmation (or re-reading details). NEVER say confirm/double-check/read-back. Proceed with booking immediately when ready, or ask ONE specific question. Keep it to 1–2 short sentences. Continue naturally without apologizing.]",
+                        },
+                      ],
+                    },
+                  }),
+                );
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: { modalities: ["audio", "text"] },
+                  }),
+                );
+              }
+            }, 100);
+          }
+
+          return; // don't forward this delta
         }
+
+        socket.send(
+          JSON.stringify({
+            type: "transcript",
+            text: delta,
+            role: "assistant",
+          }),
+        );
       }
 
       // Forward audio to client AND broadcast to monitoring channel
       if (data.type === "response.audio.delta") {
+        if (dropAiAudio) {
+          // We cancelled this response due to a prompt violation; don't leak partial audio.
+          return;
+        }
+
         const deltaLen = data.delta?.length || 0;
         console.log(`[${callId}] >>> AUDIO DELTA received, length: ${deltaLen}`);
-        
+
         // Track playback timing: mark start on first delta, accumulate bytes
         if (aiPlaybackBytesTotal === 0) {
           aiPlaybackStartedAt = Date.now();
         }
         aiPlaybackBytesTotal += deltaLen;
-        
+
         socket.send(
           JSON.stringify({
             type: "audio",
             audio: data.delta,
           }),
         );
-        
+
         // NON-BLOCKING: Broadcast AI audio to monitoring channel (no await = no jitter)
         void supabase.from("live_call_audio").insert({
           call_id: callId,
           audio_chunk: data.delta,
           audio_source: "ai",
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
         }); // Fire and forget - monitoring is optional
       }
 
@@ -5830,53 +5882,67 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
       // Forward transcript for logging + EARLY FORBIDDEN PHRASE DETECTION
       if (data.type === "response.audio_transcript.delta") {
         const delta = data.delta || "";
-        
+
+        // If we've already decided to cancel/suppress this response, don't forward more transcript deltas.
+        if (dropAiAudio || forbiddenPhraseInterrupted) {
+          return;
+        }
+
         // Accumulate transcript for early detection
         currentAssistantText += delta;
-        
+
         // Check for forbidden phrases early in the stream
         const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(currentAssistantText);
         if (hasForbidden && !forbiddenPhraseInterrupted) {
           forbiddenPhraseInterrupted = true;
-          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED: [${detectedPhrases.join(", ")}]`);
+          dropAiAudio = true;
+          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED (audio transcript): [${detectedPhrases.join(", ")}]`);
           console.warn(`[${callId}] 🚨 Cancelling response and triggering replacement...`);
-          
+
           // Cancel the current response
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            
+
             // Clear any buffered audio
             socket.send(JSON.stringify({ type: "ai_interrupted" }));
-            
+
             // Inject a correction and trigger new response
             setTimeout(() => {
               if (openaiWs?.readyState === WebSocket.OPEN) {
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ 
-                      type: "input_text", 
-                      text: "[SYSTEM: You just violated a rule by asking for confirmation. NEVER ask 'shall I confirm' or 'is that correct'. Just proceed with booking or ask ONE specific question. Continue naturally without apologizing.]" 
-                    }]
-                  }
-                }));
-                openaiWs.send(JSON.stringify({
-                  type: "response.create",
-                  response: { modalities: ["audio", "text"] }
-                }));
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: "[SYSTEM: You just violated a hard rule by asking for confirmation (or re-reading details). NEVER say confirm/double-check/read-back. Proceed with booking immediately when ready, or ask ONE specific question. Keep it to 1–2 short sentences. Continue naturally without apologizing.]",
+                        },
+                      ],
+                    },
+                  }),
+                );
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "response.create",
+                    response: { modalities: ["audio", "text"] },
+                  }),
+                );
               }
             }, 100);
           }
           return; // Don't forward this delta
         }
-        
-        socket.send(JSON.stringify({
-          type: "transcript",
-          text: delta,
-          role: "assistant"
-        }));
+
+        socket.send(
+          JSON.stringify({
+            type: "transcript",
+            text: delta,
+            role: "assistant",
+          }),
+        );
       }
 
       // User transcript - extract booking info using AI
