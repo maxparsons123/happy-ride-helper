@@ -8984,6 +8984,133 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           callSource = "asterisk";
         }
         console.log(`[${callId}] Call initialized (source: ${callSource}, phone: ${userPhone}, caller: ${callerName || 'unknown'}, city: ${callerCity || 'unknown'}, geocoding: ${geocodingEnabled}, agent: ${agentConfig?.name || 'default'}, voice: ${agentConfig?.voice || 'shimmer'})`);
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // DISPATCH CHANNEL SUBSCRIPTION
+        // Listen for messages from external dispatch system via webhook
+        // ═══════════════════════════════════════════════════════════════════
+        const dispatchChannel = supabase.channel(`dispatch_${callId}`);
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_ask" }, async (payload: any) => {
+          const { question, context } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH ASK received: "${question}" (context: ${context})`);
+          
+          if (!question || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+            console.log(`[${callId}] ⚠️ Cannot process dispatch ask - no question or OpenAI not connected`);
+            return;
+          }
+          
+          // Inject the question as a system message and trigger Ada to speak it
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH SYSTEM]: Ask the customer: "${question}"` }]
+            }
+          }));
+          
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `The dispatch system needs you to ask the customer this question. Say it naturally and wait for their response: "${question}"`
+            }
+          }));
+          
+          // Track that we're waiting for a dispatch response
+          transcriptHistory.push({
+            role: "system",
+            text: `[Dispatch question: ${question}]`,
+            timestamp: new Date().toISOString()
+          });
+        });
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
+          const { message: sayMessage } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH SAY received: "${sayMessage}"`);
+          
+          if (!sayMessage || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+            console.log(`[${callId}] ⚠️ Cannot process dispatch say - no message or OpenAI not connected`);
+            return;
+          }
+          
+          // Make Ada say the message
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH UPDATE]: Tell the customer: "${sayMessage}"` }]
+            }
+          }));
+          
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `The dispatch system has an update. Say this naturally to the customer: "${sayMessage}"`
+            }
+          }));
+        });
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_confirm" }, async (payload: any) => {
+          const { status, confirmation_message, eta, driver_name, vehicle_reg, fare } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH CONFIRM received: status=${status}`);
+          
+          if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+            console.log(`[${callId}] ⚠️ Cannot process dispatch confirm - OpenAI not connected`);
+            return;
+          }
+          
+          // Build context for Ada
+          const dispatchInfo = [];
+          if (driver_name) dispatchInfo.push(`driver: ${driver_name}`);
+          if (eta) dispatchInfo.push(`ETA: ${eta}`);
+          if (vehicle_reg) dispatchInfo.push(`registration: ${vehicle_reg}`);
+          if (fare) dispatchInfo.push(`fare: ${fare}`);
+          
+          if (status === "dispatched" && confirmation_message) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: `[DISPATCH CONFIRMED]: ${dispatchInfo.join(", ")}` }]
+              }
+            }));
+            
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions: `Say EXACTLY: "${confirmation_message}"`
+              }
+            }));
+          } else if (status === "rejected" || status === "no_cars") {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: `[DISPATCH REJECTED]: ${confirmation_message || "No cars available"}` }]
+              }
+            }));
+            
+            openaiWs.send(JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio", "text"],
+                instructions: `Say EXACTLY: "${confirmation_message || "I'm sorry, but we don't have any cars available right now. Is there anything else I can help with?"}"`
+              }
+            }));
+          }
+        });
+        
+        dispatchChannel.subscribe((status) => {
+          console.log(`[${callId}] 📡 Dispatch channel status: ${status}`);
+        });
+        
         return;
       }
       

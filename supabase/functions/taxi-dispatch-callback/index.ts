@@ -9,32 +9,60 @@ const corsHeaders = {
 /**
  * taxi-dispatch-callback
  * 
- * Webhook endpoint for external dispatch systems to send booking confirmations back.
- * When the dispatch system confirms a booking (with ETA, driver info, etc.),
- * this endpoint updates the call state and triggers Ada to speak the confirmation.
+ * Webhook endpoint for external dispatch systems to send messages back to Ada.
  * 
- * Expected POST body:
+ * ACTIONS:
+ * 
+ * 1. DISPATCH CONFIRMATION - Tell Ada to confirm the booking:
  * {
  *   "call_id": "abc123",
- *   "status": "dispatched" | "rejected" | "no_cars",
- *   "eta": "5 minutes",           // optional
- *   "driver_name": "John",        // optional
- *   "vehicle_reg": "AB12 CDE",    // optional
- *   "vehicle_type": "saloon",     // optional
- *   "fare": "£15.00",             // optional - dispatch can override
- *   "message": "Custom message"   // optional - for rejections
+ *   "action": "confirm",
+ *   "status": "dispatched",
+ *   "eta": "5 minutes",
+ *   "driver_name": "John",
+ *   "vehicle_reg": "AB12 CDE",
+ *   "fare": "£15.00"
+ * }
+ * 
+ * 2. ASK QUESTION - Make Ada ask the customer something:
+ * {
+ *   "call_id": "abc123",
+ *   "action": "ask",
+ *   "question": "The driver wants to know - front entrance or back entrance?",
+ *   "context": "entrance_choice"  // optional - helps track the response
+ * }
+ * 
+ * 3. SAY MESSAGE - Make Ada say something (no response expected):
+ * {
+ *   "call_id": "abc123",
+ *   "action": "say",
+ *   "message": "Just to let you know, your driver John is running 2 minutes late."
+ * }
+ * 
+ * 4. REJECT/NO CARS:
+ * {
+ *   "call_id": "abc123",
+ *   "action": "confirm",
+ *   "status": "rejected" | "no_cars",
+ *   "message": "Sorry, we can't service that area."
  * }
  */
 
 interface DispatchCallback {
   call_id: string;
-  status: "dispatched" | "rejected" | "no_cars" | "pending";
+  action: "confirm" | "ask" | "say";
+  // For confirm action
+  status?: "dispatched" | "rejected" | "no_cars" | "pending";
   eta?: string;
   driver_name?: string;
   vehicle_reg?: string;
   vehicle_type?: string;
   fare?: string;
   message?: string;
+  // For ask action
+  question?: string;
+  context?: string;
+  // For say action (uses message field)
 }
 
 serve(async (req) => {
@@ -51,14 +79,26 @@ serve(async (req) => {
     }
 
     const callback: DispatchCallback = await req.json();
-    const { call_id, status, eta, driver_name, vehicle_reg, vehicle_type, fare, message } = callback;
+    const { 
+      call_id, 
+      action = "confirm", // Default to confirm for backwards compatibility
+      status, 
+      eta, 
+      driver_name, 
+      vehicle_reg, 
+      vehicle_type, 
+      fare, 
+      message,
+      question,
+      context 
+    } = callback;
 
-    console.log(`[${call_id}] 📥 Dispatch callback received: ${status}`);
-    console.log(`[${call_id}] Details:`, JSON.stringify({ eta, driver_name, vehicle_reg, fare }));
+    console.log(`[${call_id}] 📥 Dispatch callback: action=${action}`);
+    console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
 
-    if (!call_id || !status) {
+    if (!call_id) {
       return new Response(JSON.stringify({ 
-        error: "Missing required fields: call_id and status" 
+        error: "Missing required field: call_id" 
       }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -66,6 +106,106 @@ serve(async (req) => {
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: ASK - Send a question for Ada to ask the customer
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === "ask") {
+      if (!question) {
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'ask' action: question" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      console.log(`[${call_id}] 🎤 Dispatch asking: "${question}"`);
+
+      // Broadcast the question to the active WebSocket session
+      await supabase.channel(`dispatch_${call_id}`).send({
+        type: "broadcast",
+        event: "dispatch_ask",
+        payload: {
+          call_id,
+          action: "ask",
+          question,
+          context: context || null,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      // Also update live_calls to show pending question
+      await supabase
+        .from("live_calls")
+        .update({
+          clarification_attempts: { 
+            pending_question: question,
+            question_context: context || null,
+            asked_at: new Date().toISOString()
+          },
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", call_id);
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "ask",
+        question,
+        message: "Question sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: SAY - Make Ada say something (no response expected)
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === "say") {
+      if (!message) {
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'say' action: message" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      console.log(`[${call_id}] 📢 Dispatch saying: "${message}"`);
+
+      await supabase.channel(`dispatch_${call_id}`).send({
+        type: "broadcast",
+        event: "dispatch_say",
+        payload: {
+          call_id,
+          action: "say",
+          message,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "say",
+        message: "Message sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: CONFIRM - Standard booking confirmation/rejection
+    // ═══════════════════════════════════════════════════════════════════
+    if (!status) {
+      return new Response(JSON.stringify({ 
+        error: "Missing required field for 'confirm' action: status" 
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // Build confirmation message based on status
     let confirmationMessage: string;
@@ -98,7 +238,7 @@ serve(async (req) => {
       confirmationMessage = message || "I'm sorry, but we're unable to take this booking at the moment. Is there anything else I can help you with?";
     } else {
       bookingStatus = "pending";
-      confirmationMessage = "Your booking is being processed. Please hold on a moment.";
+      confirmationMessage = message || "Your booking is being processed. Please hold on a moment.";
     }
 
     // Update live_calls with dispatch response
@@ -139,12 +279,13 @@ serve(async (req) => {
         .eq("call_id", call_id);
     }
 
-    // Broadcast dispatch update to live calls page
+    // Broadcast dispatch update to live calls page AND to taxi-realtime
     await supabase.channel(`dispatch_${call_id}`).send({
       type: "broadcast",
-      event: "dispatch_callback",
+      event: "dispatch_confirm",
       payload: {
         call_id,
+        action: "confirm",
         status,
         eta,
         driver_name,
@@ -154,11 +295,12 @@ serve(async (req) => {
       }
     });
 
-    console.log(`[${call_id}] ✅ Dispatch callback processed: ${status}`);
+    console.log(`[${call_id}] ✅ Dispatch confirm processed: ${status}`);
 
     return new Response(JSON.stringify({
       success: true,
       call_id,
+      action: "confirm",
       status: bookingStatus,
       confirmation_message: confirmationMessage
     }), {
