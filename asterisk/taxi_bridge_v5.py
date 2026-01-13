@@ -237,6 +237,23 @@ class TaxiBridgeV25:
         logger.error(f"[{self.call_id}] ❌ Failed to connect after {MAX_RECONNECT_ATTEMPTS} attempts")
         return False
 
+    async def stop_call(self, reason: str):
+        """Stop the bridge and close WebSocket/Asterisk cleanly."""
+        if not self.running:
+            return
+        self.running = False
+        self.ws_connected = False
+        try:
+            if self.ws:
+                await self.ws.close(code=1000, reason=reason)
+        except Exception:
+            pass
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except Exception:
+            pass
+
     async def run(self):
         peer = self.writer.get_extra_info("peername")
         logger.info(f"[{self.call_id}] 📞 Call from {peer}")
@@ -250,30 +267,53 @@ class TaxiBridgeV25:
             if not await self.connect_websocket():
                 logger.error(f"[{self.call_id}] ❌ Initial connection failed, ending call")
                 return
-            
+
             # Main loop with reconnection support
             while self.running:
                 try:
-                    # Run both directions concurrently
-                    await asyncio.gather(
-                        self.asterisk_to_ai(),
-                        self.ai_to_queue()
+                    # Run both directions concurrently, but STOP as soon as either side ends.
+                    ast_task = asyncio.create_task(self.asterisk_to_ai())
+                    ai_task = asyncio.create_task(self.ai_to_queue())
+
+                    done, pending = await asyncio.wait(
+                        {ast_task, ai_task},
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # If gather returns normally, connection was closed cleanly
+
+                    # Cancel the other direction to avoid leaked/stale sockets.
+                    for t in pending:
+                        t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+                    # If the completed task errored, bubble up so reconnect logic can run.
+                    for t in done:
+                        exc = t.exception()
+                        if exc:
+                            raise exc
+
+                    # Clean completion means call ended (hangup / timeout) -> stop.
                     break
-                    
+
                 except (ConnectionClosed, WebSocketException) as e:
                     if not self.running:
                         break
-                    
+
                     self.ws_connected = False
                     logger.warning(f"[{self.call_id}] 🔌 WebSocket disconnected: {e}")
-                    
+
+                    # If server deliberately closed the socket with a reason, treat as formal end.
+                    close_code = getattr(e, "code", None)
+                    close_reason = (getattr(e, "reason", "") or "").lower()
+                    if close_code == 1000 and ("call ended" in close_reason or "session expired" in close_reason or "error" in close_reason):
+                        logger.info(f"[{self.call_id}] ⏹️ Server closed ({close_code}): {close_reason} -> stopping")
+                        self.call_formally_ended = True
+                        break
+
                     # DON'T reconnect if call was formally ended
                     if self.call_formally_ended:
                         logger.info(f"[{self.call_id}] ⏹️ Skipping reconnect - call was formally ended")
                         break
-                    
+
                     # Try to reconnect
                     self.reconnect_attempts += 1
                     if await self.connect_websocket():
@@ -284,17 +324,17 @@ class TaxiBridgeV25:
                             for audio_data in self.pending_audio_buffer:
                                 try:
                                     await self.ws.send(audio_data)
-                                except:
+                                except Exception:
                                     break
                             self.pending_audio_buffer.clear()
                     else:
                         logger.error(f"[{self.call_id}] ❌ Reconnect failed, ending call")
                         break
-                        
+
                 except Exception as e:
                     logger.error(f"[{self.call_id}] ❌ Unexpected error: {e}")
                     break
-                    
+
         finally:
             self.running = False
             playback_task.cancel()
@@ -325,20 +365,24 @@ class TaxiBridgeV25:
                     logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
                     # Only send init once per connection
                     if not self.init_sent:
-                        await self.ws.send(json.dumps({
-                            "type": "init", "call_id": self.call_id,
-                            "user_phone": self.phone, "addressTtsSplicing": True
-                        }))
+                        await self.ws.send(
+                            json.dumps({
+                                "type": "init",
+                                "call_id": self.call_id,
+                                "user_phone": self.phone,
+                                "addressTtsSplicing": True,
+                            })
+                        )
                         self.init_sent = True
 
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
-                    
+
                     # Convert to linear16 for noise reduction
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
                     cleaned = apply_noise_reduction(linear16)
-                    
+
                     # NEW: Send native 8kHz format (Deepgram nova-2-phonecall optimized)
                     if SEND_NATIVE_ULAW:
                         # Convert cleaned PCM back to µ-law and send as-is (8kHz)
@@ -347,34 +391,39 @@ class TaxiBridgeV25:
                     else:
                         # Legacy: upsample to 24kHz PCM16
                         audio_to_send = resample_audio_linear16(cleaned, AST_RATE, AI_RATE)
-                    
+
                     # Send as binary frame
                     if self.ws_connected and self.ws:
                         try:
                             await self.ws.send(audio_to_send)
                             self.binary_audio_count += 1
                             self.last_ws_activity = time.time()
-                        except:
+                        except Exception:
                             # Buffer audio during disconnect for potential resend
                             self.pending_audio_buffer.append(audio_to_send)
                             raise
 
                 elif m_type == MSG_HANGUP:
                     logger.info(f"[{self.call_id}] 📴 Hangup received from Asterisk")
-                    break
+                    await self.stop_call("Asterisk hangup")
+                    return
 
             except asyncio.TimeoutError:
-                # No data from Asterisk for 30s - might be call ended
+                # No data from Asterisk for 30s - assume call ended
                 logger.warning(f"[{self.call_id}] ⏱️ Asterisk read timeout")
-                break
+                await self.stop_call("Asterisk timeout")
+                return
             except asyncio.IncompleteReadError:
                 logger.info(f"[{self.call_id}] 📴 Asterisk connection closed")
-                break
+                await self.stop_call("Asterisk closed")
+                return
             except (ConnectionClosed, WebSocketException):
                 raise  # Let the main loop handle reconnection
             except Exception as e:
+                # Broken pipe etc: Asterisk side is gone -> STOP so we don't leak a WS.
                 logger.error(f"[{self.call_id}] ❌ asterisk_to_ai error: {e}")
-                break
+                await self.stop_call("Asterisk error")
+                return
 
     async def ai_to_queue(self):
         audio_chunks_received = 0
@@ -458,16 +507,18 @@ class TaxiBridgeV25:
             expected_time = start_time + (bytes_played / bytes_per_sec)
             await asyncio.sleep(max(0, expected_time - time.time()))
 
-            chunk = bytes(buffer[:self.ast_frame_bytes]) if len(buffer) >= self.ast_frame_bytes else self._silence()
+            chunk = bytes(buffer[: self.ast_frame_bytes]) if len(buffer) >= self.ast_frame_bytes else self._silence()
             if len(buffer) >= self.ast_frame_bytes:
-                del buffer[:self.ast_frame_bytes]
+                del buffer[: self.ast_frame_bytes]
 
             try:
                 self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                 await self.writer.drain()
                 bytes_played += len(chunk)
-            except:
-                break
+            except Exception:
+                # If we can't write to Asterisk, the call is over; stop so WS isn't leaked.
+                await self.stop_call("Asterisk write failed")
+                return
 
     def _silence(self):
         return (b"\xFF" if self.ast_codec == "ulaw" else b"\x00") * self.ast_frame_bytes
