@@ -12,10 +12,6 @@ const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY");
 
 const TELEPHONY_SAMPLE_RATE = 8000; // Native telephony rate (µ-law from SIP)
 const TTS_SAMPLE_RATE = 24000; // TTS output rate for Deepgram Aura
-const VAD_SILENCE_MS = 800; // Silence threshold for end of speech
-const VAD_MIN_SPEECH_MS = 200; // Minimum speech duration
-const VAD_ENERGY_THRESHOLD = 0.008; // RMS energy threshold (adjusted for 8kHz)
-const MAX_AUDIO_BUFFER_MS = 30000; // Max 30 seconds of audio buffer
 
 // ============================================================================
 // TYPES
@@ -61,42 +57,6 @@ interface WebhookResponse {
 // AUDIO UTILITIES
 // ============================================================================
 
-// µ-law decode table (pre-computed for speed)
-const ULAW_DECODE_TABLE = new Int16Array(256);
-for (let i = 0; i < 256; i++) {
-  const mulaw = ~i;
-  const sign = (mulaw & 0x80) !== 0 ? -1 : 1;
-  const exponent = (mulaw >> 4) & 0x07;
-  const mantissa = mulaw & 0x0F;
-  ULAW_DECODE_TABLE[i] = sign * (((mantissa << 3) + 0x84) << exponent) - 0x84;
-}
-
-function mulawDecode(ulawData: Uint8Array): Int16Array {
-  const pcm = new Int16Array(ulawData.length);
-  for (let i = 0; i < ulawData.length; i++) {
-    pcm[i] = ULAW_DECODE_TABLE[ulawData[i]];
-  }
-  return pcm;
-}
-
-function calculateRMS(samples: Int16Array): number {
-  if (samples.length === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < samples.length; i++) {
-    const normalized = samples[i] / 32768;
-    sum += normalized * normalized;
-  }
-  return Math.sqrt(sum / samples.length);
-}
-
-function bytesToInt16(bytes: Uint8Array): Int16Array {
-  const samples = new Int16Array(bytes.length / 2);
-  for (let i = 0; i < samples.length; i++) {
-    samples[i] = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
-  }
-  return samples;
-}
-
 function int16ToBytes(samples: Int16Array): Uint8Array {
   const bytes = new Uint8Array(samples.length * 2);
   for (let i = 0; i < samples.length; i++) {
@@ -106,236 +66,246 @@ function int16ToBytes(samples: Int16Array): Uint8Array {
   return bytes;
 }
 
-function createWavHeader(dataLength: number, sampleRate: number, channels: number, bitsPerSample: number): Uint8Array {
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-  const header = new ArrayBuffer(44);
-  const view = new DataView(header);
-  
-  // "RIFF"
-  view.setUint8(0, 0x52); view.setUint8(1, 0x49); view.setUint8(2, 0x46); view.setUint8(3, 0x46);
-  view.setUint32(4, 36 + dataLength, true);
-  // "WAVE"
-  view.setUint8(8, 0x57); view.setUint8(9, 0x41); view.setUint8(10, 0x56); view.setUint8(11, 0x45);
-  // "fmt "
-  view.setUint8(12, 0x66); view.setUint8(13, 0x6D); view.setUint8(14, 0x74); view.setUint8(15, 0x20);
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  // "data"
-  view.setUint8(36, 0x64); view.setUint8(37, 0x61); view.setUint8(38, 0x74); view.setUint8(39, 0x61);
-  view.setUint32(40, dataLength, true);
-  
-  return new Uint8Array(header);
-}
-
 // ============================================================================
-// SIMPLE VAD (Voice Activity Detection)
+// STREAMING DEEPGRAM STT
 // ============================================================================
 
-class SimpleVAD {
-  private audioBuffer: Uint8Array[] = [];
-  private totalBytes = 0;
-  private speechStartAt = 0;
-  private lastSpeechAt = 0;
-  private isSpeaking = false;
+class DeepgramStreamingSTT {
+  private ws: WebSocket | null = null;
+  private isConnected = false;
+  private isConnecting = false;
+  private pendingAudio: Uint8Array[] = [];
+  private currentTranscript = "";
+  private finalTranscript = "";
+  private lastSpeechTime = 0;
+  private silenceTimer: number | null = null;
   
-  private readonly sampleRate: number;
-  private readonly silenceMs: number;
-  private readonly minSpeechMs: number;
-  private readonly energyThreshold: number;
-  private readonly maxBufferMs: number;
+  private readonly callId: string;
+  private readonly onTranscript: (transcript: string, isFinal: boolean) => void;
+  private readonly onError: (error: string) => void;
+  
+  // Silence detection
+  private readonly SILENCE_THRESHOLD_MS = 800; // End of utterance after 800ms silence
   
   constructor(
-    sampleRate = TELEPHONY_SAMPLE_RATE,
-    silenceMs = VAD_SILENCE_MS,
-    minSpeechMs = VAD_MIN_SPEECH_MS,
-    energyThreshold = VAD_ENERGY_THRESHOLD,
-    maxBufferMs = MAX_AUDIO_BUFFER_MS
+    callId: string,
+    onTranscript: (transcript: string, isFinal: boolean) => void,
+    onError: (error: string) => void
   ) {
-    this.sampleRate = sampleRate;
-    this.silenceMs = silenceMs;
-    this.minSpeechMs = minSpeechMs;
-    this.energyThreshold = energyThreshold;
-    this.maxBufferMs = maxBufferMs;
+    this.callId = callId;
+    this.onTranscript = onTranscript;
+    this.onError = onError;
   }
   
-  addAudio(chunk: Uint8Array, isUlaw = true): { utteranceComplete: boolean; audio?: Uint8Array } {
-    const now = Date.now();
-    // Decode µ-law to PCM for energy calculation
-    const samples = isUlaw ? mulawDecode(chunk) : bytesToInt16(chunk);
-    const rms = calculateRMS(samples);
-    const hasSpeech = rms > this.energyThreshold;
-    
-    // Track speech state
-    if (hasSpeech) {
-      if (!this.isSpeaking) {
-        this.speechStartAt = now;
-        this.isSpeaking = true;
-      }
-      this.lastSpeechAt = now;
+  async connect(): Promise<boolean> {
+    if (this.isConnected || this.isConnecting) {
+      console.log(`[${this.callId}] [STT] Already connected/connecting`);
+      return true;
     }
     
-    // Add to buffer
-    this.audioBuffer.push(chunk);
-    this.totalBytes += chunk.length;
-    
-    // Trim buffer if too large
-    const maxBytes = (this.sampleRate * 2 * this.maxBufferMs) / 1000;
-    while (this.totalBytes > maxBytes && this.audioBuffer.length > 1) {
-      const removed = this.audioBuffer.shift()!;
-      this.totalBytes -= removed.length;
+    if (!DEEPGRAM_API_KEY) {
+      this.onError("No Deepgram API key configured");
+      return false;
     }
     
-    // Check for end of utterance
-    const silenceDuration = now - this.lastSpeechAt;
-    const speechDuration = this.lastSpeechAt - this.speechStartAt;
+    this.isConnecting = true;
+    const connectStart = Date.now();
     
-    if (this.isSpeaking && silenceDuration >= this.silenceMs && speechDuration >= this.minSpeechMs) {
-      // Utterance complete
-      const audio = this.flush();
-      return { utteranceComplete: true, audio };
-    }
-    
-    return { utteranceComplete: false };
-  }
-  
-  flush(): Uint8Array {
-    if (this.audioBuffer.length === 0) {
-      return new Uint8Array(0);
-    }
-    
-    const combined = new Uint8Array(this.totalBytes);
-    let offset = 0;
-    for (const chunk of this.audioBuffer) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    this.reset();
-    return combined;
-  }
-  
-  reset() {
-    this.audioBuffer = [];
-    this.totalBytes = 0;
-    this.speechStartAt = 0;
-    this.lastSpeechAt = 0;
-    this.isSpeaking = false;
-  }
-}
-
-// ============================================================================
-// STT (Speech-to-Text) - Native 8kHz µ-law telephony mode
-// ============================================================================
-
-async function transcribeAudio(audioBytes: Uint8Array, isUlaw = true): Promise<string> {
-  // Deepgram Nova-2 Phone Call is optimized for 8kHz telephony audio
-  // Send native µ-law directly - no upsampling needed!
-  if (DEEPGRAM_API_KEY) {
-    try {
-      // Keyword boosting for taxi booking context
-      const keywords = [
-        "cancel:2", "book it:2", "yes:1.5", "no:1.5",
-        "Coventry:1.5", "Birmingham:1.5", "Manchester:1.5",
-        "David Road:1.5", "Sweet Spot:1.8", "airport:1.5",
-        "saloon:1.5", "estate:1.5", "passengers:1.5"
-      ].join("&keywords=");
-      
-      // Use native telephony format - what nova-2-phonecall was trained on
-      const encoding = isUlaw ? "mulaw" : "linear16";
-      const sampleRate = TELEPHONY_SAMPLE_RATE;
-      
-      console.log(`[STT] Sending ${audioBytes.length} bytes as ${encoding}@${sampleRate}Hz to Deepgram`);
-      
-      const response = await fetch(
-        `https://api.deepgram.com/v1/listen?model=nova-2-phonecall&language=en-GB&punctuate=true&smart_format=true&numerals=true&keywords=${keywords}`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-            "Content-Type": `audio/raw;encoding=${encoding};sample_rate=${sampleRate};channels=1`,
-          },
-          body: audioBytes as unknown as BodyInit,
-        }
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log(`[STT] Deepgram nova-2-phonecall: "${text}"`);
+    return new Promise((resolve) => {
+      try {
+        // Deepgram streaming WebSocket with keyword boosting
+        const keywords = [
+          "cancel:2", "book%20it:2", "yes:1.5", "no:1.5",
+          "Coventry:1.5", "Birmingham:1.5", "Manchester:1.5",
+          "David%20Road:1.5", "Sweet%20Spot:1.8", "airport:1.5",
+          "saloon:1.5", "estate:1.5", "passengers:1.5"
+        ].join("&keywords=");
         
-        if (isValidTranscript(text)) {
-          return text;
-        }
-      } else {
-        console.error(`[STT] Deepgram error: ${response.status}`);
+        const url = `wss://api.deepgram.com/v1/listen?` +
+          `model=nova-2-phonecall&` +
+          `language=en-GB&` +
+          `encoding=mulaw&` +
+          `sample_rate=${TELEPHONY_SAMPLE_RATE}&` +
+          `channels=1&` +
+          `punctuate=true&` +
+          `smart_format=true&` +
+          `numerals=true&` +
+          `interim_results=true&` +
+          `utterance_end_ms=1000&` +
+          `vad_events=true&` +
+          `endpointing=300&` +
+          `keywords=${keywords}`;
+        
+        console.log(`[${this.callId}] [STT] 🔌 Opening Deepgram streaming connection...`);
+        
+        this.ws = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+        
+        this.ws.onopen = () => {
+          const latency = Date.now() - connectStart;
+          console.log(`[${this.callId}] [STT] ✅ Deepgram connected in ${latency}ms (WARMED UP)`);
+          this.isConnected = true;
+          this.isConnecting = false;
+          
+          // Send any pending audio
+          if (this.pendingAudio.length > 0) {
+            console.log(`[${this.callId}] [STT] Flushing ${this.pendingAudio.length} pending audio chunks`);
+            for (const chunk of this.pendingAudio) {
+              this.ws?.send(chunk);
+            }
+            this.pendingAudio = [];
+          }
+          
+          resolve(true);
+        };
+        
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "Results") {
+              const transcript = data.channel?.alternatives?.[0]?.transcript || "";
+              const isFinal = data.is_final === true;
+              const speechFinal = data.speech_final === true;
+              
+              if (transcript) {
+                this.lastSpeechTime = Date.now();
+                
+                if (isFinal) {
+                  // Accumulate final transcripts
+                  this.finalTranscript += (this.finalTranscript ? " " : "") + transcript;
+                  console.log(`[${this.callId}] [STT] 📝 Final segment: "${transcript}"`);
+                } else {
+                  // Update current partial
+                  this.currentTranscript = transcript;
+                }
+                
+                // Reset silence timer
+                if (this.silenceTimer) {
+                  clearTimeout(this.silenceTimer);
+                }
+                
+                // Start silence detection
+                this.silenceTimer = setTimeout(() => {
+                  this.handleSilence();
+                }, this.SILENCE_THRESHOLD_MS);
+              }
+              
+              // Speech final means end of utterance (Deepgram's VAD)
+              if (speechFinal && this.finalTranscript) {
+                console.log(`[${this.callId}] [STT] 🎤 Speech final: "${this.finalTranscript}"`);
+                this.onTranscript(this.finalTranscript.trim(), true);
+                this.finalTranscript = "";
+                this.currentTranscript = "";
+              }
+            } else if (data.type === "UtteranceEnd") {
+              // Deepgram detected end of utterance
+              if (this.finalTranscript) {
+                console.log(`[${this.callId}] [STT] 🛑 Utterance end: "${this.finalTranscript}"`);
+                this.onTranscript(this.finalTranscript.trim(), true);
+                this.finalTranscript = "";
+                this.currentTranscript = "";
+              }
+            } else if (data.type === "SpeechStarted") {
+              console.log(`[${this.callId}] [STT] 🗣️ Speech started`);
+            } else if (data.type === "Metadata") {
+              console.log(`[${this.callId}] [STT] 📊 Metadata received`);
+            }
+          } catch (err) {
+            console.error(`[${this.callId}] [STT] Parse error:`, err);
+          }
+        };
+        
+        this.ws.onerror = (error) => {
+          console.error(`[${this.callId}] [STT] ❌ WebSocket error:`, error);
+          this.isConnecting = false;
+          this.isConnected = false;
+          this.onError("Deepgram connection error");
+          resolve(false);
+        };
+        
+        this.ws.onclose = (event) => {
+          console.log(`[${this.callId}] [STT] 📴 WebSocket closed: ${event.code} ${event.reason}`);
+          this.isConnected = false;
+          this.isConnecting = false;
+        };
+        
+        // Timeout for connection
+        setTimeout(() => {
+          if (this.isConnecting) {
+            console.error(`[${this.callId}] [STT] Connection timeout`);
+            this.isConnecting = false;
+            this.ws?.close();
+            resolve(false);
+          }
+        }, 5000);
+        
+      } catch (error) {
+        console.error(`[${this.callId}] [STT] Failed to create WebSocket:`, error);
+        this.isConnecting = false;
+        resolve(false);
       }
-    } catch (error) {
-      console.error("[STT] Deepgram error:", error);
-    }
-  }
-  
-  // Fallback to OpenAI Whisper - needs WAV with PCM
-  try {
-    // Convert µ-law to PCM for Whisper
-    const pcmSamples = isUlaw ? mulawDecode(audioBytes) : bytesToInt16(audioBytes);
-    const pcmBytes = int16ToBytes(pcmSamples);
-    
-    const wavHeader = createWavHeader(pcmBytes.length, TELEPHONY_SAMPLE_RATE, 1, 16);
-    const wavFile = new Uint8Array(wavHeader.length + pcmBytes.length);
-    wavFile.set(wavHeader, 0);
-    wavFile.set(pcmBytes, wavHeader.length);
-    
-    const formData = new FormData();
-    formData.append("file", new Blob([wavFile], { type: "audio/wav" }), "audio.wav");
-    formData.append("model", "gpt-4o-mini-transcribe");
-    formData.append("temperature", "0");
-    
-    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
-      body: formData,
     });
-    
-    if (response.ok) {
-      const data = await response.json();
-      const text = data.text || "";
-      console.log(`[STT] Whisper fallback: "${text}"`);
-      return text;
-    }
-  } catch (error) {
-    console.error("[STT] Whisper error:", error);
   }
   
-  return "";
+  private handleSilence() {
+    // If we have accumulated transcript after silence, emit it
+    if (this.finalTranscript) {
+      console.log(`[${this.callId}] [STT] ⏱️ Silence detected, emitting: "${this.finalTranscript}"`);
+      this.onTranscript(this.finalTranscript.trim(), true);
+      this.finalTranscript = "";
+      this.currentTranscript = "";
+    }
+  }
+  
+  sendAudio(audioBytes: Uint8Array) {
+    if (!this.isConnected) {
+      // Buffer audio until connected
+      if (this.isConnecting) {
+        this.pendingAudio.push(audioBytes);
+      }
+      return;
+    }
+    
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(audioBytes);
+    }
+  }
+  
+  close() {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+    }
+    
+    // Emit any remaining transcript
+    if (this.finalTranscript) {
+      this.onTranscript(this.finalTranscript.trim(), true);
+    }
+    
+    if (this.ws) {
+      // Send close frame to Deepgram
+      try {
+        this.ws.send(JSON.stringify({ type: "CloseStream" }));
+      } catch {}
+      this.ws.close();
+      this.ws = null;
+    }
+    
+    this.isConnected = false;
+    this.isConnecting = false;
+    this.pendingAudio = [];
+    this.finalTranscript = "";
+    this.currentTranscript = "";
+  }
+  
+  get connected(): boolean {
+    return this.isConnected;
+  }
 }
 
-function isValidTranscript(text: string): boolean {
-  if (!text || text.trim().length < 3) return false;
-  
-  const lower = text.toLowerCase().trim();
-  const phantomPhrases = [
-    "thank you for watching",
-    "please like and subscribe",
-    "subscribe to my channel",
-    "[music]",
-    "[applause]",
-    "you can bring them",
-    "bring them apples",
-  ];
-  
-  if (phantomPhrases.some(p => lower.includes(p))) return false;
-  
-  const words = lower.split(/\s+/).filter(w => w.length > 0);
-  return words.length >= 2;
-}
+// ============================================================================
+// SEMANTIC COHERENCE CHECK
+// ============================================================================
 
-// Determine expected response type based on Ada's last statement
 function getExpectedResponseType(adaText: string): string {
   const t = adaText.toLowerCase();
   if (/keep.*change.*cancel|keep it.*cancel|would you like to (keep|cancel)|active booking/.test(t)) return "booking_choice";
@@ -350,12 +320,10 @@ function getExpectedResponseType(adaText: string): string {
   return "unknown";
 }
 
-// Check if transcript is semantically coherent with expected response
 function isCoherentResponse(transcript: string, expectedType: string): boolean {
   const t = transcript.trim().toLowerCase();
   const wordCount = t.split(/\s+/).length;
   
-  // Short transcripts (1-3 words) need stricter validation
   if (wordCount <= 3) {
     const universallyValid = /^(yes|no|yeah|yep|nope|nah|please|okay|ok|cancel|asap|now|one|two|three|four|five|six|seven|eight|nine|ten|\d+)$/i;
     if (universallyValid.test(t)) return true;
@@ -372,19 +340,11 @@ function isCoherentResponse(transcript: string, expectedType: string): boolean {
       case "time":
         return /\b(now|asap|later|today|tomorrow|morning|afternoon|evening|\d+)\b/i.test(t);
       default:
-        // Filter obvious nonsense
         return !/\b(apples?|oranges?|bananas?|bring them|can bring)\b/i.test(t);
     }
   }
   
-  // Longer transcripts - check for obvious nonsense phrases
-  const nonsensePhrases = [
-    "you can bring",
-    "bring them apples",
-    "bring them oranges",
-    "can bring them",
-  ];
-  
+  const nonsensePhrases = ["you can bring", "bring them apples", "bring them oranges", "can bring them"];
   if (nonsensePhrases.some(p => t.includes(p))) {
     console.warn(`[Coherence] Rejected nonsense phrase: "${t}"`);
     return false;
@@ -393,56 +353,44 @@ function isCoherentResponse(transcript: string, expectedType: string): boolean {
   return true;
 }
 
+function isValidTranscript(text: string): boolean {
+  if (!text || text.trim().length < 2) return false;
+  
+  const lower = text.toLowerCase().trim();
+  const phantomPhrases = [
+    "thank you for watching",
+    "please like and subscribe",
+    "subscribe to my channel",
+    "[music]",
+    "[applause]",
+  ];
+  
+  if (phantomPhrases.some(p => lower.includes(p))) return false;
+  return true;
+}
+
 // ============================================================================
 // RESPONSE SANITIZATION
 // ============================================================================
 
 const FORBIDDEN_PHRASES = [
-  // Confirmation-seeking phrases (Ada should NEVER ask to confirm)
-  "just to double-check",
-  "double-check",
-  "let me confirm",
-  "just to confirm",
-  "to confirm",
-  "is that correct",
-  "is that right",
-  "did i get that right",
-  "did i get that correct",
-  "shall i confirm",
-  "confirm that",
-  "want me to confirm",
-  "confirm your booking",
-  "confirm the booking",
-  
-  // Address repetition patterns
-  "so that's",
-  "so that is",
-  "so you're going from",
-  "so i have you going",
-  "let me read that back",
-  "i'll read that back",
-  "just to be sure",
-  
-  // Overly verbose phrases
-  "i understand you want",
-  "if i understand correctly",
-  "let me make sure i have this right",
-  "just to make sure",
-  "perfect, so",
+  "just to double-check", "double-check", "let me confirm", "just to confirm",
+  "to confirm", "is that correct", "is that right", "did i get that right",
+  "did i get that correct", "shall i confirm", "confirm that", "want me to confirm",
+  "confirm your booking", "confirm the booking", "so that's", "so that is",
+  "so you're going from", "so i have you going", "let me read that back",
+  "i'll read that back", "just to be sure", "i understand you want",
+  "if i understand correctly", "let me make sure i have this right", "just to make sure",
 ];
 
 function sanitizeAssistantResponse(text: string, callId: string): string {
   if (!text) return text;
   
   const lower = text.toLowerCase();
-  
-  // Check for forbidden phrases
   const violations = FORBIDDEN_PHRASES.filter(phrase => lower.includes(phrase));
   
   if (violations.length > 0) {
     console.warn(`[${callId}] ⚠️ PROMPT VIOLATION: Ada said forbidden phrase(s): ${violations.join(", ")}`);
-    
-    // For severe violations (confirmation-seeking), replace entirely
     const severeViolations = ["double-check", "shall i confirm", "confirm that", "is that correct"];
     if (severeViolations.some(v => lower.includes(v))) {
       console.warn(`[${callId}] 🔄 Replacing response with safe fallback`);
@@ -450,7 +398,6 @@ function sanitizeAssistantResponse(text: string, callId: string): string {
     }
   }
   
-  // Limit to 2 sentences max for voice clarity
   const sentences = text.split(/(?<=[.!?])\s+/);
   if (sentences.length > 2) {
     const truncated = sentences.slice(0, 2).join(" ");
@@ -469,7 +416,6 @@ async function synthesizeSpeech(text: string, voice = "aura-asteria-en"): Promis
   if (!DEEPGRAM_API_KEY) return null;
   
   try {
-    // TTS outputs at 24kHz for quality, bridge will downsample to 8kHz
     const response = await fetch(
       `https://api.deepgram.com/v1/speak?model=${voice}&encoding=linear16&sample_rate=${TTS_SAMPLE_RATE}`,
       {
@@ -510,7 +456,6 @@ function extractFromText(text: string): {
   const lower = text.toLowerCase();
   const result: any = {};
   
-  // Intent
   if (/\b(book|taxi|cab|ride|pick\s*up)\b/i.test(lower)) {
     result.intent = "booking";
   } else if (/\b(cancel)\b/i.test(lower)) {
@@ -520,28 +465,23 @@ function extractFromText(text: string): {
   } else if (/\b(bye|goodbye|thanks|cheers)\b/i.test(lower)) {
     result.intent = "goodbye";
   } else {
-    result.intent = "booking"; // Default to booking
+    result.intent = "booking";
   }
   
-  // Confirmation
   result.confirmed = /\b(yes|yeah|yep|correct|confirm|book it|go ahead)\b/i.test(lower);
   
-  // Pickup: "from X"
   const fromMatch = text.match(/\bfrom\s+(.+?)(?:\s+(?:to|going)\b|$)/i);
   if (fromMatch?.[1]) {
     result.pickup = fromMatch[1].trim().replace(/[.,]+$/, "");
   }
   
-  // Destination: "to X"
   const toMatch = text.match(/\b(?:to|going\s+to)\s+(.+?)(?:\s+(?:for|with|please)\b|[.,]|$)/i);
   if (toMatch?.[1]) {
     result.destination = toMatch[1].trim().replace(/[.,]+$/, "");
   }
   
-  // Passengers
   const wordToNum: Record<string, number> = {
-    one: 1, two: 2, three: 3, four: 4, five: 5,
-    six: 6, seven: 7, eight: 8,
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
   };
   
   const passMatch = text.match(/\b(\d+)\s*(?:passengers?|people)\b/i);
@@ -556,7 +496,6 @@ function extractFromText(text: string): {
     }
   }
   
-  // Time
   if (/\b(now|asap|immediately)\b/i.test(lower)) {
     result.pickup_time = "ASAP";
   }
@@ -582,10 +521,181 @@ serve(async (req) => {
       conversation_history: [],
     };
     
-    const vad = new SimpleVAD(TELEPHONY_SAMPLE_RATE);
     let isAiTalking = false;
+    let deepgramSTT: DeepgramStreamingSTT | null = null;
+    let processingTranscript = false;
     
     console.log(`[${session.call_id}] WebSocket connection opened`);
+    
+    // Handler for when we get a final transcript from Deepgram
+    const handleTranscript = async (transcript: string, isFinal: boolean) => {
+      if (!isFinal || processingTranscript || !isValidTranscript(transcript)) return;
+      
+      processingTranscript = true;
+      
+      try {
+        console.log(`[${session.call_id}] 📝 Processing transcript: "${transcript}"`);
+        
+        // Semantic coherence check
+        const lastAdaResponse = [...session.conversation_history]
+          .reverse()
+          .find(m => m.role === "assistant")?.text || "";
+        const expectedType = getExpectedResponseType(lastAdaResponse);
+        
+        if (!isCoherentResponse(transcript, expectedType)) {
+          console.warn(`[${session.call_id}] ⚠️ Incoherent response rejected: "${transcript}" (expected: ${expectedType})`);
+          processingTranscript = false;
+          return;
+        }
+        
+        // Send transcript to client
+        socket.send(JSON.stringify({
+          type: "transcript",
+          role: "user",
+          text: transcript,
+        }));
+        
+        // Extract booking info
+        const booking = extractFromText(transcript);
+        
+        // Update session state
+        if (booking.pickup) session.session_state.pickup = booking.pickup;
+        if (booking.destination) session.session_state.destination = booking.destination;
+        if (booking.passengers) session.session_state.passengers = booking.passengers;
+        if (booking.pickup_time) session.session_state.pickup_time = booking.pickup_time;
+        
+        // Add to conversation
+        session.conversation_history.push({
+          role: "user",
+          text: transcript,
+          timestamp: new Date().toISOString(),
+        });
+        
+        // Send to webhook
+        if (session.webhook_url) {
+          const webhookPayload: WebhookPayload = {
+            call_id: session.call_id,
+            caller_phone: session.caller_phone,
+            caller_name: session.caller_name,
+            timestamp: new Date().toISOString(),
+            transcript,
+            booking,
+            session_state: session.session_state,
+            conversation: session.conversation_history.map(c => ({
+              role: c.role,
+              text: c.text,
+            })),
+          };
+          
+          console.log(`[${session.call_id}] 📤 Sending to webhook: ${session.webhook_url}`);
+          
+          try {
+            const webhookHeaders: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (session.webhook_token) {
+              webhookHeaders["Authorization"] = `Bearer ${session.webhook_token}`;
+            }
+            
+            const webhookResult = await fetch(session.webhook_url, {
+              method: "POST",
+              headers: webhookHeaders,
+              body: JSON.stringify(webhookPayload),
+            });
+            
+            if (webhookResult.ok) {
+              const responseText = await webhookResult.text();
+              if (responseText) {
+                try {
+                  const webhookResponse: WebhookResponse = JSON.parse(responseText);
+                  console.log(`[${session.call_id}] 📥 Webhook response:`, webhookResponse);
+                  
+                  if (webhookResponse.session_state) {
+                    session.session_state = {
+                      ...session.session_state,
+                      ...webhookResponse.session_state,
+                    };
+                  }
+                  
+                  let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";
+                  
+                  if (webhookResponse.end_call && webhookResponse.end_message) {
+                    adaText = webhookResponse.end_message;
+                  }
+                  
+                  if (adaText) {
+                    adaText = sanitizeAssistantResponse(adaText, session.call_id);
+                  }
+                  
+                  if (adaText) {
+                    console.log(`[${session.call_id}] 🗣️ Ada: "${adaText}"`);
+                    
+                    session.conversation_history.push({
+                      role: "assistant",
+                      text: adaText,
+                      timestamp: new Date().toISOString(),
+                    });
+                    
+                    socket.send(JSON.stringify({
+                      type: "transcript",
+                      role: "assistant",
+                      text: adaText,
+                    }));
+                    
+                    // TTS and send audio
+                    isAiTalking = true;
+                    socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
+                    
+                    const audioBytes = await synthesizeSpeech(adaText);
+                    if (audioBytes) {
+                      const CHUNK_SIZE = 4800;
+                      for (let i = 0; i < audioBytes.length; i += CHUNK_SIZE) {
+                        const chunk = audioBytes.slice(i, i + CHUNK_SIZE);
+                        socket.send(chunk);
+                        await new Promise(r => setTimeout(r, 20));
+                      }
+                    }
+                    
+                    isAiTalking = false;
+                    socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+                    
+                    // 🔥 WARM UP STT: Open Deepgram connection as Ada finishes speaking
+                    if (!webhookResponse.end_call && deepgramSTT && !deepgramSTT.connected) {
+                      console.log(`[${session.call_id}] 🔥 Pre-warming Deepgram STT connection...`);
+                      deepgramSTT.connect();
+                    }
+                    
+                    if (webhookResponse.end_call) {
+                      socket.send(JSON.stringify({
+                        type: "call_ended",
+                        reason: "webhook",
+                      }));
+                      socket.close();
+                    }
+                  }
+                } catch {
+                  console.error(`[${session.call_id}] Webhook response parse error`);
+                }
+              }
+            } else {
+              console.error(`[${session.call_id}] Webhook error: ${webhookResult.status}`);
+            }
+          } catch (error) {
+            console.error(`[${session.call_id}] Webhook call failed:`, error);
+          }
+        } else {
+          socket.send(JSON.stringify({
+            type: "booking_update",
+            call_id: session.call_id,
+            transcript,
+            booking,
+            session_state: session.session_state,
+          }));
+        }
+      } finally {
+        processingTranscript = false;
+      }
+    };
     
     socket.onmessage = async (event) => {
       try {
@@ -598,178 +708,11 @@ serve(async (req) => {
           // Skip processing if AI is talking (prevent echo)
           if (isAiTalking) return;
           
-          // Feed audio to VAD (native 8kHz µ-law)
-          const { utteranceComplete, audio } = vad.addAudio(audioBytes, true); // true = µ-law input
-          
-          if (utteranceComplete && audio && audio.length > 0) {
-            console.log(`[${session.call_id}] 🎤 Utterance complete: ${audio.length} bytes (8kHz µ-law)`);
-            
-            // Transcribe - send native µ-law directly to Deepgram
-            const transcript = await transcribeAudio(audio, true); // true = µ-law
-            
-            if (transcript) {
-              console.log(`[${session.call_id}] 📝 Transcript: "${transcript}"`);
-              
-              // SEMANTIC COHERENCE CHECK: Get Ada's last response and validate
-              const lastAdaResponse = [...session.conversation_history]
-                .reverse()
-                .find(m => m.role === "assistant")?.text || "";
-              const expectedType = getExpectedResponseType(lastAdaResponse);
-              
-              if (!isCoherentResponse(transcript, expectedType)) {
-                console.warn(`[${session.call_id}] ⚠️ Incoherent response rejected: "${transcript}" (expected: ${expectedType})`);
-                return; // Skip processing this utterance
-              }
-              
-              // Send transcript to client
-              socket.send(JSON.stringify({
-                type: "transcript",
-                role: "user",
-                text: transcript,
-              }));
-              
-              // Extract booking info
-              const booking = extractFromText(transcript);
-              
-              // Update session state
-              if (booking.pickup) session.session_state.pickup = booking.pickup;
-              if (booking.destination) session.session_state.destination = booking.destination;
-              if (booking.passengers) session.session_state.passengers = booking.passengers;
-              if (booking.pickup_time) session.session_state.pickup_time = booking.pickup_time;
-              
-              // Add to conversation
-              session.conversation_history.push({
-                role: "user",
-                text: transcript,
-                timestamp: new Date().toISOString(),
-              });
-              
-              // Send to webhook
-              if (session.webhook_url) {
-                const webhookPayload: WebhookPayload = {
-                  call_id: session.call_id,
-                  caller_phone: session.caller_phone,
-                  caller_name: session.caller_name,
-                  timestamp: new Date().toISOString(),
-                  transcript,
-                  booking,
-                  session_state: session.session_state,
-                  conversation: session.conversation_history.map(c => ({
-                    role: c.role,
-                    text: c.text,
-                  })),
-                };
-                
-                console.log(`[${session.call_id}] 📤 Sending to webhook: ${session.webhook_url}`);
-                
-                try {
-                  const webhookHeaders: Record<string, string> = {
-                    "Content-Type": "application/json",
-                  };
-                  if (session.webhook_token) {
-                    webhookHeaders["Authorization"] = `Bearer ${session.webhook_token}`;
-                  }
-                  
-                  const webhookResult = await fetch(session.webhook_url, {
-                    method: "POST",
-                    headers: webhookHeaders,
-                    body: JSON.stringify(webhookPayload),
-                  });
-                  
-                  if (webhookResult.ok) {
-                    const responseText = await webhookResult.text();
-                    if (responseText) {
-                      try {
-                        const webhookResponse: WebhookResponse = JSON.parse(responseText);
-                        console.log(`[${session.call_id}] 📥 Webhook response:`, webhookResponse);
-                        
-                        // Merge session state
-                        if (webhookResponse.session_state) {
-                          session.session_state = {
-                            ...session.session_state,
-                            ...webhookResponse.session_state,
-                          };
-                        }
-                        
-                        // Get Ada's response
-                        let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";
-                        
-                        if (webhookResponse.end_call && webhookResponse.end_message) {
-                          adaText = webhookResponse.end_message;
-                        }
-                        
-                        // SANITIZE: Filter forbidden phrases and limit length
-                        if (adaText) {
-                          adaText = sanitizeAssistantResponse(adaText, session.call_id);
-                        }
-                        
-                        if (adaText) {
-                          console.log(`[${session.call_id}] 🗣️ Ada: "${adaText}"`);
-                          
-                          // Add to conversation
-                          session.conversation_history.push({
-                            role: "assistant",
-                            text: adaText,
-                            timestamp: new Date().toISOString(),
-                          });
-                          
-                          // Send transcript
-                          socket.send(JSON.stringify({
-                            type: "transcript",
-                            role: "assistant",
-                            text: adaText,
-                          }));
-                          
-                          // TTS and send audio
-                          isAiTalking = true;
-                          socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
-                          
-                          const audioBytes = await synthesizeSpeech(adaText);
-                          if (audioBytes) {
-                            // Send as binary chunks
-                            const CHUNK_SIZE = 4800; // 100ms at 24kHz
-                            for (let i = 0; i < audioBytes.length; i += CHUNK_SIZE) {
-                              const chunk = audioBytes.slice(i, i + CHUNK_SIZE);
-                              socket.send(chunk);
-                              // Small delay for pacing
-                              await new Promise(r => setTimeout(r, 20));
-                            }
-                          }
-                          
-                          isAiTalking = false;
-                          socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
-                          
-                          // End call if requested
-                          if (webhookResponse.end_call) {
-                            socket.send(JSON.stringify({
-                              type: "call_ended",
-                              reason: "webhook",
-                            }));
-                            socket.close();
-                          }
-                        }
-                      } catch {
-                        console.error(`[${session.call_id}] Webhook response parse error`);
-                      }
-                    }
-                  } else {
-                    console.error(`[${session.call_id}] Webhook error: ${webhookResult.status}`);
-                  }
-                } catch (error) {
-                  console.error(`[${session.call_id}] Webhook call failed:`, error);
-                }
-              } else {
-                // No webhook configured - send raw transcript
-                socket.send(JSON.stringify({
-                  type: "booking_update",
-                  call_id: session.call_id,
-                  transcript,
-                  booking,
-                  session_state: session.session_state,
-                }));
-              }
-            }
+          // Stream directly to Deepgram (no local VAD needed!)
+          if (deepgramSTT) {
+            deepgramSTT.sendAudio(audioBytes);
           }
+          
           return;
         }
         
@@ -784,6 +727,17 @@ serve(async (req) => {
           session.webhook_token = message.webhook_token;
           
           console.log(`[${session.call_id}] 📞 Session initialized - phone: ${session.caller_phone}, webhook: ${session.webhook_url || "none"}`);
+          
+          // Initialize Deepgram streaming STT
+          deepgramSTT = new DeepgramStreamingSTT(
+            session.call_id,
+            handleTranscript,
+            (error) => console.error(`[${session.call_id}] [STT] Error: ${error}`)
+          );
+          
+          // 🔥 PRE-CONNECT: Start warming up Deepgram immediately!
+          console.log(`[${session.call_id}] 🔥 Pre-connecting Deepgram STT...`);
+          deepgramSTT.connect();
           
           socket.send(JSON.stringify({
             type: "session_ready",
@@ -824,12 +778,9 @@ serve(async (req) => {
         }
         
         if (message.type === "text") {
-          // Direct text input (for testing)
           const text = message.text;
           console.log(`[${session.call_id}] 📝 Text input: "${text}"`);
-          
-          // Process as if transcribed
-          // (Same flow as audio transcription above)
+          await handleTranscript(text, true);
         }
         
       } catch (error) {
@@ -839,6 +790,7 @@ serve(async (req) => {
     
     socket.onclose = () => {
       console.log(`[${session.call_id}] 📴 WebSocket closed`);
+      deepgramSTT?.close();
     };
     
     socket.onerror = (error) => {
@@ -853,7 +805,12 @@ serve(async (req) => {
     JSON.stringify({
       status: "ok",
       service: "taxi-passthrough-ws",
-      description: "WebSocket endpoint for taxi audio streaming",
+      description: "WebSocket endpoint for taxi audio streaming with STREAMING STT",
+      features: {
+        stt: "Deepgram Nova-2 streaming WebSocket (pre-warmed)",
+        tts: "Deepgram Aura",
+        vad: "Deepgram server-side VAD",
+      },
       usage: {
         websocket: "Connect via WebSocket",
         init: {
@@ -863,7 +820,7 @@ serve(async (req) => {
           webhook_url: "https://your-server.com/webhook",
           webhook_token: "optional-auth-token",
         },
-        audio: "Send raw PCM16 24kHz audio as binary WebSocket frames",
+        audio: "Send raw 8kHz µ-law audio as binary WebSocket frames",
         responses: {
           transcript: "{ type: 'transcript', role: 'user'|'assistant', text: '...' }",
           audio: "Binary PCM16 24kHz audio frames",
