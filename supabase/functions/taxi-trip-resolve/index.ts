@@ -220,10 +220,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "courts": "court",
   "placed": "place",
   "places": "place",
+
   // Common name mishearings
   "davie": "david",
   "davy": "david",
   "davies": "david",
+  "david rose": "david road", // common phone-line mishearing
+
   // POI/Venue name mishearings - STT often confuses venue names with place names
   "swaffham": "sweet spot",
   "swaffam": "sweet spot",
@@ -233,13 +236,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "sweet ham": "sweet spot",
   "sweets bob": "sweet spot",
   "three spots": "sweet spot",
-  "street spot": "sweet spot", 
+  "street spot": "sweet spot",
   "sweet spots": "sweet spot",
   "street sports": "sweet spot",
   "sweet sport": "sweet spot",
   "street sport": "sweet spot",
   "sweetspot": "sweet spot",
-  "several sweet": "sweet spot",  // Common STT fragment
+  "several sweet": "sweet spot", // common STT fragment
   "several sweet-sweet": "sweet spot",
   "sweet-sweet": "sweet spot",
 };
@@ -249,8 +252,9 @@ function normalizeSTTAddress(address: string): string {
   let normalized = address.toLowerCase();
 
   // Targeted fix: "David Rose" (STT) → "David Road" when it appears like a street suffix
-  normalized = normalized.replace(/(\b\d+[a-z]?\s+[\w']+\s+)rose\b/gi, "$1road");
-  
+  // Supports commas after house numbers (e.g., "52A, David Rose")
+  normalized = normalized.replace(/(\b\d+[a-z]?(?:\s*,\s*|\s+)[\w']+\s+)rose\b/gi, "$1road");
+
   // Remove "in the UK" / "in UK" / "UK" suffixes that STT sometimes adds erroneously
   normalized = normalized.replace(/\s*,?\s*in\s+the\s+uk\s*$/i, "");
   normalized = normalized.replace(/\s*,?\s*in\s+uk\s*$/i, "");

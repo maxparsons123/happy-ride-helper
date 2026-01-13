@@ -11,6 +11,7 @@ const corsHeaders = {
 // Enforces prompt rules at runtime
 // =============================================
 const FORBIDDEN_PHRASES = [
+  // Confirmation / re-confirmation language (Ada must not ask for confirmation)
   "double-check",
   "just to double-check",
   "confirm that",
@@ -23,6 +24,17 @@ const FORBIDDEN_PHRASES = [
   "let me just confirm",
   "so to confirm",
   "just confirming",
+
+  // Additional patterns we observed in production
+  "would you like to confirm",
+  "do you want to confirm",
+  "please confirm",
+  "confirm the pickup",
+  "confirm pickup",
+  "confirm the destination",
+  "confirm destination",
+  "confirm the booking",
+  "confirm the details",
 ];
 
 /**
@@ -31,21 +43,21 @@ const FORBIDDEN_PHRASES = [
  */
 function detectForbiddenPhrases(text: string): { hasForbidden: boolean; detectedPhrases: string[] } {
   const lower = text.toLowerCase();
-  const detected = FORBIDDEN_PHRASES.filter(phrase => lower.includes(phrase));
+  const detected = FORBIDDEN_PHRASES.filter((phrase) => lower.includes(phrase));
   return { hasForbidden: detected.length > 0, detectedPhrases: detected };
 }
 
 /**
  * Sanitizes assistant response by removing forbidden phrases.
- * Used for logging/fallback generation when OpenAI produces non-compliant output.
+ * Used as a last-resort runtime guard when the model violates hard rules.
  */
 function sanitizeAssistantResponse(text: string): string {
-  const { hasForbidden } = detectForbiddenPhrases(text);
+  const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(text);
   if (!hasForbidden) return text;
-  
-  // For now, if forbidden phrases detected, return a clean fallback
-  // This is used when regenerating after detecting a violation
-  return "Got it. Anything else?";
+
+  console.warn(`[sanitizeAssistantResponse] ⚠️ Forbidden phrase(s): ${detectedPhrases.join(", ")}`);
+  // Safe, short fallback (keeps phone call flowing and avoids confirmations)
+  return "Got it.";
 }
 
 // Optimized prompt - token-efficient with all critical rules
@@ -5918,6 +5930,13 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           "count to it": "cancel it",
           "count it": "cancel it",
           "can't to it": "cancel it",
+
+          // Observed mishearings of "cancel it" on first utterance
+          "come see it": "cancel it",
+          "come to see it": "cancel it",
+          "go to sleep": "cancel it",
+          "come sleep": "cancel it",
+          "cancel you": "cancel it",
 
           // Quick-rebook choice mishearings
           // "somewhere different" sometimes comes through as odd affirmations on phone lines
