@@ -65,6 +65,14 @@ interface WebhookResponse {
   // Ada's confirmed/interpreted addresses (for comparison tracking)
   ada_pickup?: string;
   ada_destination?: string;
+  // Booking details from your dispatch system
+  fare?: string;
+  eta_minutes?: number;
+  booking_ref?: string;
+  passengers?: number;
+  vehicle_type?: string;
+  distance_miles?: number;
+  booking_confirmed?: boolean;
 }
 
 // ============================================================================
@@ -665,6 +673,29 @@ serve(async (req) => {
                   }
                   if (webhookResponse.ada_destination) {
                     session.session_state.ada_destination = webhookResponse.ada_destination;
+                  }
+                  
+                  // Store booking details from dispatch system
+                  if (webhookResponse.fare) {
+                    session.session_state.fare = webhookResponse.fare;
+                  }
+                  if (webhookResponse.eta_minutes) {
+                    session.session_state.eta_minutes = webhookResponse.eta_minutes;
+                  }
+                  if (webhookResponse.booking_ref) {
+                    session.session_state.booking_ref = webhookResponse.booking_ref;
+                  }
+                  if (webhookResponse.passengers) {
+                    session.session_state.passengers = webhookResponse.passengers;
+                  }
+                  if (webhookResponse.vehicle_type) {
+                    session.session_state.vehicle_type = webhookResponse.vehicle_type;
+                  }
+                  if (webhookResponse.distance_miles) {
+                    session.session_state.distance_miles = webhookResponse.distance_miles;
+                  }
+                  if (webhookResponse.booking_confirmed) {
+                    session.session_state.booking_confirmed = true;
                   }
                   
                   let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";

@@ -87,9 +87,47 @@ namespace TaxiSipBridge.WinForms
         }
 
         /// <summary>
-        /// Confirm the booking is complete
+        /// Confirm the booking is complete with all details
         /// </summary>
         public static WebhookResponse ConfirmBooking(
+            string pickup,
+            string destination,
+            string fare,
+            int etaMinutes,
+            int passengers = 1,
+            string vehicleType = null,
+            double? distanceMiles = null,
+            string bookingRef = null,
+            string customMessage = null,
+            Dictionary<string, object> sessionState = null)
+        {
+            var state = sessionState ?? new Dictionary<string, object>();
+            state["booking_confirmed"] = true;
+
+            // Build confirmation message if not provided
+            string message = customMessage ?? 
+                $"Brilliant! That's booked. The fare is £{fare} and your driver will be with you in {etaMinutes} minutes.";
+
+            return new WebhookResponse
+            {
+                AdaResponse = message,
+                AdaPickup = pickup,
+                AdaDestination = destination,
+                Fare = fare,
+                EtaMinutes = etaMinutes,
+                Passengers = passengers,
+                VehicleType = vehicleType,
+                DistanceMiles = distanceMiles,
+                BookingRef = bookingRef,
+                BookingConfirmed = true,
+                SessionState = state
+            };
+        }
+
+        /// <summary>
+        /// Simple booking confirmation (backwards compatible)
+        /// </summary>
+        public static WebhookResponse ConfirmBookingSimple(
             string confirmationMessage,
             string pickup,
             string destination,
@@ -105,6 +143,7 @@ namespace TaxiSipBridge.WinForms
                 AdaResponse = confirmationMessage,
                 AdaPickup = pickup,
                 AdaDestination = destination,
+                Fare = fare,
                 BookingConfirmed = true,
                 SessionState = state
             };
@@ -466,6 +505,25 @@ namespace TaxiSipBridge.WinForms
 
         [JsonPropertyName("ada_destination")]
         public string AdaDestination { get; set; }
+
+        // Booking details - pass these back so Ada can announce them
+        [JsonPropertyName("fare")]
+        public string Fare { get; set; }
+
+        [JsonPropertyName("eta_minutes")]
+        public int? EtaMinutes { get; set; }
+
+        [JsonPropertyName("booking_ref")]
+        public string BookingRef { get; set; }
+
+        [JsonPropertyName("passengers")]
+        public int? Passengers { get; set; }
+
+        [JsonPropertyName("vehicle_type")]
+        public string VehicleType { get; set; }
+
+        [JsonPropertyName("distance_miles")]
+        public double? DistanceMiles { get; set; }
 
         [JsonPropertyName("booking_confirmed")]
         public bool? BookingConfirmed { get; set; }
