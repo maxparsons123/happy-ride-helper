@@ -29,9 +29,30 @@ import {
   Users, 
   Search,
   Download,
-  RefreshCw
+  RefreshCw,
+  Building2,
+  Plus
 } from "lucide-react";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
+
+interface Company {
+  id: string;
+  name: string;
+  slug: string;
+  webhook_url: string | null;
+  is_active: boolean;
+}
 
 interface Booking {
   id: string;
@@ -51,16 +72,41 @@ interface Booking {
   cancelled_at: string | null;
   cancellation_reason: string | null;
   booking_details: Record<string, unknown> | null;
+  company_id: string | null;
 }
 
 type DateFilter = "today" | "yesterday" | "7days" | "30days" | "all";
 
 export default function Billing() {
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [selectedCompany, setSelectedCompany] = useState<string>("all");
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [dateFilter, setDateFilter] = useState<DateFilter>("today");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  
+  // New company dialog
+  const [newCompanyOpen, setNewCompanyOpen] = useState(false);
+  const [newCompanyName, setNewCompanyName] = useState("");
+  const [newCompanyWebhook, setNewCompanyWebhook] = useState("");
+  const [creatingCompany, setCreatingCompany] = useState(false);
+
+  // Fetch companies
+  useEffect(() => {
+    const fetchCompanies = async () => {
+      const { data, error } = await supabase
+        .from("companies")
+        .select("*")
+        .eq("is_active", true)
+        .order("name");
+      
+      if (!error && data) {
+        setCompanies(data);
+      }
+    };
+    fetchCompanies();
+  }, []);
 
   const fetchBookings = async () => {
     setLoading(true);
@@ -69,6 +115,11 @@ export default function Billing() {
       .from("bookings")
       .select("*")
       .order("booked_at", { ascending: false });
+
+    // Apply company filter
+    if (selectedCompany !== "all") {
+      query = query.eq("company_id", selectedCompany);
+    }
 
     // Apply date filter
     const now = new Date();
@@ -102,7 +153,7 @@ export default function Billing() {
 
   useEffect(() => {
     fetchBookings();
-  }, [dateFilter, statusFilter]);
+  }, [dateFilter, statusFilter, selectedCompany]);
 
   // Filter by search query (client-side)
   const filteredBookings = bookings.filter((b) => {
@@ -143,6 +194,10 @@ export default function Billing() {
   };
 
   const exportToCsv = () => {
+    const companyName = selectedCompany === "all" 
+      ? "all-companies" 
+      : companies.find(c => c.id === selectedCompany)?.slug || "unknown";
+    
     const headers = ["Date", "Time", "Phone", "Name", "Pickup", "Destination", "Passengers", "Fare", "Status"];
     const rows = filteredBookings.map((b) => [
       format(new Date(b.booked_at), "yyyy-MM-dd"),
@@ -161,10 +216,45 @@ export default function Billing() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `bookings-${format(new Date(), "yyyy-MM-dd")}.csv`;
+    a.download = `bookings-${companyName}-${format(new Date(), "yyyy-MM-dd")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const createCompany = async () => {
+    if (!newCompanyName.trim()) {
+      toast.error("Company name is required");
+      return;
+    }
+
+    setCreatingCompany(true);
+    const slug = newCompanyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    
+    const { data, error } = await supabase
+      .from("companies")
+      .insert({
+        name: newCompanyName.trim(),
+        slug,
+        webhook_url: newCompanyWebhook.trim() || null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error creating company:", error);
+      toast.error("Failed to create company");
+    } else if (data) {
+      setCompanies(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+      setSelectedCompany(data.id);
+      setNewCompanyOpen(false);
+      setNewCompanyName("");
+      setNewCompanyWebhook("");
+      toast.success(`Company "${data.name}" created`);
+    }
+    setCreatingCompany(false);
+  };
+
+  const selectedCompanyData = companies.find(c => c.id === selectedCompany);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6">
@@ -178,7 +268,9 @@ export default function Billing() {
           </Link>
           <div>
             <h1 className="text-2xl font-bold">Billing & History</h1>
-            <p className="text-muted-foreground text-sm">View completed calls and booking records</p>
+            <p className="text-muted-foreground text-sm">
+              {selectedCompanyData ? selectedCompanyData.name : "All Companies"}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -192,6 +284,84 @@ export default function Billing() {
           </Button>
         </div>
       </div>
+
+      {/* Company Selector */}
+      <Card className="p-4 mb-6 bg-card border-border">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <Building2 className="h-5 w-5 text-muted-foreground" />
+            <span className="text-sm font-medium">Company:</span>
+          </div>
+          <Select value={selectedCompany} onValueChange={setSelectedCompany}>
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Select company" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Companies</SelectItem>
+              {companies.map((company) => (
+                <SelectItem key={company.id} value={company.id}>
+                  {company.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          
+          <Dialog open={newCompanyOpen} onOpenChange={setNewCompanyOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Company
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add New Company</DialogTitle>
+                <DialogDescription>
+                  Create a new company with its own WebSocket stream for real-time calls.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="company-name">Company Name</Label>
+                  <Input
+                    id="company-name"
+                    placeholder="e.g., ABC Taxis"
+                    value={newCompanyName}
+                    onChange={(e) => setNewCompanyName(e.target.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="webhook-url">Webhook URL (optional)</Label>
+                  <Input
+                    id="webhook-url"
+                    placeholder="https://dispatch.example.com/webhook"
+                    value={newCompanyWebhook}
+                    onChange={(e) => setNewCompanyWebhook(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Booking data will be POSTed to this URL in real-time.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setNewCompanyOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={createCompany} disabled={creatingCompany}>
+                  {creatingCompany ? "Creating..." : "Create Company"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {selectedCompanyData?.webhook_url && (
+            <Badge variant="outline" className="text-green-400 border-green-400/30">
+              <span className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
+              WebSocket Active
+            </Badge>
+          )}
+        </div>
+      </Card>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

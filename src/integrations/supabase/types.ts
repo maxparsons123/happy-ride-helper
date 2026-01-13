@@ -137,6 +137,7 @@ export type Database = {
           caller_phone: string
           cancellation_reason: string | null
           cancelled_at: string | null
+          company_id: string | null
           completed_at: string | null
           created_at: string
           destination: string
@@ -159,6 +160,7 @@ export type Database = {
           caller_phone: string
           cancellation_reason?: string | null
           cancelled_at?: string | null
+          company_id?: string | null
           completed_at?: string | null
           created_at?: string
           destination: string
@@ -181,6 +183,7 @@ export type Database = {
           caller_phone?: string
           cancellation_reason?: string | null
           cancelled_at?: string | null
+          company_id?: string | null
           completed_at?: string | null
           created_at?: string
           destination?: string
@@ -195,7 +198,15 @@ export type Database = {
           status?: string
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "bookings_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       call_logs: {
         Row: {
@@ -311,6 +322,36 @@ export type Database = {
         }
         Relationships: []
       }
+      companies: {
+        Row: {
+          created_at: string
+          id: string
+          is_active: boolean
+          name: string
+          slug: string
+          updated_at: string
+          webhook_url: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name: string
+          slug: string
+          updated_at?: string
+          webhook_url?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+          slug?: string
+          updated_at?: string
+          webhook_url?: string | null
+        }
+        Relationships: []
+      }
       live_call_audio: {
         Row: {
           audio_chunk: string
@@ -346,6 +387,7 @@ export type Database = {
           caller_phone: string | null
           caller_total_bookings: number | null
           clarification_attempts: Json | null
+          company_id: string | null
           destination: string | null
           ended_at: string | null
           eta: string | null
@@ -369,6 +411,7 @@ export type Database = {
           caller_phone?: string | null
           caller_total_bookings?: number | null
           clarification_attempts?: Json | null
+          company_id?: string | null
           destination?: string | null
           ended_at?: string | null
           eta?: string | null
@@ -392,6 +435,7 @@ export type Database = {
           caller_phone?: string | null
           caller_total_bookings?: number | null
           clarification_attempts?: Json | null
+          company_id?: string | null
           destination?: string | null
           ended_at?: string | null
           eta?: string | null
@@ -405,7 +449,15 @@ export type Database = {
           transcripts?: Json
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "live_calls_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       sip_trunks: {
         Row: {
