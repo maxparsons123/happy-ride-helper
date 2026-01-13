@@ -1542,68 +1542,108 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
     }
   };
 
-  // Extract destination or pickup from Ada's last response (she often interprets STT correctly)
-  // e.g., user says "Street spot" but Ada says "to Sweetspot" - we can extract "Sweetspot"
+  // Extract destination or pickup from Ada's responses using AI (more accurate than regex)
+  // e.g., user says "Street spot" but Ada says "to Sweetspot" - AI can extract "Sweetspot"
+  const extractAddressFromAdaResponseAI = async (addressType: "pickup" | "destination"): Promise<string | null> => {
+    // Get recent Ada responses (last 3 for context)
+    const adaResponses = transcriptHistory.filter(t => t.role === "assistant").slice(-3);
+    if (adaResponses.length === 0) return null;
+    
+    const adaText = adaResponses.map(r => r.text).join(" | ");
+    if (!adaText || adaText.length < 10) return null;
+    
+    // Get the customer's recent inputs for context
+    const customerInputs = transcriptHistory.filter(t => t.role === "user").slice(-3);
+    const customerText = customerInputs.map(r => r.text).join(" | ");
+    
+    try {
+      const extractionPrompt = `Extract the ${addressType} address from Ada's taxi booking conversation.
+
+CUSTOMER SAID: "${customerText}"
+
+ADA RESPONDED: "${adaText}"
+
+RULES:
+1. Extract ONLY actual addresses or place names that Ada mentioned as the ${addressType}
+2. Return ONLY the address/place name, nothing else
+3. If Ada mentioned a place like "Sweetspot", "Sweet Spot", "Manchester", "52 David Road" - extract exactly that
+4. If Ada didn't mention any ${addressType} address, return "NONE"
+5. DO NOT extract conversational phrases like "hear from you", "help you", "meet you"
+6. DO NOT extract generic words like "you", "that", "there", "today"
+
+Examples:
+- "Shall I book you to Manchester?" → "Manchester"
+- "So from 52A David Road?" → "52A David Road" (if asking about pickup)
+- "Lovely to hear from you again!" → "NONE"
+- "Is that to Sweetspot?" → "Sweetspot"
+- "Got it, heading to the airport" → "the airport"
+
+Return ONLY the ${addressType} address, or "NONE" if not found.`;
+
+      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash-lite", // Fast & cheap for simple extraction
+          messages: [
+            { role: "user", content: extractionPrompt }
+          ],
+          max_tokens: 50,
+          temperature: 0,
+        }),
+      });
+
+      if (!response.ok) {
+        console.log(`[${callId}] ⚠️ AI address extraction failed: ${response.status}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const extracted = data.choices?.[0]?.message?.content?.trim();
+      
+      if (!extracted || extracted === "NONE" || extracted.toLowerCase() === "none") {
+        console.log(`[${callId}] 🔍 AI found no ${addressType} in Ada's response`);
+        return null;
+      }
+      
+      // Filter out obvious non-addresses
+      const badPhrases = ['hear from you', 'help you', 'meet you', 'see you', 'speak', 'talk', 'again', 'today', 'you', 'that', 'there'];
+      if (badPhrases.some(p => extracted.toLowerCase().includes(p))) {
+        console.log(`[${callId}] 🔍 AI extracted conversational phrase, ignoring: "${extracted}"`);
+        return null;
+      }
+      
+      console.log(`[${callId}] 🤖 AI extracted ${addressType} from Ada: "${extracted}"`);
+      return extracted;
+      
+    } catch (error) {
+      console.error(`[${callId}] ⚠️ AI address extraction error:`, error);
+      return null;
+    }
+  };
+  
+  // Synchronous fallback for when we can't await (uses simple heuristics instead of AI)
   const extractAddressFromAdaResponse = (addressType: "pickup" | "destination"): string | null => {
-    // Get Ada's last response from transcript history
+    // This is now a simple fallback - the AI version should be preferred
     const adaResponses = transcriptHistory.filter(t => t.role === "assistant");
     if (adaResponses.length === 0) return null;
     
     const lastAdaText = adaResponses[adaResponses.length - 1].text;
     if (!lastAdaText) return null;
     
-    // Common conversational phrases to exclude (not addresses)
-    const conversationalPhrases = [
-      'you', 'that', 'there', 'the', 'book', 'confirm', 'help', 'hear', 'meet',
-      'hear from you', 'help you', 'meet you', 'see you', 'speak', 'talk',
-      'know', 'understand', 'check', 'sorry', 'sure', 'okay', 'yes', 'no',
-      'again', 'today', 'now', 'please', 'thank', 'thanks', 'welcome'
-    ];
-    
-    // Common patterns Ada uses to reference addresses
+    // Very conservative regex - only match clear "from X to Y" patterns
     if (addressType === "destination") {
-      // "to Sweetspot", "to the Sweetspot", "heading to Sweetspot", "destination is Sweetspot"
-      const destPatterns = [
-        /\bto\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
-        /\bdestination\s+(?:is\s+)?(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
-        /\bgoing\s+to\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
-        /\bheading\s+to\s+(?:the\s+)?([A-Z][a-zA-Z0-9'\s-]+?)(?:\s+in\s+|\s*,|\?|\.|\!|$)/i,
-      ];
-      
-      for (const pattern of destPatterns) {
-        const match = lastAdaText.match(pattern);
-        if (match && match[1]) {
-          const extracted = match[1].trim().toLowerCase();
-          // Filter out common false positives - check if any conversational phrase is in the extracted text
-          const isConversational = conversationalPhrases.some(phrase => 
-            extracted.includes(phrase) || phrase.includes(extracted)
-          );
-          if (!isConversational) {
-            console.log(`[${callId}] 🔍 Extracted destination from Ada: "${match[1].trim()}"`);
-            return match[1].trim();
-          }
-        }
-      }
-    } else {
-      // "from 52A David Road", "pickup at 52A David Road", "picking you up from..."
-      const pickupPatterns = [
-        /\bfrom\s+([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+to\s+|\s*,|\?|\.|\!|$)/i,
-        /\bpickup\s+(?:is\s+)?(?:at\s+)?([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+|\s*,|\?|\.|\!|$)/i,
-        /\bpicking\s+(?:you\s+)?up\s+(?:from\s+)?([0-9]+[A-Za-z]?\s+[A-Za-z][a-zA-Z0-9'\s-]+?)(?:\s+|\s*,|\?|\.|\!|$)/i,
-      ];
-      
-      for (const pattern of pickupPatterns) {
-        const match = lastAdaText.match(pattern);
-        if (match && match[1]) {
-          const extracted = match[1].trim().toLowerCase();
-          // Filter out conversational phrases
-          const isConversational = conversationalPhrases.some(phrase => 
-            extracted.includes(phrase) || phrase.includes(extracted)
-          );
-          if (!isConversational) {
-            console.log(`[${callId}] 🔍 Extracted pickup from Ada: "${match[1].trim()}"`);
-            return match[1].trim();
-          }
+      // Match: "to [PlaceName]" where PlaceName starts with capital and is not conversational
+      const match = lastAdaText.match(/\bto\s+["']?([A-Z][a-zA-Z0-9'\s-]{2,30})["']?(?:\s*[,?!.]|$)/);
+      if (match) {
+        const extracted = match[1].trim();
+        const badWords = ['you', 'that', 'there', 'hear', 'meet', 'help', 'book', 'confirm'];
+        if (!badWords.some(w => extracted.toLowerCase().startsWith(w))) {
+          console.log(`[${callId}] 🔍 Fallback extracted destination: "${extracted}"`);
+          return extracted;
         }
       }
     }
@@ -4515,7 +4555,8 @@ Rules:
             } else {
               // DUAL-SOURCE COMPARISON: Capture both STT and Ada's interpretation for comparison
               const extractedPickup = knownBooking.pickup!;
-              const adaPickup = extractAddressFromAdaResponse("pickup");
+              // Use AI-based extraction for better accuracy (falls back to regex if AI fails)
+              const adaPickup = await extractAddressFromAdaResponseAI("pickup") || extractAddressFromAdaResponse("pickup");
               
               // Log both sources for comparison (but trust STT for geocoding)
               if (adaPickup && normalize(adaPickup) !== normalize(extractedPickup)) {
@@ -4626,7 +4667,8 @@ Rules:
             } else {
               // DUAL-SOURCE COMPARISON: Capture both STT and Ada's interpretation for comparison
               const extractedDest = knownBooking.destination!;
-              const adaDest = extractAddressFromAdaResponse("destination");
+              // Use AI-based extraction for better accuracy (falls back to regex if AI fails)
+              const adaDest = await extractAddressFromAdaResponseAI("destination") || extractAddressFromAdaResponse("destination");
               
               // Log both sources for comparison (but trust STT for geocoding)
               if (adaDest && normalize(adaDest) !== normalize(extractedDest)) {
