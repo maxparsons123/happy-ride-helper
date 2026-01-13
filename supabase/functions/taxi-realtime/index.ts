@@ -469,6 +469,7 @@ serve(async (req) => {
   let useUnifiedExtraction = false; // Use taxi-extract-unified instead of inline regex parsing
   let bookingMode: "standard" | "raw" = "standard"; // "raw" = skip all validation, send to webhook for you to handle
   let rawPassthroughEndpoint = ""; // Webhook endpoint for raw passthrough mode
+  let skipDbWrites = false; // When true, suppress all DB writes (used for failed reconnect attempts)
   let greetingSent = false; // Prevent duplicate greetings on session.updated
   let awaitingAreaResponse = false; // True if we asked the new caller for their area (for geocode bias)
   let needsHistoryPriming = false; // If OpenAI reconnects, prime it with transcript history (avoid re-greeting)
@@ -3520,6 +3521,11 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
 
   // Broadcast live call updates to the database for monitoring
   const broadcastLiveCall = async (updates: Record<string, any>) => {
+    // GUARD: Skip all DB writes for failed reconnect attempts (prevents phantom calls)
+    if (skipDbWrites) {
+      console.log(`[${callId}] 🚫 Skipping DB write (skipDbWrites=true)`);
+      return;
+    }
     try {
       const { error } = await supabase.from("live_calls").upsert({
         call_id: callId,
@@ -9462,7 +9468,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             .single();
           
           if (callCheck?.status === "ended") {
-            console.log(`[${callId}] 🚫 BLOCKING RECONNECT - call has already ended, closing connection`);
+            // CRITICAL: Set skipDbWrites to prevent phantom call creation in onclose handler
+            skipDbWrites = true;
+            callEnded = true;
+            console.log(`[${callId}] 🚫 BLOCKING RECONNECT - call has already ended, closing connection (skipDbWrites=true)`);
             socket.send(JSON.stringify({ 
               type: "error", 
               message: "Call has already ended" 
@@ -9486,7 +9495,10 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             return;
           } else {
             // Resume failed but this IS a reconnect attempt - don't start fresh, just close
-            console.log(`[${callId}] ⚠️ Session resume failed (expired/no data) - closing reconnect attempt`);
+            // CRITICAL: Set skipDbWrites to prevent phantom call creation in onclose handler
+            skipDbWrites = true;
+            callEnded = true; // Treat as ended to prevent any DB upserts
+            console.log(`[${callId}] ⚠️ Session resume failed (expired/no data) - closing reconnect attempt (skipDbWrites=true)`);
             socket.send(JSON.stringify({ 
               type: "session_resumed", 
               call_id: callId,
