@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.taxi-webhook-test]
 verify_jwt = false
+
+[functions.company-passthrough]
+verify_jwt = false
