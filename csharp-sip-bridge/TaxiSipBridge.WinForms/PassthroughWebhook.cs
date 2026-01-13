@@ -246,6 +246,90 @@ namespace TaxiSipBridge.WinForms
                 ?? request?.Booking?.Destination;
         }
 
+        /// <summary>
+        /// Convert your existing BookTaxiResponse to a webhook response for Ada
+        /// </summary>
+        public static WebhookResponse FromBookTaxiResponse(
+            BookTaxiResponse booking,
+            string message = null,
+            bool isConfirmed = true,
+            Dictionary<string, object> sessionState = null)
+        {
+            var state = sessionState ?? new Dictionary<string, object>();
+            
+            // Store coordinates in session for future fare calculations
+            if (booking.userlat != 0) state["pickup_lat"] = booking.userlat;
+            if (booking.userlon != 0) state["pickup_lon"] = booking.userlon;
+            state["validated_pickup"] = booking.pickup_location;
+            state["validated_destination"] = booking.dropoff_location;
+            state["booking_ref"] = booking.reference_number;
+            state["job_id"] = booking.jobid;
+            state["booking_confirmed"] = isConfirmed;
+
+            // Build message if not provided
+            string adaMessage = message ?? booking.bookingmessage;
+            if (string.IsNullOrWhiteSpace(adaMessage) && isConfirmed)
+            {
+                adaMessage = $"That's booked! Your reference is {booking.reference_number}. " +
+                             $"Driver on the way to {booking.pickup_location}.";
+            }
+
+            return new WebhookResponse
+            {
+                AdaResponse = isConfirmed ? adaMessage : null,
+                AdaQuestion = isConfirmed ? null : adaMessage,
+                AdaPickup = booking.pickup_location,
+                AdaDestination = booking.dropoff_location,
+                Passengers = booking.number_of_passengers > 0 ? booking.number_of_passengers : null,
+                BookingRef = booking.reference_number,
+                BookingConfirmed = isConfirmed,
+                SessionState = state
+            };
+        }
+
+        /// <summary>
+        /// Create a booking confirmation response from BookTaxiResponse with fare/ETA
+        /// </summary>
+        public static WebhookResponse ConfirmFromBookTaxiResponse(
+            BookTaxiResponse booking,
+            string fare,
+            int etaMinutes,
+            string vehicleType = null,
+            double? distanceMiles = null,
+            string customMessage = null)
+        {
+            var state = new Dictionary<string, object>
+            {
+                ["pickup_lat"] = booking.userlat,
+                ["pickup_lon"] = booking.userlon,
+                ["validated_pickup"] = booking.pickup_location,
+                ["validated_destination"] = booking.dropoff_location,
+                ["booking_ref"] = booking.reference_number,
+                ["job_id"] = booking.jobid,
+                ["booking_confirmed"] = true
+            };
+
+            string message = customMessage ?? 
+                $"Brilliant! That's booked from {booking.pickup_location} to {booking.dropoff_location}. " +
+                $"The fare is £{fare} and your driver will be with you in {etaMinutes} minutes. " +
+                $"Your reference is {booking.reference_number}.";
+
+            return new WebhookResponse
+            {
+                AdaResponse = message,
+                AdaPickup = booking.pickup_location,
+                AdaDestination = booking.dropoff_location,
+                Fare = fare,
+                EtaMinutes = etaMinutes,
+                Passengers = booking.number_of_passengers > 0 ? booking.number_of_passengers : null,
+                VehicleType = vehicleType,
+                DistanceMiles = distanceMiles,
+                BookingRef = booking.reference_number,
+                BookingConfirmed = true,
+                SessionState = state
+            };
+        }
+
         #endregion
 
         #region Async Callback (Optional)
@@ -550,5 +634,28 @@ namespace TaxiSipBridge.WinForms
         public double Lon { get; set; }
         public string Source { get; set; } // "memory", "postcode", "google"
         public string ErrorMessage { get; set; }
+    }
+
+    /// <summary>
+    /// Your existing dispatch system booking response model.
+    /// Use with FromBookTaxiResponse() or ConfirmFromBookTaxiResponse() to convert to webhook response.
+    /// </summary>
+    public class BookTaxiResponse
+    {
+        public string pickup_location { get; set; } = "";
+        public string dropoff_location { get; set; } = "";
+        public string pickup_time { get; set; } = "";
+        public int number_of_passengers { get; set; }
+        public string luggage { get; set; } = "";
+        public string special_requests { get; set; } = "";
+        public string nearest_place { get; set; } = "";
+        public string reference_number { get; set; } = "";
+        public string username { get; set; } = "";
+        public string usertelephone { get; set; } = "";
+        public string jobid { get; set; } = "";
+        public string Rawjson { get; set; } = "";
+        public string bookingmessage { get; set; } = "";
+        public double userlat { get; set; }
+        public double userlon { get; set; }
     }
 }
