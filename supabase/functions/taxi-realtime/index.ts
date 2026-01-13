@@ -5146,99 +5146,102 @@ Rules:
             tools: [
               {
                 type: "function",
-                name: "book_taxi",
-                description: "MANDATORY: You MUST call this function to book a taxi. You CANNOT confirm a booking or quote a fare without calling this function first. When the customer confirms they want to book (says 'yes', 'please', 'book it', etc.), call this function IMMEDIATELY and wait for the response before speaking. The response will contain the calculated fare and ETA which you MUST use in your confirmation message. DO NOT invent or guess fares - they come from this function.",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    pickup: { type: "string", description: "Pickup location exactly as customer stated" },
-                    destination: { type: "string", description: "Drop-off location exactly as customer stated" },
-                    passengers: { type: "integer", description: "Number of passengers" },
-                    pickup_time: { type: "string", description: "When the taxi is needed: 'ASAP' for immediate, or 'YYYY-MM-DD HH:MM' format for scheduled bookings" },
-                    vehicle_type: { type: "string", description: "Optional: Vehicle type if customer requested (e.g., '6 seater', 'MPV', 'estate', 'saloon', 'minibus')" }
-                  },
-                  required: ["pickup", "destination", "passengers", "pickup_time"]
-                }
-              },
-              {
-                type: "function",
-                name: "end_call",
-                description: "End the phone call after the customer confirms they don't need anything else. Call this IMMEDIATELY after saying goodbye.",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    reason: { type: "string", description: "Reason for ending call: 'booking_complete', 'customer_request', or 'no_further_assistance'" }
-                  },
-                  required: ["reason"]
-                }
-              },
-              {
-                type: "function",
-                name: "cancel_booking",
-                description: "Cancel an active booking for the customer. Call this IMMEDIATELY when they say they want to cancel their booking.",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    reason: { type: "string", description: "Why the booking is being cancelled: 'customer_request', 'change_plans', etc." }
-                  },
-                  required: ["reason"]
-                }
-              },
-              {
-                type: "function",
-                name: "modify_booking",
-                description: "IMMEDIATELY modify an active booking when the customer wants to correct or update ANY detail. Use this when they say things like: 'wrong address', 'that's not right', 'actually it's...', 'can you update...', 'change the pickup to...', 'it should be 52A not 52'. DO NOT cancel and rebook - use modify_booking to update in place. This preserves booking history and is faster for the customer.",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    new_pickup: { type: "string", description: "New pickup address - use when customer corrects the pickup (e.g., '52A David Road' instead of '52 David Road')" },
-                    new_destination: { type: "string", description: "New destination address - use when customer corrects the destination" },
-                    new_passengers: { type: "integer", description: "New number of passengers - use when customer corrects passenger count" },
-                    new_vehicle_type: { type: "string", description: "New vehicle type (e.g., '6 seater', 'MPV', 'estate') - only if customer requests it" }
-                  },
-                  required: []
-                }
-              },
-              {
-                type: "function",
-                name: "save_address_alias",
-                description: "Save an address alias for the customer (e.g., 'home', 'work', 'office'). ONLY use when customer EXPLICITLY asks to save: 'save this as home', 'call this my work', 'remember this as office'. Do NOT use just because they mentioned 'home' - that's for resolving existing aliases. Always confirm before saving: 'Just to confirm, save [address] as your [alias]?'",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    alias: { type: "string", description: "The alias name: 'home', 'work', 'office', 'gym', 'school', etc." },
-                    address: { type: "string", description: "The full address to save under this alias" }
-                  },
-                  required: ["alias", "address"]
-                }
-              },
-              {
-                type: "function",
                 name: "save_customer_name",
-                description: "Save or UPDATE the customer's name. Call this: 1) When a NEW customer tells you their name (e.g., 'My name is John'), 2) When a RETURNING customer CORRECTS their name (e.g., 'Actually it's Sarah', 'My name isn't Max, it's Mike', 'Call me Dave'), 3) When you greet someone by wrong name and they correct you. Use the EXACT name they said - do NOT guess.",
+                description: "Save or update the customer's name. Call IMMEDIATELY when the user corrects their name, even for returning callers.",
                 parameters: {
                   type: "object",
                   properties: {
-                    name: { type: "string", description: "The customer's first name EXACTLY as they said it. Do not guess - only use the name they actually spoke." }
+                    name: { type: "string", description: "The customer's preferred or corrected full name" }
                   },
                   required: ["name"]
                 }
               },
               {
                 type: "function",
+                name: "book_taxi",
+                description: "Book a taxi. CALL IMMEDIATELY when pickup, destination, and passengers are known. Do NOT wait for confirmation. Include 'bags' if airport/station trip.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    pickup: { type: "string", description: "Full pickup address (e.g., '52 David Road, Coventry')" },
+                    destination: { type: "string", description: "Full destination address" },
+                    passengers: { type: "integer", minimum: 1, description: "Number of passengers" },
+                    bags: { type: "integer", minimum: 0, description: "Number of bags/suitcases (required for airport/station trips)" },
+                    pickup_time: { type: "string", description: "When needed: 'ASAP' (default) or 'YYYY-MM-DD HH:MM' for scheduled" },
+                    vehicle_type: { type: "string", description: "Vehicle type if customer requested (e.g., 'estate', 'MPV', '8-seater')" }
+                  },
+                  required: ["pickup", "destination", "passengers"]
+                }
+              },
+              {
+                type: "function",
+                name: "cancel_booking",
+                description: "Cancel the user's active booking. CALL THIS BEFORE saying 'cancelled'.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: { type: "string", description: "Reason: 'customer_request', 'change_plans', etc." }
+                  },
+                  required: []
+                }
+              },
+              {
+                type: "function",
+                name: "modify_booking",
+                description: "Modify an existing booking (e.g., change pickup, destination, passengers). Use for corrections - do NOT cancel and rebook.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    field_to_change: { 
+                      type: "string", 
+                      enum: ["pickup", "destination", "passengers", "bags", "time", "vehicle"],
+                      description: "Which part of the booking to change" 
+                    },
+                    new_value: { type: "string", description: "The new value for the field" }
+                  },
+                  required: ["field_to_change", "new_value"]
+                }
+              },
+              {
+                type: "function",
+                name: "save_address_alias",
+                description: "Save an address alias (e.g., 'home', 'work'). ONLY use when customer EXPLICITLY asks to save.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    alias: { type: "string", description: "Alias name: 'home', 'work', 'office', etc." },
+                    address: { type: "string", description: "Full address to save" }
+                  },
+                  required: ["alias", "address"]
+                }
+              },
+              {
+                type: "function",
                 name: "find_nearby_places",
-                description: "Find nearby venues when customer asks for recommendations. Use for questions like 'where's a good restaurant?', 'know any nice pubs?', 'I need a hotel', 'what's good for a night out?', etc.",
+                description: "Find nearby venues when the user asks for hotels, restaurants, bars, cafes, pubs, or places. Returns 2–3 options.",
                 parameters: {
                   type: "object",
                   properties: {
                     category: { 
                       type: "string", 
-                      enum: ["hotel", "restaurant", "cafe", "bar", "pub", "nightclub", "cinema", "theatre", "shopping"], 
-                      description: "Type of venue: hotel, restaurant, cafe, bar, pub, nightclub, cinema, theatre, shopping" 
+                      enum: ["hotel", "restaurant", "bar", "cafe", "pub", "nightclub", "cinema", "theatre", "shopping"],
+                      description: "Type of venue requested" 
                     },
-                    context_address: { type: "string", description: "Optional: Use pickup/destination as reference, or leave empty to use caller's city" }
+                    location_hint: { type: "string", description: "Optional area or city mentioned by user" }
                   },
                   required: ["category"]
+                }
+              },
+              {
+                type: "function",
+                name: "end_call",
+                description: "End the call after saying 'Safe travels!'.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    reason: { type: "string", description: "Reason: 'booking_complete', 'customer_request', 'no_further_assistance'" }
+                  },
+                  required: []
                 }
               }
             ],
