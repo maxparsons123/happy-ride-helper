@@ -9194,21 +9194,38 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }),
           );
 
-          // Delay sending call_ended so Ada's goodbye audio finishes playing
+          // CRITICAL: Close OpenAI connection IMMEDIATELY to prevent Ada from speaking again
+          // The goodbye audio has already been generated and sent before this tool was called
+          console.log(`[${callId}] 📞 Closing OpenAI connection to prevent further speech`);
+          try {
+            openaiWs?.close();
+          } catch (_) {
+            // ignore
+          }
+
+          // Delay sending call_ended so Ada's goodbye audio finishes playing on the bridge
           // Asterisk bridge will hang up immediately on receiving this, so we wait
           setTimeout(() => {
             console.log(`[${callId}] 📞 Sending call_ended after goodbye audio delay`);
-            socket.send(
-              JSON.stringify({
-                type: "call_ended",
-                reason: args.reason,
-              }),
-            );
+            try {
+              socket.send(
+                JSON.stringify({
+                  type: "call_ended",
+                  reason: args.reason,
+                }),
+              );
+            } catch (_) {
+              // Socket may already be closed
+            }
 
-            // Close the WebSocket connection shortly after
+            // Close the client WebSocket connection shortly after
             setTimeout(() => {
-              console.log(`[${callId}] 📞 Closing connection after end_call`);
-              socket.close();
+              console.log(`[${callId}] 📞 Closing client connection after end_call`);
+              try {
+                socket.close();
+              } catch (_) {
+                // ignore
+              }
             }, 500);
           }, 4000); // 4 seconds for goodbye audio to complete
         }
