@@ -4676,24 +4676,36 @@ Rules:
               // Use AI-based extraction for better accuracy (falls back to regex if AI fails)
               const adaDest = await extractAddressFromAdaResponseAI("destination") || extractAddressFromAdaResponse("destination");
               
-              // PRIORITIZE ADA'S INTERPRETATION: Ada often corrects STT mishearings (e.g., "Street spot" → "Sweet Spot")
-              // If Ada mentioned a different address, use hers for geocoding as she maintains better context
+              // PRIORITIZE STT when it looks like a valid venue/POI name (e.g., "Sweet Spot", "Tesco")
+              // Only use Ada's interpretation if STT is garbled (random words, not a coherent place name)
               let addressToGeocode = extractedDest;
-              if (adaDest && normalize(adaDest) !== normalize(extractedDest)) {
+              
+              // Check if STT looks like a coherent venue/POI name (short, 1-3 words, not garbled)
+              const sttLooksLikeVenue = /^(the\s+)?[\w']+(\s+[\w']+){0,2}$/i.test(extractedDest.trim());
+              const adaMatchesSTT = adaDest && normalize(adaDest) === normalize(extractedDest);
+              
+              if (adaDest && !adaMatchesSTT) {
                 console.log(`[${callId}] 📊 DUAL-SOURCE COMPARISON:`);
-                console.log(`[${callId}]    STT extracted: "${extractedDest}"`);
-                console.log(`[${callId}]    Ada said: "${adaDest}" ← USING THIS FOR GEOCODING`);
+                console.log(`[${callId}]    STT extracted: "${extractedDest}" (looks like venue: ${sttLooksLikeVenue})`);
+                console.log(`[${callId}]    Ada said: "${adaDest}"`);
                 
                 // Add comparison to transcript for UI visibility
                 transcriptHistory.push({
                   role: "system",
-                  text: `📊 ADDRESS SOURCES (destination) - STT: "${extractedDest}" | Ada: "${adaDest}" ✓`,
+                  text: `📊 ADDRESS SOURCES (destination) - STT: "${extractedDest}" | Ada: "${adaDest}"${sttLooksLikeVenue ? ' (STT prioritized - venue name)' : ' ✓'}`,
                   timestamp: new Date().toISOString()
                 });
                 queueLiveCallBroadcast({});
                 
-                // Use Ada's interpretation for geocoding (she often has better context)
-                addressToGeocode = adaDest;
+                // CRITICAL: If STT looks like a coherent venue name (e.g., "Sweet Spot", "Tesco"),
+                // prioritize it over Ada's interpretation (which may be from a greeting suggestion)
+                if (sttLooksLikeVenue) {
+                  console.log(`[${callId}]    → KEEPING STT (looks like venue name)`);
+                  // Keep addressToGeocode = extractedDest (STT)
+                } else {
+                  console.log(`[${callId}]    → USING ADA (STT looks garbled)`);
+                  addressToGeocode = adaDest;
+                }
               }
               
               // GEOCODE USING ADA'S INTERPRETATION (or STT if Ada didn't mention an address)
