@@ -1552,6 +1552,14 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
     const lastAdaText = adaResponses[adaResponses.length - 1].text;
     if (!lastAdaText) return null;
     
+    // Common conversational phrases to exclude (not addresses)
+    const conversationalPhrases = [
+      'you', 'that', 'there', 'the', 'book', 'confirm', 'help', 'hear', 'meet',
+      'hear from you', 'help you', 'meet you', 'see you', 'speak', 'talk',
+      'know', 'understand', 'check', 'sorry', 'sure', 'okay', 'yes', 'no',
+      'again', 'today', 'now', 'please', 'thank', 'thanks', 'welcome'
+    ];
+    
     // Common patterns Ada uses to reference addresses
     if (addressType === "destination") {
       // "to Sweetspot", "to the Sweetspot", "heading to Sweetspot", "destination is Sweetspot"
@@ -1565,11 +1573,14 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
       for (const pattern of destPatterns) {
         const match = lastAdaText.match(pattern);
         if (match && match[1]) {
-          const extracted = match[1].trim();
-          // Filter out common false positives
-          if (!['you', 'that', 'there', 'the', 'book', 'confirm', 'help'].includes(extracted.toLowerCase())) {
-            console.log(`[${callId}] 🔍 Extracted destination from Ada: "${extracted}"`);
-            return extracted;
+          const extracted = match[1].trim().toLowerCase();
+          // Filter out common false positives - check if any conversational phrase is in the extracted text
+          const isConversational = conversationalPhrases.some(phrase => 
+            extracted.includes(phrase) || phrase.includes(extracted)
+          );
+          if (!isConversational) {
+            console.log(`[${callId}] 🔍 Extracted destination from Ada: "${match[1].trim()}"`);
+            return match[1].trim();
           }
         }
       }
@@ -1584,9 +1595,15 @@ NON-NEGOTIABLE OVERRIDES (FOLLOW THESE EVEN IF OTHER RULES CONFLICT):
       for (const pattern of pickupPatterns) {
         const match = lastAdaText.match(pattern);
         if (match && match[1]) {
-          const extracted = match[1].trim();
-          console.log(`[${callId}] 🔍 Extracted pickup from Ada: "${extracted}"`);
-          return extracted;
+          const extracted = match[1].trim().toLowerCase();
+          // Filter out conversational phrases
+          const isConversational = conversationalPhrases.some(phrase => 
+            extracted.includes(phrase) || phrase.includes(extracted)
+          );
+          if (!isConversational) {
+            console.log(`[${callId}] 🔍 Extracted pickup from Ada: "${match[1].trim()}"`);
+            return match[1].trim();
+          }
         }
       }
     }
