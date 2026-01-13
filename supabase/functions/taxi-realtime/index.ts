@@ -5600,6 +5600,69 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
       // User transcript - extract booking info using AI
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         const rawTranscript = data.transcript || "";
+        
+        // === NO-SPEECH PROBABILITY CHECK ===
+        // OpenAI Realtime API may provide no_speech_prob in transcription metadata
+        // If probability of "no speech" is high, this is likely phantom/noise
+        const noSpeechProb = data.no_speech_prob ?? data.logprob ?? null;
+        if (noSpeechProb !== null && noSpeechProb > 0.6) {
+          console.log(`[${callId}] 🔇 High no-speech probability (${noSpeechProb.toFixed(2)}) - skipping transcript: "${rawTranscript}"`);
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
+          return;
+        }
+        
+        // === WHISPER PHANTOM BLACKLIST ===
+        // Whisper hallucinates these phrases from background noise/static - filter them at the source
+        const PHANTOM_BLACKLIST = [
+          'thank you for watching',
+          'thanks for watching', 
+          'please like and subscribe',
+          'subscribe to my channel',
+          'subtitles by',
+          'transcribed by',
+          'captions by',
+          'translation by',
+          '[music]',
+          '[applause]',
+          '[laughter]',
+          '♪',
+          '♫',
+          // Common YouTube/podcast phantoms
+          'don\'t forget to subscribe',
+          'hit the bell',
+          'leave a comment',
+          // Whisper loops (repeats same word when confused)
+          'you you you',
+          'the the the',
+          'a a a',
+          'i i i',
+        ];
+        
+        const rawLower = rawTranscript.toLowerCase().trim();
+        const isBlacklistedPhantom = PHANTOM_BLACKLIST.some(p => rawLower.includes(p));
+        if (isBlacklistedPhantom) {
+          console.log(`[${callId}] 🔇 Whisper phantom blacklist hit: "${rawTranscript}"`);
+          awaitingResponseAfterCommit = false;
+          responseCreatedSinceCommit = true;
+          return;
+        }
+        
+        // === REPETITION LOOP DETECTION ===
+        // Whisper sometimes loops a single word/phrase when confused - detect "word word word" patterns
+        const words: string[] = rawLower.split(/\s+/).filter((w: string) => w.length > 0);
+        if (words.length >= 3) {
+          const uniqueWords = new Set(words);
+          // If 80%+ of words are the same, it's likely a Whisper loop
+          const mostCommonCount = Math.max(...[...uniqueWords].map((w: string) => words.filter((x: string) => x === w).length));
+          if (mostCommonCount >= words.length * 0.8) {
+            console.log(`[${callId}] 🔇 Whisper repetition loop detected: "${rawTranscript}"`);
+            awaitingResponseAfterCommit = false;
+            responseCreatedSinceCommit = true;
+            return;
+          }
+        }
+        
         console.log(`[${callId}] Raw user transcript: "${rawTranscript}" (length: ${rawTranscript.length})`);
         noteUserActivity("transcription.completed");
         
