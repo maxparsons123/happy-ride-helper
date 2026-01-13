@@ -159,11 +159,44 @@ interface FuzzyMatchResult {
 /**
  * Check if an extracted address fuzzy-matches any address in caller history
  */
+// Major UK cities - these should NOT trigger fuzzy match clarification
+// If someone says "Manchester", that's a valid destination, not a fuzzy match to "Manchester M90 1QX"
+const MAJOR_CITIES = new Set([
+  "manchester", "london", "birmingham", "leeds", "liverpool", "sheffield",
+  "bristol", "newcastle", "nottingham", "leicester", "coventry", "glasgow",
+  "edinburgh", "cardiff", "belfast", "bradford", "wolverhampton", "plymouth",
+  "southampton", "portsmouth", "brighton", "reading", "derby", "stoke",
+  "luton", "bolton", "sunderland", "norwich", "oxford", "cambridge",
+  "york", "swansea", "hull", "dundee", "aberdeen", "middlesbrough"
+]);
+
+function isMajorCity(addr: string): boolean {
+  const normalized = addr.toLowerCase().trim();
+  // Check if the address is JUST a major city name (optionally with punctuation)
+  const cityOnly = normalized.replace(/[.,!?]/g, "").trim();
+  return MAJOR_CITIES.has(cityOnly);
+}
+
 function checkFuzzyMatch(
   extractedAddr: string,
   addressHistory: string[]
 ): FuzzyMatchResult {
   if (!extractedAddr || !addressHistory || addressHistory.length === 0) {
+    return {
+      isExactMatch: false,
+      isFuzzyMatch: false,
+      matchedAddress: null,
+      extractedAddress: extractedAddr,
+      needsClarification: false,
+      clarificationReason: null,
+      confidence: 1.0,
+    };
+  }
+
+  // SKIP fuzzy matching for major cities - they're valid destinations on their own
+  // This prevents "Manchester" from being confused with "Manchester M90 1QX" (airport)
+  if (isMajorCity(extractedAddr)) {
+    console.log(`[taxi-extract] Skipping fuzzy match for major city: "${extractedAddr}"`);
     return {
       isExactMatch: false,
       isFuzzyMatch: false,
