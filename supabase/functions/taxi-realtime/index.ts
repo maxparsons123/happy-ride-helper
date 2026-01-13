@@ -2125,6 +2125,14 @@ Ask them: "What's the house number for ${streetAddress}?"`;
     const oNum = o.match(/\b\d+[a-z]?\b/i)?.[0];
     if (oNum && !p.includes(oNum)) return false;
 
+    // Check for compound word matches first (e.g., "sweetspot" vs "sweet spot")
+    // Remove all spaces and compare - if they match, it's just a spacing difference
+    const oNoSpaces = o.replace(/\s+/g, "");
+    const pNoSpaces = p.replace(/\s+/g, "");
+    if (oNoSpaces.includes(pNoSpaces) || pNoSpaces.includes(oNoSpaces)) {
+      return true;
+    }
+
     // Require at least one "meaningful" word overlap (ignore common address words)
     const stop = new Set([
       "road",
@@ -2165,6 +2173,16 @@ Ask them: "What's the house number for ${streetAddress}?"`;
     for (const t of oTokens) {
       if (pTokens.has(t)) overlap++;
       if (overlap >= 1) return true;
+    }
+
+    // Additional check: see if any token from one set is contained within a token from the other
+    // This catches cases like "sweetspot" containing "sweet" or "spot"
+    for (const oT of oTokens) {
+      for (const pT of pTokens) {
+        if (oT.length >= 4 && pT.length >= 4) {
+          if (oT.includes(pT) || pT.includes(oT)) return true;
+        }
+      }
     }
 
     return false;
