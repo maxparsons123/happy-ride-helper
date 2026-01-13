@@ -5601,9 +5601,17 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         }); // Fire and forget - monitoring is optional
       }
 
-      // Log audio done
+      // Log audio done and clear buffer to prevent echo contamination
       if (data.type === "response.audio.done") {
         console.log(`[${callId}] >>> response.audio.done - audio generation complete`);
+        
+        // CRITICAL: Clear the input audio buffer after Ada finishes speaking
+        // This flushes any TTS echo or background noise captured during her speech
+        // so it doesn't contaminate the user's next utterance transcription
+        if (openaiWs?.readyState === WebSocket.OPEN) {
+          console.log(`[${callId}] 🧹 Clearing audio buffer after AI speech to prevent echo in next transcription`);
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+        }
       }
 
       // Log audio transcript done - save complete assistant message
