@@ -2909,10 +2909,17 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
         },
       }));
       
-      openaiWs.send(JSON.stringify({
-        type: "response.create",
-        response: { modalities: ["audio", "text"] },
-      }));
+      // Trigger response - check if in progress to avoid double-speaking
+      if (!openAiResponseInProgress) {
+        openAiResponseInProgress = true;
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"] },
+        }));
+      } else {
+        deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "max-attempts-continue" };
+        console.log(`[${callId}] ⏸️ Deferring response.create (max-attempts-continue) - response already in progress`);
+      }
       return;
     }
 
@@ -2979,11 +2986,18 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       },
     }));
 
-    // Trigger Ada to respond
-    openaiWs.send(JSON.stringify({
-      type: "response.create",
-      response: { modalities: ["audio", "text"] },
-    }));
+    // Trigger Ada to respond - but check if a response is already in progress to avoid double-speaking
+    if (!openAiResponseInProgress) {
+      openAiResponseInProgress = true;
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities: ["audio", "text"] },
+      }));
+    } else {
+      // Defer the response to avoid double-speaking
+      deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "geocode-clarification" };
+      console.log(`[${callId}] ⏸️ Deferring response.create (geocode-clarification) - response already in progress`);
+    }
   };
 
   const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
@@ -3491,7 +3505,8 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
       'picking', 'pick', 'up', 'going', 'to', 'heading', 'one', 'two', 'three', 'four',
       'not', 'wrong', 'incorrect', 'correct', 'actually', 'change', 'update', 'fix',
       'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'them', 'it',
-      'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine', 'alright'
+      'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine', 'alright',
+      'calling', 'caller', 'customer', 'phone', 'mobile', 'speaking', 'here', 'there'
     ]);
     
     // Helper to capitalize name properly (handles multi-word names like "Mary Jane")
@@ -3594,27 +3609,35 @@ Wait for their confirmation. If they say the addresses are wrong, ask them to cl
     try {
       console.log(`[${callId}] 🤖 AI name extraction for: "${transcript}"`);
       
-      const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
+      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${LOVABLE_API_KEY}`,
         },
         body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
+          model: "google/gemini-2.5-flash-lite",
           messages: [
             {
               role: "system",
-              content: `You are a name extraction assistant. Extract the person's first name from their response to "What's your name?".
-              
+              content: `You are a name extraction assistant. Extract the caller's FIRST NAME from their greeting response.
+
+CRITICAL PATTERNS TO HANDLE:
+- "San Juan and I'm calling from Coventry" → "San" (first name only)
+- "It's Maria and I'm in Birmingham" → "Maria"
+- "My name is John, calling from London" → "John"
+- "Sarah here, I'm calling from Manchester" → "Sarah"
+- "Juan Carlos and I'm from Leeds" → "Juan" (first name only)
+- "Hi, Carlos speaking from Coventry" → "Carlos"
+
 Rules:
-- Return ONLY the first name, nothing else
-- Return "NONE" if no name is found or if the text is not a name response
-- Handle phonetic/spelled names: "M-A-R-Y" → "Mary", "it's Mary, M-A-R-Y" → "Mary"
-- Handle accents/variations: "My name is Seán" → "Seán", "I'm María" → "María"
-- Ignore filler words: "Um, it's John" → "John"
-- For "Yes it's Mary" or "Yeah Mary" → "Mary"
-- Only extract if they're clearly stating their name, not asking for a taxi to "Mary Street" etc.`
+- Return ONLY the first name (single word), nothing else
+- Return "NONE" if no name is found
+- Handle phonetic/spelled names: "M-A-R-Y" → "Mary"
+- Handle accents: "Seán" → "Seán", "María" → "María"
+- NEVER return "Calling", "Speaking", "Here", city names, or common words
+- Ignore location info after "from", "in", "calling from" etc.
+- For compound names like "Juan Carlos", return only the first part: "Juan"`
             },
             {
               role: "user",
@@ -4158,12 +4181,14 @@ Rules:
 
       // CRITICAL: If we're awaiting clarification for a specific address, route postcode/outcode answers correctly
       // This prevents "CV12BW" from becoming destination when we asked for pickup postcode
+      // NOTE: Normalize hyphenated postcodes like "CB6-7GR" → "CB6 7GR"
+      const normalizedTranscript = transcript.trim().replace(/-/g, ' ').toUpperCase();
       const postcodePattern = /^[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d?[A-Z]*$/i;
-      const looksLikePostcodeOnly = postcodePattern.test(transcript.trim());
+      const looksLikePostcodeOnly = postcodePattern.test(normalizedTranscript);
       
       if (awaitingClarificationFor && looksLikePostcodeOnly) {
-        const postcode = transcript.trim().toUpperCase();
-        console.log(`[${callId}] 📮 Postcode/outcode detected: "${postcode}" - routing to ${awaitingClarificationFor}`);
+        const postcode = normalizedTranscript;
+        console.log(`[${callId}] 📮 Postcode/outcode detected: "${postcode}" (original: "${transcript.trim()}") - routing to ${awaitingClarificationFor}`);
         
         // Extract city from the postcode outcode (e.g., CV1 → Coventry)
         const outcodeMatch = postcode.match(/^([A-Z]{1,2}\d{1,2}[A-Z]?)/i);
@@ -6421,7 +6446,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           const nonNames = new Set([
             'you', 'your', 'me', 'my', 'i', 'we', 'us', 'they', 'it', 'yes', 'no', 'yeah',
             'okay', 'ok', 'sure', 'please', 'thanks', 'hello', 'hi', 'hey', 'bye', 'goodbye',
-            'for', 'asap', 'now', 'today', 'taxi', 'cab', 'car', 'booking', 'book'
+            'for', 'asap', 'now', 'today', 'taxi', 'cab', 'car', 'booking', 'book',
+            'calling', 'caller', 'speaking', 'here', 'phone', 'mobile', 'customer'
           ]);
           
           for (const pattern of correctionPatterns) {
@@ -6493,7 +6519,9 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
               'good', 'morning', 'afternoon', 'evening', 'just', 'actually', 'um', 'uh',
               'you', 'your', 'yours', 'me', 'my', 'mine', 'i', 'we', 'us', 'they', 'it',
               'bye', 'goodbye', 'cheers', 'ta', 'brilliant', 'lovely', 'great', 'fine',
-              'for', 'asap', 'now', 'today'
+              'for', 'asap', 'now', 'today', 'calling', 'caller', 'speaking', 'here',
+              'phone', 'mobile', 'customer', 'from', 'coventry', 'birmingham', 'london',
+              'manchester', 'liverpool', 'leeds', 'sheffield', 'bristol', 'nottingham'
             ]);
             
             for (const pattern of patterns) {
@@ -6508,11 +6536,22 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             return null;
           };
           
-          const quickName = quickExtractName(correctedTranscript);
+          // For greeting-style responses with "calling from" or "and I'm", use AI extraction (more reliable)
+          const looksLikeGreetingWithLocation = /\b(calling from|and i'm|i'm calling|from coventry|from birmingham|from london|from manchester)\b/i.test(correctedTranscript);
+          
+          let quickName: string | null = null;
+          if (looksLikeGreetingWithLocation) {
+            // Use AI for complex greeting patterns like "San Juan and I'm calling from Coventry"
+            console.log(`[${callId}] 🤖 Using AI extraction for greeting with location: "${correctedTranscript}"`);
+            quickName = await extractNameWithAI(correctedTranscript);
+          } else {
+            quickName = quickExtractName(correctedTranscript);
+          }
+          
           if (quickName && openaiWs?.readyState === WebSocket.OPEN) {
             callerName = quickName;
             console.log(`[${callId}] 👤 Quick name injection: "${callerName}"`);
-            
+
             // Inject the exact name into Ada's context immediately
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
