@@ -6526,10 +6526,19 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         // If Ada is speaking, cancel the current response AND clear the audio buffer
         // CRITICAL: Clearing the buffer removes any TTS echo/residue that was captured
         // before the barge-in was detected - prevents garbage transcripts like "Can I make that fucking face"
-        if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN) {
+        // 
+        // ECHO GUARD: Don't cancel if Ada JUST stopped speaking - this prevents her own
+        // voice from being detected as a barge-in and cutting herself off
+        const echoGuardMs = agentConfig?.echo_guard_ms ?? ECHO_GUARD_MS_DEFAULT;
+        const timeSinceAiStopped = Date.now() - aiStoppedSpeakingAt;
+        const inEchoGuard = aiStoppedSpeakingAt > 0 && timeSinceAiStopped < echoGuardMs;
+        
+        if (aiSpeaking && openaiWs?.readyState === WebSocket.OPEN && !inEchoGuard) {
           console.log(`[${callId}] 🧹 Barge-in during AI speech - clearing audio buffer to prevent echo contamination`);
           openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        } else if (inEchoGuard) {
+          console.log(`[${callId}] 🔇 Ignoring speech_started during echo guard (${timeSinceAiStopped}ms < ${echoGuardMs}ms)`);
         }
       }
 
