@@ -328,11 +328,10 @@ async function synthesizeSpeech(text: string, voice: string = "aura-asteria-en")
 }
 
 // ============================================================================
-// STT (OPTIONAL)
+// STT - gpt-4o-mini-transcribe (PRIMARY) with Deepgram fallback
 // ============================================================================
 
-async function transcribeAudio(audioBase64: string): Promise<string> {
-  const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+async function transcribeAudio(audioBase64: string, sampleRate: number = 16000): Promise<string> {
   const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY");
   
   // Decode base64 to binary
@@ -342,57 +341,110 @@ async function transcribeAudio(audioBase64: string): Promise<string> {
     bytes[i] = binaryString.charCodeAt(i);
   }
   
-  // Try Groq Whisper first
-  if (GROQ_API_KEY) {
-    try {
-      // Create WAV file
-      const wavHeader = createWavHeader(bytes.length, 16000, 1, 16);
-      const wavFile = new Uint8Array(wavHeader.length + bytes.length);
-      wavFile.set(wavHeader, 0);
-      wavFile.set(bytes, wavHeader.length);
+  // Create WAV file for OpenAI
+  const wavHeader = createWavHeader(bytes.length, sampleRate, 1, 16);
+  const wavFile = new Uint8Array(wavHeader.length + bytes.length);
+  wavFile.set(wavHeader, 0);
+  wavFile.set(bytes, wavHeader.length);
+  
+  // Try gpt-4o-mini-transcribe first (OpenAI)
+  try {
+    const prompt = `Transcribe speech into clear English.
+Preserve UK place names, road names, and business names.
+Convert spoken numbers to digits.
+Focus on taxi booking details.
+Return one clear sentence.`;
+
+    const formData = new FormData();
+    formData.append("file", new Blob([wavFile], { type: "audio/wav" }), "audio.wav");
+    formData.append("model", "gpt-4o-mini-transcribe");
+    formData.append("prompt", prompt);
+    formData.append("temperature", "0");
+    
+    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
+      body: formData,
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      const text = data.text || "";
+      console.log(`[STT] gpt-4o-mini-transcribe: "${text}"`);
       
-      const formData = new FormData();
-      formData.append("file", new Blob([wavFile], { type: "audio/wav" }), "audio.wav");
-      formData.append("model", "whisper-large-v3-turbo");
-      formData.append("language", "en");
-      
-      const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${GROQ_API_KEY}` },
-        body: formData,
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        return data.text || "";
+      // Quality gate - reject hallucinations
+      if (isValidTranscript(text)) {
+        return text;
       }
-    } catch (error) {
-      console.error("Groq STT error:", error);
+      console.log(`[STT] Quality gate failed, trying fallback...`);
+    } else {
+      const errorText = await response.text();
+      console.error(`[STT] gpt-4o-mini-transcribe error: ${response.status} - ${errorText}`);
     }
+  } catch (error) {
+    console.error("[STT] gpt-4o-mini-transcribe exception:", error);
   }
   
-  // Fallback to Deepgram
+  // Fallback to Deepgram Nova-2
   if (DEEPGRAM_API_KEY) {
     try {
-      const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB", {
+      const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB&smart_format=true`, {
         method: "POST",
         headers: {
           "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-          "Content-Type": "audio/raw;encoding=linear16;sample_rate=16000;channels=1",
+          "Content-Type": `audio/raw;encoding=linear16;sample_rate=${sampleRate};channels=1`,
         },
         body: bytes,
       });
       
       if (response.ok) {
         const data = await response.json();
-        return data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        const text = data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        console.log(`[STT] Deepgram fallback: "${text}"`);
+        return text;
       }
     } catch (error) {
-      console.error("Deepgram STT error:", error);
+      console.error("[STT] Deepgram fallback error:", error);
     }
   }
   
   return "";
+}
+
+// Quality gate - reject hallucinations and noise
+function isValidTranscript(text: string): boolean {
+  if (!text || text.trim().length < 3) return false;
+  
+  const lower = text.toLowerCase().trim();
+  
+  // Whisper/GPT phantom phrases
+  const phantomPhrases = [
+    "thank you for watching",
+    "thanks for watching",
+    "please like and subscribe",
+    "subscribe to my channel",
+    "subtitles by",
+    "[music]",
+    "[applause]",
+    "[laughter]",
+  ];
+  
+  if (phantomPhrases.some(p => lower.includes(p))) {
+    return false;
+  }
+  
+  // Repetition loop detection (e.g., "you you you you")
+  const words = lower.split(/\s+/).filter(w => w.length > 0);
+  if (words.length >= 3) {
+    const uniqueWords = new Set(words);
+    const mostCommonCount = Math.max(...[...uniqueWords].map(w => words.filter(x => x === w).length));
+    if (mostCommonCount >= words.length * 0.8) {
+      return false;
+    }
+  }
+  
+  // Must have at least 2 words for meaningful speech
+  return words.length >= 2;
 }
 
 function createWavHeader(dataLength: number, sampleRate: number, channels: number, bitsPerSample: number): Uint8Array {
