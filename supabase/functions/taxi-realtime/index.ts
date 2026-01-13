@@ -5791,11 +5791,33 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         aiPlaybackBytesTotal += deltaLen;
 
         // If we haven't flushed the token buffer yet, hold audio
+        // But also flush if we have too many audio chunks (text might not be streaming)
+        const MAX_AUDIO_BUFFER_CHUNKS = 15; // ~300ms of audio at typical chunk rates
         if (!tokenBufferFlushed) {
           tokenBufferAudio.push(data.delta);
+          
+          // Fallback: flush audio buffer if it gets too large (text tokens aren't arriving)
+          if (tokenBufferAudio.length >= MAX_AUDIO_BUFFER_CHUNKS) {
+            tokenBufferFlushed = true;
+            console.log(`[${callId}] ⚡ Audio buffer full (${tokenBufferAudio.length} chunks) - flushing without waiting for text tokens`);
+            
+            // Flush all buffered audio
+            for (const audioChunk of tokenBufferAudio) {
+              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+              void supabase.from("live_call_audio").insert({
+                call_id: callId,
+                audio_chunk: audioChunk,
+                audio_source: "ai",
+                created_at: new Date().toISOString(),
+              });
+            }
+            tokenBufferAudio = [];
+            return;
+          }
+          
           // Log periodically to avoid noise
           if (tokenBufferAudio.length <= 3 || tokenBufferAudio.length % 10 === 0) {
-            console.log(`[${callId}] 🔒 Buffering audio chunk #${tokenBufferAudio.length} (waiting for ${TOKEN_BUFFER_SIZE} tokens)`);
+            console.log(`[${callId}] 🔒 Buffering audio chunk #${tokenBufferAudio.length} (waiting for ${TOKEN_BUFFER_SIZE} tokens or ${MAX_AUDIO_BUFFER_CHUNKS} chunks)`);
           }
           return;
         }
@@ -5821,6 +5843,22 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
       // Log audio done and clear buffer to prevent echo contamination
       if (data.type === "response.audio.done") {
         console.log(`[${callId}] >>> response.audio.done - audio generation complete`);
+        
+        // CRITICAL: Flush any remaining buffered audio that wasn't sent yet
+        if (!tokenBufferFlushed && tokenBufferAudio.length > 0) {
+          tokenBufferFlushed = true;
+          console.log(`[${callId}] ⚡ Flushing remaining ${tokenBufferAudio.length} audio chunks on response.audio.done`);
+          for (const audioChunk of tokenBufferAudio) {
+            socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: audioChunk,
+              audio_source: "ai",
+              created_at: new Date().toISOString(),
+            });
+          }
+          tokenBufferAudio = [];
+        }
         
         // CRITICAL: Clear the input audio buffer after Ada finishes speaking
         // This flushes any TTS echo or background noise captured during her speech
