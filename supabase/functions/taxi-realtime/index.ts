@@ -6004,12 +6004,18 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
 
         // Accumulate transcript for early detection
         currentAssistantText += delta;
+        
+        // Add token to buffer (same as text.delta handler)
+        tokenBufferTokens.push(delta);
 
         // Check for forbidden phrases early in the stream
         const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(currentAssistantText);
         if (hasForbidden && !forbiddenPhraseInterrupted) {
           forbiddenPhraseInterrupted = true;
           dropAiAudio = true;
+          // CRITICAL: Clear buffers so no forbidden audio ever plays
+          tokenBufferAudio = [];
+          tokenBufferTokens = [];
           console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED (audio transcript): [${detectedPhrases.join(", ")}]`);
           console.warn(`[${callId}] 🚨 Cancelling response and triggering replacement...`);
 
@@ -6049,14 +6055,41 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           }
           return; // Don't forward this delta
         }
+        
+        // If buffer has reached threshold, flush it and switch to direct streaming
+        if (!tokenBufferFlushed && tokenBufferTokens.length >= TOKEN_BUFFER_SIZE) {
+          tokenBufferFlushed = true;
+          console.log(`[${callId}] ✅ Token buffer full (${TOKEN_BUFFER_SIZE} tokens) - flushing ${tokenBufferAudio.length} audio chunks`);
 
-        socket.send(
-          JSON.stringify({
-            type: "transcript",
-            text: delta,
-            role: "assistant",
-          }),
-        );
+          // Flush all buffered audio
+          for (const audioChunk of tokenBufferAudio) {
+            socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: audioChunk,
+              audio_source: "ai",
+              created_at: new Date().toISOString(),
+            });
+          }
+          tokenBufferAudio = [];
+
+          // Flush all buffered transcript tokens
+          for (const token of tokenBufferTokens) {
+            socket.send(JSON.stringify({ type: "transcript", text: token, role: "assistant" }));
+          }
+          tokenBufferTokens = [];
+        }
+
+        // If already flushed, send transcript directly
+        if (tokenBufferFlushed) {
+          socket.send(
+            JSON.stringify({
+              type: "transcript",
+              text: delta,
+              role: "assistant",
+            }),
+          );
+        }
       }
 
       // User transcript - extract booking info using AI
