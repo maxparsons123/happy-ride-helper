@@ -6644,7 +6644,40 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             }
           }
           
-          // 2+ words - be more permissive
+          // 2-4 words - validate against expected type more carefully
+          if (wordCount <= 4) {
+            switch (expectedType) {
+              case "number":
+                // For passenger/luggage count, require numeric content
+                const hasNumeric = /\d+|one|two|three|four|five|six|seven|eight|nine|ten|just\s*me|myself/i.test(t);
+                if (!hasNumeric) {
+                  console.log(`[taxi-realtime] 🔇 Off-topic response: "${t}" doesn't contain a number (expected: ${expectedType})`);
+                  return false;
+                }
+                return true;
+              case "yes_no":
+                // For confirmation, require yes/no/please/correct type words
+                const hasConfirmation = /yes|no|yeah|yep|nope|nah|please|correct|right|ok|okay|sure|go ahead|book|confirm|cancel/i.test(t);
+                if (!hasConfirmation) {
+                  console.log(`[taxi-realtime] 🔇 Off-topic response: "${t}" doesn't contain confirmation (expected: ${expectedType})`);
+                  return false;
+                }
+                return true;
+              case "booking_choice":
+                // For keep/change/cancel, require relevant keywords
+                const hasChoice = /keep|cancel|change|modify|update|different|same|yes|no/i.test(t);
+                if (!hasChoice) {
+                  console.log(`[taxi-realtime] 🔇 Off-topic response: "${t}" doesn't contain booking choice (expected: ${expectedType})`);
+                  return false;
+                }
+                return true;
+              default:
+                // Other types (address, time, etc.) - be permissive
+                return true;
+            }
+          }
+          
+          // 5+ words - be permissive as they likely contain meaningful content
           return true;
         };
         
