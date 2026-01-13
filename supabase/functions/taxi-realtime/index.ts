@@ -534,6 +534,51 @@ serve(async (req) => {
     }
   };
   
+  // Detect if the last assistant message was an incomplete greeting (cut off mid-sentence)
+  const isIncompleteGreeting = (text: string): boolean => {
+    if (!text || text.length < 5) return false;
+    
+    const trimmed = text.trim();
+    const lower = trimmed.toLowerCase();
+    
+    // Check if it starts like a greeting but doesn't end with punctuation
+    const greetingStarts = ['hello', 'hi ', 'welcome', 'good morning', 'good afternoon', 'good evening'];
+    const startsLikeGreeting = greetingStarts.some(g => lower.startsWith(g));
+    
+    if (!startsLikeGreeting) return false;
+    
+    // A complete greeting should end with ?, !, or . (and typically asks a question or makes a statement)
+    const endsWithPunctuation = /[.!?]$/.test(trimmed);
+    if (!endsWithPunctuation) {
+      console.log(`[${callId}] 🔍 Incomplete greeting detected (no punctuation): "${text}"`);
+      return true;
+    }
+    
+    // Check for specific incomplete patterns (greeting was cut mid-flow)
+    // e.g., "Hello Max! I can see you" - has "!" but the sentence continues and is cut off
+    const incompletePhrases = [
+      /i can see you$/i,           // "I can see you" (cut off before "have an active booking")
+      /i can see$/i,               // "I can see"
+      /would you like to$/i,       // "Would you like to" (cut off)
+      /your taxi is$/i,            // "Your taxi is"
+      /let me$/i,                  // "Let me"
+      /i'll just$/i,               // "I'll just"
+      /shall i$/i,                 // "Shall I"
+      /can i$/i,                   // "Can I"
+      /where would$/i,             // "Where would"
+      /and where$/i,               // "And where"
+    ];
+    
+    for (const pattern of incompletePhrases) {
+      if (pattern.test(trimmed)) {
+        console.log(`[${callId}] 🔍 Incomplete greeting detected (cut-off phrase): "${text}"`);
+        return true;
+      }
+    }
+    
+    return false;
+  };
+  
   // Load and restore session state on reconnect
   const loadResumedSession = async (): Promise<boolean> => {
     try {
@@ -572,10 +617,26 @@ serve(async (req) => {
       callerName = data.caller_name || '';
       callerCity = resumeData.session_state?.callerCity || '';
       userPhone = data.caller_phone || '';
-      greetingSent = true; // Already greeted before disconnect
-      isResumedSession = true;
-      needsHistoryPriming = true;
       awaitingAreaResponse = resumeData.session_state?.awaitingAreaResponse || false;
+      
+      // Check if the last assistant message was an incomplete greeting
+      const lastAssistantText = resumeData.last_assistant_text || '';
+      const greetingWasIncomplete = isIncompleteGreeting(lastAssistantText);
+      
+      if (greetingWasIncomplete) {
+        // Force re-greeting by NOT setting greetingSent
+        console.log(`[${callId}] ⚠️ Last greeting was incomplete - will re-greet on reconnect`);
+        greetingSent = false;
+        isResumedSession = false;
+        needsHistoryPriming = false;
+        // Clear transcripts so we start fresh
+        transcriptHistory = [];
+      } else {
+        // Normal resume - greeting was complete
+        greetingSent = true;
+        isResumedSession = true;
+        needsHistoryPriming = true;
+      }
       
       // Restore booking state
       if (resumeData.booking) {
