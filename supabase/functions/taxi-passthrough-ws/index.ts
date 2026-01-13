@@ -525,6 +525,10 @@ serve(async (req) => {
     let deepgramSTT: DeepgramStreamingSTT | null = null;
     let processingTranscript = false;
     
+    // 🔇 ECHO GUARD: Discard audio for 400ms after Ada stops speaking
+    const ECHO_GUARD_MS = 400;
+    let echoGuardUntil = 0; // Timestamp until which audio should be discarded
+    
     console.log(`[${session.call_id}] WebSocket connection opened`);
     
     // Handler for when we get a final transcript from Deepgram
@@ -659,6 +663,10 @@ serve(async (req) => {
                     isAiTalking = false;
                     socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
                     
+                    // 🔇 ECHO GUARD: Start discarding audio for 400ms after Ada stops
+                    echoGuardUntil = Date.now() + ECHO_GUARD_MS;
+                    console.log(`[${session.call_id}] 🔇 Echo guard active for ${ECHO_GUARD_MS}ms`);
+                    
                     // 🔥 WARM UP STT: Open Deepgram connection as Ada finishes speaking
                     if (!webhookResponse.end_call && deepgramSTT && !deepgramSTT.connected) {
                       console.log(`[${session.call_id}] 🔥 Pre-warming Deepgram STT connection...`);
@@ -707,6 +715,13 @@ serve(async (req) => {
           
           // Skip processing if AI is talking (prevent echo)
           if (isAiTalking) return;
+          
+          // 🔇 ECHO GUARD: Skip audio during the guard period after Ada stops
+          const now = Date.now();
+          if (now < echoGuardUntil) {
+            // Silently discard - this is echo/residual TTS
+            return;
+          }
           
           // Stream directly to Deepgram (no local VAD needed!)
           if (deepgramSTT) {
@@ -774,6 +789,9 @@ serve(async (req) => {
             
             isAiTalking = false;
             socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+            
+            // 🔇 ECHO GUARD: Start discarding audio for 400ms after Ada stops
+            echoGuardUntil = Date.now() + ECHO_GUARD_MS;
           }
         }
         
