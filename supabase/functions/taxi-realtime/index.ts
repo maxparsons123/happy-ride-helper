@@ -5718,8 +5718,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         }
 
         // Explicit farewells should always end the call (these are NOT ambiguous like "cheers")
-        // IMPORTANT: Include common STT mishearings of "bye" like "you", "by", "buy"
-        const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya|by|buy|you)\b[!. ]*$/.test(t);
+        // NOTE: Removed "you" - too ambiguous, often just noise/echo. Keep "by" and "buy" as less common mishearings.
+        const explicitFarewellOnly = /^(bye|bye\s+bye|bye-bye|goodbye|see\s+you|see\s+ya|see-ya|by|buy)\b[!. ]*$/.test(t);
         
         // Catch "bye bye" anywhere in the transcript (e.g., "Thank you. Bye. Bye." or "bye bye")
         // This is always an intentional goodbye, regardless of booking state
@@ -5915,7 +5915,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         const isContextualPhantom = (text: string): boolean => {
           const t = text.trim().toLowerCase();
           // These short phrases are often phantoms when they appear right after Ada speaks
-          const phantomCandidates = ['thank you', 'thanks', 'bye', 'goodbye', 'cheers'];
+          // Include "you" - very common STT phantom from noise/echo that sounds like "bye"
+          const phantomCandidates = ['thank you', 'thanks', 'bye', 'goodbye', 'cheers', 'you', 'by', 'buy'];
           
           // Check if it's a short phantom-candidate phrase
           const isShortPhrase = phantomCandidates.some(p => t === p || t === p + '.');
