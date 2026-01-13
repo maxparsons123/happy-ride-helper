@@ -453,6 +453,7 @@ serve(async (req) => {
   let activeBooking: { id: string; pickup: string; destination: string; passengers: number; fare: string; booked_at: string; pickup_name?: string | null; destination_name?: string | null } | null = null; // Outstanding booking
   let transcriptHistory: { role: string; text: string; timestamp: string }[] = [];
   let currentAssistantText = ""; // Buffer for assistant transcript
+  let forbiddenPhraseInterrupted = false; // Flag to prevent multiple interruptions
   let aiSpeaking = false; // Local speaking flag (used for safe barge-in cancellation)
   let aiStoppedSpeakingAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let aiPlaybackStartedAt = 0; // Timestamp when AI audio playback started
@@ -5604,6 +5605,8 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         openAiResponseInProgress = true;
         aiPlaybackBytesTotal = 0;
         aiPlaybackStartedAt = 0;
+        currentAssistantText = ""; // Reset transcript buffer for new response
+        forbiddenPhraseInterrupted = false; // Reset interruption flag
 
         if (awaitingResponseAfterCommit) {
           responseCreatedSinceCommit = true;
@@ -5824,11 +5827,54 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         }
       }
 
-      // Forward transcript for logging
+      // Forward transcript for logging + EARLY FORBIDDEN PHRASE DETECTION
       if (data.type === "response.audio_transcript.delta") {
+        const delta = data.delta || "";
+        
+        // Accumulate transcript for early detection
+        currentAssistantText += delta;
+        
+        // Check for forbidden phrases early in the stream
+        const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(currentAssistantText);
+        if (hasForbidden && !forbiddenPhraseInterrupted) {
+          forbiddenPhraseInterrupted = true;
+          console.warn(`[${callId}] 🚨 EARLY FORBIDDEN PHRASE DETECTED: [${detectedPhrases.join(", ")}]`);
+          console.warn(`[${callId}] 🚨 Cancelling response and triggering replacement...`);
+          
+          // Cancel the current response
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            
+            // Clear any buffered audio
+            socket.send(JSON.stringify({ type: "ai_interrupted" }));
+            
+            // Inject a correction and trigger new response
+            setTimeout(() => {
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ 
+                      type: "input_text", 
+                      text: "[SYSTEM: You just violated a rule by asking for confirmation. NEVER ask 'shall I confirm' or 'is that correct'. Just proceed with booking or ask ONE specific question. Continue naturally without apologizing.]" 
+                    }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] }
+                }));
+              }
+            }, 100);
+          }
+          return; // Don't forward this delta
+        }
+        
         socket.send(JSON.stringify({
           type: "transcript",
-          text: data.delta,
+          text: delta,
           role: "assistant"
         }));
       }
