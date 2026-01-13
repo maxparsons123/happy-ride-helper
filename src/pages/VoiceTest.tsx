@@ -45,6 +45,10 @@ export default function VoiceTest() {
   const [selectedVoice, setSelectedVoice] = useState<string>("shimmer");
   const [loadingAgents, setLoadingAgents] = useState(true);
   
+  // Raw passthrough mode
+  const [rawPassthroughMode, setRawPassthroughMode] = useState(false);
+  const [rawPassthroughEndpoint, setRawPassthroughEndpoint] = useState("");
+  
   // Metrics
   const [lastLatency, setLastLatency] = useState<number | null>(null);
   const [avgLatency, setAvgLatency] = useState<number | null>(null);
@@ -247,14 +251,22 @@ export default function VoiceTest() {
         const agentName = agents.find(a => a.slug === selectedAgent)?.name || selectedAgent;
         addMessage(`Connected, initializing session with ${agentName}...`, "system");
         
-        ws.send(JSON.stringify({
+        const initPayload: Record<string, unknown> = {
           type: "init",
           call_id: "voice-test-" + Date.now(),
           addressTtsSplicing: true,
           agent: selectedAgent,
           voice: selectedVoice,
-          useUnifiedExtraction: false, // Toggle to true to use AI-first extraction (taxi-extract-unified)
-        }));
+          useUnifiedExtraction: false,
+        };
+        
+        // Add raw passthrough mode settings
+        if (rawPassthroughMode && rawPassthroughEndpoint.trim()) {
+          initPayload.bookingMode = "raw";
+          initPayload.rawPassthroughEndpoint = rawPassthroughEndpoint.trim();
+        }
+        
+        ws.send(JSON.stringify(initPayload));
       };
 
     ws.onmessage = (event) => {
@@ -334,7 +346,7 @@ export default function VoiceTest() {
       isConnectingRef.current = false;
       addMessage("Connection error", "system");
     };
-  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents]);
+  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents, rawPassthroughMode, rawPassthroughEndpoint]);
 
   const disconnect = useCallback(() => {
     stopRecordingInternal();
@@ -807,6 +819,44 @@ export default function VoiceTest() {
             <PhoneOff className="w-4 h-4 mr-2" />
             Disconnect
           </Button>
+        </div>
+
+        {/* Raw Passthrough Mode */}
+        <div className="bg-card rounded-xl border border-chat-border p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="font-semibold text-primary">🔀 Raw Passthrough Mode</h3>
+              <p className="text-xs text-muted-foreground">
+                Send booking data directly to your webhook for validation
+              </p>
+            </div>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={rawPassthroughMode}
+                onChange={(e) => setRawPassthroughMode(e.target.checked)}
+                disabled={status !== "disconnected"}
+                className="rounded border-muted-foreground w-5 h-5"
+              />
+              <span className="text-sm font-medium">{rawPassthroughMode ? "ON" : "OFF"}</span>
+            </label>
+          </div>
+          
+          {rawPassthroughMode && (
+            <div className="space-y-2">
+              <label className="text-sm text-muted-foreground">Webhook Endpoint:</label>
+              <Input
+                value={rawPassthroughEndpoint}
+                onChange={(e) => setRawPassthroughEndpoint(e.target.value)}
+                placeholder="https://your-server.com/ada-webhook"
+                disabled={status !== "disconnected"}
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Ada will POST raw booking details to this endpoint. Your server should respond with JSON containing <code className="bg-muted px-1 rounded">action</code>, <code className="bg-muted px-1 rounded">message</code>, etc.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Voice Area */}
