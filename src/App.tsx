@@ -9,6 +9,7 @@ import VoiceTest from "./pages/VoiceTest";
 import LiveCalls from "./pages/LiveCalls";
 import SipConfig from "./pages/SipConfig";
 import Agents from "./pages/Agents";
+import WebhookTest from "./pages/WebhookTest";
 
 const queryClient = new QueryClient();
 
@@ -24,6 +25,7 @@ const App = () => (
           <Route path="/live" element={<LiveCalls />} />
           <Route path="/sip-config" element={<SipConfig />} />
           <Route path="/agents" element={<Agents />} />
+          <Route path="/webhook-test" element={<WebhookTest />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
