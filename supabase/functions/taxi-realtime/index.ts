@@ -5945,13 +5945,110 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
           "as soon as": "ASAP",
         };
         
+        // === ADDRESS STT CORRECTIONS ===
+        // Fix common Whisper hallucinations of addresses and place names
+        // These are applied BEFORE the transcript reaches the LLM
+        const ADDRESS_CORRECTIONS: Record<string, string> = {
+          // City name hallucinations
+          "click on street": "coventry",
+          "click on": "coventry",
+          "conference": "coventry",
+          "cognitive": "coventry",
+          "confident tree": "coventry",
+          "comment tree": "coventry",
+          "convention": "coventry",
+          
+          // Sweet Spot / POI hallucinations
+          "seminole small street": "sweet spot",
+          "seminole small": "sweet spot",
+          "seminole": "sweet spot",
+          "spelman": "sweet spot",
+          "spelman airport": "sweet spot",  // This was NOT airport
+          "seven all small street": "sweet spot",
+          "small street": "sweet spot",
+          "sweet spots": "sweet spot",
+          "three spots": "sweet spot",
+          "street spot": "sweet spot",
+          "sweet sport": "sweet spot",
+          "street sport": "sweet spot",
+          "sweetspot": "sweet spot",
+          "swap them": "sweet spot",
+          "swap him": "sweet spot",
+          "swapham": "sweet spot",
+          "swaffham": "sweet spot",
+          "swaffam": "sweet spot",
+          "sweet ham": "sweet spot",
+          "sweets bob": "sweet spot",
+          
+          // "to" destination prefix hallucinations - Tube is not a destination
+          "tube": "to",  // "7 Russell Street Tube" → "7 Russell Street to"
+          
+          // Road type mishearings
+          "rhodes": "road",
+          "rode": "road",
+          "rowed": "road",
+          "rows": "road",
+          "treat": "street",
+          "treats": "street",
+          "strait": "street",
+          "straight": "street",
+          "streat": "street",
+          "avenue you": "avenue",
+          "have a new": "avenue",
+          "avnew": "avenue",
+          "lane's": "lane",
+          "lain": "lane",
+          "plains": "lane",
+          "drive's": "drive",
+          "drove": "drive",
+          "clothes": "close",
+          "closed": "close",
+          "crescent's": "crescent",
+          "present": "crescent",
+          "pleasant": "crescent",
+          "grace": "grove",
+          "groves": "grove",
+          "terris": "terrace",
+          "terrorists": "terrace",
+          "terrorist": "terrace",
+          "garden": "gardens",
+          "court's": "court",
+          "caught": "court",
+          "courts": "court",
+          
+          // Common street name mishearings
+          "davie": "david",
+          "davy": "david",
+          "davies": "david",
+          "david rose": "david road", // Common mishearing
+          
+          // Number mishearings that look like money
+          "$2.00": "two",
+          "$1.00": "one",
+          "$3.00": "three",
+          "$4.00": "four",
+          "$5.00": "five",
+        };
+        
         let correctedTranscript = rawTranscript;
+        
+        // Apply command corrections first
         for (const [mishearing, correction] of Object.entries(COMMAND_CORRECTIONS)) {
           const regex = new RegExp(`\\b${mishearing}\\b`, "gi");
           if (regex.test(correctedTranscript)) {
             const before = correctedTranscript;
             correctedTranscript = correctedTranscript.replace(regex, correction);
             console.log(`[${callId}] 🔧 STT COMMAND CORRECTION: "${mishearing}" → "${correction}" (full: "${before}" → "${correctedTranscript}")`);
+          }
+        }
+        
+        // Apply address corrections
+        for (const [mishearing, correction] of Object.entries(ADDRESS_CORRECTIONS)) {
+          const regex = new RegExp(`\\b${mishearing}\\b`, "gi");
+          if (regex.test(correctedTranscript)) {
+            const before = correctedTranscript;
+            correctedTranscript = correctedTranscript.replace(regex, correction);
+            console.log(`[${callId}] 🔧 STT ADDRESS CORRECTION: "${mishearing}" → "${correction}" (full: "${before}" → "${correctedTranscript}")`);
           }
         }
 
