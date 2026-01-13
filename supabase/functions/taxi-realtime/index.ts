@@ -6464,30 +6464,59 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         if (useUnifiedExtraction) {
           console.log(`[${callId}] 🧪 UNIFIED MODE: Using taxi-extract-unified for: "${rawTranscript}"`);
           
-          // Call unified extraction (runs in parallel, doesn't block response)
-          extractWithUnifiedAI(rawTranscript).catch(err => {
-            console.error(`[${callId}] 🧪 Unified extraction error:`, err);
-          });
-          
-          // Still send response.create immediately - AI has full context
-          if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
-            if (openAiResponseInProgress) {
-              deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "unified-extraction" };
-              responseCreatedSinceCommit = true;
-              console.log(`[${callId}] ⏸️ Deferring response.create (unified-extraction) - response already in progress`);
-            } else {
-              openAiResponseInProgress = true;
-              startResponseTimeout();
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response: { modalities: ["audio", "text"] },
-              }));
-              responseCreatedSinceCommit = true;
-              console.log(`[${callId}] >>> response.create sent (unified-extraction)`);
+          // CRITICAL: If forcedResponseInstructions is set (e.g., international caller),
+          // skip extraction and use the forced instructions immediately
+          if (forcedResponseInstructions) {
+            console.log(`[${callId}] 🌍 UNIFIED MODE: Skipping extraction - using forcedResponseInstructions`);
+            
+            if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+              const response = { modalities: ["audio", "text"], instructions: forcedResponseInstructions };
+              const label = "unified-forced";
+              
+              if (openAiResponseInProgress) {
+                deferredResponseCreate = { response: response as Record<string, unknown>, label };
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] ⏸️ Deferring response.create (${label}) - response already in progress`);
+              } else {
+                openAiResponseInProgress = true;
+                startResponseTimeout();
+                openaiWs.send(JSON.stringify({
+                  type: "response.create",
+                  response,
+                }));
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] >>> response.create sent (${label})`);
+              }
             }
+            
+            awaitingResponseAfterCommit = false;
+          } else {
+            // Normal unified extraction path - no forced instructions
+            // Call unified extraction (runs in parallel, doesn't block response)
+            extractWithUnifiedAI(rawTranscript).catch(err => {
+              console.error(`[${callId}] 🧪 Unified extraction error:`, err);
+            });
+            
+            // Still send response.create immediately - AI has full context
+            if (awaitingResponseAfterCommit && sessionReady && openaiWs?.readyState === WebSocket.OPEN && !responseCreatedSinceCommit) {
+              if (openAiResponseInProgress) {
+                deferredResponseCreate = { response: { modalities: ["audio", "text"] } as Record<string, unknown>, label: "unified-extraction" };
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] ⏸️ Deferring response.create (unified-extraction) - response already in progress`);
+              } else {
+                openAiResponseInProgress = true;
+                startResponseTimeout();
+                openaiWs.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"] },
+                }));
+                responseCreatedSinceCommit = true;
+                console.log(`[${callId}] >>> response.create sent (unified-extraction)`);
+              }
+            }
+            
+            awaitingResponseAfterCommit = false;
           }
-          
-          awaitingResponseAfterCommit = false;
           // Skip the inline regex fast-path entirely
         } else if (isSimpleResponse) {
           console.log(`[${callId}] ⚡ FAST-PATH: simple response: "${rawTranscript}" - sending response.create IMMEDIATELY`);
