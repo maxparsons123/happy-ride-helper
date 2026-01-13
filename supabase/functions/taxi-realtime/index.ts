@@ -7,66 +7,32 @@ const corsHeaders = {
 };
 
 // =============================================
-// FORBIDDEN PHRASE DETECTION & SANITIZATION
-// Enforces prompt rules at runtime
+// FORBIDDEN PHRASE DETECTION - DISABLED
+// Was causing false positives (cutting off valid sentences)
+// The prompt itself handles rule enforcement now
 // =============================================
-const FORBIDDEN_PHRASES = [
-  // Confirmation / re-confirmation language (Ada must not ask for confirmation)
-  "double-check",
-  "just to double-check",
-  "just to check",
-  "confirm that",
-  "shall i confirm",
-  "is that correct",
-  "let me confirm",
-  "shall i book that",
-  "shall i go ahead",
-  "shall i book",
-  "just to be sure",
-  "can i confirm",
-  "let me just confirm",
-  "so to confirm",
-  "just confirming",
-  "did you mean",
-  "is this correct",
-
-  // Additional patterns we observed in production
-  "would you like to confirm",
-  "do you want to confirm",
-  "please confirm",
-  "confirm the pickup",
-  "confirm pickup",
-  "confirm the destination",
-  "confirm destination",
-  "confirm the booking",
-  "confirm the details",
-  "shall i confirm that booking",
-  "can i book that",
-  "want me to book",
-  "should i book",
+const FORBIDDEN_PHRASES: string[] = [
+  // DISABLED - phrases were triggering on legitimate contexts like:
+  // "Shall I book you a taxi to..." (valid offer, not a confirmation question)
+  // Keeping array empty but preserving structure for future use if needed
 ];
 
 /**
  * Detects forbidden phrases in assistant responses.
- * Returns { hasForbidden, detectedPhrases } for logging/action.
+ * CURRENTLY DISABLED - always returns false to prevent mid-sentence cutoffs.
  */
-function detectForbiddenPhrases(text: string): { hasForbidden: boolean; detectedPhrases: string[] } {
-  const lower = text.toLowerCase();
-  const detected = FORBIDDEN_PHRASES.filter((phrase) => lower.includes(phrase));
-  return { hasForbidden: detected.length > 0, detectedPhrases: detected };
+function detectForbiddenPhrases(_text: string): { hasForbidden: boolean; detectedPhrases: string[] } {
+  // Disabled - prompt handles these rules now
+  return { hasForbidden: false, detectedPhrases: [] };
 }
 
 /**
- * Sanitizes assistant response by removing forbidden phrases.
- * Used as a last-resort runtime guard when the model violates hard rules.
+ * Sanitizes assistant response - CURRENTLY A PASSTHROUGH.
+ * Phrase filtering disabled to prevent cutting off valid sentences.
  */
 function sanitizeAssistantResponse(text: string): string {
-  const { hasForbidden, detectedPhrases } = detectForbiddenPhrases(text);
-  if (!hasForbidden) return text;
-
-  console.warn(`[sanitizeAssistantResponse] ⚠️ Forbidden phrase(s): ${detectedPhrases.join(", ")}`);
-  // Safe, short fallback (keeps phone call flowing and avoids confirmations)
-  return "Got it.";
+  // Passthrough - no filtering
+  return text;
 }
 
 // Optimized prompt - token-efficient with all critical rules
