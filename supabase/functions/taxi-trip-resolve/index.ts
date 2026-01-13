@@ -1770,41 +1770,15 @@ serve(async (req) => {
       coordsContext
     );
     
-    // Validate addresses are in UK (reject international bookings)
-    const MAX_TRIP_DISTANCE_MILES = 200; // Maximum reasonable taxi distance
-    const UK_COUNTRY_CODES = ["GB", "UK"];
-    
-    const isUkAddress = (loc: ResolvedLocation | null): boolean => {
-      if (!loc) return false;
-      // Check country code
-      if (loc.country && UK_COUNTRY_CODES.includes(loc.country.toUpperCase())) return true;
-      // Check for UK postcode pattern
-      if (loc.postcode && /^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(loc.postcode)) return true;
-      // Check for known UK cities
-      if (loc.city && UK_CITIES[loc.city.toLowerCase()]) return true;
-      return false;
-    };
-    
-    // Check if addresses are in UK
-    const pickupIsUk = isUkAddress(pickup);
-    const dropoffIsUk = isUkAddress(dropoff);
-    
-    if (pickup && !pickupIsUk) {
-      console.warn(`⚠️ Pickup not in UK: ${pickup.formatted_address} (country: ${pickup.country})`);
-      response.error = `Pickup address "${pickup_input}" appears to be outside the UK. We only serve UK locations.`;
-      response.pickup = undefined; // Clear invalid address
-    }
-    
-    if (dropoff && !dropoffIsUk) {
-      console.warn(`⚠️ Dropoff not in UK: ${dropoff.formatted_address} (country: ${dropoff.country})`);
-      response.error = `Destination "${dropoff_input}" appears to be outside the UK. We only serve UK locations.`;
-      response.dropoff = undefined; // Clear invalid address
-    }
-    
-    // Calculate distance and fare if we have both valid UK points
-    if (pickup && dropoff && pickupIsUk && dropoffIsUk) {
+    // Calculate distance and fare if we have both points.
+    // NOTE: This resolver is used by a global booking flow, so we do NOT hard-reject
+    // locations by country here. Any service-area restrictions should live in the
+    // dispatch layer, not in geocoding.
+    const MAX_TRIP_DISTANCE_MILES = 200; // Safety guard (avoid absurdly long taxi trips)
+
+    if (pickup && dropoff) {
       const distance = await calculateDistance(pickup, dropoff);
-      
+
       if (distance) {
         // Check if distance is reasonable for a taxi
         if (distance.miles > MAX_TRIP_DISTANCE_MILES) {
@@ -1821,7 +1795,7 @@ serve(async (req) => {
         const straightLine = haversineDistance(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
         const estimatedMeters = straightLine * 1.3; // Road multiplier
         const estimatedMiles = estimatedMeters / 1609.34;
-        
+
         if (estimatedMiles > MAX_TRIP_DISTANCE_MILES) {
           console.warn(`⚠️ Trip too long (haversine): ${estimatedMiles.toFixed(0)} miles`);
           response.error = `This trip is approximately ${estimatedMiles.toFixed(0)} miles - too far for a taxi.`;
