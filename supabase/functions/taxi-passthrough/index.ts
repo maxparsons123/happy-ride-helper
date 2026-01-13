@@ -385,10 +385,17 @@ Return one clear sentence.`;
     console.error("[STT] gpt-4o-mini-transcribe exception:", error);
   }
   
-  // Fallback to Deepgram Nova-2
+  // Fallback to Deepgram Nova-2 Phone Call (telephony-optimized)
   if (DEEPGRAM_API_KEY) {
     try {
-      const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB&smart_format=true`, {
+      // Keyword boosting for taxi booking context
+      const keywords = [
+        "cancel:2", "book it:2", "yes:1.5", "no:1.5",
+        "Coventry:1.5", "Birmingham:1.5", "Manchester:1.5",
+        "David Road:1.5", "Sweet Spot:1.8", "airport:1.5"
+      ].join("&keywords=");
+      
+      const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2-phonecall&language=en-GB&punctuate=true&smart_format=true&numerals=true&keywords=${keywords}`, {
         method: "POST",
         headers: {
           "Authorization": `Token ${DEEPGRAM_API_KEY}`,

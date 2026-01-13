@@ -168,15 +168,29 @@ serve(async (req) => {
       let resultText = "";
       
       if (sttProvider === "deepgram" && DEEPGRAM_API_KEY) {
-        // Deepgram Nova-2 - optimized for telephony and UK accents
-        // CRITICAL: Add keyword boosting for taxi commands and UK locations
-        // Also add dynamic keywords from Ada's last response for context
+        // Deepgram Nova-2 Phone Call - TELEPHONY-OPTIMIZED for 8kHz phone audio
+        // CRITICAL: Use nova-2-phonecall model for best phone line accuracy
+        // Add keyword boosting for taxi commands, UK locations, and vehicle types
         const baseKeywords = [
+          // Taxi commands (high boost)
           "cancel:2", "cancel it:2", "cancel the booking:2", "keep it:2", "book it:2",
-          "yes please:1.5", "no thanks:1.5", "that's right:1.5", "that's correct:1.5", "yes:1.5", "no:1.5", "yeah:1.5",
-          "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Wolverhampton:1.5", "Manchester:1.5",
+          "modify:1.8", "change:1.8", "update:1.8",
+          // Confirmation phrases
+          "yes please:1.5", "no thanks:1.5", "that's right:1.5", "that's correct:1.5", 
+          "yes:1.5", "no:1.5", "yeah:1.5", "correct:1.5",
+          // UK Cities
+          "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Wolverhampton:1.5", 
+          "Manchester:1.5", "London:1.5", "Leeds:1.5", "Liverpool:1.5",
+          // Common streets
           "School Road:1.5", "David Road:1.5", "Station Road:1.5", "High Street:1.5",
-          "Birmingham Airport:1.5", "Heathrow:1.5", "Gatwick:1.5", "Manchester Airport:1.5"
+          "Church Road:1.5", "Park Road:1.5", "Mill Lane:1.5",
+          // Airports & Transport hubs
+          "Birmingham Airport:1.8", "Heathrow:1.8", "Gatwick:1.8", "Manchester Airport:1.8",
+          "train station:1.5", "bus station:1.5", "coach station:1.5",
+          // Vehicle types
+          "saloon:1.5", "estate:1.5", "MPV:1.5", "minibus:1.5", "executive:1.5",
+          // Venues
+          "Sweet Spot:1.8", "Tesco:1.5", "Asda:1.5", "hospital:1.5"
         ];
         
         // DYNAMIC CONTEXT: Extract key terms from Ada's last response to boost recognition
@@ -192,7 +206,7 @@ serve(async (req) => {
             });
           }
           // Boost addresses/places mentioned (basic extraction)
-          const addressMatch = lastAssistantResponse.match(/\d+[A-Z]?\s+\w+\s+(?:Road|Street|Lane|Avenue|Drive)/gi);
+          const addressMatch = lastAssistantResponse.match(/\d+[A-Z]?\s+\w+\s+(?:Road|Street|Lane|Avenue|Drive|Close|Way)/gi);
           if (addressMatch) {
             addressMatch.forEach(addr => baseKeywords.push(`${addr}:1.8`));
           }
@@ -200,8 +214,12 @@ serve(async (req) => {
         
         const keywords = baseKeywords.join("&keywords=");
         
-        // Remove language lock for multilingual support, add keywords
-        const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&keywords=${keywords}`, {
+        // TELEPHONY-OPTIMIZED: nova-2-phonecall model for 8kHz phone audio
+        // - punctuate: true for sentence structure
+        // - smart_format: true for numeric conversion ("five two" → "52")
+        // - numerals: true for explicit number formatting
+        // - No language lock for multilingual support
+        const response = await fetch(`https://api.deepgram.com/v1/listen?model=nova-2-phonecall&punctuate=true&smart_format=true&numerals=true&keywords=${keywords}`, {
           method: "POST",
           headers: {
             Authorization: `Token ${DEEPGRAM_API_KEY}`,
