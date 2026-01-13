@@ -82,6 +82,13 @@ serve(async (req) => {
   let isProcessing = false;
   let silenceTimer: number | null = null;
   let isAiTalking = false; // Track if AI is currently speaking
+  let aiStoppedAt = 0; // Timestamp when AI stopped speaking (for echo guard)
+  let consecutiveSpeechFrames = 0; // Count frames above threshold for robust barge-in
+  
+  // Barge-in configuration
+  const BARGE_IN_ECHO_GUARD_MS = 400; // Ignore speech for 400ms after AI stops (prevents echo cutoff)
+  const BARGE_IN_ENERGY_THRESHOLD = 0.15; // Higher threshold for barge-in (not just noise)
+  const BARGE_IN_FRAMES_REQUIRED = 3; // Require 3 consecutive speech frames (~60ms) to trigger
   
   // VAD Configuration - can be updated via session.update
   let vadConfig = {
@@ -547,6 +554,8 @@ serve(async (req) => {
         }
         
         isAiTalking = false; // Mark AI as done speaking
+        aiStoppedAt = Date.now(); // Record when AI stopped for echo guard
+        consecutiveSpeechFrames = 0; // Reset barge-in detection
         socket.send(JSON.stringify({ type: "audio.done" }));
         
         // Check if Ada said goodbye - end the call
@@ -626,13 +635,29 @@ serve(async (req) => {
       const isSpeech = energy > vadConfig.threshold * 0.1; // Scale threshold
       
       // Barge-in detection: if user speaks while AI is talking
-      if (isSpeech && isAiTalking) {
-        console.log(`[${callId}] 🛑 Barge-in detected! Interrupting AI...`);
-        isAiTalking = false;
-        socket.send(JSON.stringify({ type: "audio.interrupted" }));
-        // Clear any pending audio
-        audioBuffer = [];
-        if (silenceTimer) clearTimeout(silenceTimer);
+      // IMPORTANT: Requires sustained speech and echo guard to prevent cutoffs
+      if (isAiTalking) {
+        const timeSinceAiStopped = Date.now() - aiStoppedAt;
+        const inEchoGuard = aiStoppedAt > 0 && timeSinceAiStopped < BARGE_IN_ECHO_GUARD_MS;
+        const isStrongSpeech = energy > BARGE_IN_ENERGY_THRESHOLD;
+        
+        if (isStrongSpeech && !inEchoGuard) {
+          consecutiveSpeechFrames++;
+          
+          if (consecutiveSpeechFrames >= BARGE_IN_FRAMES_REQUIRED) {
+            console.log(`[${callId}] 🛑 Barge-in detected! energy=${energy.toFixed(3)}, frames=${consecutiveSpeechFrames}`);
+            isAiTalking = false;
+            aiStoppedAt = Date.now();
+            consecutiveSpeechFrames = 0;
+            socket.send(JSON.stringify({ type: "audio.interrupted" }));
+            // Clear any pending audio
+            audioBuffer = [];
+            if (silenceTimer) clearTimeout(silenceTimer);
+          }
+        } else {
+          // Reset counter if below threshold or in echo guard
+          consecutiveSpeechFrames = 0;
+        }
       }
       
       audioBuffer.push(bytes);
