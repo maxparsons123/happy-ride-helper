@@ -232,6 +232,12 @@ const STT_CORRECTIONS: Record<string, string> = {
   "swapham": "sweetspot",
   "sweet ham": "sweetspot",
   "sweets bob": "sweetspot",
+  "three spots": "sweet spot",
+  "street spot": "sweet spot", 
+  "sweet spots": "sweet spot",
+  "street sports": "sweet spot",
+  "sweet sport": "sweet spot",
+  "street sport": "sweet spot",
 };
 
 // Normalize address by fixing common STT mishearings
@@ -240,6 +246,11 @@ function normalizeSTTAddress(address: string): string {
 
   // Targeted fix: "David Rose" (STT) → "David Road" when it appears like a street suffix
   normalized = normalized.replace(/(\b\d+[a-z]?\s+[\w']+\s+)rose\b/gi, "$1road");
+  
+  // Remove "in the UK" / "in UK" / "UK" suffixes that STT sometimes adds erroneously
+  normalized = normalized.replace(/\s*,?\s*in\s+the\s+uk\s*$/i, "");
+  normalized = normalized.replace(/\s*,?\s*in\s+uk\s*$/i, "");
+  normalized = normalized.replace(/\s*,?\s*uk\s*$/i, "");
 
   for (const [mishearing, correction] of Object.entries(STT_CORRECTIONS)) {
     // Use word boundary matching to avoid partial replacements
