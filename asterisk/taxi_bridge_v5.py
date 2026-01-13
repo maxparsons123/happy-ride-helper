@@ -62,11 +62,15 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"
+WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-passthrough-ws"
 
-AST_RATE = 8000
-AI_RATE = 24000
+# Audio rates
+AST_RATE = 8000   # Asterisk telephony rate (native µ-law)
+AI_RATE = 24000   # AI TTS output rate (for playback)
 RESAMPLE_RATIO = AI_RATE // AST_RATE  # = 3
+
+# NEW: Send native 8kHz µ-law to edge function (Deepgram nova-2-phonecall optimized)
+SEND_NATIVE_ULAW = True
 
 MSG_HANGUP = 0x00
 MSG_UUID = 0x01
@@ -330,19 +334,29 @@ class TaxiBridgeV25:
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
+                    
+                    # Convert to linear16 for noise reduction
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
                     cleaned = apply_noise_reduction(linear16)
-                    upsampled = resample_audio_linear16(cleaned, AST_RATE, AI_RATE)
+                    
+                    # NEW: Send native 8kHz format (Deepgram nova-2-phonecall optimized)
+                    if SEND_NATIVE_ULAW:
+                        # Convert cleaned PCM back to µ-law and send as-is (8kHz)
+                        out_ulaw = lin2ulaw(cleaned)
+                        audio_to_send = out_ulaw
+                    else:
+                        # Legacy: upsample to 24kHz PCM16
+                        audio_to_send = resample_audio_linear16(cleaned, AST_RATE, AI_RATE)
                     
                     # Send as binary frame
                     if self.ws_connected and self.ws:
                         try:
-                            await self.ws.send(upsampled)
+                            await self.ws.send(audio_to_send)
                             self.binary_audio_count += 1
                             self.last_ws_activity = time.time()
                         except:
                             # Buffer audio during disconnect for potential resend
-                            self.pending_audio_buffer.append(upsampled)
+                            self.pending_audio_buffer.append(audio_to_send)
                             raise
 
                 elif m_type == MSG_HANGUP:
