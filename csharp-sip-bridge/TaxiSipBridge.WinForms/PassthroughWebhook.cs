@@ -25,11 +25,50 @@ namespace TaxiSipBridge.WinForms
         #region Parsing & Serialization
 
         /// <summary>
-        /// Parse incoming webhook JSON to WebhookRequest
+        /// Parse incoming webhook JSON to WebhookRequest (for passthrough mode)
         /// </summary>
         public static WebhookRequest ParseRequest(string json)
         {
             return JsonSerializer.Deserialize<WebhookRequest>(json, _jsonOptions) ?? new WebhookRequest();
+        }
+
+        /// <summary>
+        /// Parse Ada booking webhook payload (sent to DISPATCH_WEBHOOK_URL)
+        /// </summary>
+        public static AdaBookingPayload ParseAdaBookingPayload(string json)
+        {
+            return JsonSerializer.Deserialize<AdaBookingPayload>(json, _jsonOptions) ?? new AdaBookingPayload();
+        }
+
+        /// <summary>
+        /// Convert Ada booking payload to your BookTaxiResponse for processing
+        /// </summary>
+        public static BookTaxiResponse ToBookTaxiResponse(AdaBookingPayload payload)
+        {
+            return new BookTaxiResponse
+            {
+                pickup_location = payload.Pickup ?? "",
+                dropoff_location = payload.Destination ?? "",
+                pickup_time = payload.PickupTime ?? "",
+                number_of_passengers = payload.Passengers,
+                luggage = payload.Luggage ?? "",
+                reference_number = payload.Reference ?? "",
+                username = payload.CallerName ?? "",
+                usertelephone = payload.Phone ?? "",
+                jobid = payload.CallId ?? "",
+                Rawjson = "",
+                bookingmessage = "",
+                pickup_name = payload.PickupName ?? "",
+                destination_name = payload.DestinationName ?? "",
+                vehicle_type = payload.VehicleType ?? "",
+                is_asap = payload.IsAsap,
+                scheduled_for = payload.ScheduledFor ?? "",
+                estimated_fare = payload.EstimatedFare ?? "",
+                estimated_eta = payload.EstimatedEta ?? "",
+                pickup_verified = payload.PickupVerified,
+                destination_verified = payload.DestinationVerified,
+                timestamp = payload.Timestamp ?? ""
+            };
         }
 
         /// <summary>
@@ -664,11 +703,12 @@ namespace TaxiSipBridge.WinForms
     }
 
     /// <summary>
-    /// Your existing dispatch system booking response model.
+    /// Your existing dispatch system booking response model - extended for Ada webhook.
     /// Use with FromBookTaxiResponse() or ConfirmFromBookTaxiResponse() to convert to webhook response.
     /// </summary>
     public class BookTaxiResponse
     {
+        // Original fields
         public string pickup_location { get; set; } = "";
         public string dropoff_location { get; set; } = "";
         public string pickup_time { get; set; } = "";
@@ -684,5 +724,81 @@ namespace TaxiSipBridge.WinForms
         public string bookingmessage { get; set; } = "";
         public double userlat { get; set; }
         public double userlon { get; set; }
+
+        // Extended fields from Ada webhook payload
+        public string pickup_name { get; set; } = "";
+        public string destination_name { get; set; } = "";
+        public string vehicle_type { get; set; } = "";
+        public bool is_asap { get; set; } = true;
+        public string scheduled_for { get; set; } = "";
+        public string estimated_fare { get; set; } = "";
+        public string estimated_eta { get; set; } = "";
+        public bool pickup_verified { get; set; }
+        public bool destination_verified { get; set; }
+        public string timestamp { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Direct Ada webhook booking payload (matches exactly what Ada sends to DISPATCH_WEBHOOK_URL).
+    /// Parse this with ParseAdaBookingPayload() to get a BookTaxiResponse.
+    /// </summary>
+    public class AdaBookingPayload
+    {
+        [JsonPropertyName("call_id")]
+        public string CallId { get; set; } = "";
+
+        [JsonPropertyName("reference")]
+        public string Reference { get; set; } = "";
+
+        [JsonPropertyName("phone")]
+        public string Phone { get; set; } = "";
+
+        [JsonPropertyName("caller_name")]
+        public string CallerName { get; set; } = "";
+
+        [JsonPropertyName("pickup")]
+        public string Pickup { get; set; } = "";
+
+        [JsonPropertyName("pickup_name")]
+        public string PickupName { get; set; } = "";
+
+        [JsonPropertyName("destination")]
+        public string Destination { get; set; } = "";
+
+        [JsonPropertyName("destination_name")]
+        public string DestinationName { get; set; } = "";
+
+        [JsonPropertyName("passengers")]
+        public int Passengers { get; set; } = 1;
+
+        [JsonPropertyName("luggage")]
+        public string Luggage { get; set; } = "";
+
+        [JsonPropertyName("vehicle_type")]
+        public string VehicleType { get; set; } = "";
+
+        [JsonPropertyName("pickup_time")]
+        public string PickupTime { get; set; } = "";
+
+        [JsonPropertyName("is_asap")]
+        public bool IsAsap { get; set; } = true;
+
+        [JsonPropertyName("scheduled_for")]
+        public string ScheduledFor { get; set; } = "";
+
+        [JsonPropertyName("estimated_fare")]
+        public string EstimatedFare { get; set; } = "";
+
+        [JsonPropertyName("estimated_eta")]
+        public string EstimatedEta { get; set; } = "";
+
+        [JsonPropertyName("pickup_verified")]
+        public bool PickupVerified { get; set; }
+
+        [JsonPropertyName("destination_verified")]
+        public bool DestinationVerified { get; set; }
+
+        [JsonPropertyName("timestamp")]
+        public string Timestamp { get; set; } = "";
     }
 }
