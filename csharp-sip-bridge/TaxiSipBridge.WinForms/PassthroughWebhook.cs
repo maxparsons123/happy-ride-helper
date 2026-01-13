@@ -231,6 +231,128 @@ namespace TaxiSipBridge.WinForms
         }
 
         #endregion
+
+        #region Example Handler
+
+        /// <summary>
+        /// Example: Wire this to your HTTP listener. Returns the JSON response string.
+        /// </summary>
+        public static async Task<string> HandleWebhookAsync(
+            string requestJson,
+            Func<WebhookRequest, Task<AddressValidationResult>> validatePickup,
+            Func<WebhookRequest, Task<AddressValidationResult>> validateDestination,
+            Func<double, double, double, double, int, Task<(decimal Fare, int EtaMinutes)>> calculateFare)
+        {
+            try
+            {
+                var request = ParseRequest(requestJson);
+                Console.WriteLine($"📥 Webhook: call_id={request.CallId}, transcript={request.Transcript}");
+
+                var response = new WebhookResponse { SessionState = request.SessionState ?? new() };
+
+                // Get addresses from STT or Ada
+                string sttPickup = request.AddressSources?.Stt?.Pickup;
+                string sttDestination = request.AddressSources?.Stt?.Destination;
+                string adaPickup = request.AddressSources?.Ada?.Pickup;
+                string adaDestination = request.AddressSources?.Ada?.Destination;
+                int passengers = request.Booking?.Passengers ?? 1;
+
+                double pickupLat = GetSessionValue(request, "pickup_lat", 0.0);
+                double pickupLon = GetSessionValue(request, "pickup_lon", 0.0);
+                double dropoffLat = GetSessionValue(request, "dropoff_lat", 0.0);
+                double dropoffLon = GetSessionValue(request, "dropoff_lon", 0.0);
+
+                string validatedPickup = GetSessionValue(request, "validated_pickup", "");
+                string validatedDestination = GetSessionValue(request, "validated_destination", "");
+
+                // ---------------------------------------------------------
+                // VALIDATE PICKUP (if new one provided)
+                // ---------------------------------------------------------
+                if (!string.IsNullOrWhiteSpace(sttPickup) && string.IsNullOrWhiteSpace(validatedPickup))
+                {
+                    var result = await validatePickup(request);
+                    if (result.IsValid)
+                    {
+                        validatedPickup = result.FormattedAddress;
+                        pickupLat = result.Lat;
+                        pickupLon = result.Lon;
+
+                        response.AdaPickup = validatedPickup;
+                        response.SessionState["validated_pickup"] = validatedPickup;
+                        response.SessionState["pickup_lat"] = pickupLat;
+                        response.SessionState["pickup_lon"] = pickupLon;
+                    }
+                    else
+                    {
+                        return SerializeResponse(Ask(result.ErrorMessage ?? 
+                            "I couldn't find that pickup. Could you give me a postcode?"));
+                    }
+                }
+
+                // ---------------------------------------------------------
+                // VALIDATE DESTINATION (if new one provided)
+                // ---------------------------------------------------------
+                if (!string.IsNullOrWhiteSpace(sttDestination) && string.IsNullOrWhiteSpace(validatedDestination))
+                {
+                    var result = await validateDestination(request);
+                    if (result.IsValid)
+                    {
+                        validatedDestination = result.FormattedAddress;
+                        dropoffLat = result.Lat;
+                        dropoffLon = result.Lon;
+
+                        response.AdaDestination = validatedDestination;
+                        response.SessionState["validated_destination"] = validatedDestination;
+                        response.SessionState["dropoff_lat"] = dropoffLat;
+                        response.SessionState["dropoff_lon"] = dropoffLon;
+                    }
+                    else
+                    {
+                        return SerializeResponse(Ask(result.ErrorMessage ?? 
+                            "I couldn't find that destination. Could you give me more details?"));
+                    }
+                }
+
+                // ---------------------------------------------------------
+                // DETERMINE NEXT STEP
+                // ---------------------------------------------------------
+                bool hasPickup = !string.IsNullOrWhiteSpace(validatedPickup) || !string.IsNullOrWhiteSpace(adaPickup);
+                bool hasDestination = !string.IsNullOrWhiteSpace(validatedDestination) || !string.IsNullOrWhiteSpace(adaDestination);
+
+                if (!hasPickup)
+                {
+                    return SerializeResponse(Ask("Where would you like to be picked up from?"));
+                }
+                if (!hasDestination)
+                {
+                    return SerializeResponse(Ask("And where are you heading to?"));
+                }
+                if (passengers <= 0)
+                {
+                    return SerializeResponse(Ask("How many passengers?"));
+                }
+
+                // ---------------------------------------------------------
+                // CALCULATE FARE & CONFIRM
+                // ---------------------------------------------------------
+                var (fare, eta) = await calculateFare(pickupLat, pickupLon, dropoffLat, dropoffLon, passengers);
+
+                response.AdaResponse = $"Brilliant! That's booked from {validatedPickup ?? adaPickup} to " +
+                    $"{validatedDestination ?? adaDestination}. The fare is £{fare:F2} and your driver will be " +
+                    $"with you in {eta} minutes. Anything else?";
+                response.BookingConfirmed = true;
+                response.SessionState["booking_confirmed"] = true;
+
+                return SerializeResponse(response);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Webhook error: {ex.Message}");
+                return SerializeResponse(Error());
+            }
+        }
+
+        #endregion
     }
 
     // -----------------------------------------------------------------
