@@ -7201,22 +7201,37 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (bookingMode === "raw") {
             console.log(`[${callId}] 📦 RAW PASSTHROUGH: Sending booking to external webhook`);
             
+            // Build passenger_booking from what the caller said (user turns only)
+            const passengerSaid = transcriptHistory
+              .filter(t => t.role === "user")
+              .map(t => t.text)
+              .join(" | ");
+            
+            // Build ada_booking from what Ada extracted (structured summary)
+            const pickup = args.pickup || knownBooking.pickup || "";
+            const destination = args.destination || knownBooking.destination || "";
+            const passengers = Number(args.passengers || knownBooking.passengers || 1);
+            const luggage = args.luggage || knownBooking.luggage || null;
+            const pickupTime = args.pickup_time || "ASAP";
+            const vehicleType = args.vehicle_type || null;
+            
+            const adaExtracted = [
+              `Pickup: ${pickup}`,
+              `Destination: ${destination}`,
+              `Passengers: ${passengers}`,
+              luggage ? `Luggage: ${luggage}` : null,
+              `Time: ${pickupTime}`,
+              vehicleType ? `Vehicle: ${vehicleType}` : null,
+              callerName ? `Name: ${callerName}` : null
+            ].filter(Boolean).join(", ");
+            
+            // Simple payload: just two strings
             const rawPayload = {
               call_id: callId,
               phone: userPhone || "unknown",
-              caller_name: callerName || null,
-              // Raw booking details - EXACTLY as Ada collected them
-              pickup: args.pickup || knownBooking.pickup || "",
-              destination: args.destination || knownBooking.destination || "",
-              passengers: Number(args.passengers || knownBooking.passengers || 1),
-              luggage: args.luggage || knownBooking.luggage || null,
-              pickup_time: args.pickup_time || "ASAP",
-              vehicle_type: args.vehicle_type || null,
-              // Transcript for context
-              transcript: transcriptHistory.map(t => `${t.role}: ${t.text}`).join("\n"),
-              // Metadata
-              timestamp: new Date().toISOString(),
-              mode: "raw_passthrough"
+              passenger_booking: passengerSaid,  // What the caller said
+              ada_booking: adaExtracted,          // What Ada understood
+              timestamp: new Date().toISOString()
             };
             
             // Determine endpoint
@@ -7275,9 +7290,9 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 if (bookingConfirmed) {
                   activeBooking = {
                     id: webhookData.job_id || webhookData.jobid || webhookData.reference || `raw-${Date.now()}`,
-                    pickup: rawPayload.pickup,
-                    destination: rawPayload.destination,
-                    passengers: rawPayload.passengers,
+                    pickup: pickup,
+                    destination: destination,
+                    passengers: passengers,
                     fare: webhookData.fare || "TBC",
                     booked_at: new Date().toISOString()
                   };

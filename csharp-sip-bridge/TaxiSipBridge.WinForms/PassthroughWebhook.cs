@@ -910,37 +910,16 @@ namespace TaxiSipBridge.WinForms
         [JsonPropertyName("phone")]
         public string Phone { get; set; } = "";
 
-        [JsonPropertyName("caller_name")]
-        public string CallerName { get; set; } = "";
+        /// <summary>What the caller said (all user turns joined by " | ")</summary>
+        [JsonPropertyName("passenger_booking")]
+        public string PassengerBooking { get; set; } = "";
 
-        // RAW booking details - exactly as the caller said them
-        [JsonPropertyName("pickup")]
-        public string Pickup { get; set; } = "";
-
-        [JsonPropertyName("destination")]
-        public string Destination { get; set; } = "";
-
-        [JsonPropertyName("passengers")]
-        public int Passengers { get; set; } = 1;
-
-        [JsonPropertyName("luggage")]
-        public string Luggage { get; set; } = "";
-
-        [JsonPropertyName("pickup_time")]
-        public string PickupTime { get; set; } = "";
-
-        [JsonPropertyName("vehicle_type")]
-        public string VehicleType { get; set; } = "";
-
-        // Conversation transcript for context
-        [JsonPropertyName("transcript")]
-        public string Transcript { get; set; } = "";
+        /// <summary>What Ada extracted: "Pickup: X, Destination: Y, Passengers: N, ..."</summary>
+        [JsonPropertyName("ada_booking")]
+        public string AdaBooking { get; set; } = "";
 
         [JsonPropertyName("timestamp")]
         public string Timestamp { get; set; } = "";
-
-        [JsonPropertyName("mode")]
-        public string Mode { get; set; } = "raw_passthrough";
     }
 
     /// <summary>
