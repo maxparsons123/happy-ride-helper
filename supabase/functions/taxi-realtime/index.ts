@@ -5965,14 +5965,33 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
             /^\s*\d+(\s+\d+){10,}\s*$/,  // Long sequences of numbers
           ];
           
-          // CONTEXTUAL BYE/GOODBYE FILTER:
-          // Only treat "bye" as hallucination if conversation is young (<2 user turns)
-          // If user has spoken substantively, they might genuinely be saying goodbye
+          // GHOST AUDIO FILTER (CRITICAL):
+          // Detects residual audio from previous calls that gets transcribed at call start.
+          // Common patterns: "thank you bye-bye", "cheers mate", "thanks bye" from previous call endings.
+          // If user hasn't had a chance to respond yet, goodbye-like phrases are almost certainly ghost audio.
           const userTurnCount = transcriptHistory.filter(m => m.role === "user").length;
+          
+          // Pattern 1: Simple bye phrases at start of call
           const byePatterns = [/^bye\.?$/i, /^goodbye\.?$/i, /^bye[\s-]?bye\.?$/i];
           const isByePhrase = byePatterns.some(p => p.test(t));
           if (isByePhrase && userTurnCount < 2) {
-            console.log(`[${callId}] 🚫 Hallucination detected: "${t}" appears too early (only ${userTurnCount} user turns)`);
+            console.log(`[${callId}] 🚫 Ghost audio detected: "${t}" appears too early (only ${userTurnCount} user turns)`);
+            return true;
+          }
+          
+          // Pattern 2: Thank-you/goodbye combinations appearing before user has engaged
+          // e.g., "Thank you very much. Thank you. Bye-bye." from a previous call
+          const thankByePhrases = /thank\s*you.*bye|bye.*thank|cheers.*bye|thanks.*bye|bye.*cheers|bye.*thanks|thank you.*thank you/i;
+          if (thankByePhrases.test(t) && userTurnCount < 1) {
+            console.log(`[${callId}] 🔮 Ghost audio detected: "${t}" is a thank-you-bye combination at call start`);
+            return true;
+          }
+          
+          // Pattern 3: Generic farewell phrases at the very start of a call (0 user turns)
+          // These are almost certainly from the previous call's ending
+          const farewellAtStart = /^(cheers|cheers mate|thanks mate|thank you|thanks|safe travels|take care|have a good|lovely speaking|nice talking)/i;
+          if (farewellAtStart.test(t) && userTurnCount === 0) {
+            console.log(`[${callId}] 🔮 Ghost audio detected: "${t}" is a farewell phrase at call start (0 user turns)`);
             return true;
           }
           
