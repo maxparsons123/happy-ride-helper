@@ -7789,6 +7789,57 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             type: "booking_confirmed",
             booking: { ...finalBooking, fare: `£${fare}`, eta }
           }));
+          
+          // =============================================
+          // DISPATCH WEBHOOK - Send booking to external system
+          // =============================================
+          const dispatchWebhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          if (dispatchWebhookUrl) {
+            const webhookPayload = {
+              event: "booking_confirmed",
+              call_id: callId,
+              caller_phone: userPhone,
+              caller_name: callerName,
+              pickup: finalBooking.pickup,
+              pickup_name: finalBooking.pickupName || null,
+              destination: finalBooking.destination,
+              destination_name: finalBooking.destinationName || null,
+              passengers: finalBooking.passengers,
+              luggage: finalBooking.luggage || null,
+              vehicle_type: finalBooking.vehicleType || "saloon",
+              pickup_time: isAsap ? "ASAP" : scheduledTime,
+              fare: `£${fare}`,
+              eta: isAsap ? eta : null,
+              scheduled_for: scheduledTime || null,
+              booked_at: new Date().toISOString()
+            };
+            
+            console.log(`[${callId}] 📤 Sending booking to dispatch webhook: ${dispatchWebhookUrl}`);
+            
+            // Fire-and-forget: don't block the call for webhook response
+            (async () => {
+              try {
+                const webhookResponse = await fetch(dispatchWebhookUrl, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Call-ID": callId,
+                    "X-Event-Type": "booking_confirmed"
+                  },
+                  body: JSON.stringify(webhookPayload)
+                });
+                
+                if (webhookResponse.ok) {
+                  const responseData = await webhookResponse.text();
+                  console.log(`[${callId}] ✅ Dispatch webhook success: ${webhookResponse.status} - ${responseData.substring(0, 200)}`);
+                } else {
+                  console.error(`[${callId}] ❌ Dispatch webhook error: ${webhookResponse.status} ${webhookResponse.statusText}`);
+                }
+              } catch (webhookError) {
+                console.error(`[${callId}] ❌ Dispatch webhook failed:`, webhookError);
+              }
+            })();
+          }
         }
         
         // Handle cancel_booking function
