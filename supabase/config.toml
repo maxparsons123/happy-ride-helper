@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.taxi-dispatch-callback]
 verify_jwt = false
+
+[functions.taxi-passthrough-ws]
+verify_jwt = false
