@@ -436,17 +436,32 @@ export default function LiveCalls() {
     const currentPickup = callData.pickup;
     const currentDestination = callData.destination;
     
-    // Clear stale geocode results when addresses change significantly
+    // Check if addresses actually changed
     const pickupChanged = prevPickup !== currentPickup;
     const destinationChanged = prevDestination !== currentDestination;
     
-    if (pickupChanged || destinationChanged) {
-      console.log("[LiveCalls] Booking addresses changed - clearing stale geocode results");
-      if (pickupChanged) setPickupGeocode(null);
-      if (destinationChanged) setDestinationGeocode(null);
-      if (pickupChanged || destinationChanged) setTripResolveResult(null);
-      prevBookingRef.current = { pickup: currentPickup, destination: currentDestination };
+    // CRITICAL: Only geocode if addresses actually changed
+    // This prevents refreshing on every realtime update (transcript changes, etc.)
+    if (!pickupChanged && !destinationChanged) {
+      return; // No change in addresses, skip geocoding
     }
+    
+    console.log("[LiveCalls] Booking addresses changed - triggering geocode", {
+      pickupChanged,
+      destinationChanged,
+      prevPickup,
+      currentPickup,
+      prevDestination,
+      currentDestination
+    });
+    
+    // Clear stale geocode results when addresses change
+    if (pickupChanged) setPickupGeocode(null);
+    if (destinationChanged) setDestinationGeocode(null);
+    setTripResolveResult(null);
+    
+    // Update ref BEFORE geocoding to prevent re-triggers
+    prevBookingRef.current = { pickup: currentPickup, destination: currentDestination };
 
     // Use taxi-trip-resolve if enabled, otherwise fallback to basic geocode
     if (useTripResolver) {
