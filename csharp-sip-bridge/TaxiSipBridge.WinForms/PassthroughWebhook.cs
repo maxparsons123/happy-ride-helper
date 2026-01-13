@@ -247,6 +247,33 @@ namespace TaxiSipBridge.WinForms
         }
 
         /// <summary>
+        /// Convert incoming WebhookRequest to your BookTaxiResponse for processing
+        /// </summary>
+        public static BookTaxiResponse ToBookTaxiResponse(WebhookRequest request)
+        {
+            return new BookTaxiResponse
+            {
+                pickup_location = request?.AddressSources?.Stt?.Pickup 
+                    ?? request?.AddressSources?.Ada?.Pickup 
+                    ?? request?.Booking?.Pickup ?? "",
+                dropoff_location = request?.AddressSources?.Stt?.Destination 
+                    ?? request?.AddressSources?.Ada?.Destination 
+                    ?? request?.Booking?.Destination ?? "",
+                pickup_time = request?.Booking?.PickupTime ?? "",
+                number_of_passengers = request?.Booking?.Passengers ?? 1,
+                luggage = request?.Booking?.Luggage ?? "",
+                special_requests = request?.Booking?.SpecialRequests ?? "",
+                username = request?.CallerName ?? "",
+                usertelephone = request?.CallerPhone ?? "",
+                jobid = request?.CallId ?? "",
+                Rawjson = "",
+                bookingmessage = "",
+                userlat = GetSessionValue(request, "pickup_lat", 0.0),
+                userlon = GetSessionValue(request, "pickup_lon", 0.0)
+            };
+        }
+
+        /// <summary>
         /// Convert your existing BookTaxiResponse to a webhook response for Ada
         /// </summary>
         public static WebhookResponse FromBookTaxiResponse(
