@@ -7004,7 +7004,22 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         console.log(`[${callId}] Function call: ${data.name}`, data.arguments);
         
         if (data.name === "book_taxi") {
-          const args = JSON.parse(data.arguments);
+          let args: any = {};
+          try {
+            args = JSON.parse(data.arguments || "{}");
+          } catch (e) {
+            console.error(`[${callId}] ⚠️ book_taxi args parse error:`, e);
+            args = {};
+          }
+
+          // Back-compat / schema normalization
+          // - our tool schema uses `bags`, existing booking logic uses `luggage`
+          if (args.luggage === undefined && args.bags !== undefined) {
+            args.luggage = args.bags;
+          }
+          if (!args.pickup_time) {
+            args.pickup_time = "ASAP";
+          }
 
           // TRAVEL HUB LUGGAGE CHECK: Block booking if trip involves airport/station but luggage unknown
           const pickupForCheck = knownBooking.pickup ?? args.pickup;
@@ -7736,7 +7751,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
           if (!explicitCancel || explicitKeep) {
             console.log(`[${callId}] 🛑 Cancel blocked (no explicit cancel in transcript)`);
 
-            // Tell the model to ask for a clear confirmation instead of cancelling.
+            // IMPORTANT: Do NOT tell the customer cancellation "failed".
+            // This is a safety block (unclear intent), not a backend failure.
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -7745,8 +7761,8 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 output: JSON.stringify({
                   success: false,
                   blocked: true,
-                  message: "Cancellation blocked: no clear cancel request.",
-                  next_action: "Ask: keep it, change it, or cancel it (say 'cancel it')."
+                  message: "Cancellation not confirmed (transcript unclear).",
+                  next_action: "Ask one short question: keep it, change it, or cancel it. Do NOT claim you tried to cancel."
                 })
               }
             }));
@@ -7755,7 +7771,7 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               type: "response.create",
               response: {
                 modalities: ["audio", "text"],
-                instructions: "Ask ONE short question: 'Sorry—do you want to keep it, change it, or cancel it? Say keep it, change it, or cancel it.' Do NOT cancel yet."
+                instructions: "Ask ONE short question: 'Sorry—do you want to keep it, change it, or cancel it?' Do NOT mention cancellation errors or retries."
               }
             }));
 
@@ -7864,7 +7880,43 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // Handle modify_booking function
         if (data.name === "modify_booking") {
-          const args = JSON.parse(data.arguments);
+          let rawArgs: any = {};
+          try {
+            rawArgs = JSON.parse(data.arguments || "{}");
+          } catch (e) {
+            console.error(`[${callId}] ⚠️ modify_booking args parse error:`, e);
+            rawArgs = {};
+          }
+
+          // Back-compat / schema normalization:
+          // - New schema: { field_to_change, new_value }
+          // - Legacy schema: { new_pickup, new_destination, new_passengers, new_vehicle_type }
+          const args: any = { ...rawArgs };
+          if (args.field_to_change && typeof args.new_value === "string") {
+            const field = String(args.field_to_change);
+            const v = args.new_value;
+            if (field === "pickup") args.new_pickup = v;
+            if (field === "destination") args.new_destination = v;
+            if (field === "vehicle") args.new_vehicle_type = v;
+            if (field === "time") args.new_pickup_time = v;
+            if (field === "passengers") {
+              const n = parseInt(v, 10);
+              if (!Number.isNaN(n)) args.new_passengers = n;
+            }
+            if (field === "bags") {
+              const n = parseInt(v, 10);
+              if (!Number.isNaN(n)) args.new_luggage = n;
+            }
+          }
+
+          // Also accept numeric new_value for passengers/bags
+          if (args.field_to_change === "passengers" && typeof args.new_value === "number") {
+            args.new_passengers = args.new_value;
+          }
+          if (args.field_to_change === "bags" && typeof args.new_value === "number") {
+            args.new_luggage = args.new_value;
+          }
+
           console.log(`[${callId}] ✏️ Modify booking requested:`, args);
           
           // If activeBooking not set but we have phone, try to look it up
@@ -8339,16 +8391,21 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // Handle find_nearby_places function - recommend venues/places to go
         if (data.name === "find_nearby_places") {
-          const args = JSON.parse(data.arguments);
-          console.log(`[${callId}] 🔍 find_nearby_places called: category=${args.category}, context=${args.context_address || 'auto'}`);
+          let args: any = {};
+          try {
+            args = JSON.parse(data.arguments || "{}");
+          } catch (e) {
+            console.error(`[${callId}] ⚠️ find_nearby_places args parse error:`, e);
+            args = {};
+          }
+
+          // Back-compat: allow either `context_address` (legacy) or `location_hint` (new schema)
+          const contextAddress = args.context_address || args.location_hint || knownBooking.pickup || knownBooking.destination;
+          console.log(`[${callId}] 🔍 find_nearby_places called: category=${args.category}, context=${contextAddress || 'auto'}`);
           
           // Determine location context for search (pickup → destination → callerCity)
           let searchCity = callerCity;
           let searchCoords: { lat: number; lng: number } | null = null;
-          
-          // Use provided context address or infer from booking state
-          const contextAddress = args.context_address || knownBooking.pickup || knownBooking.destination;
-          
           if (contextAddress) {
             // Try to extract city from the context address
             const cities = [
