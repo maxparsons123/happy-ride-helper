@@ -5912,20 +5912,101 @@ IMPORTANT: Listen for BOTH their name AND their area (city/town like Coventry, B
         
         // CONTEXTUAL PHANTOM FILTER: Filter "Thank you." or "Bye." ONLY if:
         // It appears right after Ada stopped speaking (likely echo/phantom)
+        // INTELLIGENT SEMANTIC COHERENCE FILTER
+        // Detects what type of response Ada is expecting and filters out nonsense
+        const getExpectedResponseType = (adaText: string): string => {
+          const t = adaText.toLowerCase();
+          // Booking options (keep/change/cancel)
+          if (/keep.*change.*cancel|keep it.*cancel|would you like to (keep|cancel)|active booking/.test(t)) return "booking_choice";
+          // Asking for address/location
+          if (/where.*pick|pickup.*address|pick you up from|where.*from|where.*going|destination|drop.*off|where to/i.test(t)) return "address";
+          // Asking for passengers
+          if (/how many (passengers|people)|passengers.*there/i.test(t)) return "number";
+          // Asking for time
+          if (/when.*need|what time|for now or later|asap or/i.test(t)) return "time";
+          // Asking for postcode
+          if (/postcode|post code|zip|area code/i.test(t)) return "postcode";
+          // Yes/no question
+          if (/shall i book|want me to book|is that correct|confirm|right\?|ok\?|okay\?/i.test(t)) return "yes_no";
+          // Anything else?
+          if (/anything else|else i can help|else for you/i.test(t)) return "farewell_or_request";
+          // General question
+          if (/\?$/.test(t.trim())) return "question";
+          return "unknown";
+        };
+        
+        const isCoherentResponse = (transcript: string, expectedType: string): boolean => {
+          const t = transcript.trim().toLowerCase();
+          const wordCount = t.split(/\s+/).length;
+          
+          // Very short transcripts (1 word) need stricter validation
+          if (wordCount === 1) {
+            // Single words that are ALWAYS valid regardless of context
+            const universallyValid = /^(yes|no|yeah|yep|nope|nah|please|okay|ok|cancel|asap|now|one|two|three|four|five|six|seven|eight|nine|ten|\d+)$/i;
+            if (universallyValid.test(t)) return true;
+            
+            // Single word that doesn't match expected type is likely phantom
+            switch (expectedType) {
+              case "booking_choice":
+                return /^(keep|cancel|change|yes|no)$/i.test(t);
+              case "address":
+                // Single word addresses are rare - allow common landmarks
+                return /^(airport|station|hospital|hotel|home|work|centre|center)$/i.test(t);
+              case "number":
+                return /^\d+$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(t);
+              case "time":
+                return /^(now|asap|later|today|tomorrow|\d+)$/i.test(t);
+              case "yes_no":
+                return /^(yes|no|yeah|yep|nope|nah|please|correct|right)$/i.test(t);
+              case "farewell_or_request":
+                return /^(no|nope|bye|goodbye|thanks|cheers|yes|actually)$/i.test(t);
+              default:
+                // Unknown context - be more permissive but still filter obvious noise
+                return !/^(you|by|buy|the|a|an|um|uh|er|hmm)$/i.test(t);
+            }
+          }
+          
+          // 2+ words - be more permissive
+          return true;
+        };
+        
         const isContextualPhantom = (text: string): boolean => {
           const t = text.trim().toLowerCase();
-          // These short phrases are often phantoms when they appear right after Ada speaks
-          // Include "you" - very common STT phantom from noise/echo that sounds like "bye"
-          const phantomCandidates = ['thank you', 'thanks', 'bye', 'goodbye', 'cheers', 'you', 'by', 'buy'];
+          const wordCount = t.split(/\s+/).length;
           
-          // Check if it's a short phantom-candidate phrase
-          const isShortPhrase = phantomCandidates.some(p => t === p || t === p + '.');
-          if (!isShortPhrase) return false;
+          // Get Ada's last response for context
+          const lastAdaResponse = [...transcriptHistory].reverse().find(m => m.role === "assistant")?.text || "";
+          const expectedType = getExpectedResponseType(lastAdaResponse);
+          const timeSinceAda = aiStoppedSpeakingAt > 0 ? Date.now() - aiStoppedSpeakingAt : Infinity;
           
-          // Check if Ada just finished speaking (within 800ms) - likely a phantom/echo
-          if (aiStoppedSpeakingAt > 0 && Date.now() - aiStoppedSpeakingAt < 800) {
-            console.log(`[${callId}] 🔇 Contextual phantom: "${text}" appeared ${Date.now() - aiStoppedSpeakingAt}ms after Ada finished`);
+          // PHASE 1: Time-based phantom detection (echo shortly after Ada speaks)
+          const echoWindowMs = 800;
+          const isInEchoWindow = timeSinceAda < echoWindowMs;
+          
+          // Known phantom phrases that appear as echo/noise
+          const phantomCandidates = ['thank you', 'thanks', 'bye', 'goodbye', 'cheers', 'you', 'by', 'buy', 'the', 'a', 'um', 'uh', 'hmm'];
+          const isKnownPhantom = phantomCandidates.some(p => t === p || t === p + '.');
+          
+          if (isKnownPhantom && isInEchoWindow) {
+            console.log(`[${callId}] 🔇 Echo phantom: "${text}" appeared ${timeSinceAda}ms after Ada finished`);
             return true;
+          }
+          
+          // PHASE 2: Semantic coherence check (does the response make sense?)
+          // Only apply to short transcripts (1-2 words) to avoid false positives on real speech
+          if (wordCount <= 2 && !isCoherentResponse(t, expectedType)) {
+            console.log(`[${callId}] 🔇 Incoherent response: "${text}" doesn't match expected type "${expectedType}" (Ada asked: "${lastAdaResponse.substring(0, 50)}...")`);
+            return true;
+          }
+          
+          // PHASE 3: Very short + very soon = almost certainly phantom
+          if (wordCount === 1 && timeSinceAda < 500) {
+            // Single word appearing within 500ms - check if it's a meaningful response
+            const meaningfulSingleWords = /^(yes|no|yeah|nope|cancel|asap|now|one|two|three|please|\d+)$/i;
+            if (!meaningfulSingleWords.test(t)) {
+              console.log(`[${callId}] 🔇 Quick phantom: single word "${text}" appeared ${timeSinceAda}ms after Ada`);
+              return true;
+            }
           }
           
           return false;
