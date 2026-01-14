@@ -515,22 +515,47 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
+              const payloadJson = JSON.stringify(webhookPayload);
+              console.log(
+                `[${sessionState.callId}] 📦 Dispatch payload bytes: ${payloadJson.length} (job_id=${jobId})`
+              );
+
               const webhookResp = await fetch(webhookUrl, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(webhookPayload)
+                headers: {
+                  "Content-Type": "application/json; charset=utf-8",
+                  "Accept": "application/json",
+                  "X-Job-Id": jobId,
+                  "X-Call-Id": sessionState.callId,
+                },
+                // Send as bytes to avoid any server issues with string/chunked decoding
+                body: new TextEncoder().encode(payloadJson),
               });
-              
+
+              const respText = await webhookResp.text();
+              console.log(
+                `[${sessionState.callId}] 📥 Dispatch HTTP ${webhookResp.status} body_bytes=${respText.length}`
+              );
+
               if (webhookResp.ok) {
-                const dispatchResult = await webhookResp.json();
+                let dispatchResult: any = {};
+                try {
+                  dispatchResult = respText ? JSON.parse(respText) : {};
+                } catch (parseErr) {
+                  console.error(
+                    `[${sessionState.callId}] Dispatch response JSON parse failed (showing first 300 chars): ${respText.slice(0, 300)}`
+                  );
+                  dispatchResult = {};
+                }
+
                 console.log(`[${sessionState.callId}] 📥 Dispatch response:`, dispatchResult);
-                
+
                 // Use fare/ETA from your dispatch system
                 fare = dispatchResult.fare || fare;
                 etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
                 bookingRef = dispatchResult.booking_ref || dispatchResult.job_id || jobId;
                 distance = dispatchResult.distance || dispatchResult.distance_miles || null;
-                
+
                 // Update pickup/destination if dispatch provides validated addresses
                 if (dispatchResult.pickup_address) {
                   sessionState.booking.pickup = dispatchResult.pickup_address;
@@ -539,7 +564,9 @@ serve(async (req) => {
                   sessionState.booking.destination = dispatchResult.destination_address;
                 }
               } else {
-                console.error(`[${sessionState.callId}] Webhook error: ${webhookResp.status}`);
+                console.error(
+                  `[${sessionState.callId}] Webhook error: ${webhookResp.status} body=${respText.slice(0, 300)}`
+                );
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] Webhook failed:`, webhookErr);
