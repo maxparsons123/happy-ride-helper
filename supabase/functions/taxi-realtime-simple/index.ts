@@ -145,37 +145,39 @@ const STT_CORRECTIONS: Record<string, string> = {
 };
 
 // Hallucination patterns to reject entirely (return empty string)
+// NOTE: keep this conservative — we must NOT discard valid short answers like "no" or "three".
 const HALLUCINATION_PATTERNS = [
-  /^(thank you[.,!]?\s*)+$/i,                    // Repeated "Thank you. Thank you."
-  /^(okay[.,!]?\s*)+$/i,                         // Repeated "Okay. Okay."
-  /^(bye[.,!]?\s*)+$/i,                          // Repeated "Bye. Bye."
-  /^(yes[.,!]?\s*)+$/i,                          // Repeated "Yes. Yes."
-  /^(no[.,!]?\s*)+$/i,                           // Repeated "No. No."
-  /^(uh+[.,!]?\s*)+$/i,                          // "Uh. Uh. Uh."
-  /^(um+[.,!]?\s*)+$/i,                          // "Um. Um."
-  /^(k[.,!]?\s*)+$/i,                            // "K. K."
-  /^\.+$/,                                        // Just dots
-  /^\s*$/,                                        // Empty/whitespace
-  /^(you can bring|bring them|apples|oranges)/i, // Nonsense phrases
+  /^(thank you[.,!]?\s*){2,}$/i,                 // repeated "Thank you"
+  /^(thanks[.,!]?\s*){2,}$/i,                    // repeated "Thanks"
+  /^(okay[.,!]?\s*){2,}$/i,                      // repeated "Okay"
+  /^(ok[.,!]?\s*){2,}$/i,                        // repeated "Ok"
+  /^(bye[.,!]?\s*){2,}$/i,                       // repeated "Bye"
+  /^(you can bring|bring them|apples|oranges)/i,  // known nonsense phrases
+  /^\.+$/,                                       // just dots
 ];
+
+// Valid short utterances that should NEVER be treated as hallucinations
+const ALLOWED_SHORT_UTTERANCE =
+  /^(yes|no|yeah|yep|nope|nah|ok|okay|k|thanks|thank you|asap|now|one|two|three|four|five|six|seven|eight|nine|ten|\d+)$/i;
 
 function isHallucination(text: string): boolean {
   const trimmed = text.trim();
-  if (trimmed.length < 2) return true;
-  
+  if (!trimmed) return true;
+
+  // Preserve critical short replies (passenger counts, yes/no, etc.)
+  if (ALLOWED_SHORT_UTTERANCE.test(trimmed)) return false;
+
   for (const pattern of HALLUCINATION_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return true;
-    }
+    if (pattern.test(trimmed)) return true;
   }
-  
-  // Check for excessive repetition (same word 3+ times)
+
+  // Excessive repetition (same word 3+ times) — usually echo/hallucination
   const words = trimmed.toLowerCase().split(/\s+/);
   if (words.length >= 3) {
-    const uniqueWords = new Set(words.filter(w => w.length > 1));
-    if (uniqueWords.size === 1) return true; // All same word
+    const unique = new Set(words);
+    if (unique.size === 1) return true;
   }
-  
+
   return false;
 }
 
@@ -185,14 +187,20 @@ function correctTranscript(text: string): string {
     console.log(`[STT] Rejected hallucination: "${text}"`);
     return "";
   }
-  
-  let corrected = text.toLowerCase();
+
+  // Apply ALL corrections (not first-match), so phrases like
+  // "Truth to a Day with Rod" can become "52A David Road".
+  let out = text;
+  let outLower = out.toLowerCase();
+
   for (const [bad, good] of Object.entries(STT_CORRECTIONS)) {
-    if (corrected.includes(bad)) {
-      return text.replace(new RegExp(bad, "gi"), good);
+    if (outLower.includes(bad)) {
+      out = out.replace(new RegExp(bad, "gi"), good);
+      outLower = out.toLowerCase();
     }
   }
-  return text;
+
+  return out;
 }
 
 // --- Session State ---
