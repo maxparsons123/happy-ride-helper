@@ -140,6 +140,12 @@ function correctTranscript(text: string): string {
 }
 
 // --- Session State ---
+interface TranscriptItem {
+  role: "user" | "assistant";
+  text: string;
+  timestamp: string;
+}
+
 interface SessionState {
   callId: string;
   phone: string;
@@ -154,7 +160,13 @@ interface SessionState {
     passengers: number | null;
     bags: number | null;
   };
-  transcripts: Array<{ role: string; text: string; timestamp: string }>;
+  transcripts: TranscriptItem[];
+
+  // Streaming assistant transcript assembly (OpenAI sends token deltas)
+  assistantTranscriptIndex: number | null;
+
+  // Debounced DB flush
+  transcriptFlushTimer: number | null;
 }
 
 serve(async (req) => {
@@ -252,6 +264,32 @@ serve(async (req) => {
     console.log(`[${sessionState.callId}] 📝 Session updated`);
   };
 
+  const flushTranscriptsToDb = async (sessionState: SessionState) => {
+    try {
+      const { error } = await supabase
+        .from("live_calls")
+        .update({
+          transcripts: sessionState.transcripts,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("call_id", sessionState.callId);
+
+      if (error) {
+        console.error(`[${sessionState.callId}] ❌ Failed to save transcripts:`, error);
+      }
+    } catch (e) {
+      console.error(`[${sessionState.callId}] ❌ Transcript flush exception:`, e);
+    }
+  };
+
+  const scheduleTranscriptFlush = (sessionState: SessionState) => {
+    if (sessionState.transcriptFlushTimer) return;
+    sessionState.transcriptFlushTimer = setTimeout(() => {
+      sessionState.transcriptFlushTimer = null;
+      flushTranscriptsToDb(sessionState);
+    }, 350) as unknown as number;
+  };
+
   // --- Handle OpenAI Messages ---
   const handleOpenAIMessage = (message: any, sessionState: SessionState) => {
     switch (message.type) {
@@ -269,50 +307,75 @@ serve(async (req) => {
         }));
         break;
 
-      case "response.audio_transcript.delta":
-        socket.send(JSON.stringify({
-          type: "transcript",
-          text: message.delta,
-          role: "assistant"
-        }));
-        break;
+      case "response.audio_transcript.delta": {
+        // Stream assistant transcript to bridge
+        const delta = String(message.delta || "");
+        socket.send(
+          JSON.stringify({
+            type: "transcript",
+            text: delta,
+            role: "assistant",
+          })
+        );
 
-      case "response.audio_transcript.done":
-        // Log assistant response
-        sessionState.transcripts.push({
-          role: "assistant",
-          text: message.transcript || "",
-          timestamp: new Date().toISOString()
-        });
-        // Save to database
-        supabase.from("live_calls")
-          .update({ transcripts: sessionState.transcripts, updated_at: new Date().toISOString() })
-          .eq("call_id", sessionState.callId)
-          .then(() => console.log(`[${sessionState.callId}] 💾 Saved assistant transcript`));
+        // Also persist to DB so the /live UI can show it
+        if (delta) {
+          if (sessionState.assistantTranscriptIndex === null) {
+            sessionState.transcripts.push({
+              role: "assistant",
+              text: delta,
+              timestamp: new Date().toISOString(),
+            });
+            sessionState.assistantTranscriptIndex = sessionState.transcripts.length - 1;
+          } else {
+            const idx = sessionState.assistantTranscriptIndex;
+            const prev = sessionState.transcripts[idx];
+            sessionState.transcripts[idx] = { ...prev, text: (prev.text || "") + delta };
+          }
+          scheduleTranscriptFlush(sessionState);
+        }
         break;
+      }
 
-      case "conversation.item.input_audio_transcription.completed":
+      case "response.audio_transcript.done": {
+        // Mark assistant transcript as finalized for next turn
+        sessionState.assistantTranscriptIndex = null;
+        scheduleTranscriptFlush(sessionState);
+        break;
+      }
+
+      case "conversation.item.input_audio_transcription.completed": {
         // User transcript from Whisper
-        const userText = correctTranscript(message.transcript || "");
+        const userText = correctTranscript(String(message.transcript || ""));
         console.log(`[${sessionState.callId}] 👤 User: "${userText}"`);
-        
-        socket.send(JSON.stringify({
-          type: "transcript",
-          text: userText,
-          role: "user"
-        }));
-        
-        sessionState.transcripts.push({
-          role: "user",
-          text: userText,
-          timestamp: new Date().toISOString()
-        });
-        // Save to database
-        supabase.from("live_calls")
-          .update({ transcripts: sessionState.transcripts, updated_at: new Date().toISOString() })
-          .eq("call_id", sessionState.callId)
-          .then(() => console.log(`[${sessionState.callId}] 💾 Saved user transcript`));
+
+        socket.send(
+          JSON.stringify({
+            type: "transcript",
+            text: userText,
+            role: "user",
+          })
+        );
+
+        if (userText) {
+          sessionState.transcripts.push({
+            role: "user",
+            text: userText,
+            timestamp: new Date().toISOString(),
+          });
+          scheduleTranscriptFlush(sessionState);
+        }
+
+        // IMPORTANT: Trigger assistant response after a user turn
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
         break;
+      }
+
+      case "input_audio_buffer.speech_stopped": {
+        // Fallback: sometimes Whisper event is delayed; ensure we trigger a response
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        break;
+      }
 
       case "response.function_call_arguments.done":
         handleFunctionCall(
@@ -530,7 +593,9 @@ serve(async (req) => {
           customerName: message.customer_name || null,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
-          transcripts: []
+          transcripts: [],
+          assistantTranscriptIndex: null,
+          transcriptFlushTimer: null
         };
 
         // Create live call record
