@@ -178,6 +178,7 @@ CRITICAL TOOL USAGE - READ CAREFULLY:
 - If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer. This is dispatch telling you something important (e.g., address issue).
 - If the result contains "needs_clarification: true" → Ask the customer the question in ada_message, then wait for their answer.
 - If the result contains "rejected: true" → Tell the customer we cannot process their booking using the ada_message.
+- If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call. Do NOT ask any follow-up questions.
 - If the result contains "success: true" → Say: "Booked! [ETA] minutes, [FARE]. Anything else?"
 - DO NOT make up fares or ETAs. You MUST use the values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
@@ -861,6 +862,22 @@ serve(async (req) => {
                 
                 // Check if dispatch sent a "say" message (look for dispatch transcript)
                 const transcripts = callData?.transcripts as any[] || [];
+                
+                // Check for hangup instruction first
+                const dispatchHangup = transcripts.find(t => 
+                  t.role === "dispatch_hangup" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchHangup) {
+                  console.log(`[${sessionState.callId}] 📞 Dispatch hangup: ${dispatchHangup.text}`);
+                  dispatchResult = {
+                    hangup: true,
+                    ada_message: dispatchHangup.text
+                  };
+                  break;
+                }
+                
                 const dispatchSay = transcripts.find(t => 
                   t.role === "dispatch" && 
                   new Date(t.timestamp).getTime() > pollStart
@@ -880,7 +897,19 @@ serve(async (req) => {
               }
               
               if (dispatchResult) {
-                if (dispatchResult.ada_message) {
+                // Check if dispatch requested hangup
+                if (dispatchResult.hangup) {
+                  console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
+                  result = {
+                    success: false,
+                    hangup: true,
+                    ada_message: dispatchResult.ada_message,
+                    message: "Dispatch requested call termination"
+                  };
+                  break;
+                }
+                
+                if (dispatchResult.ada_message && !dispatchResult.confirmed) {
                   console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
                   // Return early with the message - don't confirm booking yet
                   result = {

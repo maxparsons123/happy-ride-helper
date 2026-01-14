@@ -46,11 +46,18 @@ const corsHeaders = {
  *   "status": "rejected" | "no_cars",
  *   "message": "Sorry, we can't service that area."
  * }
+ * 
+ * 5. HANGUP - Instruct Ada to end the call:
+ * {
+ *   "call_id": "abc123",
+ *   "action": "hangup",
+ *   "message": "Goodbye!"  // optional - Ada will say this before hanging up
+ * }
  */
 
 interface DispatchCallback {
   call_id: string;
-  action: "confirm" | "ask" | "say";
+  action: "confirm" | "ask" | "say" | "hangup";
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
   eta?: string;
@@ -63,6 +70,7 @@ interface DispatchCallback {
   question?: string;
   context?: string;
   // For say action (uses message field)
+  // For hangup action - optional goodbye message
 }
 
 serve(async (req) => {
@@ -212,6 +220,56 @@ serve(async (req) => {
         call_id,
         action: "say",
         message: "Message sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: HANGUP - Instruct Ada to end the call
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === "hangup") {
+      const goodbyeMessage = message || "Goodbye!";
+      console.log(`[${call_id}] 📞 Dispatch hangup: "${goodbyeMessage}"`);
+
+      // Add hangup instruction to transcripts so polling can detect it
+      const { data: callData } = await supabase
+        .from("live_calls")
+        .select("transcripts")
+        .eq("call_id", call_id)
+        .single();
+
+      const transcripts = (callData?.transcripts as any[]) || [];
+      transcripts.push({
+        role: "dispatch_hangup",
+        text: goodbyeMessage,
+        timestamp: new Date().toISOString()
+      });
+
+      await supabase
+        .from("live_calls")
+        .update({
+          transcripts,
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", call_id);
+
+      await supabase.channel(`dispatch_${call_id}`).send({
+        type: "broadcast",
+        event: "dispatch_hangup",
+        payload: {
+          call_id,
+          action: "hangup",
+          message: goodbyeMessage,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "hangup",
+        message: "Hangup instruction sent to Ada"
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
