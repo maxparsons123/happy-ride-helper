@@ -448,7 +448,7 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "book_taxi":
+        case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
             pickup: args.pickup,
@@ -456,6 +456,52 @@ serve(async (req) => {
             passengers: args.passengers,
             bags: args.bags || 0
           };
+          
+          const jobId = crypto.randomUUID();
+          let fare = "£12.50";
+          let etaMinutes = 8;
+          let bookingRef = "";
+          let distance = "";
+          
+          // Call dispatch webhook if configured
+          const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          if (DISPATCH_WEBHOOK_URL) {
+            try {
+              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook...`);
+              const webhookPayload = {
+                job_id: jobId,
+                call_id: sessionState.callId,
+                caller_phone: sessionState.phone,
+                caller_name: sessionState.customerName,
+                ada_pickup: args.pickup,
+                ada_destination: args.destination,
+                passengers: args.passengers || 1,
+                bags: args.bags || 0,
+                vehicle_type: args.vehicle_type || "saloon",
+                pickup_time: args.pickup_time || "now",
+                timestamp: new Date().toISOString()
+              };
+              
+              const webhookResponse = await fetch(DISPATCH_WEBHOOK_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(webhookPayload)
+              });
+              
+              if (webhookResponse.ok) {
+                const dispatchResult = await webhookResponse.json();
+                console.log(`[${sessionState.callId}] ✅ Dispatch response:`, dispatchResult);
+                fare = dispatchResult.fare || fare;
+                etaMinutes = dispatchResult.eta_minutes || etaMinutes;
+                bookingRef = dispatchResult.booking_ref || "";
+                distance = dispatchResult.distance || "";
+              } else {
+                console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook failed: ${webhookResponse.status}`);
+              }
+            } catch (webhookErr) {
+              console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
+            }
+          }
           
           // Create booking in DB
           const { error: bookingError } = await supabase.from("bookings").insert({
@@ -465,7 +511,10 @@ serve(async (req) => {
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers || 1,
-            status: "confirmed"
+            fare: fare,
+            eta: `${etaMinutes} minutes`,
+            status: "confirmed",
+            booking_details: { job_id: jobId, booking_ref: bookingRef, distance: distance }
           });
           
           if (bookingError) {
@@ -474,11 +523,13 @@ serve(async (req) => {
           
           result = { 
             success: true, 
-            eta_minutes: 8, 
-            fare: "£12.50",
+            eta_minutes: etaMinutes, 
+            fare: fare,
+            booking_ref: bookingRef,
             message: "Booking confirmed"
           };
           break;
+        }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
