@@ -64,11 +64,13 @@ interface DispatchCallback {
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
   eta?: string;
+  eta_minutes?: number; // Numeric ETA alternative
   driver_name?: string;
   vehicle_reg?: string;
   vehicle_type?: string;
   fare?: string;
   message?: string;
+  booking_ref?: string; // Reference number for the booking
   // For ask action
   question?: string;
   context?: string;
@@ -95,15 +97,20 @@ serve(async (req) => {
       action,
       call_action,
       status, 
-      eta, 
+      eta,
+      eta_minutes,
       driver_name, 
       vehicle_reg, 
       vehicle_type, 
       fare, 
       message,
+      booking_ref,
       question,
       context 
     } = callback;
+    
+    // Normalize ETA: prefer eta_minutes if provided
+    const normalizedEta = eta_minutes ? `${eta_minutes} minutes` : eta;
 
     console.log(`[${call_id}] 📥 Dispatch callback: action=${action}, call_action=${call_action}`);
     console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
@@ -304,14 +311,17 @@ serve(async (req) => {
         if (driver_name) {
           parts.push(`Your driver ${driver_name} is on the way.`);
         }
-        if (eta) {
-          parts.push(`They'll be with you in ${eta}.`);
+        if (normalizedEta) {
+          parts.push(`They'll be with you in ${normalizedEta}.`);
         }
         if (vehicle_reg) {
           parts.push(`Look out for registration ${vehicle_reg}.`);
         }
         if (fare) {
-          parts.push(`The fare is ${fare}.`);
+          parts.push(`The fare is £${fare}.`);
+        }
+        if (booking_ref) {
+          parts.push(`Your booking reference is ${booking_ref}.`);
         }
         parts.push("Is there anything else I can help you with?");
         
@@ -332,7 +342,7 @@ serve(async (req) => {
         .from("live_calls")
         .update({
           status: bookingStatus,
-          eta: eta || null,
+          eta: normalizedEta || null,
           fare: fare || null,
           updated_at: new Date().toISOString()
         })
@@ -348,13 +358,14 @@ serve(async (req) => {
           status: "dispatched",
           updated_at: new Date().toISOString()
         };
-        if (eta) bookingUpdate.eta = eta;
+        if (normalizedEta) bookingUpdate.eta = normalizedEta;
         if (fare) bookingUpdate.fare = fare;
-        if (driver_name || vehicle_reg) {
+        if (driver_name || vehicle_reg || booking_ref) {
           bookingUpdate.booking_details = {
             driver_name: driver_name || null,
             vehicle_reg: vehicle_reg || null,
             vehicle_type: vehicle_type || null,
+            booking_ref: booking_ref || null,
             dispatched_at: new Date().toISOString()
           };
         }
@@ -373,10 +384,12 @@ serve(async (req) => {
           call_id,
           action: "confirm",
           status,
-          eta,
+          eta: normalizedEta,
+          eta_minutes,
           driver_name,
           vehicle_reg,
           fare,
+          booking_ref,
           confirmation_message: confirmationMessage
         }
       });
