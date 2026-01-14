@@ -9642,39 +9642,83 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         connectToOpenAI();
       }
 
-      // BINARY AUDIO PATH: Handle raw PCM bytes directly (no base64 overhead)
+      // BINARY AUDIO PATH: Handle raw audio bytes from bridge
+      // Bridge sends 8kHz µ-law (160 bytes/frame) - must decode + upsample to 24kHz PCM16 for OpenAI
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+        const rawBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+        
+        // Detect if this is 8kHz µ-law (160 bytes = 20ms at 8kHz) vs 24kHz PCM16 (960 bytes = 20ms at 24kHz)
+        const isUlaw8k = rawBytes.length === 160 || rawBytes.length === 320 && rawBytes.every(b => b !== 0); // 160 = µ-law, 320 = slin16
+        
+        let base64Audio: string;
+        
+        if (rawBytes.length === 160) {
+          // 8kHz µ-law from bridge - decode + upsample to 24kHz PCM16
+          // Step 1: Decode µ-law to 16-bit PCM (8kHz)
+          const pcm16_8k = new Int16Array(rawBytes.length);
+          for (let i = 0; i < rawBytes.length; i++) {
+            const ulaw = ~rawBytes[i] & 0xFF;
+            const sign = (ulaw & 0x80) ? -1 : 1;
+            const exponent = (ulaw >> 4) & 0x07;
+            const mantissa = ulaw & 0x0F;
+            let sample = ((mantissa << 3) + 0x84) << exponent;
+            sample -= 0x84;
+            pcm16_8k[i] = sign * sample;
+          }
+          
+          // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
+          const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_24k[i * 3] = s0;
+            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          }
+          // Handle last sample
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+          
+          // Step 3: Convert to base64
+          const bytes = new Uint8Array(pcm16_24k.buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          base64Audio = btoa(binary);
+        } else {
+          // Assume already PCM16 (or other format) - forward as-is
+          let binary = "";
+          for (let i = 0; i < rawBytes.length; i++) {
+            binary += String.fromCharCode(rawBytes[i]);
+          }
+          base64Audio = btoa(binary);
+        }
+        
         if (!sessionReady) {
-          // Queue binary audio until session is ready
-          const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-          const base64Audio = btoa(String.fromCharCode(...audioBytes));
-
-          // Cap pending queue to prevent runaway memory usage if session never becomes ready
+          // Queue audio until session is ready
           while (pendingMessages.length >= MAX_PENDING_MESSAGES) {
             pendingMessages.shift();
           }
           pendingMessages.push({ type: "audio", audio: base64Audio });
 
-          // Throttle logging (otherwise it drowns out the important OpenAI connect/error logs)
+          // Throttle logging
           preReadyAudioQueued += 1;
           const now = Date.now();
           if (now - lastPreReadyAudioLogAt > 1000) {
             lastPreReadyAudioLogAt = now;
             console.log(
-              `[${callId}] ⏳ Pre-ready audio: +${preReadyAudioQueued} chunks in last ~1s, last=${audioBytes.length} bytes, pending=${pendingMessages.length}`,
+              `[${callId}] ⏳ Pre-ready audio: +${preReadyAudioQueued} chunks in last ~1s, last=${rawBytes.length} bytes, pending=${pendingMessages.length}`,
             );
             preReadyAudioQueued = 0;
           }
           return;
         }
         
-        // Forward audio to OpenAI
-        // NOTE: Some OpenAI Realtime sessions reject raw binary frames depending on protocol/version.
-        // To keep this robust, we always wrap audio in input_audio_buffer.append.
+        // Forward converted audio to OpenAI
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          const audioBytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-          const base64Audio = btoa(String.fromCharCode(...audioBytes));
-
           openaiWs.send(
             JSON.stringify({
               type: "input_audio_buffer.append",
@@ -9682,22 +9726,9 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
             }),
           );
 
-          // USER AUDIO MONITORING - DISABLED for now (causes too much DB load)
-          // To re-enable: uncomment below and set a higher throttle interval
-          // const now = Date.now();
-          // if (now - lastUserAudioBroadcastAt >= 1000) {
-          //   lastUserAudioBroadcastAt = now;
-          //   void supabase.from("live_call_audio").insert({
-          //     call_id: callId,
-          //     audio_chunk: base64Audio,
-          //     audio_source: "user",
-          //     created_at: new Date().toISOString()
-          //   });
-          // }
-
           // Log periodically (not every frame to reduce noise)
           if (Math.random() < 0.01) {
-            console.log(`[${callId}] 🔊 Audio appended: ${audioBytes.length} bytes`);
+            console.log(`[${callId}] 🔊 Audio appended: ${rawBytes.length} bytes (converted to 24kHz PCM16)`);
           }
         }
         return;
