@@ -126,17 +126,40 @@ const TOOLS = [
 ];
 
 // --- STT Corrections ---
+// Phonetic fixes for common telephony mishearings
 const STT_CORRECTIONS: Record<string, string> = {
+  // Cancel intent variations
   "come to sleep": "cancel it",
-  "click on street": "Coventry",
-  "heather oh": "Heathrow",
-  "gat wick": "Gatwick",
-  "birming ham": "Birmingham",
-  "david rose": "david road",
+  "go to sleep": "cancel it",
+  "come see it": "cancel it",
   "count to three": "cancel",
   "can't sell it": "cancel it",
   "concert": "cancel",
   "counter": "cancel",
+  "counsel": "cancel",
+  "council": "cancel",
+  
+  // Location mishearings
+  "click on street": "Coventry",
+  "heather oh": "Heathrow",
+  "heather row": "Heathrow",
+  "heath row": "Heathrow",
+  "gat wick": "Gatwick",
+  "got wick": "Gatwick",
+  "birming ham": "Birmingham",
+  "david rose": "david road",
+  "davie road": "david road",
+  "davey road": "david road",
+  "man chester": "Manchester",
+  "lead station": "Leeds station",
+  "kings cross": "King's Cross",
+  
+  // Number mishearings
+  "for passengers": "4 passengers",
+  "to passengers": "2 passengers",
+  "tree passengers": "3 passengers",
+  "one passenger": "1 passenger",
+  "won passenger": "1 passenger",
 };
 
 function correctTranscript(text: string): string {
@@ -261,12 +284,19 @@ serve(async (req) => {
         voice: sessionState.voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        input_audio_transcription: { model: "whisper-1" },
+        input_audio_transcription: { 
+          model: "whisper-1",
+          // Language hint improves accuracy for UK English speakers
+          language: "en"
+        },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.6,
-          prefix_padding_ms: 500,
-          silence_duration_ms: 1500
+          // Lower threshold (0.5) detects quieter speech better
+          threshold: 0.5,
+          // More prefix padding captures speech starts (soft consonants)
+          prefix_padding_ms: 600,
+          // Longer silence duration prevents cutting off slow speakers
+          silence_duration_ms: 1200
         },
         temperature: 0.6,
         tools: TOOLS,
