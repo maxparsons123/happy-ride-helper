@@ -9736,6 +9736,42 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
       
       const message = JSON.parse(event.data);
       
+      // ═══════════════════════════════════════════════════════════════════
+      // PRE-CONNECT: Handle eager connection from bridge (before call is answered)
+      // Check if agent uses simple mode and redirect IMMEDIATELY
+      // ═══════════════════════════════════════════════════════════════════
+      if (message.type === "pre_connect") {
+        callId = message.call_id || callId;
+        console.log(`[${callId}] 🔔 Pre-connect received - checking for simple mode redirect...`);
+        
+        // Default to 'ada' agent for pre-connect (actual agent specified in init)
+        const agentSlug = message.agent || "ada";
+        const { useSimpleMode } = await loadAgentConfig(agentSlug);
+        
+        if (useSimpleMode) {
+          console.log(`[${callId}] 🔀 Pre-connect: Agent ${agentSlug} uses simple mode - redirecting NOW`);
+          
+          socket.send(JSON.stringify({
+            type: "redirect",
+            endpoint: "taxi-realtime-simple",
+            url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-simple`,
+            reason: "simple_mode_pre_connect",
+            call_id: callId,
+            init_data: message
+          }));
+          
+          skipDbWrites = true;
+          callEnded = true;
+          try { socket.close(1000, "Redirecting to simple mode"); } catch (_) { /* ignore */ }
+          return;
+        }
+        
+        // Not simple mode - acknowledge pre_connect and continue with full mode
+        socket.send(JSON.stringify({ type: "pre_connected", call_id: callId }));
+        console.log(`[${callId}] ✅ Pre-connect acknowledged (full mode)`);
+        return;
+      }
+      
       // Set call ID from client
       if (message.type === "init") {
         const isReconnect = message.reconnect === true;
