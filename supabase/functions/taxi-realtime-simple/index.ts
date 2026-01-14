@@ -460,14 +460,23 @@ serve(async (req) => {
   let openaiWs: WebSocket | null = null;
   let state: SessionState | null = null;
   let openaiConnected = false;
+  let preConnected = false; // Track if we pre-connected before init
+  let pendingGreeting = false; // Track if greeting should fire when OpenAI ready
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // --- Connect to OpenAI ---
-  const connectToOpenAI = (sessionState: SessionState) => {
+  // --- Connect to OpenAI (can be called early for pre-connection) ---
+  const connectToOpenAI = (sessionState: SessionState, triggerGreeting: boolean = true) => {
+    if (openaiWs) {
+      console.log(`[${sessionState.callId}] ⚡ OpenAI already connected (pre-connected)`);
+      if (triggerGreeting) {
+        sendSessionUpdate(sessionState);
+      }
+      return;
+    }
+    
     const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17`;
     
     // Deno WebSocket requires protocols array, not headers object
-    // Pass auth via URL params or use subprotocol for auth
     openaiWs = new WebSocket(url, [
       "realtime",
       `openai-insecure-api-key.${OPENAI_API_KEY}`,
@@ -477,6 +486,13 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
       openaiConnected = true;
+      
+      // If this was a pre-connect, don't send greeting yet - wait for init
+      if (preConnected && !pendingGreeting) {
+        console.log(`[${sessionState.callId}] ⏳ Pre-connected, waiting for init to trigger greeting`);
+        return;
+      }
+      
       sendSessionUpdate(sessionState);
     };
 
@@ -1033,25 +1049,18 @@ serve(async (req) => {
       // Handle JSON messages
       const message = JSON.parse(event.data);
 
-      if (message.type === "init") {
+      // PRE-CONNECT: Connect to OpenAI while phone is ringing (before answer)
+      if (message.type === "pre_connect") {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
-        const isReconnect = message.reconnect === true;
         
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect})`);
-
-        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
-        if (isReconnect) {
-          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
-          socket.close(1000, "Session expired");
-          return;
-        }
-
-        // Detect language from phone number FIRST (fast, no DB)
+        console.log(`[${callId}] 🔔 Pre-connecting to OpenAI (phone ringing)`);
+        
+        // Detect language early
         const detectedLanguage = detectLanguageFromPhone(phone);
         const finalLanguage = message.language || detectedLanguage || "auto";
         
-        // Initialize state IMMEDIATELY with minimal data - don't wait for DB
+        // Create minimal state for pre-connection
         state = {
           callId,
           phone,
@@ -1059,8 +1068,8 @@ serve(async (req) => {
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
           language: finalLanguage,
-          customerName: message.customer_name || null,
-          hasActiveBooking: message.has_active_booking || false,
+          customerName: null,
+          hasActiveBooking: false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
           transcripts: [],
           callerLastPickup: null,
@@ -1073,10 +1082,77 @@ serve(async (req) => {
           callEnded: false
         };
         
+        preConnected = true;
+        connectToOpenAI(state, false); // Connect but DON'T trigger greeting yet
+        
+        socket.send(JSON.stringify({ 
+          type: "pre_connected", 
+          call_id: callId
+        }));
+        return;
+      }
+
+      if (message.type === "init") {
+        const callId = message.call_id || `simple-${Date.now()}`;
+        const phone = message.phone || "unknown";
+        const isReconnect = message.reconnect === true;
+        
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, preConnected=${preConnected})`);
+
+        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
+        if (isReconnect) {
+          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
+          socket.close(1000, "Session expired");
+          return;
+        }
+
+        // Detect language from phone number FIRST (fast, no DB)
+        const detectedLanguage = detectLanguageFromPhone(phone);
+        const finalLanguage = message.language || detectedLanguage || "auto";
+        
+        // Update or create state
+        if (state && preConnected) {
+          // Update existing pre-connected state with full details
+          state.phone = phone;
+          state.language = finalLanguage;
+          state.customerName = message.customer_name || null;
+          state.hasActiveBooking = message.has_active_booking || false;
+          console.log(`[${callId}] ⚡ Using pre-connected OpenAI session`);
+        } else {
+          // Initialize state fresh
+          state = {
+            callId,
+            phone,
+            companyName: message.company_name || DEFAULT_COMPANY,
+            agentName: message.agent_name || DEFAULT_AGENT,
+            voice: message.voice || DEFAULT_VOICE,
+            language: finalLanguage,
+            customerName: message.customer_name || null,
+            hasActiveBooking: message.has_active_booking || false,
+            booking: { pickup: null, destination: null, passengers: null, bags: null },
+            transcripts: [],
+            callerLastPickup: null,
+            callerLastDestination: null,
+            callerTotalBookings: 0,
+            assistantTranscriptIndex: null,
+            transcriptFlushTimer: null,
+            isAdaSpeaking: false,
+            echoGuardUntil: 0,
+            callEnded: false
+          };
+        }
+        
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state.language}`);
 
-        // Connect to OpenAI IMMEDIATELY - don't wait for DB lookup
-        connectToOpenAI(state);
+        // If pre-connected, OpenAI is already ready - just send session update + greeting
+        if (preConnected && openaiConnected) {
+          console.log(`[${callId}] ⚡ OpenAI already connected - triggering greeting immediately!`);
+          sendSessionUpdate(state);
+        } else {
+          // Connect to OpenAI IMMEDIATELY - don't wait for DB lookup
+          pendingGreeting = true;
+          connectToOpenAI(state);
+        }
 
         socket.send(JSON.stringify({ 
           type: "ready", 
