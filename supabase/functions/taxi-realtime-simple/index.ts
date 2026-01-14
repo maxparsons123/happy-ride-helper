@@ -402,15 +402,13 @@ serve(async (req) => {
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
         }
-
-        // IMPORTANT: Trigger assistant response after a user turn
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
         break;
       }
 
       case "input_audio_buffer.speech_stopped": {
-        // Fallback: sometimes Whisper event is delayed; ensure we trigger a response
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
+        // Manual response.create causes "conversation_already_has_active_response" errors
         break;
       }
 
