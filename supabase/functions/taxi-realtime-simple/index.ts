@@ -284,6 +284,11 @@ serve(async (req) => {
           text: message.transcript || "",
           timestamp: new Date().toISOString()
         });
+        // Save to database
+        supabase.from("live_calls")
+          .update({ transcripts: sessionState.transcripts, updated_at: new Date().toISOString() })
+          .eq("call_id", sessionState.callId)
+          .then(() => console.log(`[${sessionState.callId}] 💾 Saved assistant transcript`));
         break;
 
       case "conversation.item.input_audio_transcription.completed":
@@ -302,6 +307,11 @@ serve(async (req) => {
           text: userText,
           timestamp: new Date().toISOString()
         });
+        // Save to database
+        supabase.from("live_calls")
+          .update({ transcripts: sessionState.transcripts, updated_at: new Date().toISOString() })
+          .eq("call_id", sessionState.callId)
+          .then(() => console.log(`[${sessionState.callId}] 💾 Saved user transcript`));
         break;
 
       case "response.function_call_arguments.done":
