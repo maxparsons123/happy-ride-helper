@@ -180,12 +180,13 @@ serve(async (req) => {
   const connectToOpenAI = (sessionState: SessionState) => {
     const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17`;
     
-    openaiWs = new WebSocket(url, {
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
-      }
-    } as any);
+    // Deno WebSocket requires protocols array, not headers object
+    // Pass auth via URL params or use subprotocol for auth
+    openaiWs = new WebSocket(url, [
+      "realtime",
+      `openai-insecure-api-key.${OPENAI_API_KEY}`,
+      "openai-beta.realtime-v1"
+    ]);
 
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
