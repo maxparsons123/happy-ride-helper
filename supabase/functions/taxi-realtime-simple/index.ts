@@ -192,13 +192,17 @@ CRITICAL TOOL USAGE - READ CAREFULLY:
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
 
-BOOKING MODIFICATIONS - VERY IMPORTANT:
-- If customer changes PICKUP → CALL modify_booking(field_to_change: "pickup", new_value: "[NEW ADDRESS]") IMMEDIATELY.
-- If customer changes DESTINATION → CALL modify_booking(field_to_change: "destination", new_value: "[NEW ADDRESS]") IMMEDIATELY.
-- If customer changes PASSENGERS → CALL modify_booking(field_to_change: "passengers", new_value: "[NUMBER]") IMMEDIATELY.
-- If customer changes BAGS → CALL modify_booking(field_to_change: "bags", new_value: "[NUMBER]") IMMEDIATELY.
+BOOKING MODIFICATIONS - MANDATORY - WEBHOOK REQUIRED:
+⚠️ YOU MUST CALL modify_booking FOR ANY CHANGE TO AN ACTIVE BOOKING. THIS IS NON-NEGOTIABLE.
+- If customer changes PICKUP → CALL modify_booking(field_to_change: "pickup", new_value: "[NEW ADDRESS]") IMMEDIATELY. DO NOT SKIP.
+- If customer changes DESTINATION → CALL modify_booking(field_to_change: "destination", new_value: "[NEW ADDRESS]") IMMEDIATELY. DO NOT SKIP.
+- If customer changes PASSENGERS → CALL modify_booking(field_to_change: "passengers", new_value: "[NUMBER]") IMMEDIATELY. DO NOT SKIP.
+- If customer changes BAGS → CALL modify_booking(field_to_change: "bags", new_value: "[NUMBER]") IMMEDIATELY. DO NOT SKIP.
+- EVEN IF the change seems minor or you already know the new value, YOU MUST STILL CALL modify_booking.
+- The modify_booking function triggers a WEBHOOK to the dispatch system. Without this call, the dispatch system will have outdated info.
 - After calling modify_booking, confirm the change: "Updated! Pickup is now [NEW ADDRESS]." or similar.
-- NEVER ignore a change request. ALWAYS call modify_booking first, then confirm.
+- NEVER ignore a change request. NEVER just acknowledge verbally without calling the tool.
+- NEVER cancel and rebook. ALWAYS use modify_booking to preserve booking history.
 - If booking was already confirmed and user wants changes, call modify_booking then call book_taxi again to get updated fare.
 
 RULES:
@@ -251,7 +255,7 @@ const TOOLS = [
   {
     type: "function",
     name: "modify_booking",
-    description: "Modify any booking detail. CALL IMMEDIATELY when customer changes pickup, destination, passengers, or bags. Never cancel and rebook - always modify.",
+    description: "⚠️ MANDATORY: Call this function IMMEDIATELY when customer changes ANY booking detail (pickup, destination, passengers, bags). This triggers a WEBHOOK to update the dispatch system. NEVER skip this call. NEVER just acknowledge verbally. NEVER cancel and rebook - always modify. Even minor changes REQUIRE this call.",
     parameters: {
       type: "object",
       properties: {
