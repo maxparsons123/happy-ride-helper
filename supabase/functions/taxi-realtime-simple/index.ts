@@ -449,7 +449,7 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "book_taxi":
+        case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
             pickup: args.pickup,
@@ -458,15 +458,73 @@ serve(async (req) => {
             bags: args.bags || 0
           };
           
-          // Create booking in DB
+          // Call external dispatch webhook for geocoding + fare/ETA
+          const webhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          let fare = "£12.50";
+          let etaMinutes = 8;
+          let bookingRef: string | null = null;
+          let distance: string | null = null;
+          
+          if (webhookUrl) {
+            try {
+              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook...`);
+              const webhookPayload = {
+                action: "book_taxi",
+                call_id: sessionState.callId,
+                caller_phone: sessionState.phone,
+                caller_name: sessionState.customerName,
+                pickup: args.pickup,
+                destination: args.destination,
+                passengers: args.passengers || 1,
+                bags: args.bags || 0,
+                vehicle_type: args.vehicle_type || "saloon",
+                pickup_time: args.pickup_time || "now",
+                timestamp: new Date().toISOString()
+              };
+              
+              const webhookResp = await fetch(webhookUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(webhookPayload)
+              });
+              
+              if (webhookResp.ok) {
+                const dispatchResult = await webhookResp.json();
+                console.log(`[${sessionState.callId}] 📥 Dispatch response:`, dispatchResult);
+                
+                // Use fare/ETA from your dispatch system
+                fare = dispatchResult.fare || fare;
+                etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
+                bookingRef = dispatchResult.booking_ref || dispatchResult.booking_id || null;
+                distance = dispatchResult.distance || dispatchResult.distance_miles || null;
+                
+                // Update pickup/destination if dispatch provides validated addresses
+                if (dispatchResult.pickup_address) {
+                  sessionState.booking.pickup = dispatchResult.pickup_address;
+                }
+                if (dispatchResult.destination_address) {
+                  sessionState.booking.destination = dispatchResult.destination_address;
+                }
+              } else {
+                console.error(`[${sessionState.callId}] Webhook error: ${webhookResp.status}`);
+              }
+            } catch (webhookErr) {
+              console.error(`[${sessionState.callId}] Webhook failed:`, webhookErr);
+            }
+          }
+          
+          // Create booking in DB with dispatch fare/ETA
           const { error: bookingError } = await supabase.from("bookings").insert({
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
-            pickup: args.pickup,
-            destination: args.destination,
+            pickup: sessionState.booking.pickup,
+            destination: sessionState.booking.destination,
             passengers: args.passengers || 1,
-            status: "confirmed"
+            fare: fare,
+            eta: `${etaMinutes} minutes`,
+            status: "confirmed",
+            booking_details: bookingRef ? { booking_ref: bookingRef, distance } : null
           });
           
           if (bookingError) {
@@ -475,11 +533,13 @@ serve(async (req) => {
           
           result = { 
             success: true, 
-            eta_minutes: 8, 
-            fare: "£12.50",
+            eta_minutes: etaMinutes, 
+            fare: fare,
+            booking_ref: bookingRef,
             message: "Booking confirmed"
           };
           break;
+        }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
