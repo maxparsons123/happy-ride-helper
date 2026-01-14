@@ -198,6 +198,11 @@ interface SessionState {
   };
   transcripts: TranscriptItem[];
 
+  // Caller history from database
+  callerLastPickup: string | null;
+  callerLastDestination: string | null;
+  callerTotalBookings: number;
+
   // Streaming assistant transcript assembly (OpenAI sends token deltas)
   assistantTranscriptIndex: number | null;
 
@@ -513,8 +518,14 @@ serve(async (req) => {
                 call_id: sessionState.callId,
                 caller_phone: sessionState.phone,
                 caller_name: sessionState.customerName,
+                // Ada's interpreted addresses
                 ada_pickup: args.pickup,
                 ada_destination: args.destination,
+                // Caller's historical addresses for comparison
+                caller_last_pickup: sessionState.callerLastPickup || null,
+                caller_last_destination: sessionState.callerLastDestination || null,
+                caller_total_bookings: sessionState.callerTotalBookings || 0,
+                // Booking details
                 passengers: args.passengers || 1,
                 bags: args.bags || 0,
                 vehicle_type: args.vehicle_type || "saloon",
@@ -750,6 +761,34 @@ serve(async (req) => {
           return;
         }
 
+        // Lookup caller history from database
+        let callerLastPickup: string | null = null;
+        let callerLastDestination: string | null = null;
+        let callerTotalBookings = 0;
+        let callerName: string | null = message.customer_name || null;
+        
+        if (phone && phone !== "unknown") {
+          try {
+            const { data: callerData } = await supabase
+              .from("callers")
+              .select("name, last_pickup, last_destination, total_bookings")
+              .eq("phone_number", phone)
+              .maybeSingle();
+            
+            if (callerData) {
+              callerLastPickup = callerData.last_pickup || null;
+              callerLastDestination = callerData.last_destination || null;
+              callerTotalBookings = callerData.total_bookings || 0;
+              if (!callerName && callerData.name) {
+                callerName = callerData.name;
+              }
+              console.log(`[${callId}] 👤 Found caller history: ${callerTotalBookings} bookings, last: ${callerLastPickup} → ${callerLastDestination}`);
+            }
+          } catch (e) {
+            console.error(`[${callId}] Failed to lookup caller:`, e);
+          }
+        }
+
         // Initialize state (fresh session only)
         state = {
           callId,
@@ -757,10 +796,13 @@ serve(async (req) => {
           companyName: message.company_name || DEFAULT_COMPANY,
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
-          customerName: message.customer_name || null,
+          customerName: callerName,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
           transcripts: [],
+          callerLastPickup,
+          callerLastDestination,
+          callerTotalBookings,
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
