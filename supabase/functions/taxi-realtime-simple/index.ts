@@ -566,7 +566,6 @@ serve(async (req) => {
           let distance: string | null = null;
           
           if (webhookUrl) {
-            // FIRE-AND-FORGET: Don't block the call flow waiting for webhook
             const webhookPayload = {
               action: "book_taxi",
               job_id: jobId,
@@ -581,35 +580,45 @@ serve(async (req) => {
               bags: args.bags || 0,
               vehicle_type: args.vehicle_type || "saloon",
               pickup_time: args.pickup_time || "now",
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
             };
 
-            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook (fire-and-forget): ${webhookUrl}`);
+            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook: ${webhookUrl}`);
             console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
 
-            // Fire-and-forget async IIFE - don't await, don't block
-            (async () => {
-              try {
-                const resp = await fetch(webhookUrl, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-Job-Id": jobId,
-                    "X-Call-Id": sessionState.callId,
-                  },
-                  body: JSON.stringify(webhookPayload),
-                });
+            // IMPORTANT: Do NOT fire-and-forget.
+            // Edge runtimes can cancel background tasks when the WebSocket closes.
+            // We'll wait briefly (with a timeout) so the webhook reliably leaves the server.
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 1500);
 
-                if (resp.ok) {
-                  const respText = await resp.text();
-                  console.log(`[${sessionState.callId}] ✅ Dispatch webhook success: ${resp.status} - ${respText.substring(0, 200)}`);
-                } else {
-                  console.error(`[${sessionState.callId}] ❌ Dispatch webhook error: ${resp.status} ${resp.statusText}`);
-                }
-              } catch (webhookErr) {
-                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, webhookErr);
+              const resp = await fetch(webhookUrl, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Job-Id": jobId,
+                  "X-Call-Id": sessionState.callId,
+                },
+                body: JSON.stringify(webhookPayload),
+                signal: controller.signal,
+              });
+
+              clearTimeout(timeout);
+
+              const respText = await resp.text().catch(() => "");
+              if (resp.ok) {
+                console.log(
+                  `[${sessionState.callId}] ✅ Dispatch webhook delivered: ${resp.status} - ${respText.substring(0, 200)}`
+                );
+              } else {
+                console.error(
+                  `[${sessionState.callId}] ❌ Dispatch webhook rejected: ${resp.status} ${resp.statusText} - ${respText.substring(0, 200)}`
+                );
               }
-            })();
+            } catch (webhookErr) {
+              console.error(`[${sessionState.callId}] ❌ Dispatch webhook send failed:`, webhookErr);
+            }
           }
           
           // Create booking in DB immediately (don't wait for webhook)
