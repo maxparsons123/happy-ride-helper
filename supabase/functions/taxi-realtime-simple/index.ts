@@ -456,10 +456,18 @@ serve(async (req) => {
       if (message.type === "init") {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
+        const isReconnect = message.reconnect === true;
         
-        console.log(`[${callId}] 🚀 Initializing simple session`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect})`);
 
-        // Initialize state
+        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
+        if (isReconnect) {
+          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
+          socket.close(1000, "Session expired");
+          return;
+        }
+
+        // Initialize state (fresh session only)
         state = {
           callId,
           phone,
