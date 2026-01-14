@@ -172,6 +172,12 @@ GREETING (ALWAYS IN THE CURRENT LANGUAGE):
 - Returning caller (active booking): Greet [NAME], mention an active booking, ask keep/change/cancel.
 Example Dutch (nl) new caller: "Hallo, welkom bij {{company_name}}! Ik ben {{agent_name}}. Hoe heet u?"
 
+LOCATION CHECK (IF GPS REQUIRED):
+- If you receive "[SYSTEM: GPS not available]" at the start, you MUST ask: "Where are you right now?" or "What's your current location?"
+- When they tell you (e.g., "I'm at the train station", "I'm on High Street near Tesco") → CALL save_location function with their answer.
+- Wait for save_location result before proceeding with booking flow.
+- If save_location fails, apologize and ask them to try the app with location services enabled.
+
 BOOKING FLOW (STRICT ORDER):
 1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
@@ -284,6 +290,18 @@ const TOOLS = [
         location_hint: { type: "string" }
       },
       required: ["category"]
+    }
+  },
+  {
+    type: "function",
+    name: "save_location",
+    description: "Save caller's current location when GPS is not available. Call this when caller tells you where they are (e.g., 'I'm at the train station', 'I'm on High Street'). This geocodes and saves their location.",
+    parameters: {
+      type: "object",
+      properties: {
+        location: { type: "string", description: "The location the caller provided (e.g., 'train station', 'High Street', 'Tesco on London Road')" }
+      },
+      required: ["location"]
     }
   },
   {
@@ -812,6 +830,77 @@ serve(async (req) => {
           result = { success: true };
           break;
 
+        case "save_location": {
+          console.log(`[${sessionState.callId}] 📍 Saving location: ${args.location}`);
+          
+          try {
+            // Call geocode function to convert location to coordinates
+            const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+            const geocodeResponse = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+              method: "POST",
+              headers: { 
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`
+              },
+              body: JSON.stringify({ 
+                address: args.location,
+                // Bias towards UK if we have phone hint
+                region: sessionState.phone?.startsWith("+44") ? "uk" : undefined
+              })
+            });
+            
+            if (geocodeResponse.ok) {
+              const geocodeData = await geocodeResponse.json();
+              
+              if (geocodeData.lat && geocodeData.lon) {
+                sessionState.gpsLat = geocodeData.lat;
+                sessionState.gpsLon = geocodeData.lon;
+                
+                console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon}`);
+                
+                // Save to caller_gps table
+                await supabase.from("caller_gps").upsert({
+                  phone_number: sessionState.phone,
+                  lat: geocodeData.lat,
+                  lon: geocodeData.lon,
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour
+                }, { onConflict: "phone_number" });
+                
+                // Update live_calls with GPS
+                await supabase.from("live_calls").update({
+                  gps_lat: geocodeData.lat,
+                  gps_lon: geocodeData.lon,
+                  gps_updated_at: new Date().toISOString()
+                }).eq("call_id", sessionState.callId);
+                
+                result = { 
+                  success: true, 
+                  message: `Location saved: ${geocodeData.formatted_address || args.location}`,
+                  lat: geocodeData.lat,
+                  lon: geocodeData.lon
+                };
+              } else {
+                result = { 
+                  success: false, 
+                  error: "Could not find that location. Please try a more specific address or landmark."
+                };
+              }
+            } else {
+              result = { 
+                success: false, 
+                error: "Location lookup failed. Please try again."
+              };
+            }
+          } catch (e) {
+            console.error(`[${sessionState.callId}] Geocode error:`, e);
+            result = { 
+              success: false, 
+              error: "Location lookup failed. Please try again."
+            };
+          }
+          break;
+        }
+
         case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
@@ -852,6 +941,9 @@ serve(async (req) => {
                 ada_destination: args.destination,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
+                // GPS location (if available)
+                gps_lat: sessionState.gpsLat,
+                gps_lon: sessionState.gpsLon,
                 // Booking details
                 passengers: args.passengers || 1,
                 bags: args.bags || 0,
@@ -1436,32 +1528,28 @@ serve(async (req) => {
                 state.gpsLon = gpsData.lon;
                 console.log(`[${callId}] 📍 GPS loaded: ${gpsData.lat}, ${gpsData.lon}`);
               } else if (state?.gpsRequired && !state?.gpsLat) {
-                // NO GPS and it's required - send rejection message
-                console.log(`[${callId}] ❌ GPS REQUIRED but not found - rejecting call`);
+                // NO GPS and it's required - ask Ada to request location
+                console.log(`[${callId}] ⚠️ GPS REQUIRED but not found - Ada will ask for location`);
                 
-                // Send rejection message via OpenAI
+                // Send system message to trigger location request flow
                 if (openaiWs && openaiConnected) {
+                  // Inject a system message that triggers Ada to ask for location
                   openaiWs.send(JSON.stringify({
                     type: "conversation.item.create",
                     item: {
                       type: "message",
                       role: "user",
-                      content: [{ type: "input_text", text: "[SYSTEM: GPS location not received. Reject this booking.]" }]
+                      content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }]
                     }
                   }));
-                  openaiWs.send(JSON.stringify({
-                    type: "response.create",
-                    response: {
-                      modalities: ["text", "audio"],
-                      instructions: "Tell the caller: 'I'm sorry, I need your location to book a taxi. Please enable location services in your app and try again. Goodbye.' Then call the end_call function immediately."
-                    }
-                  }));
+                  // Note: Don't create response here - let the normal greeting flow handle it
+                  // Ada will see the system message and ask for location per the prompt
                 }
                 
-                // Also notify bridge
+                // Notify bridge
                 socket.send(JSON.stringify({
                   type: "gps_required",
-                  message: "GPS location not received - call will be rejected"
+                  message: "GPS location not received - Ada will ask for location"
                 }));
               }
             }
