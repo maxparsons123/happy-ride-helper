@@ -1019,13 +1019,51 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "modify_booking":
+        case "modify_booking": {
           console.log(`[${sessionState.callId}] ✏️ Modifying:`, args);
+          const oldValue = args.field_to_change === "pickup" ? sessionState.booking.pickup
+            : args.field_to_change === "destination" ? sessionState.booking.destination
+            : args.field_to_change === "passengers" ? sessionState.booking.passengers
+            : null;
+          
           if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
           if (args.field_to_change === "destination") sessionState.booking.destination = args.new_value;
           if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value);
-          result = { success: true };
+          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(args.new_value);
+          
+          // Send webhook with modification details if dispatch is configured
+          const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          if (DISPATCH_MODIFY_URL) {
+            const modifyPayload = {
+              event: "booking_modified",
+              call_id: sessionState.callId,
+              caller_phone: sessionState.phone,
+              caller_name: sessionState.customerName,
+              // What changed
+              field_changed: args.field_to_change,
+              old_value: oldValue,
+              new_value: args.new_value,
+              // Current complete booking state
+              booking: {
+                pickup: sessionState.booking.pickup,
+                destination: sessionState.booking.destination,
+                passengers: sessionState.booking.passengers,
+                bags: sessionState.booking.bags
+              },
+              timestamp: new Date().toISOString()
+            };
+            
+            console.log(`[${sessionState.callId}] 📡 Sending booking modification webhook:`, modifyPayload);
+            fetch(DISPATCH_MODIFY_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(modifyPayload),
+            }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
+          }
+          
+          result = { success: true, modified: args.field_to_change, new_value: args.new_value };
           break;
+        }
 
         case "find_nearby_places":
           console.log(`[${sessionState.callId}] 📍 Finding:`, args.category);
