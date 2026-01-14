@@ -605,35 +605,41 @@ serve(async (req) => {
               timestamp: new Date().toISOString(),
             };
 
-            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook (fire-and-forget): ${webhookUrl}`);
+            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook: ${webhookUrl}`);
             console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
 
-            (async () => {
-              try {
-                const resp = await fetch(webhookUrl, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-Job-Id": jobId,
-                    "X-Call-Id": sessionState.callId,
-                  },
-                  body: JSON.stringify(webhookPayload),
-                });
+            // IMPORTANT: Do NOT fire-and-forget.
+            // Edge runtimes can cancel background tasks when the WebSocket closes.
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 1500);
 
-                if (resp.ok) {
-                  const respText = await resp.text();
-                  console.log(
-                    `[${sessionState.callId}] ✅ Dispatch webhook success: ${resp.status} - ${respText.substring(0, 200)}`
-                  );
-                } else {
-                  console.error(
-                    `[${sessionState.callId}] ❌ Dispatch webhook error: ${resp.status} ${resp.statusText}`
-                  );
-                }
-              } catch (webhookErr) {
-                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, webhookErr);
+              const resp = await fetch(webhookUrl, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Job-Id": jobId,
+                  "X-Call-Id": sessionState.callId,
+                },
+                body: JSON.stringify(webhookPayload),
+                signal: controller.signal,
+              });
+
+              clearTimeout(timeout);
+
+              const respText = await resp.text().catch(() => "");
+              if (resp.ok) {
+                console.log(
+                  `[${sessionState.callId}] ✅ Dispatch webhook delivered: ${resp.status} - ${respText.substring(0, 200)}`
+                );
+              } else {
+                console.error(
+                  `[${sessionState.callId}] ❌ Dispatch webhook rejected: ${resp.status} ${resp.statusText} - ${respText.substring(0, 200)}`
+                );
               }
-            })();
+            } catch (webhookErr) {
+              console.error(`[${sessionState.callId}] ❌ Dispatch webhook send failed:`, webhookErr);
+            }
           } else {
             console.log(`[${sessionState.callId}] ⚠️ DISPATCH_WEBHOOK_URL not set; skipping dispatch webhook`);
           }
