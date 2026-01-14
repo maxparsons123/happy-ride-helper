@@ -70,7 +70,7 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-passthrough-ws"
+WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"
 
 # Audio rates
 AST_RATE = 8000   # Asterisk telephony rate (native µ-law)
