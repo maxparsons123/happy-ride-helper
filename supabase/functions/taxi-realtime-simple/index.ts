@@ -1032,12 +1032,23 @@ serve(async (req) => {
 
         case "modify_booking": {
           console.log(`[${sessionState.callId}] ✏️ Modifying:`, args);
+          
+          // Capture previous booking state BEFORE making changes
+          const previousBooking = {
+            pickup: sessionState.booking.pickup,
+            destination: sessionState.booking.destination,
+            passengers: sessionState.booking.passengers,
+            bags: sessionState.booking.bags,
+            version: sessionState.booking.version
+          };
+          
           const oldValue = args.field_to_change === "pickup" ? sessionState.booking.pickup
             : args.field_to_change === "destination" ? sessionState.booking.destination
             : args.field_to_change === "passengers" ? sessionState.booking.passengers
             : args.field_to_change === "bags" ? sessionState.booking.bags
             : null;
           
+          // Apply the changes
           if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
           if (args.field_to_change === "destination") sessionState.booking.destination = args.new_value;
           if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value);
@@ -1052,23 +1063,31 @@ serve(async (req) => {
             // Increment booking version for each modification
             sessionState.booking.version = (sessionState.booking.version || 1) + 1;
             
+            // Get user transcripts for STT reference (like book_taxi does)
+            const userTranscripts = sessionState.transcripts
+              .filter(t => t.role === "user")
+              .slice(-5)
+              .map(t => t.text);
+            
             const modifyPayload = {
               event: "booking_modified",
               call_id: sessionState.callId,
               caller_phone: sessionState.phone,
               caller_name: sessionState.customerName,
-              // What changed
+              // What changed (for quick detection)
               field_changed: args.field_to_change,
               old_value: oldValue,
               new_value: args.new_value,
-              // Current complete booking state with version
-              booking: {
-                pickup: sessionState.booking.pickup,
-                destination: sessionState.booking.destination,
-                passengers: sessionState.booking.passengers,
-                bags: sessionState.booking.bags,
-                version: sessionState.booking.version
-              },
+              // Full PREVIOUS booking state (before change)
+              previous_booking: previousBooking,
+              // Full CURRENT booking state (after change) - matches book_taxi structure
+              ada_pickup: sessionState.booking.pickup,
+              ada_destination: sessionState.booking.destination,
+              passengers: sessionState.booking.passengers,
+              bags: sessionState.booking.bags,
+              // Raw STT transcripts for reference
+              user_transcripts: userTranscripts,
+              // Version tracking
               booking_version: sessionState.booking.version,
               timestamp: new Date().toISOString()
             };
