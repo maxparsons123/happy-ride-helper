@@ -59,7 +59,7 @@ const corsHeaders = {
 
 interface DispatchCallback {
   call_id: string;
-  action?: "confirm" | "ask" | "say";
+  action?: "confirm" | "ask" | "say" | "booked"; // "booked" is alias for "confirm"
   call_action?: "hangup";
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
@@ -280,10 +280,10 @@ serve(async (req) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ACTION: CONFIRM - Standard booking confirmation/rejection
+    // ACTION: CONFIRM/BOOKED - Standard booking confirmation/rejection
+    // "booked" is an alias for "confirm" for backwards compatibility
     // ═══════════════════════════════════════════════════════════════════
-    // Default to confirm if action not specified (backwards compatibility)
-    if (!action || action === "confirm") {
+    if (!action || action === "confirm" || action === "booked") {
       if (!status) {
         return new Response(JSON.stringify({ 
           error: "Missing required field for 'confirm' action: status" 
