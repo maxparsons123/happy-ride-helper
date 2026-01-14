@@ -515,22 +515,58 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
+              const encoder = new TextEncoder();
               const payloadJson = JSON.stringify(webhookPayload);
+              const payloadBytes = encoder.encode(payloadJson);
+
               console.log(
-                `[${sessionState.callId}] 📦 Dispatch payload bytes: ${payloadJson.length} (job_id=${jobId})`
+                `[${sessionState.callId}] 📦 Dispatch payload bytes: ${payloadBytes.byteLength} (job_id=${jobId})`
               );
 
-              const webhookResp = await fetch(webhookUrl, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json; charset=utf-8",
-                  "Accept": "application/json",
-                  "X-Job-Id": jobId,
-                  "X-Call-Id": sessionState.callId,
-                },
-                // Send as bytes to avoid any server issues with string/chunked decoding
-                body: new TextEncoder().encode(payloadJson),
-              });
+              const timeoutMs = 8000;
+              const maxAttempts = 3;
+
+              let webhookResp: Response | null = null;
+              let lastErr: unknown = null;
+
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
+
+                try {
+                  webhookResp = await fetch(webhookUrl, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Accept": "application/json",
+                      // Help servers that rely on Content-Length (avoid chunked decoding issues)
+                      "Content-Length": String(payloadBytes.byteLength),
+                      // IDs duplicated in headers for easier tracking
+                      "X-Job-Id": jobId,
+                      "X-Call-Id": sessionState.callId,
+                      "Connection": "close",
+                    },
+                    body: payloadBytes,
+                    signal: controller.signal,
+                  });
+
+                  clearTimeout(timeout);
+                  break; // success
+                } catch (err) {
+                  clearTimeout(timeout);
+                  lastErr = err;
+                  console.error(
+                    `[${sessionState.callId}] Webhook attempt ${attempt}/${maxAttempts} failed:`,
+                    err
+                  );
+                  // small backoff
+                  await new Promise((r) => setTimeout(r, 400 * attempt));
+                }
+              }
+
+              if (!webhookResp) {
+                throw lastErr ?? new Error("Webhook request failed");
+              }
 
               const respText = await webhookResp.text();
               console.log(
