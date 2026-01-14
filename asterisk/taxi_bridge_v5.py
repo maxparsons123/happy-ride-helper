@@ -232,12 +232,16 @@ class TaxiBridgeV25:
                 
                 # If we have redirect init_data, use that (fresh session for redirect)
                 if init_data:
+                    # IMPORTANT: init_data may contain reconnect=true from upstream;
+                    # we ALWAYS force a fresh init when switching endpoints.
                     redirect_msg = {
                         "type": "init",
+                        **init_data,
                         "call_id": self.call_id,
+                        # send both keys for compatibility across endpoints
                         "phone": self.phone if self.phone != "Unknown" else None,
-                        "reconnect": False,  # Fresh session on redirect
-                        **init_data  # Override with server-provided init data
+                        "user_phone": self.phone if self.phone != "Unknown" else None,
+                        "reconnect": False,
                     }
                     await self.ws.send(json.dumps(redirect_msg))
                     logger.info(f"[{self.call_id}] 🔀 Sent redirect init (fresh session) to {target_url}")
@@ -247,6 +251,7 @@ class TaxiBridgeV25:
                     init_msg = {
                         "type": "init",
                         "call_id": self.call_id,
+                        "phone": self.phone if self.phone != "Unknown" else None,
                         "user_phone": self.phone if self.phone != "Unknown" else None,
                         "addressTtsSplicing": True,
                         "reconnect": True
@@ -560,6 +565,8 @@ class TaxiBridgeV25:
                 elif msg_type not in ["heartbeat", "session_update"]:
                     logger.info(f"[{self.call_id}] 📨 Received: {msg_type}")
                     
+        except RedirectException:
+            raise  # Bubble up so main loop can switch endpoints
         except (ConnectionClosed, WebSocketException):
             raise  # Let main loop handle reconnection
         except Exception as e:
