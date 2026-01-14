@@ -128,6 +128,13 @@ function detectLanguageFromPhone(phone: string | null): string | null {
     cleaned = "+31" + cleaned.slice(3);
   }
 
+  // If no + prefix but starts with known country code digits, add +
+  // Common patterns: 44... (UK), 1... (USA/Canada), 33... (France), etc.
+  if (!cleaned.startsWith("+") && /^(44|1|33|49|31|34|39|351|353|61|64|7|81|82|86|91)\d{6,}$/.test(cleaned)) {
+    cleaned = "+" + cleaned;
+    console.log(`📞 Phone ${phone} missing + prefix, normalized to ${cleaned}`);
+  }
+
   // Only attempt country-code matching on E.164-like numbers
   if (!cleaned.startsWith("+")) {
     console.log(`📞 Phone ${phone} not in E.164 format; skipping country-code language mapping`);
