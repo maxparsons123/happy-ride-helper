@@ -131,48 +131,140 @@ const TOOLS = [
 // --- STT Corrections ---
 // Phonetic fixes for common telephony mishearings
 const STT_CORRECTIONS: Record<string, string> = {
-  // Cancel intent variations
+  // Cancel intent variations (telephony noise triggers these)
   "come to sleep": "cancel it",
   "go to sleep": "cancel it",
   "come see it": "cancel it",
   "count to three": "cancel",
   "can't sell it": "cancel it",
+  "cancel eat": "cancel it",
   "concert": "cancel",
   "counter": "cancel",
   "counsel": "cancel",
   "council": "cancel",
+  "can so": "cancel",
+  "can soul": "cancel",
   
-  // Location mishearings
-  "click on street": "Coventry",
+  // Airport/Station mishearings
   "heather oh": "Heathrow",
   "heather row": "Heathrow",
   "heath row": "Heathrow",
+  "heather o": "Heathrow",
+  "heat throw": "Heathrow",
   "gat wick": "Gatwick",
   "got wick": "Gatwick",
-  "birming ham": "Birmingham",
-  "david rose": "david road",
-  "davie road": "david road",
-  "davey road": "david road",
+  "cat wick": "Gatwick",
+  "stand stead": "Stansted",
+  "stan stead": "Stansted",
+  "luton air port": "Luton Airport",
+  "birmingham air port": "Birmingham Airport",
+  "man chest her": "Manchester",
   "man chester": "Manchester",
   "lead station": "Leeds station",
+  "leads station": "Leeds station",
   "kings cross": "King's Cross",
+  "saint pan crass": "St Pancras",
+  "saint pancreas": "St Pancras",
+  "euston": "Euston",
+  "you stone": "Euston",
+  "padding ton": "Paddington",
+  "victoria coach": "Victoria Coach Station",
+  
+  // City/Area mishearings
+  "click on street": "Coventry",
+  "coven tree": "Coventry",
+  "cover entry": "Coventry",
+  "birming ham": "Birmingham",
+  "burming ham": "Birmingham",
+  "wolver hampton": "Wolverhampton",
+  "wolves hampton": "Wolverhampton",
+  "leaming ton": "Leamington",
+  "lemington": "Leamington",
+  "warrick": "Warwick",
+  "war wick": "Warwick",
+  "nun eaten": "Nuneaton",
+  "new neaten": "Nuneaton",
+  "ken ill worth": "Kenilworth",
+  "bed worth": "Bedworth",
+  "rugby": "Rugby",
+  "rug bee": "Rugby",
+  
+  // Street name mishearings
+  "david rose": "David Road",
+  "davie road": "David Road",
+  "davey road": "David Road",
+  "david wrote": "David Road",
+  "high street": "High Street",
+  "hi street": "High Street",
+  "church road": "Church Road",
+  "church wrote": "Church Road",
+  "station road": "Station Road",
+  "station wrote": "Station Road",
+  "london road": "London Road",
+  "london wrote": "London Road",
   
   // Number mishearings
   "for passengers": "4 passengers",
+  "fore passengers": "4 passengers",
   "to passengers": "2 passengers",
+  "too passengers": "2 passengers",
   "tree passengers": "3 passengers",
+  "free passengers": "3 passengers",
   "one passenger": "1 passenger",
   "won passenger": "1 passenger",
+  "wan passenger": "1 passenger",
+  "five passengers": "5 passengers",
+  "fife passengers": "5 passengers",
+  "six passengers": "6 passengers",
+  "sicks passengers": "6 passengers",
+  
+  // Common phrases
+  "pick me up": "pick me up",
+  "pick up from": "pick up from",
+  "going to": "going to",
+  "go into": "going to",
+  "drop off at": "drop off at",
+  "drop of at": "drop off at",
+  
+  // House number suffixes
+  "a high": "A High",
+  "b high": "B High",
+  "fifty to a": "52A",
+  "fifty too a": "52A",
 };
+
+// Hallucination patterns - common STT artifacts from telephony noise
+const HALLUCINATION_PATTERNS = [
+  /^(um+|uh+|ah+|er+|hmm+)\.?$/i,
+  /^(okay|ok|yes|yeah|no|nope|yep|right|alright)\.?$/i,
+  /^\.+$/,
+  /^thanks?\.?$/i,
+  /^thank you\.?$/i,
+  /^bye\.?$/i,
+  /^hello\.?$/i,
+  /^hi\.?$/i,
+  /^(one|two|three|four|five)\.?$/i, // Standalone numbers often phantom
+  /^it's raining/i, // Common telephony artifact
+  /^nice weather/i,
+  /^how are you/i,
+];
+
+function isHallucination(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 2) return true;
+  // Very short responses during booking flow are likely noise
+  return HALLUCINATION_PATTERNS.some(pattern => pattern.test(trimmed));
+}
 
 function correctTranscript(text: string): string {
   let corrected = text.toLowerCase();
   for (const [bad, good] of Object.entries(STT_CORRECTIONS)) {
     if (corrected.includes(bad)) {
-      return text.replace(new RegExp(bad, "gi"), good);
+      corrected = corrected.replace(new RegExp(bad, "gi"), good);
     }
   }
-  return text;
+  // Capitalize first letter and return
+  return corrected.charAt(0).toUpperCase() + corrected.slice(1);
 }
 
 // --- Session State ---
@@ -295,7 +387,9 @@ serve(async (req) => {
         input_audio_transcription: { 
           model: "whisper-1",
           // Language hint improves accuracy for UK English speakers
-          language: "en"
+          language: "en",
+          // Prompt hint helps Whisper recognize UK place names and taxi terminology
+          prompt: "Taxi booking in UK. Common places: Heathrow, Gatwick, Stansted, Birmingham, Manchester, Coventry, Warwick, Leamington, Nuneaton, Kenilworth. Street types: Road, Street, Lane, Drive, Avenue, Close. Numbers like 52A, 14B. Passengers, destination, pickup."
         },
         turn_detection: {
           type: "server_vad",
@@ -425,8 +519,16 @@ serve(async (req) => {
 
       case "conversation.item.input_audio_transcription.completed": {
         // User transcript from Whisper
-        const userText = correctTranscript(String(message.transcript || ""));
-        console.log(`[${sessionState.callId}] 👤 User: "${userText}"`);
+        const rawText = String(message.transcript || "").trim();
+        
+        // Filter out hallucinations/noise
+        if (!rawText || isHallucination(rawText)) {
+          console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}"`);
+          break;
+        }
+        
+        const userText = correctTranscript(rawText);
+        console.log(`[${sessionState.callId}] 👤 User: "${userText}"${rawText !== userText ? ` (corrected from: "${rawText}")` : ""}`);
 
         socket.send(
           JSON.stringify({
