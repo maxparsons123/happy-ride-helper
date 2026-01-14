@@ -192,18 +192,26 @@ CRITICAL TOOL USAGE - READ CAREFULLY:
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
 
-BOOKING MODIFICATIONS - MANDATORY - WEBHOOK REQUIRED:
-⚠️ YOU MUST CALL modify_booking FOR ANY CHANGE TO AN ACTIVE BOOKING. THIS IS NON-NEGOTIABLE.
-- If customer changes PICKUP → CALL modify_booking(field_to_change: "pickup", new_value: "[NEW ADDRESS]") IMMEDIATELY. DO NOT SKIP.
-- If customer changes DESTINATION → CALL modify_booking(field_to_change: "destination", new_value: "[NEW ADDRESS]") IMMEDIATELY. DO NOT SKIP.
-- If customer changes PASSENGERS → CALL modify_booking(field_to_change: "passengers", new_value: "[NUMBER]") IMMEDIATELY. DO NOT SKIP.
-- If customer changes BAGS → CALL modify_booking(field_to_change: "bags", new_value: "[NUMBER]") IMMEDIATELY. DO NOT SKIP.
-- EVEN IF the change seems minor or you already know the new value, YOU MUST STILL CALL modify_booking.
-- The modify_booking function triggers a WEBHOOK to the dispatch system. Without this call, the dispatch system will have outdated info.
-- After calling modify_booking, confirm the change: "Updated! Pickup is now [NEW ADDRESS]." or similar.
-- NEVER ignore a change request. NEVER just acknowledge verbally without calling the tool.
+BOOKING MODIFICATIONS - TWO-STEP CONFIRMATION REQUIRED:
+⚠️ CHANGES REQUIRE USER CONFIRMATION BEFORE WEBHOOK IS SENT.
+
+STEP 1 - ASK FOR CONFIRMATION:
+- If customer wants to change PICKUP → Ask: "Change pickup to [NEW ADDRESS]?" and WAIT for confirmation.
+- If customer wants to change DESTINATION → Ask: "Change destination to [NEW ADDRESS]?" and WAIT for confirmation.
+- If customer wants to change PASSENGERS → Ask: "Update to [NUMBER] passengers?" and WAIT for confirmation.
+- If customer wants to change BAGS → Ask: "Update to [NUMBER] bags?" and WAIT for confirmation.
+
+STEP 2 - AFTER USER CONFIRMS (says yes/yeah/correct/that's right/go ahead):
+- ONLY THEN call modify_booking(field_to_change: "[FIELD]", new_value: "[VALUE]").
+- This triggers a WEBHOOK to the dispatch system with the confirmed change.
+- After calling modify_booking, confirm: "Updated! Your pickup is now [NEW ADDRESS]."
+
+⚠️ CRITICAL RULES:
+- NEVER call modify_booking before user confirms the change.
+- NEVER skip the confirmation step.
+- If user says "no" or rejects the change, ask what they'd like instead.
 - NEVER cancel and rebook. ALWAYS use modify_booking to preserve booking history.
-- If booking was already confirmed and user wants changes, call modify_booking then call book_taxi again to get updated fare.
+- If booking was already confirmed and user wants changes, confirm first, then call modify_booking, then call book_taxi again to get updated fare.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -255,12 +263,12 @@ const TOOLS = [
   {
     type: "function",
     name: "modify_booking",
-    description: "⚠️ MANDATORY: Call this function IMMEDIATELY when customer changes ANY booking detail (pickup, destination, passengers, bags). This triggers a WEBHOOK to update the dispatch system. NEVER skip this call. NEVER just acknowledge verbally. NEVER cancel and rebook - always modify. Even minor changes REQUIRE this call.",
+    description: "⚠️ ONLY CALL AFTER USER CONFIRMS THE CHANGE. When customer wants to change a booking detail, FIRST ask them to confirm (e.g., 'Change pickup to X?'). ONLY after they say yes/yeah/correct, call this function. This triggers a WEBHOOK to update the dispatch system. NEVER call before confirmation. NEVER cancel and rebook - always modify.",
     parameters: {
       type: "object",
       properties: {
         field_to_change: { type: "string", enum: ["pickup", "destination", "passengers", "bags", "time"], description: "Which field to update" },
-        new_value: { type: "string", description: "The new value for the field" }
+        new_value: { type: "string", description: "The confirmed new value for the field" }
       },
       required: ["field_to_change", "new_value"]
     }
