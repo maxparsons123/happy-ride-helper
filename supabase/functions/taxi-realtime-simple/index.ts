@@ -137,9 +137,55 @@ const STT_CORRECTIONS: Record<string, string> = {
   "can't sell it": "cancel it",
   "concert": "cancel",
   "counter": "cancel",
+  "truth to a": "52A",
+  "truth to": "52",
+  "day with rod": "David Road",
+  "day with road": "David Road",
+  "i am manchester": "to Manchester",
 };
 
+// Hallucination patterns to reject entirely (return empty string)
+const HALLUCINATION_PATTERNS = [
+  /^(thank you[.,!]?\s*)+$/i,                    // Repeated "Thank you. Thank you."
+  /^(okay[.,!]?\s*)+$/i,                         // Repeated "Okay. Okay."
+  /^(bye[.,!]?\s*)+$/i,                          // Repeated "Bye. Bye."
+  /^(yes[.,!]?\s*)+$/i,                          // Repeated "Yes. Yes."
+  /^(no[.,!]?\s*)+$/i,                           // Repeated "No. No."
+  /^(uh+[.,!]?\s*)+$/i,                          // "Uh. Uh. Uh."
+  /^(um+[.,!]?\s*)+$/i,                          // "Um. Um."
+  /^(k[.,!]?\s*)+$/i,                            // "K. K."
+  /^\.+$/,                                        // Just dots
+  /^\s*$/,                                        // Empty/whitespace
+  /^(you can bring|bring them|apples|oranges)/i, // Nonsense phrases
+];
+
+function isHallucination(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 2) return true;
+  
+  for (const pattern of HALLUCINATION_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return true;
+    }
+  }
+  
+  // Check for excessive repetition (same word 3+ times)
+  const words = trimmed.toLowerCase().split(/\s+/);
+  if (words.length >= 3) {
+    const uniqueWords = new Set(words.filter(w => w.length > 1));
+    if (uniqueWords.size === 1) return true; // All same word
+  }
+  
+  return false;
+}
+
 function correctTranscript(text: string): string {
+  // First check for hallucinations
+  if (isHallucination(text)) {
+    console.log(`[STT] Rejected hallucination: "${text}"`);
+    return "";
+  }
+  
   let corrected = text.toLowerCase();
   for (const [bad, good] of Object.entries(STT_CORRECTIONS)) {
     if (corrected.includes(bad)) {
@@ -494,134 +540,65 @@ serve(async (req) => {
           let distance: string | null = null;
           
           if (webhookUrl) {
-            try {
-              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook with job_id: ${jobId}`);
-              const webhookPayload = {
-                action: "book_taxi",
-                job_id: jobId,  // Unique ID for this booking
-                call_id: sessionState.callId,
-                caller_phone: sessionState.phone,
-                caller_name: sessionState.customerName,
-                // Ada's interpreted addresses (from AI tool call)
-                ada_pickup: args.pickup,
-                ada_destination: args.destination,
-                // Legacy fields (same as Ada's)
-                pickup: args.pickup,
-                destination: args.destination,
-                passengers: args.passengers || 1,
-                bags: args.bags || 0,
-                vehicle_type: args.vehicle_type || "saloon",
-                pickup_time: args.pickup_time || "now",
-                timestamp: new Date().toISOString()
-              };
-              
-              const encoder = new TextEncoder();
-              const payloadJson = JSON.stringify(webhookPayload);
-              const payloadBytes = encoder.encode(payloadJson);
+            // FIRE-AND-FORGET: Don't block the call flow waiting for webhook
+            const webhookPayload = {
+              action: "book_taxi",
+              job_id: jobId,
+              call_id: sessionState.callId,
+              caller_phone: sessionState.phone,
+              caller_name: sessionState.customerName,
+              ada_pickup: args.pickup,
+              ada_destination: args.destination,
+              pickup: args.pickup,
+              destination: args.destination,
+              passengers: args.passengers || 1,
+              bags: args.bags || 0,
+              vehicle_type: args.vehicle_type || "saloon",
+              pickup_time: args.pickup_time || "now",
+              timestamp: new Date().toISOString()
+            };
 
-              console.log(
-                `[${sessionState.callId}] 📦 Dispatch payload bytes: ${payloadBytes.byteLength} (job_id=${jobId})`
-              );
+            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook (fire-and-forget): ${webhookUrl}`);
+            console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
 
-              const timeoutMs = 8000;
-              const maxAttempts = 3;
+            // Fire-and-forget async IIFE - don't await, don't block
+            (async () => {
+              try {
+                const resp = await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Job-Id": jobId,
+                    "X-Call-Id": sessionState.callId,
+                  },
+                  body: JSON.stringify(webhookPayload),
+                });
 
-              let webhookResp: Response | null = null;
-              let lastErr: unknown = null;
-
-              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
-
-                try {
-                  webhookResp = await fetch(webhookUrl, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "Accept": "application/json",
-                      // Help servers that rely on Content-Length (avoid chunked decoding issues)
-                      "Content-Length": String(payloadBytes.byteLength),
-                      // IDs duplicated in headers for easier tracking
-                      "X-Job-Id": jobId,
-                      "X-Call-Id": sessionState.callId,
-                      "Connection": "close",
-                    },
-                    body: payloadBytes,
-                    signal: controller.signal,
-                  });
-
-                  clearTimeout(timeout);
-                  break; // success
-                } catch (err) {
-                  clearTimeout(timeout);
-                  lastErr = err;
-                  console.error(
-                    `[${sessionState.callId}] Webhook attempt ${attempt}/${maxAttempts} failed:`,
-                    err
-                  );
-                  // small backoff
-                  await new Promise((r) => setTimeout(r, 400 * attempt));
+                if (resp.ok) {
+                  const respText = await resp.text();
+                  console.log(`[${sessionState.callId}] ✅ Dispatch webhook success: ${resp.status} - ${respText.substring(0, 200)}`);
+                } else {
+                  console.error(`[${sessionState.callId}] ❌ Dispatch webhook error: ${resp.status} ${resp.statusText}`);
                 }
+              } catch (webhookErr) {
+                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, webhookErr);
               }
-
-              if (!webhookResp) {
-                throw lastErr ?? new Error("Webhook request failed");
-              }
-
-              const respText = await webhookResp.text();
-              console.log(
-                `[${sessionState.callId}] 📥 Dispatch HTTP ${webhookResp.status} body_bytes=${respText.length}`
-              );
-
-              if (webhookResp.ok) {
-                let dispatchResult: any = {};
-                try {
-                  dispatchResult = respText ? JSON.parse(respText) : {};
-                } catch (parseErr) {
-                  console.error(
-                    `[${sessionState.callId}] Dispatch response JSON parse failed (showing first 300 chars): ${respText.slice(0, 300)}`
-                  );
-                  dispatchResult = {};
-                }
-
-                console.log(`[${sessionState.callId}] 📥 Dispatch response:`, dispatchResult);
-
-                // Use fare/ETA from your dispatch system
-                fare = dispatchResult.fare || fare;
-                etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
-                bookingRef = dispatchResult.booking_ref || dispatchResult.job_id || jobId;
-                distance = dispatchResult.distance || dispatchResult.distance_miles || null;
-
-                // Update pickup/destination if dispatch provides validated addresses
-                if (dispatchResult.pickup_address) {
-                  sessionState.booking.pickup = dispatchResult.pickup_address;
-                }
-                if (dispatchResult.destination_address) {
-                  sessionState.booking.destination = dispatchResult.destination_address;
-                }
-              } else {
-                console.error(
-                  `[${sessionState.callId}] Webhook error: ${webhookResp.status} body=${respText.slice(0, 300)}`
-                );
-              }
-            } catch (webhookErr) {
-              console.error(`[${sessionState.callId}] Webhook failed:`, webhookErr);
-            }
+            })();
           }
           
-          // Create booking in DB with job_id and dispatch fare/ETA
+          // Create booking in DB immediately (don't wait for webhook)
           const { error: bookingError } = await supabase.from("bookings").insert({
-            id: jobId,  // Use job_id as primary key
+            id: jobId,
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
-            pickup: sessionState.booking.pickup,
-            destination: sessionState.booking.destination,
+            pickup: args.pickup,
+            destination: args.destination,
             passengers: args.passengers || 1,
             fare: fare,
             eta: `${etaMinutes} minutes`,
             status: "confirmed",
-            booking_details: bookingRef ? { booking_ref: bookingRef, distance } : null
+            booking_details: { job_id: jobId }
           });
           
           if (bookingError) {
@@ -632,7 +609,7 @@ serve(async (req) => {
             success: true, 
             eta_minutes: etaMinutes, 
             fare: fare,
-            booking_ref: bookingRef,
+            booking_ref: jobId,
             message: "Booking confirmed"
           };
           break;
