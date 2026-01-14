@@ -34,7 +34,7 @@ BOOKING FLOW (STRICT ORDER):
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
 4. ONLY for AIRPORTS or TRAIN STATIONS: ask "Any bags?" — otherwise skip bags entirely.
-5. When ALL details are known → call book_taxi IMMEDIATELY.
+5. When ALL details are known → YOU MUST call book_taxi tool IMMEDIATELY. Do NOT speak a confirmation until the tool returns.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -42,18 +42,21 @@ RULES:
 3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
 4. NEVER ask about bags unless destination is an AIRPORT or TRAIN STATION.
 5. If user corrects name → call save_customer_name immediately.
-6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
-7. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
-8. GLOBAL service — accept any address.
-9. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+6. After book_taxi returns: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
+7. If user says "no" or "that's all" after "Anything else?" → say "Safe travels!" and call end_call.
+8. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
+9. GLOBAL service — accept any address.
+10. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
 
-TOOL USAGE:
-- Only call book_taxi when ALL fields provided (pickup, destination, passengers).
-- NEVER invent fares/addresses.
-- Call end_call after "Safe travels!".
+CRITICAL TOOL RULES:
+- You MUST call book_taxi tool when you have pickup, destination, and passengers. DO NOT just say "Booked" without calling the tool.
+- You MUST call end_call tool after saying "Safe travels!". DO NOT keep talking, re-greet, or restart booking after end_call.
+- You MUST call cancel_booking tool before saying "cancelled". DO NOT just say it's cancelled without calling the tool.
+- NEVER say a booking is confirmed unless you have called the book_taxi tool and received a response.
+- NEVER invent fares or ETAs — use the values returned by the book_taxi tool.
 `;
 
 // --- Tool Schemas ---
@@ -71,19 +74,28 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book taxi. CALL IMMEDIATELY when details known.",
+    description:
+      "MANDATORY: You MUST call this tool to book a taxi. Do NOT say 'Booked' without calling this tool first. Call when you have pickup, destination, and passengers.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string" },
-        destination: { type: "string" },
-        passengers: { type: "integer", minimum: 1 },
-        bags: { type: "integer", minimum: 0 },
+        pickup: { type: "string", description: "Pickup address" },
+        destination: { type: "string", description: "Destination address" },
+        passengers: {
+          type: "integer",
+          minimum: 1,
+          description: "Number of passengers",
+        },
+        bags: {
+          type: "integer",
+          minimum: 0,
+          description: "Number of bags (only for airport/station trips)",
+        },
         pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
-        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
+        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] },
       },
-      required: ["pickup", "destination", "passengers"]
-    }
+      required: ["pickup", "destination", "passengers"],
+    },
   },
   {
     type: "function",
@@ -541,36 +553,103 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "book_taxi":
+        case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers,
-            bags: args.bags || 0
+            bags: args.bags || 0,
           };
-          
+
+          // Generate job_id upfront for tracking (and for dispatch correlation)
+          const jobId = crypto.randomUUID();
+
+          // Default fallback values (if dispatch webhook unavailable)
+          let fare = "£12.50";
+          let etaMinutes = 8;
+
+          // Call external dispatch webhook for geocoding + fare/ETA
+          const webhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          if (webhookUrl) {
+            const webhookPayload = {
+              action: "book_taxi",
+              job_id: jobId,
+              call_id: sessionState.callId,
+              caller_phone: sessionState.phone,
+              caller_name: sessionState.customerName,
+              ada_pickup: args.pickup,
+              ada_destination: args.destination,
+              pickup: args.pickup,
+              destination: args.destination,
+              passengers: args.passengers || 1,
+              bags: args.bags || 0,
+              vehicle_type: args.vehicle_type || "saloon",
+              pickup_time: args.pickup_time || "now",
+              timestamp: new Date().toISOString(),
+            };
+
+            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook (fire-and-forget): ${webhookUrl}`);
+            console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
+
+            (async () => {
+              try {
+                const resp = await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Job-Id": jobId,
+                    "X-Call-Id": sessionState.callId,
+                  },
+                  body: JSON.stringify(webhookPayload),
+                });
+
+                if (resp.ok) {
+                  const respText = await resp.text();
+                  console.log(
+                    `[${sessionState.callId}] ✅ Dispatch webhook success: ${resp.status} - ${respText.substring(0, 200)}`
+                  );
+                } else {
+                  console.error(
+                    `[${sessionState.callId}] ❌ Dispatch webhook error: ${resp.status} ${resp.statusText}`
+                  );
+                }
+              } catch (webhookErr) {
+                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, webhookErr);
+              }
+            })();
+          } else {
+            console.log(`[${sessionState.callId}] ⚠️ DISPATCH_WEBHOOK_URL not set; skipping dispatch webhook`);
+          }
+
+          // Persist booking immediately (don’t wait for webhook)
           const { error: bookingError } = await supabase.from("bookings").insert({
+            id: jobId,
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers || 1,
-            status: "confirmed"
+            fare,
+            eta: `${etaMinutes} minutes`,
+            status: "confirmed",
+            booking_details: { job_id: jobId },
           });
-          
+
           if (bookingError) {
             console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
           }
-          
-          result = { 
-            success: true, 
-            eta_minutes: 8, 
-            fare: "£12.50",
-            message: "Booking confirmed"
+
+          result = {
+            success: true,
+            eta_minutes: etaMinutes,
+            fare,
+            booking_ref: jobId,
+            message: "Booking confirmed",
           };
           break;
+        }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
@@ -591,7 +670,8 @@ serve(async (req) => {
           console.log(`[${sessionState.callId}] 👋 Ending call`);
           result = { success: true };
           immediateFlush(sessionState);
-          await supabase.from("live_calls")
+          await supabase
+            .from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           break;
@@ -604,15 +684,44 @@ serve(async (req) => {
       result = { error: "Failed to execute" };
     }
 
-    openaiWs?.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "function_call_output",
-        call_id: callId,
-        output: JSON.stringify(result)
-      }
-    }));
+    // Send result back to OpenAI
+    openaiWs?.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "function_call_output",
+          call_id: callId,
+          output: JSON.stringify(result),
+        },
+      })
+    );
 
+    // CRITICAL: end_call should TERMINATE the session (no further responses / re-greetings)
+    if (name === "end_call") {
+      try {
+        socket.send(JSON.stringify({ type: "call_ended" }));
+      } catch {
+        // ignore
+      }
+      try {
+        scribeWs?.close();
+      } catch {
+        // ignore
+      }
+      try {
+        openaiWs?.close();
+      } catch {
+        // ignore
+      }
+      try {
+        socket.close(1000, "Call ended");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Trigger response continuation for non-ending tool calls
     openaiWs?.send(JSON.stringify({ type: "response.create" }));
   };
 
