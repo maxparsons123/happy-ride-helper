@@ -59,6 +59,75 @@ interface LiveCall {
   caller_last_booking_at: string | null;
 }
 
+// --- Phone Number to Country Mapping ---
+const COUNTRY_CODE_INFO: Record<string, { code: string; name: string; flag: string; lang: string }> = {
+  "+44": { code: "GB", name: "United Kingdom", flag: "🇬🇧", lang: "en" },
+  "+1": { code: "US", name: "USA/Canada", flag: "🇺🇸", lang: "en" },
+  "+61": { code: "AU", name: "Australia", flag: "🇦🇺", lang: "en" },
+  "+64": { code: "NZ", name: "New Zealand", flag: "🇳🇿", lang: "en" },
+  "+353": { code: "IE", name: "Ireland", flag: "🇮🇪", lang: "en" },
+  "+34": { code: "ES", name: "Spain", flag: "🇪🇸", lang: "es" },
+  "+52": { code: "MX", name: "Mexico", flag: "🇲🇽", lang: "es" },
+  "+54": { code: "AR", name: "Argentina", flag: "🇦🇷", lang: "es" },
+  "+56": { code: "CL", name: "Chile", flag: "🇨🇱", lang: "es" },
+  "+57": { code: "CO", name: "Colombia", flag: "🇨🇴", lang: "es" },
+  "+51": { code: "PE", name: "Peru", flag: "🇵🇪", lang: "es" },
+  "+33": { code: "FR", name: "France", flag: "🇫🇷", lang: "fr" },
+  "+32": { code: "BE", name: "Belgium", flag: "🇧🇪", lang: "fr" },
+  "+41": { code: "CH", name: "Switzerland", flag: "🇨🇭", lang: "de" },
+  "+49": { code: "DE", name: "Germany", flag: "🇩🇪", lang: "de" },
+  "+43": { code: "AT", name: "Austria", flag: "🇦🇹", lang: "de" },
+  "+39": { code: "IT", name: "Italy", flag: "🇮🇹", lang: "it" },
+  "+351": { code: "PT", name: "Portugal", flag: "🇵🇹", lang: "pt" },
+  "+55": { code: "BR", name: "Brazil", flag: "🇧🇷", lang: "pt" },
+  "+48": { code: "PL", name: "Poland", flag: "🇵🇱", lang: "pl" },
+  "+40": { code: "RO", name: "Romania", flag: "🇷🇴", lang: "ro" },
+  "+31": { code: "NL", name: "Netherlands", flag: "🇳🇱", lang: "nl" },
+  "+966": { code: "SA", name: "Saudi Arabia", flag: "🇸🇦", lang: "ar" },
+  "+971": { code: "AE", name: "UAE", flag: "🇦🇪", lang: "ar" },
+  "+20": { code: "EG", name: "Egypt", flag: "🇪🇬", lang: "ar" },
+  "+91": { code: "IN", name: "India", flag: "🇮🇳", lang: "hi" },
+  "+86": { code: "CN", name: "China", flag: "🇨🇳", lang: "zh" },
+  "+852": { code: "HK", name: "Hong Kong", flag: "🇭🇰", lang: "zh" },
+  "+886": { code: "TW", name: "Taiwan", flag: "🇹🇼", lang: "zh" },
+  "+81": { code: "JP", name: "Japan", flag: "🇯🇵", lang: "ja" },
+  "+82": { code: "KR", name: "South Korea", flag: "🇰🇷", lang: "ko" },
+  "+90": { code: "TR", name: "Turkey", flag: "🇹🇷", lang: "tr" },
+  "+7": { code: "RU", name: "Russia", flag: "🇷🇺", lang: "ru" },
+  "+30": { code: "GR", name: "Greece", flag: "🇬🇷", lang: "el" },
+  "+420": { code: "CZ", name: "Czech Republic", flag: "🇨🇿", lang: "cs" },
+  "+36": { code: "HU", name: "Hungary", flag: "🇭🇺", lang: "hu" },
+  "+46": { code: "SE", name: "Sweden", flag: "🇸🇪", lang: "sv" },
+  "+47": { code: "NO", name: "Norway", flag: "🇳🇴", lang: "no" },
+  "+45": { code: "DK", name: "Denmark", flag: "🇩🇰", lang: "da" },
+  "+358": { code: "FI", name: "Finland", flag: "🇫🇮", lang: "fi" },
+  "+1868": { code: "TT", name: "Trinidad & Tobago", flag: "🇹🇹", lang: "en" },
+  "+234": { code: "NG", name: "Nigeria", flag: "🇳🇬", lang: "en" },
+  "+27": { code: "ZA", name: "South Africa", flag: "🇿🇦", lang: "en" },
+  "+63": { code: "PH", name: "Philippines", flag: "🇵🇭", lang: "en" },
+  "+65": { code: "SG", name: "Singapore", flag: "🇸🇬", lang: "en" },
+  "+60": { code: "MY", name: "Malaysia", flag: "🇲🇾", lang: "en" },
+};
+
+// Detect country from phone number
+function getCountryFromPhone(phone: string | null): { code: string; name: string; flag: string; lang: string } | null {
+  if (!phone) return null;
+  
+  // Ensure phone has + prefix
+  const cleaned = phone.startsWith("+") ? phone.replace(/\s+/g, "").replace(/-/g, "") : `+${phone.replace(/\s+/g, "").replace(/-/g, "")}`;
+  
+  // Try longer codes first (e.g., +353 before +3, +1868 before +1)
+  const sortedCodes = Object.keys(COUNTRY_CODE_INFO).sort((a, b) => b.length - a.length);
+  
+  for (const code of sortedCodes) {
+    if (cleaned.startsWith(code)) {
+      return COUNTRY_CODE_INFO[code];
+    }
+  }
+  
+  return null;
+}
+
 // Audio playback utilities (PCM16 @ 24kHz)
 const pcm16ToAudioBuffer = (ctx: AudioContext, pcmData: Uint8Array) => {
   // Interpret bytes as little-endian int16 PCM
@@ -983,11 +1052,23 @@ export default function LiveCalls() {
                               </Badge>
                             )}
                           </div>
-                          {selectedCallData.caller_phone && (
-                            <p className="text-sm text-muted-foreground font-mono">
-                              +{selectedCallData.caller_phone}
-                            </p>
-                          )}
+                          {selectedCallData.caller_phone && (() => {
+                            const countryInfo = getCountryFromPhone(selectedCallData.caller_phone);
+                            return (
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm text-muted-foreground font-mono">
+                                  +{selectedCallData.caller_phone}
+                                </p>
+                                {countryInfo && (
+                                  <Badge variant="outline" className="text-xs gap-1">
+                                    <span>{countryInfo.flag}</span>
+                                    <span>{countryInfo.name}</span>
+                                    <span className="text-muted-foreground">({countryInfo.lang.toUpperCase()})</span>
+                                  </Badge>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                       
