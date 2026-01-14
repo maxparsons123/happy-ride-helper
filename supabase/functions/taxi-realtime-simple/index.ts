@@ -231,6 +231,16 @@ RULES:
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
+
+TURN-TAKING AWARENESS:
+When the user finishes speaking, look for:
+- Complete sentences ending with punctuation or natural pauses
+- Completion phrases like "that's all", "thanks", "bye", "please", "yes", "no", "okay"
+- Clear questions or requests that warrant a response
+- Pauses after completing a thought
+
+If you detect the user has finished their turn, respond appropriately without waiting for more input.
+Do NOT interrupt mid-sentence - wait for natural pause points.
 `;
 
 // --- Tool Schemas ---
@@ -640,9 +650,9 @@ serve(async (req) => {
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.5,
-          prefix_padding_ms: 400,
-          silence_duration_ms: 800
+          threshold: 0.6,           // Slightly higher threshold to avoid triggering on soft sounds
+          prefix_padding_ms: 500,   // More padding before speech starts
+          silence_duration_ms: 1200 // Wait longer for user to finish speaking (was 800)
         },
         temperature: 0.6,
         tools: TOOLS,
