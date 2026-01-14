@@ -98,6 +98,7 @@ HIGH_PASS_CUTOFF = 60       # Lower cutoff to preserve more speech fundamentals 
 TARGET_RMS = 2500           # Slightly lower target to avoid over-compression (was 3000)
 MAX_GAIN = 3.0              # Moderate gain for quiet speakers (was 2.5)
 MIN_GAIN = 0.8              # Prevent gain reduction that would clip soft sounds
+GAIN_SMOOTHING_FACTOR = 0.2 # Smooth gain transitions between frames (0.0=slow, 1.0=fast)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -106,20 +107,24 @@ logger = logging.getLogger(__name__)
 _highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype='high', fs=AST_RATE, output='sos')
 
 
-def apply_noise_reduction(audio_bytes: bytes) -> bytes:
+def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
     """Apply noise reduction pipeline optimized for soft consonant preservation.
     
     Key improvements for STT accuracy:
     - Soft knee gating preserves attack transients (c, t, p, k sounds)
     - Lower threshold only gates true noise floor
     - Gentler normalization prevents over-compression
+    - Gain smoothing prevents syllable splitting across frames
+    
+    Returns:
+        Tuple of (processed_audio_bytes, new_gain_value)
     """
     if not audio_bytes or len(audio_bytes) < 4:
-        return audio_bytes
+        return audio_bytes, last_gain
     
     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
-        return audio_bytes
+        return audio_bytes, last_gain
     
     # 1. Gentle high-pass filter (60Hz) - remove DC and very low rumble only
     audio_np = sosfilt(_highpass_sos, audio_np)
@@ -144,14 +149,17 @@ def apply_noise_reduction(audio_bytes: bytes) -> bytes:
         mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
         audio_np[mask] *= 0.1
     
-    # 3. Gentle normalization - don't over-compress quiet speech
+    # 3. Smoothed normalization - don't over-compress quiet speech
     rms = np.sqrt(np.mean(audio_np ** 2))
+    current_gain = last_gain  # Default to last gain
     if rms > 30:  # Lower threshold to catch quieter speech (was 50)
-        gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
-        audio_np *= gain
+        target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
+        # Smooth transition from last gain to target gain
+        current_gain = last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - last_gain)
+        audio_np *= current_gain
     
     audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
-    return audio_np.tobytes()
+    return audio_np.tobytes(), current_gain
 
 
 def resample_audio_linear16(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
@@ -183,6 +191,9 @@ class TaxiBridgeV25:
         self.ast_codec = "slin16"
         self.ast_frame_bytes = 320
         self.binary_audio_count = 0
+        
+        # Audio processing state (gain smoothing)
+        self.last_gain = 1.0
         
         # Reconnection tracking
         self.reconnect_attempts = 0
@@ -443,7 +454,7 @@ class TaxiBridgeV25:
 
                     # Convert to linear16 for noise reduction
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
-                    cleaned = apply_noise_reduction(linear16)
+                    cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
 
                     # NEW: Send native 8kHz format (Deepgram nova-2-phonecall optimized)
                     if SEND_NATIVE_ULAW:
