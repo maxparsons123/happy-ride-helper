@@ -33,15 +33,15 @@ BOOKING FLOW (STRICT ORDER):
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
 4. ONLY if destination is an AIRPORT or TRAIN STATION: ask "Any bags?" Otherwise SKIP bags entirely.
-5. When ALL details are known → YOU MUST CALL THE book_taxi FUNCTION IMMEDIATELY. DO NOT just say "booked" - you MUST use the tool!
+5. When ALL details are known → Say "Let me check your booking" then CALL book_taxi function. WAIT for the result before speaking again.
 
 CRITICAL TOOL USAGE - READ CAREFULLY:
-- When you have pickup, destination, and passengers → CALL book_taxi function. This is MANDATORY.
-- The book_taxi function will return fare and ETA. Use those values in your response.
-- DO NOT make up fares or ETAs. You MUST call book_taxi to get real values.
+- When you have pickup, destination, and passengers → Say "Let me check your booking" then CALL book_taxi function.
+- The book_taxi function will return fare and ETA from dispatch. You MUST WAIT for the result.
+- After receiving the tool result, say: "Booked! [ETA from tool] minutes, [FARE from tool]. Anything else?"
+- DO NOT make up fares or ETAs. You MUST use the values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
-- After booking tool returns: say "Booked! [ETA from tool] minutes, [FARE from tool]. Anything else?"
 - Call end_call function after saying "Safe travels!".
 
 RULES:
@@ -504,6 +504,7 @@ serve(async (req) => {
           if (DISPATCH_WEBHOOK_URL) {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
+              console.log(`[${sessionState.callId}] ⏳ Waiting for dispatch response (10s timeout)...`);
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
@@ -518,11 +519,18 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
+              // 10 second timeout to give dispatch time to respond
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 10000);
+              
               const webhookResponse = await fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(webhookPayload)
+                body: JSON.stringify(webhookPayload),
+                signal: controller.signal
               });
+              
+              clearTimeout(timeoutId);
               
               if (webhookResponse.ok) {
                 const dispatchResult = await webhookResponse.json();
