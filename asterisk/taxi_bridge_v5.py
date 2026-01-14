@@ -230,16 +230,18 @@ class TaxiBridgeV25:
                 # Update current URL on successful connect
                 self.current_ws_url = target_url
                 
-                # If we have redirect init_data, use that
+                # If we have redirect init_data, use that (fresh session for redirect)
                 if init_data:
                     redirect_msg = {
                         "type": "init",
-                        **init_data,
                         "call_id": self.call_id,
-                        "user_phone": self.phone if self.phone != "Unknown" else None,
+                        "phone": self.phone if self.phone != "Unknown" else None,
+                        "reconnect": False,  # Fresh session on redirect
+                        **init_data  # Override with server-provided init data
                     }
                     await self.ws.send(json.dumps(redirect_msg))
-                    logger.info(f"[{self.call_id}] 🔀 Sent redirect init to {target_url}")
+                    logger.info(f"[{self.call_id}] 🔀 Sent redirect init (fresh session) to {target_url}")
+                    self.init_sent = True  # Mark as initialized after redirect
                 elif self.reconnect_attempts > 0 or self.init_sent:
                     # Reconnect to same endpoint
                     init_msg = {
