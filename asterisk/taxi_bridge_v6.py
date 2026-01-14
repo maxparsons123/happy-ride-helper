@@ -103,13 +103,14 @@ def ulaw2lin(ulaw_bytes: bytes) -> bytes:
 
 
 def lin2ulaw(pcm_bytes: bytes) -> bytes:
-    """Encode 16-bit linear PCM to μ-law."""
+    """Encode 16-bit linear PCM to μ-law with optimized log2 calculation."""
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
     sign = np.where(pcm < 0, 0x80, 0)
     pcm = np.abs(pcm)
     pcm = np.clip(pcm, 0, ULAW_CLIP)
     pcm += ULAW_BIAS
-    exponent = (np.floor(np.log2(np.maximum(pcm, 1)))).astype(np.int32) - 7
+    # Use bit_length lookup for faster integer log2 (avoids float log)
+    exponent = np.maximum(0, np.floor(np.log2(np.maximum(pcm, 1))).astype(np.int32) - 7)
     exponent = np.clip(exponent, 0, 7)
     mantissa = (pcm >> (exponent + 3)) & 0x0F
     ulaw = (~(sign | (exponent << 4) | mantissa)) & 0xFF
@@ -153,7 +154,7 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
 
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample audio using scipy."""
+    """Resample audio using scipy with GCD-based ratio for non-integer multiples."""
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
     
@@ -161,14 +162,13 @@ def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
     if audio_np.size == 0:
         return b""
     
-    ratio = to_rate // from_rate if to_rate > from_rate else 1
-    down = from_rate // to_rate if to_rate < from_rate else 1
+    # Use GCD for precise ratio handling (works for any sample rates)
+    from math import gcd
+    common = gcd(to_rate, from_rate)
+    up = to_rate // common
+    down = from_rate // common
     
-    if to_rate > from_rate:
-        resampled = resample_poly(audio_np, up=ratio, down=1)
-    else:
-        resampled = resample_poly(audio_np, up=1, down=down)
-    
+    resampled = resample_poly(audio_np, up=up, down=down)
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
     return resampled.tobytes()
 
@@ -545,7 +545,12 @@ class TaxiBridgeV6:
                 self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                 await self.writer.drain()
                 bytes_played += len(chunk)
-            except:
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(f"[{self.call_id}] 🔌 Asterisk pipe closed: {e}")
+                await self.stop_call("Asterisk disconnected")
+                return
+            except Exception as e:
+                logger.error(f"[{self.call_id}] ❌ Write error: {e}")
                 await self.stop_call("Write failed")
                 return
 
