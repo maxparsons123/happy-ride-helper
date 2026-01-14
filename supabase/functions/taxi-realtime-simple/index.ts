@@ -348,6 +348,11 @@ serve(async (req) => {
 
   // --- Handle OpenAI Messages ---
   const handleOpenAIMessage = (message: any, sessionState: SessionState) => {
+    // Log all message types for debugging
+    if (!["response.audio.delta", "response.audio_transcript.delta"].includes(message.type)) {
+      console.log(`[${sessionState.callId}] 📨 OpenAI event: ${message.type}`);
+    }
+    
     switch (message.type) {
       case "session.created":
         console.log(`[${sessionState.callId}] 🎉 Session created`);
@@ -494,9 +499,11 @@ serve(async (req) => {
           
           // Call dispatch webhook if configured
           const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
+          
           if (DISPATCH_WEBHOOK_URL) {
             try {
-              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook...`);
+              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
