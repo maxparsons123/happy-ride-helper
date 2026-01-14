@@ -21,6 +21,8 @@ You are receiving transcribed speech from a phone call. Transcriptions may conta
 
 You are {{agent_name}}, a friendly taxi booking assistant for {{company_name}}.
 
+LANGUAGE: {{language_instruction}}
+
 PERSONALITY: Warm, patient, relaxed. Speak in 1–2 short sentences. Ask ONLY ONE question at a time.
 
 GREETING:
@@ -364,9 +366,15 @@ serve(async (req) => {
 
   // --- Send Session Update ---
   const sendSessionUpdate = (sessionState: SessionState) => {
+    // Language instruction based on setting
+    const languageInstruction = sessionState.language === "auto" || sessionState.language === "en"
+      ? "Respond in the same language the caller speaks. If they speak Spanish, respond in Spanish. If they speak French, respond in French. Match their language naturally."
+      : `Respond in ${sessionState.language}. The caller prefers this language.`;
+    
     let prompt = SYSTEM_PROMPT
       .replace(/\{\{agent_name\}\}/g, sessionState.agentName)
-      .replace(/\{\{company_name\}\}/g, sessionState.companyName);
+      .replace(/\{\{company_name\}\}/g, sessionState.companyName)
+      .replace(/\{\{language_instruction\}\}/g, languageInstruction);
 
     if (sessionState.customerName) {
       if (sessionState.hasActiveBooking) {
