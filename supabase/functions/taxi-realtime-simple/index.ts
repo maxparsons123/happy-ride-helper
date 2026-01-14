@@ -192,6 +192,15 @@ CRITICAL TOOL USAGE - READ CAREFULLY:
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
 
+BOOKING MODIFICATIONS - VERY IMPORTANT:
+- If customer changes PICKUP → CALL modify_booking(field_to_change: "pickup", new_value: "[NEW ADDRESS]") IMMEDIATELY.
+- If customer changes DESTINATION → CALL modify_booking(field_to_change: "destination", new_value: "[NEW ADDRESS]") IMMEDIATELY.
+- If customer changes PASSENGERS → CALL modify_booking(field_to_change: "passengers", new_value: "[NUMBER]") IMMEDIATELY.
+- If customer changes BAGS → CALL modify_booking(field_to_change: "bags", new_value: "[NUMBER]") IMMEDIATELY.
+- After calling modify_booking, confirm the change: "Updated! Pickup is now [NEW ADDRESS]." or similar.
+- NEVER ignore a change request. ALWAYS call modify_booking first, then confirm.
+- If booking was already confirmed and user wants changes, call modify_booking then call book_taxi again to get updated fare.
+
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
 2. NEVER repeat addresses, fares, or full routes.
@@ -242,12 +251,12 @@ const TOOLS = [
   {
     type: "function",
     name: "modify_booking",
-    description: "Modify existing booking.",
+    description: "Modify any booking detail. CALL IMMEDIATELY when customer changes pickup, destination, passengers, or bags. Never cancel and rebook - always modify.",
     parameters: {
       type: "object",
       properties: {
-        field_to_change: { type: "string", enum: ["pickup", "destination", "passengers", "bags", "time"] },
-        new_value: { type: "string" }
+        field_to_change: { type: "string", enum: ["pickup", "destination", "passengers", "bags", "time"], description: "Which field to update" },
+        new_value: { type: "string", description: "The new value for the field" }
       },
       required: ["field_to_change", "new_value"]
     }
