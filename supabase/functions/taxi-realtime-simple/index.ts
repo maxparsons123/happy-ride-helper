@@ -234,19 +234,15 @@ const STT_CORRECTIONS: Record<string, string> = {
 };
 
 // Hallucination patterns - common STT artifacts from telephony noise
+// NOTE: Do NOT filter standalone numbers - they are valid passenger counts!
 const HALLUCINATION_PATTERNS = [
   /^(um+|uh+|ah+|er+|hmm+)\.?$/i,
-  /^(okay|ok|yes|yeah|no|nope|yep|right|alright)\.?$/i,
   /^\.+$/,
-  /^thanks?\.?$/i,
-  /^thank you\.?$/i,
-  /^bye\.?$/i,
-  /^hello\.?$/i,
-  /^hi\.?$/i,
-  /^(one|two|three|four|five)\.?$/i, // Standalone numbers often phantom
   /^it's raining/i, // Common telephony artifact
   /^nice weather/i,
   /^how are you/i,
+  /^good morning\.?$/i,
+  /^good afternoon\.?$/i,
 ];
 
 function isHallucination(text: string): boolean {
