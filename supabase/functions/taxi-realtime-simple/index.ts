@@ -897,16 +897,45 @@ serve(async (req) => {
               }
               
               if (dispatchResult) {
-                // Check if dispatch requested hangup
+                // Check if dispatch requested hangup - immediately end call
                 if (dispatchResult.hangup) {
                   console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
+                  
+                  // Send the goodbye message to Ada to speak
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: `[SYSTEM: Dispatch has ended this call. Say exactly: "${dispatchResult.ada_message}" then immediately hang up.]` }]
+                    }
+                  }));
+                  
+                  // Return hangup result and trigger end_call after speech
                   result = {
                     success: false,
                     hangup: true,
                     ada_message: dispatchResult.ada_message,
-                    message: "Dispatch requested call termination"
+                    message: "Dispatch requested call termination - ending call"
                   };
-                  break;
+                  
+                  // Mark call as ending and schedule cleanup
+                  sessionState.callEnded = true;
+                  immediateFlush(sessionState);
+                  
+                  await supabase.from("live_calls")
+                    .update({ status: "completed", ended_at: new Date().toISOString() })
+                    .eq("call_id", sessionState.callId);
+                  
+                  // Close after goodbye plays
+                  setTimeout(() => {
+                    console.log(`[${sessionState.callId}] 🔌 Closing connection after dispatch hangup`);
+                    openaiWs?.close();
+                  }, 5000);
+                  
+                  // Trigger response so Ada speaks the goodbye
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  return; // Exit early - don't continue with booking
                 }
                 
                 if (dispatchResult.ada_message && !dispatchResult.confirmed) {
