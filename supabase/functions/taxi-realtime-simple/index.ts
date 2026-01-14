@@ -434,15 +434,57 @@ serve(async (req) => {
 
   socket.onmessage = async (event) => {
     try {
-      // Handle binary audio
-      if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-        if (openaiConnected && openaiWs) {
-          const audioData = event.data instanceof ArrayBuffer 
-            ? new Uint8Array(event.data) 
-            : event.data;
+      // Handle binary audio (Deno WebSocket receives Blob or ArrayBuffer)
+      const isBinary = event.data instanceof Blob || event.data instanceof ArrayBuffer || event.data instanceof Uint8Array;
+      
+      if (isBinary) {
+        if (openaiConnected && openaiWs && state) {
+          let audioData: Uint8Array;
           
-          // Convert to base64 and send
-          const base64Audio = btoa(String.fromCharCode(...audioData));
+          if (event.data instanceof Blob) {
+            audioData = new Uint8Array(await event.data.arrayBuffer());
+          } else if (event.data instanceof ArrayBuffer) {
+            audioData = new Uint8Array(event.data);
+          } else {
+            audioData = event.data;
+          }
+          
+          // Bridge sends 8kHz µ-law, need to convert to 24kHz PCM16 for OpenAI
+          // Step 1: Decode µ-law to 16-bit PCM
+          const pcm16_8k = new Int16Array(audioData.length);
+          for (let i = 0; i < audioData.length; i++) {
+            const ulaw = ~audioData[i] & 0xFF;
+            const sign = (ulaw & 0x80) ? -1 : 1;
+            const exponent = (ulaw >> 4) & 0x07;
+            const mantissa = ulaw & 0x0F;
+            let sample = ((mantissa << 3) + 0x84) << exponent;
+            sample -= 0x84;
+            pcm16_8k[i] = sign * sample;
+          }
+          
+          // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
+          const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_24k[i * 3] = s0;
+            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          }
+          // Handle last sample
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+          
+          // Step 3: Convert to base64
+          const bytes = new Uint8Array(pcm16_24k.buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64Audio = btoa(binary);
+          
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
             audio: base64Audio
