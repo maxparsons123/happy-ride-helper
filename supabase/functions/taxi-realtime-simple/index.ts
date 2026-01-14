@@ -473,6 +473,10 @@ serve(async (req) => {
                 call_id: sessionState.callId,
                 caller_phone: sessionState.phone,
                 caller_name: sessionState.customerName,
+                // Ada's interpreted addresses (from AI tool call)
+                ada_pickup: args.pickup,
+                ada_destination: args.destination,
+                // Legacy fields (same as Ada's)
                 pickup: args.pickup,
                 destination: args.destination,
                 passengers: args.passengers || 1,
