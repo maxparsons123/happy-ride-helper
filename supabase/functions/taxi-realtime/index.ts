@@ -9835,29 +9835,31 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         const { loaded: agentLoaded, useSimpleMode } = await loadAgentConfig(agentSlug);
         
         // ═══════════════════════════════════════════════════════════════════
-        // SIMPLE MODE REDIRECT (SCRIBE STT)
-        // If agent has use_simple_mode enabled, route to Scribe STT pipeline for far better phone transcription.
+        // SIMPLE MODE REDIRECT
+        // If agent has use_simple_mode enabled, tell bridge to reconnect to simple endpoint.
+        // (Scribe STT is currently failing to connect from the edge runtime.)
         // ═══════════════════════════════════════════════════════════════════
         if (useSimpleMode) {
-          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-realtime-scribe (better STT)`);
+          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-realtime-simple`);
 
+          // Send redirect message to bridge
           socket.send(
             JSON.stringify({
               type: "redirect",
-              endpoint: "taxi-realtime-scribe",
-              url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-scribe`,
-              reason: "simple_mode_enabled_scribe",
+              endpoint: "taxi-realtime-simple",
+              url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-simple`,
+              reason: "simple_mode_enabled",
               call_id: callId,
               // Pass through all init data so bridge can forward it
               init_data: message,
             })
           );
 
-          // Close this socket - bridge should reconnect to scribe endpoint
+          // Close this socket - bridge should reconnect to simple endpoint
           skipDbWrites = true;
           callEnded = true;
           try {
-            socket.close(1000, "Redirecting to Scribe STT mode");
+            socket.close(1000, "Redirecting to simple mode");
           } catch (_) {
             /* ignore */
           }
