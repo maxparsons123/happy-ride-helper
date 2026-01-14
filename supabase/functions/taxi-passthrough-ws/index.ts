@@ -606,13 +606,65 @@ serve(async (req) => {
           text: transcript,
           timestamp: new Date().toISOString(),
         });
-        
+
+        const sendAda = async (text: string, opts?: { endCall?: boolean; reason?: string }) => {
+          const adaText = sanitizeAssistantResponse(text, session.call_id);
+          if (!adaText) return;
+
+          console.log(`[${session.call_id}] 🗣️ Ada: "${adaText}"`);
+
+          session.conversation_history.push({
+            role: "assistant",
+            text: adaText,
+            timestamp: new Date().toISOString(),
+          });
+
+          socket.send(
+            JSON.stringify({
+              type: "transcript",
+              role: "assistant",
+              text: adaText,
+            })
+          );
+
+          // TTS and send audio
+          isAiTalking = true;
+          socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
+
+          const audioBytes = await synthesizeSpeech(adaText);
+          if (audioBytes) {
+            const CHUNK_SIZE = 4800;
+            for (let i = 0; i < audioBytes.length; i += CHUNK_SIZE) {
+              const chunk = audioBytes.slice(i, i + CHUNK_SIZE);
+              socket.send(chunk);
+              await new Promise((r) => setTimeout(r, 20));
+            }
+          }
+
+          isAiTalking = false;
+          socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
+
+          // 🔇 ECHO GUARD: Start discarding audio after Ada stops
+          echoGuardUntil = Date.now() + ECHO_GUARD_MS;
+          console.log(`[${session.call_id}] 🔇 Echo guard active for ${ECHO_GUARD_MS}ms`);
+
+          if (opts?.endCall) {
+            socket.send(
+              JSON.stringify({
+                type: "call_ended",
+                reason: opts.reason || "webhook",
+              })
+            );
+            socket.close();
+          }
+        };
+
         // Send to webhook
         if (session.webhook_url) {
           // Extract Ada's addresses from session state (accumulated from previous webhook responses)
           const adaPickup = session.session_state.ada_pickup as string | undefined;
           const adaDestination = session.session_state.ada_destination as string | undefined;
-          
+
           const webhookPayload: WebhookPayload = {
             call_id: session.call_id,
             caller_phone: session.caller_phone,
@@ -631,14 +683,14 @@ serve(async (req) => {
               },
             },
             session_state: session.session_state,
-            conversation: session.conversation_history.map(c => ({
+            conversation: session.conversation_history.map((c) => ({
               role: c.role,
               text: c.text,
             })),
           };
-          
+
           console.log(`[${session.call_id}] 📤 Sending to webhook: ${session.webhook_url}`);
-          
+
           try {
             const webhookHeaders: Record<string, string> = {
               "Content-Type": "application/json",
@@ -646,127 +698,128 @@ serve(async (req) => {
             if (session.webhook_token) {
               webhookHeaders["Authorization"] = `Bearer ${session.webhook_token}`;
             }
-            
+
+            // ngrok/webhooks can hang - apply a hard timeout so the call never goes silent
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+
             const webhookResult = await fetch(session.webhook_url, {
               method: "POST",
               headers: webhookHeaders,
               body: JSON.stringify(webhookPayload),
+              signal: controller.signal,
             });
-            
-            if (webhookResult.ok) {
-              const responseText = await webhookResult.text();
-              if (responseText) {
-                try {
-                  const webhookResponse: WebhookResponse = JSON.parse(responseText);
-                  console.log(`[${session.call_id}] 📥 Webhook response:`, webhookResponse);
-                  
-                  if (webhookResponse.session_state) {
-                    session.session_state = {
-                      ...session.session_state,
-                      ...webhookResponse.session_state,
-                    };
-                  }
-                  
-                  // Store Ada's addresses for comparison tracking
-                  if (webhookResponse.ada_pickup) {
-                    session.session_state.ada_pickup = webhookResponse.ada_pickup;
-                  }
-                  if (webhookResponse.ada_destination) {
-                    session.session_state.ada_destination = webhookResponse.ada_destination;
-                  }
-                  
-                  // Store booking details from dispatch system
-                  if (webhookResponse.fare) {
-                    session.session_state.fare = webhookResponse.fare;
-                  }
-                  if (webhookResponse.eta_minutes) {
-                    session.session_state.eta_minutes = webhookResponse.eta_minutes;
-                  }
-                  if (webhookResponse.booking_ref) {
-                    session.session_state.booking_ref = webhookResponse.booking_ref;
-                  }
-                  if (webhookResponse.passengers) {
-                    session.session_state.passengers = webhookResponse.passengers;
-                  }
-                  if (webhookResponse.vehicle_type) {
-                    session.session_state.vehicle_type = webhookResponse.vehicle_type;
-                  }
-                  if (webhookResponse.distance_miles) {
-                    session.session_state.distance_miles = webhookResponse.distance_miles;
-                  }
-                  if (webhookResponse.booking_confirmed) {
-                    session.session_state.booking_confirmed = true;
-                  }
-                  
-                  let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";
-                  
-                  if (webhookResponse.end_call && webhookResponse.end_message) {
-                    adaText = webhookResponse.end_message;
-                  }
-                  
-                  if (adaText) {
-                    adaText = sanitizeAssistantResponse(adaText, session.call_id);
-                  }
-                  
-                  if (adaText) {
-                    console.log(`[${session.call_id}] 🗣️ Ada: "${adaText}"`);
-                    
-                    session.conversation_history.push({
-                      role: "assistant",
-                      text: adaText,
-                      timestamp: new Date().toISOString(),
-                    });
-                    
-                    socket.send(JSON.stringify({
-                      type: "transcript",
-                      role: "assistant",
-                      text: adaText,
-                    }));
-                    
-                    // TTS and send audio
-                    isAiTalking = true;
-                    socket.send(JSON.stringify({ type: "ai_speaking", speaking: true }));
-                    
-                    const audioBytes = await synthesizeSpeech(adaText);
-                    if (audioBytes) {
-                      const CHUNK_SIZE = 4800;
-                      for (let i = 0; i < audioBytes.length; i += CHUNK_SIZE) {
-                        const chunk = audioBytes.slice(i, i + CHUNK_SIZE);
-                        socket.send(chunk);
-                        await new Promise(r => setTimeout(r, 20));
-                      }
-                    }
-                    
-                    isAiTalking = false;
-                    socket.send(JSON.stringify({ type: "ai_speaking", speaking: false }));
-                    
-                    // 🔇 ECHO GUARD: Start discarding audio for 400ms after Ada stops
-                    echoGuardUntil = Date.now() + ECHO_GUARD_MS;
-                    console.log(`[${session.call_id}] 🔇 Echo guard active for ${ECHO_GUARD_MS}ms`);
-                    
-                    // 🔥 WARM UP STT: Open Deepgram connection as Ada finishes speaking
-                    if (!webhookResponse.end_call && deepgramSTT && !deepgramSTT.connected) {
-                      console.log(`[${session.call_id}] 🔥 Pre-warming Deepgram STT connection...`);
-                      deepgramSTT.connect();
-                    }
-                    
-                    if (webhookResponse.end_call) {
-                      socket.send(JSON.stringify({
-                        type: "call_ended",
-                        reason: "webhook",
-                      }));
-                      socket.close();
-                    }
-                  }
-                } catch {
-                  console.error(`[${session.call_id}] Webhook response parse error`);
-                }
-              }
-            } else {
-              console.error(`[${session.call_id}] Webhook error: ${webhookResult.status}`);
+
+            clearTimeout(timeout);
+
+            const responseText = await webhookResult.text().catch(() => "");
+            console.log(
+              `[${session.call_id}] 📥 Webhook status: ${webhookResult.status} (${responseText.length} bytes)`
+            );
+
+            if (!webhookResult.ok) {
+              console.error(
+                `[${session.call_id}] ❌ Webhook error: ${webhookResult.status} - ${responseText.substring(0, 200)}`
+              );
+              await sendAda(
+                "Sorry, I'm having trouble connecting to dispatch right now. Please say that again.",
+                { reason: "webhook_error" }
+              );
+              return;
+            }
+
+            if (!responseText) {
+              console.warn(`[${session.call_id}] ⚠️ Webhook returned empty body`);
+              await sendAda(
+                "Sorry, I didn't get a response from dispatch. Please say that again.",
+                { reason: "webhook_empty" }
+              );
+              return;
+            }
+
+            let webhookResponse: WebhookResponse;
+            try {
+              webhookResponse = JSON.parse(responseText);
+            } catch (e) {
+              console.error(`[${session.call_id}] Webhook response parse error`);
+              await sendAda(
+                "Sorry, I couldn't understand the dispatch response. Please try again.",
+                { reason: "webhook_parse" }
+              );
+              return;
+            }
+
+            console.log(`[${session.call_id}] 📥 Webhook response:`, webhookResponse);
+
+            if (webhookResponse.session_state) {
+              session.session_state = {
+                ...session.session_state,
+                ...webhookResponse.session_state,
+              };
+            }
+
+            // Store Ada's addresses for comparison tracking
+            if (webhookResponse.ada_pickup) {
+              session.session_state.ada_pickup = webhookResponse.ada_pickup;
+            }
+            if (webhookResponse.ada_destination) {
+              session.session_state.ada_destination = webhookResponse.ada_destination;
+            }
+
+            // Store booking details from dispatch system
+            if (webhookResponse.fare) {
+              session.session_state.fare = webhookResponse.fare;
+            }
+            if (webhookResponse.eta_minutes) {
+              session.session_state.eta_minutes = webhookResponse.eta_minutes;
+            }
+            if (webhookResponse.booking_ref) {
+              session.session_state.booking_ref = webhookResponse.booking_ref;
+            }
+            if (webhookResponse.passengers) {
+              session.session_state.passengers = webhookResponse.passengers;
+            }
+            if (webhookResponse.vehicle_type) {
+              session.session_state.vehicle_type = webhookResponse.vehicle_type;
+            }
+            if (webhookResponse.distance_miles) {
+              session.session_state.distance_miles = webhookResponse.distance_miles;
+            }
+            if (webhookResponse.booking_confirmed) {
+              session.session_state.booking_confirmed = true;
+            }
+
+            let adaText = webhookResponse.ada_response || webhookResponse.ada_question || "";
+
+            if (webhookResponse.end_call && webhookResponse.end_message) {
+              adaText = webhookResponse.end_message;
+            }
+
+            if (!adaText) {
+              console.warn(`[${session.call_id}] ⚠️ Webhook returned no ada_response/ada_question`);
+              await sendAda(
+                "Sorry, I didn't get instructions back from dispatch. Please repeat that.",
+                { reason: "webhook_no_text" }
+              );
+              return;
+            }
+
+            await sendAda(adaText, {
+              endCall: Boolean(webhookResponse.end_call),
+              reason: webhookResponse.end_call ? "webhook" : undefined,
+            });
+
+            // 🔥 WARM UP STT: Open Deepgram connection as Ada finishes speaking
+            if (!webhookResponse.end_call && deepgramSTT && !deepgramSTT.connected) {
+              console.log(`[${session.call_id}] 🔥 Pre-warming Deepgram STT connection...`);
+              deepgramSTT.connect();
             }
           } catch (error) {
             console.error(`[${session.call_id}] Webhook call failed:`, error);
+            await sendAda(
+              "Sorry, I'm having trouble connecting to dispatch right now. Please try again.",
+              { reason: "webhook_failed" }
+            );
           }
         } else {
           socket.send(JSON.stringify({
