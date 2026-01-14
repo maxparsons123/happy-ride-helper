@@ -22,6 +22,14 @@ from scipy.signal import resample_poly, butter, sosfilt
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+
+class RedirectException(Exception):
+    """Raised when server sends a redirect to a different endpoint."""
+    def __init__(self, url: str, init_data: dict):
+        self.url = url
+        self.init_data = init_data
+        super().__init__(f"Redirect to {url}")
+
 # μ-law codec using numpy (replaces deprecated audioop)
 # ITU-T G.711 μ-law encoding/decoding tables
 ULAW_BIAS = 0x84
@@ -183,6 +191,11 @@ class TaxiBridgeV25:
         self.call_formally_ended = False  # Set when call_ended received from server
         self.init_sent = False  # Track if init with phone has been sent
         
+        # Redirect handling
+        self.redirect_url = None
+        self.redirect_init_data = None
+        self.current_ws_url = WS_URL  # Track which URL we're connected to
+        
         # Audio buffer for reconnect (keep recent audio to resend after reconnect)
         self.pending_audio_buffer = deque(maxlen=50)  # ~1 second of audio frames
 
@@ -193,8 +206,15 @@ class TaxiBridgeV25:
             self.ast_codec, self.ast_frame_bytes = "slin16", 320
         logger.info(f"[{self.call_id}] 🔎 Format: {self.ast_codec} ({frame_len} bytes)")
 
-    async def connect_websocket(self) -> bool:
-        """Connect to WebSocket with retry logic."""
+    async def connect_websocket(self, url: str = None, init_data: dict = None) -> bool:
+        """Connect to WebSocket with retry logic.
+        
+        Args:
+            url: Optional URL override (for redirects)
+            init_data: Optional init data override (for redirects)
+        """
+        target_url = url or self.current_ws_url
+        
         while self.reconnect_attempts < MAX_RECONNECT_ATTEMPTS and self.running:
             try:
                 delay = RECONNECT_BASE_DELAY_S * (2 ** self.reconnect_attempts) if self.reconnect_attempts > 0 else 0
@@ -203,13 +223,25 @@ class TaxiBridgeV25:
                     await asyncio.sleep(delay)
                 
                 self.ws = await asyncio.wait_for(
-                    websockets.connect(WS_URL, ping_interval=5, ping_timeout=10),
+                    websockets.connect(target_url, ping_interval=5, ping_timeout=10),
                     timeout=10.0
                 )
                 
-                # Only send init here if reconnecting (we already have phone)
-                # For fresh connections, wait for UUID message to get phone first
-                if self.reconnect_attempts > 0 or self.init_sent:
+                # Update current URL on successful connect
+                self.current_ws_url = target_url
+                
+                # If we have redirect init_data, use that
+                if init_data:
+                    redirect_msg = {
+                        "type": "init",
+                        **init_data,
+                        "call_id": self.call_id,
+                        "user_phone": self.phone if self.phone != "Unknown" else None,
+                    }
+                    await self.ws.send(json.dumps(redirect_msg))
+                    logger.info(f"[{self.call_id}] 🔀 Sent redirect init to {target_url}")
+                elif self.reconnect_attempts > 0 or self.init_sent:
+                    # Reconnect to same endpoint
                     init_msg = {
                         "type": "init",
                         "call_id": self.call_id,
@@ -224,7 +256,7 @@ class TaxiBridgeV25:
                 is_reconnect = self.reconnect_attempts > 0 or self.init_sent
                 self.reconnect_attempts = 0  # Reset on successful connect
                 
-                logger.info(f"[{self.call_id}] ✅ WebSocket connected" + (" (reconnected)" if is_reconnect else ""))
+                logger.info(f"[{self.call_id}] ✅ WebSocket connected to {target_url}" + (" (reconnected)" if is_reconnect else ""))
                 return True
                 
             except asyncio.TimeoutError:
@@ -293,6 +325,29 @@ class TaxiBridgeV25:
 
                     # Clean completion means call ended (hangup / timeout) -> stop.
                     break
+
+                except RedirectException as e:
+                    # Server wants us to connect to a different endpoint (e.g., simple mode)
+                    logger.info(f"[{self.call_id}] 🔀 Handling redirect to: {e.url}")
+                    self.ws_connected = False
+                    
+                    # Close current WebSocket cleanly
+                    try:
+                        if self.ws:
+                            await self.ws.close(code=1000, reason="Redirecting")
+                    except Exception:
+                        pass
+                    
+                    # Connect to new endpoint with redirect init data
+                    self.reconnect_attempts = 0  # Reset for redirect
+                    if await self.connect_websocket(url=e.url, init_data=e.init_data):
+                        logger.info(f"[{self.call_id}] ✅ Redirect successful, resuming on new endpoint")
+                        # Clear redirect state
+                        self.redirect_url = None
+                        self.redirect_init_data = None
+                    else:
+                        logger.error(f"[{self.call_id}] ❌ Redirect failed, ending call")
+                        break
 
                 except (ConnectionClosed, WebSocketException) as e:
                     if not self.running:
@@ -475,6 +530,18 @@ class TaxiBridgeV25:
                         logger.info(f"[{self.call_id}] ✅ Session resumed with {turn_count} conversation turns")
                     else:
                         logger.info(f"[{self.call_id}] ✅ Session resumed (fresh start)")
+                elif msg_type == "redirect":
+                    # Server wants us to reconnect to a different endpoint (e.g., simple mode)
+                    new_url = data.get("url")
+                    init_data = data.get("init_data", {})
+                    logger.info(f"[{self.call_id}] 🔀 Redirect requested to: {new_url}")
+                    
+                    # Store redirect info for reconnection
+                    self.redirect_url = new_url
+                    self.redirect_init_data = init_data
+                    
+                    # Close current WebSocket - main loop will handle reconnect
+                    raise RedirectException(new_url, init_data)
                 elif msg_type == "call_ended":
                     # Call was formally ended - stop reconnection attempts
                     logger.info(f"[{self.call_id}] 📴 Call ended by server: {data.get('reason', 'unknown')}")
