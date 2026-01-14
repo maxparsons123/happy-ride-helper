@@ -799,7 +799,7 @@ serve(async (req) => {
           if (DISPATCH_WEBHOOK_URL) {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
-              console.log(`[${sessionState.callId}] ⏳ Waiting for dispatch response (10s timeout)...`);
+              console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
               // Get recent user transcripts as structured array for comparison
               const userTranscripts = sessionState.transcripts
                 .filter(t => t.role === "user")
@@ -824,28 +824,62 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
-              // 10 second timeout to give dispatch time to respond
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 10000);
-              
-              const webhookResponse = await fetch(DISPATCH_WEBHOOK_URL, {
+              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
+              fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(webhookPayload),
-                signal: controller.signal
-              });
+              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
               
-              clearTimeout(timeoutId);
+              // Now poll live_calls table for dispatch response (fare, eta, or say message)
+              // Dispatch will call taxi-dispatch-callback which updates live_calls
+              const pollTimeout = 15000; // 15 seconds max wait
+              const pollInterval = 500; // Check every 500ms
+              const pollStart = Date.now();
+              let dispatchResult: any = null;
               
-              if (webhookResponse.ok) {
-                const dispatchResult = await webhookResponse.json();
-                console.log(`[${sessionState.callId}] ✅ Dispatch response:`, dispatchResult);
-                fare = dispatchResult.fare || fare;
-                etaMinutes = dispatchResult.eta_minutes || etaMinutes;
-                bookingRef = dispatchResult.booking_ref || "";
-                distance = dispatchResult.distance || "";
+              console.log(`[${sessionState.callId}] 🔄 Polling for dispatch callback response (${pollTimeout/1000}s timeout)...`);
+              
+              while (Date.now() - pollStart < pollTimeout) {
+                // Check live_calls for dispatch response
+                const { data: callData } = await supabase
+                  .from("live_calls")
+                  .select("fare, eta, status, transcripts")
+                  .eq("call_id", sessionState.callId)
+                  .single();
                 
-                // Check if dispatch wants Ada to say something specific (e.g., address issue)
+                // Check if dispatch set fare/eta (confirm action)
+                if (callData?.fare && callData?.eta) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed: fare=${callData.fare}, eta=${callData.eta}`);
+                  dispatchResult = {
+                    fare: callData.fare,
+                    eta_minutes: parseInt(callData.eta) || 8,
+                    confirmed: true
+                  };
+                  break;
+                }
+                
+                // Check if dispatch sent a "say" message (look for dispatch transcript)
+                const transcripts = callData?.transcripts as any[] || [];
+                const dispatchSay = transcripts.find(t => 
+                  t.role === "dispatch" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchSay) {
+                  console.log(`[${sessionState.callId}] 💬 Dispatch says: ${dispatchSay.text}`);
+                  dispatchResult = {
+                    ada_message: dispatchSay.text,
+                    needs_clarification: true
+                  };
+                  break;
+                }
+                
+                // Wait before next poll
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+              }
+              
+              if (dispatchResult) {
                 if (dispatchResult.ada_message) {
                   console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
                   // Return early with the message - don't confirm booking yet
@@ -869,8 +903,14 @@ serve(async (req) => {
                   };
                   break;
                 }
+                
+                // Use confirmed fare/eta from dispatch
+                if (dispatchResult.confirmed) {
+                  fare = dispatchResult.fare || fare;
+                  etaMinutes = dispatchResult.eta_minutes || etaMinutes;
+                }
               } else {
-                console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook failed: ${webhookResponse.status}`);
+                console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using defaults`);
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);

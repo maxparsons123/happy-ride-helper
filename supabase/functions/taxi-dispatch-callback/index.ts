@@ -174,6 +174,28 @@ serve(async (req) => {
 
       console.log(`[${call_id}] 📢 Dispatch saying: "${message}"`);
 
+      // Add dispatch message to transcripts so polling can detect it
+      const { data: callData } = await supabase
+        .from("live_calls")
+        .select("transcripts")
+        .eq("call_id", call_id)
+        .single();
+
+      const transcripts = (callData?.transcripts as any[]) || [];
+      transcripts.push({
+        role: "dispatch",
+        text: message,
+        timestamp: new Date().toISOString()
+      });
+
+      await supabase
+        .from("live_calls")
+        .update({
+          transcripts,
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", call_id);
+
       await supabase.channel(`dispatch_${call_id}`).send({
         type: "broadcast",
         event: "dispatch_say",
