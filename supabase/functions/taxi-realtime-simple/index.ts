@@ -263,9 +263,9 @@ serve(async (req) => {
         input_audio_transcription: { model: "whisper-1" },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.7,
+          threshold: 0.6,
           prefix_padding_ms: 400,
-          silence_duration_ms: 500
+          silence_duration_ms: 1200
         },
         temperature: 0.6,
         tools: TOOLS,
