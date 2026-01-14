@@ -181,6 +181,10 @@ interface SessionState {
   // Echo guard: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
+
+  // OpenAI session lifecycle
+  didSendSessionUpdate: boolean;
+  didSendGreeting: boolean;
 }
 
 serve(async (req) => {
@@ -217,7 +221,7 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
       openaiConnected = true;
-      sendSessionUpdate(sessionState);
+      // IMPORTANT: wait for `session.created` before sending `session.update`
     };
 
     openaiWs.onmessage = (event) => {
@@ -321,8 +325,22 @@ serve(async (req) => {
     switch (message.type) {
       case "session.created":
         console.log(`[${sessionState.callId}] 🎉 Session created`);
-        // Trigger greeting
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+
+        // CRITICAL: configure the session AFTER `session.created` so tools/instructions apply
+        if (!sessionState.didSendSessionUpdate) {
+          sendSessionUpdate(sessionState);
+          sessionState.didSendSessionUpdate = true;
+        }
+        break;
+
+      case "session.updated":
+        console.log(`[${sessionState.callId}] ✅ Session confirmed (session.updated)`);
+
+        // Trigger greeting once we know the session config (tools/prompt) is applied
+        if (!sessionState.didSendGreeting) {
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          sessionState.didSendGreeting = true;
+        }
         break;
 
       case "response.audio.delta":
@@ -718,7 +736,9 @@ serve(async (req) => {
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
-          echoGuardUntil: 0
+          echoGuardUntil: 0,
+          didSendSessionUpdate: false,
+          didSendGreeting: false,
         };
 
         // Create live call record
