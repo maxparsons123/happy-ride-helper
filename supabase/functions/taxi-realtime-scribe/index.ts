@@ -252,20 +252,36 @@ serve(async (req) => {
     }
 
     // Connect to Scribe WebSocket
-    scribeWs = new WebSocket(
-      `wss://api.elevenlabs.io/v1/scribe/v2_realtime?token=${token}`
-    );
+    // IMPORTANT: Scribe v2 realtime requires session config via query params (model_id, audio_format, commit_strategy)
+    const scribeUrl =
+      `wss://api.elevenlabs.io/v1/scribe/v2_realtime` +
+      `?token=${token}` +
+      `&model_id=scribe_v2_realtime` +
+      `&language_code=en` +
+      `&audio_format=ulaw_8000` +
+      `&commit_strategy=vad`;
+
+    scribeWs = new WebSocket(scribeUrl);
 
     scribeWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ ElevenLabs Scribe connected`);
-      
-      // Configure Scribe for 8kHz PCM (telephony)
-      scribeWs?.send(JSON.stringify({
-        type: "configure",
-        audio_format: "pcm_8000",  // Native 8kHz!
-        sample_rate: 8000,
-        commit_strategy: "vad",  // Voice Activity Detection
-      }));
+
+      // Flush any buffered pre-connect audio (to avoid missing the first utterance)
+      if (sessionState.audioBuffer.length > 0) {
+        console.log(
+          `[${sessionState.callId}] 📤 Flushing ${sessionState.audioBuffer.length} buffered audio chunk(s) to Scribe`
+        );
+        for (const chunk of sessionState.audioBuffer.splice(0)) {
+          try {
+            let binary = "";
+            for (let i = 0; i < chunk.length; i++) binary += String.fromCharCode(chunk[i]);
+            const base64Audio = btoa(binary);
+            scribeWs?.send(JSON.stringify({ audio_base_64: base64Audio }));
+          } catch (e) {
+            console.error(`[${sessionState.callId}] Buffer flush error:`, e);
+          }
+        }
+      }
     };
 
     scribeWs.onmessage = (event) => {
@@ -734,42 +750,42 @@ serve(async (req) => {
     try {
       const isBinary = event.data instanceof Blob || event.data instanceof ArrayBuffer || event.data instanceof Uint8Array;
       
-      if (isBinary) {
-        if (state && scribeWs && scribeWs.readyState === WebSocket.OPEN) {
-          // Echo guard check
-          if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
-            return; // Skip audio during Ada's speech
-          }
+       if (isBinary) {
+         if (state && scribeWs) {
+           // Echo guard check
+           if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
+             return; // Skip audio during Ada's speech
+           }
 
-          let audioData: Uint8Array;
-          
-          if (event.data instanceof Blob) {
-            audioData = new Uint8Array(await event.data.arrayBuffer());
-          } else if (event.data instanceof ArrayBuffer) {
-            audioData = new Uint8Array(event.data);
-          } else {
-            audioData = event.data;
-          }
-          
-          // Convert µ-law to PCM16 (keep at 8kHz - Scribe supports it natively!)
-          const pcm16 = ulawToPcm16(audioData);
-          
-          // Convert to base64 for Scribe
-          const bytes = new Uint8Array(pcm16.buffer);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-          }
-          const base64Audio = btoa(binary);
-          
-          // Send to ElevenLabs Scribe
-          scribeWs.send(JSON.stringify({
-            type: "audio",
-            audio: base64Audio
-          }));
-        }
-        return;
-      }
+           let audioData: Uint8Array;
+
+           if (event.data instanceof Blob) {
+             audioData = new Uint8Array(await event.data.arrayBuffer());
+           } else if (event.data instanceof ArrayBuffer) {
+             audioData = new Uint8Array(event.data);
+           } else {
+             audioData = event.data;
+           }
+
+           // If Scribe isn't connected yet, buffer a few chunks so we don't miss the user's first words
+           if (scribeWs.readyState !== WebSocket.OPEN) {
+             if (state.audioBuffer.length < 60) {
+               state.audioBuffer.push(audioData);
+             }
+             return;
+           }
+
+           // Scribe supports native telephony µ-law input (ulaw_8000). Send raw bytes as base64.
+           let binary = "";
+           for (let i = 0; i < audioData.length; i++) {
+             binary += String.fromCharCode(audioData[i]);
+           }
+           const base64Audio = btoa(binary);
+
+           scribeWs.send(JSON.stringify({ audio_base_64: base64Audio }));
+         }
+         return;
+       }
 
       // Handle JSON messages
       const message = JSON.parse(event.data);
