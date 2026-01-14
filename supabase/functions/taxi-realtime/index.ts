@@ -9849,8 +9849,18 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
               url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-passthrough-ws`,
               reason: "simple_mode_deepgram",
               call_id: callId,
-              // Pass through all init data so bridge can forward it
-              init_data: message,
+              // Enrich init data so passthrough-ws can forward transcripts to your webhook
+              init_data: {
+                ...message,
+                caller_phone: message.caller_phone ?? message.user_phone ?? message.phone ?? userPhone ?? null,
+                caller_name: message.caller_name ?? callerName ?? null,
+                webhook_url:
+                  message.webhook_url ??
+                  Deno.env.get("DISPATCH_WEBHOOK_URL") ??
+                  Deno.env.get("ADADIRECT_WEBHOOK_URL") ??
+                  null,
+                webhook_token: message.webhook_token ?? null,
+              },
             })
           );
 
