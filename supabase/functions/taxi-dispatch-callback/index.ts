@@ -59,7 +59,8 @@ const corsHeaders = {
 
 interface DispatchCallback {
   call_id: string;
-  action?: "confirm" | "ask" | "say" | "booked"; // "booked" is alias for "confirm"
+  event?: "booking_modified"; // For modification callbacks
+  action?: "confirm" | "ask" | "say" | "booked" | "update_fare"; // "booked" is alias for "confirm"
   call_action?: "hangup";
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
@@ -76,6 +77,10 @@ interface DispatchCallback {
   context?: string;
   // For say action (uses message field)
   // For hangup call_action - optional goodbye message
+  // For booking_modified event
+  field_changed?: string;
+  old_value?: string;
+  new_value?: string;
 }
 
 serve(async (req) => {
@@ -94,6 +99,7 @@ serve(async (req) => {
     const callback: DispatchCallback = await req.json();
     const { 
       call_id, 
+      event,
       action,
       call_action,
       status, 
@@ -106,13 +112,16 @@ serve(async (req) => {
       message,
       booking_ref,
       question,
-      context 
+      context,
+      field_changed,
+      old_value,
+      new_value
     } = callback;
     
     // Normalize ETA: prefer eta_minutes if provided
     const normalizedEta = eta_minutes ? `${eta_minutes} minutes` : eta;
 
-    console.log(`[${call_id}] 📥 Dispatch callback: action=${action}, call_action=${call_action}`);
+    console.log(`[${call_id}] 📥 Dispatch callback: event=${event}, action=${action}, call_action=${call_action}`);
     console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
 
     if (!call_id) {
@@ -125,6 +134,77 @@ serve(async (req) => {
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: UPDATE_FARE - Update fare/eta after booking modification
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === "update_fare") {
+      console.log(`[${call_id}] 💰 Fare update: fare=${fare}, eta=${normalizedEta}`);
+
+      // Update live_calls with new fare/eta
+      const updateData: Record<string, any> = {
+        updated_at: new Date().toISOString()
+      };
+      if (fare) updateData.fare = fare;
+      if (normalizedEta) updateData.eta = normalizedEta;
+
+      const { error: updateError } = await supabase
+        .from("live_calls")
+        .update(updateData)
+        .eq("call_id", call_id);
+
+      if (updateError) {
+        console.error(`[${call_id}] ❌ Failed to update fare:`, updateError);
+      }
+
+      // Also update bookings table
+      if (fare || normalizedEta) {
+        const bookingUpdate: Record<string, any> = {
+          updated_at: new Date().toISOString()
+        };
+        if (fare) bookingUpdate.fare = fare;
+        if (normalizedEta) bookingUpdate.eta = normalizedEta;
+
+        await supabase
+          .from("bookings")
+          .update(bookingUpdate)
+          .eq("call_id", call_id);
+      }
+
+      // If message provided, add to transcripts for Ada to speak
+      if (message) {
+        const { data: callData } = await supabase
+          .from("live_calls")
+          .select("transcripts")
+          .eq("call_id", call_id)
+          .single();
+
+        const transcripts = (callData?.transcripts as any[]) || [];
+        transcripts.push({
+          role: "dispatch",
+          text: message,
+          timestamp: new Date().toISOString()
+        });
+
+        await supabase
+          .from("live_calls")
+          .update({ transcripts, updated_at: new Date().toISOString() })
+          .eq("call_id", call_id);
+      }
+
+      console.log(`[${call_id}] ✅ Fare updated: ${fare}, eta: ${normalizedEta}`);
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "update_fare",
+        fare,
+        eta: normalizedEta,
+        message: "Fare updated successfully"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // CALL_ACTION: HANGUP - Instruct Ada to end the call (check first)
