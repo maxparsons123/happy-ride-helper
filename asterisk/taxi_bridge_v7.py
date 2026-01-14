@@ -26,8 +26,7 @@ import struct
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from math import gcd
-from typing import Deque, Optional, Tuple
+from typing import Deque, Optional
 
 import numpy as np
 from scipy.signal import butter, resample_poly, sosfilt
@@ -167,55 +166,28 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
     return audio_np.tobytes(), current_gain
 
 
-def resample_audio_up(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample audio UP (for caller audio to AI) - uses polyphase filter."""
-    if not audio_bytes or from_rate == to_rate:
-        return audio_bytes
-
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-    if audio_np.size == 0:
-        return b""
-
-    g = gcd(from_rate, to_rate)
-    up = to_rate // g
-    down = from_rate // g
-
-    resampled = resample_poly(audio_np, up=up, down=down)
-    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-    return resampled.tobytes()
-
-
-def resample_audio_down(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """
-    Resample audio DOWN (for AI TTS to telephony) - optimized for voice quality.
-    Uses simple linear interpolation which preserves voice warmth better than
-    polyphase filters for this specific 24kHz→8kHz case.
-    """
-    if not audio_bytes or from_rate == to_rate:
-        return audio_bytes
-
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-    if audio_np.size == 0:
-        return b""
-
-    # For 24kHz → 8kHz (3:1 ratio), simple decimation with averaging
-    # This preserves voice warmth better than polyphase for TTS
-    ratio = from_rate / to_rate
+def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
+    """High-quality resampling using scipy.signal.resample_poly.
     
-    if ratio == 3.0:
-        # Special case for 24kHz → 8kHz: average every 3 samples
-        # This acts as a simple low-pass filter and preserves voice quality
-        trim_len = (len(audio_np) // 3) * 3
-        audio_np = audio_np[:trim_len]
-        reshaped = audio_np.reshape(-1, 3)
-        resampled = reshaped.mean(axis=1)
+    Uses fixed 3:1 ratio for 8kHz<->24kHz conversions (proven to work in v5).
+    """
+    if from_rate == to_rate or not audio_bytes:
+        return audio_bytes
+    
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    if audio_np.size == 0:
+        return b""
+    
+    # Fixed ratio for telephony <-> AI audio (same as v5 which works)
+    RESAMPLE_RATIO = 3  # 24000 / 8000 = 3
+    
+    if to_rate > from_rate:
+        # Upsampling: 8kHz -> 24kHz
+        resampled = resample_poly(audio_np, up=RESAMPLE_RATIO, down=1)
     else:
-        # Fallback to polyphase for other ratios
-        g = gcd(from_rate, to_rate)
-        up = to_rate // g
-        down = from_rate // g
-        resampled = resample_poly(audio_np, up=up, down=down)
-
+        # Downsampling: 24kHz -> 8kHz
+        resampled = resample_poly(audio_np, up=1, down=RESAMPLE_RATIO)
+    
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
     return resampled.tobytes()
 
@@ -531,7 +503,7 @@ class TaxiBridgeV7:
                     if SEND_NATIVE_ULAW:
                         audio_to_send = lin2ulaw(cleaned)
                     else:
-                        audio_to_send = resample_audio_up(cleaned, AST_RATE, AI_RATE)
+                        audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
 
                     # Send to AI
                     if self.state.ws_connected and self.ws:
@@ -576,7 +548,7 @@ class TaxiBridgeV7:
 
                 # Binary audio (TTS from AI - use quality-preserving downsample)
                 if isinstance(message, bytes):
-                    pcm_8k = resample_audio_down(message, AI_RATE, AST_RATE)
+                    pcm_8k = resample_audio(message, AI_RATE, AST_RATE)
                     out = lin2ulaw(pcm_8k) if self.state.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
                     audio_count += 1
@@ -589,7 +561,7 @@ class TaxiBridgeV7:
                 if msg_type in ("audio", "address_tts"):
                     # TTS audio - use quality-preserving downsample
                     raw_24k = base64.b64decode(data["audio"])
-                    pcm_8k = resample_audio_down(raw_24k, AI_RATE, AST_RATE)
+                    pcm_8k = resample_audio(raw_24k, AI_RATE, AST_RATE)
                     out = lin2ulaw(pcm_8k) if self.state.ast_codec == "ulaw" else pcm_8k
                     self.audio_queue.append(out)
                     audio_count += 1
