@@ -294,26 +294,56 @@ class TaxiBridgeV6:
 
         try:
             # ═══════════════════════════════════════════════════════════════
-            # OPTIMIZATION: Connect and send init IMMEDIATELY
-            # Don't wait for phone number - it will arrive via update_phone
-            # This saves ~500-1000ms on greeting latency!
+            # STEP 1: Wait for UUID message from Asterisk (contains phone)
+            # This ensures we have the correct phone for language detection
+            # ═══════════════════════════════════════════════════════════════
+            logger.info(f"[{self.call_id}] ⏳ Waiting for phone number from Asterisk...")
+            phone_received = False
+            wait_start = time.time()
+            
+            while not phone_received and self.running:
+                try:
+                    header = await asyncio.wait_for(self.reader.readexactly(3), timeout=2.0)
+                    m_type, m_len = header[0], struct.unpack(">H", header[1:3])[0]
+                    payload = await self.reader.readexactly(m_len)
+                    
+                    if m_type == MSG_UUID:
+                        raw_hex = payload.hex()
+                        if len(raw_hex) >= 12:
+                            self.phone = raw_hex[-12:]
+                        logger.info(f"[{self.call_id}] 👤 Phone received: {self.phone}")
+                        phone_received = True
+                    elif m_type == MSG_HANGUP:
+                        logger.info(f"[{self.call_id}] 📴 Hangup before init")
+                        return
+                    # Ignore audio frames during this phase
+                    
+                except asyncio.TimeoutError:
+                    # If no UUID after 2s, proceed with unknown phone
+                    elapsed = time.time() - wait_start
+                    if elapsed > 2.0:
+                        logger.warning(f"[{self.call_id}] ⚠️ No phone after 2s, proceeding with unknown")
+                        break
+            
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 2: Connect to WebSocket and send init WITH phone number
+            # This enables correct language detection from the start!
             # ═══════════════════════════════════════════════════════════════
             if not await self.connect_websocket():
                 logger.error(f"[{self.call_id}] ❌ Connection failed")
                 return
             
-            # Send init with placeholder phone - OpenAI starts warming up NOW
-            eager_init = {
+            # Send init with ACTUAL phone - language detected correctly!
+            init_msg = {
                 "type": "init",
                 "call_id": self.call_id,
-                "phone": "unknown",
-                "user_phone": "unknown",
+                "phone": self.phone if self.phone != "Unknown" else "unknown",
+                "user_phone": self.phone if self.phone != "Unknown" else "unknown",
                 "addressTtsSplicing": True,
-                "eager_init": True,
             }
-            await self.ws.send(json.dumps(eager_init))
+            await self.ws.send(json.dumps(init_msg))
             self.init_sent = True
-            logger.info(f"[{self.call_id}] 🚀 Sent EAGER init - greeting will start immediately!")
+            logger.info(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}")
 
             # Main loop
             while self.running:
@@ -401,22 +431,8 @@ class TaxiBridgeV6:
                 payload = await self.reader.readexactly(m_len)
 
                 if m_type == MSG_UUID:
-                    raw_hex = payload.hex()
-                    if len(raw_hex) >= 12:
-                        self.phone = raw_hex[-12:]
-                    logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
-                    
-                    # ═══════════════════════════════════════════════════════
-                    # OPTIMIZATION: Send phone update (init was already sent)
-                    # This allows caller lookup to happen in background
-                    # ═══════════════════════════════════════════════════════
-                    await self.ws.send(json.dumps({
-                        "type": "update_phone",
-                        "call_id": self.call_id,
-                        "phone": self.phone,
-                        "user_phone": self.phone,
-                    }))
-                    logger.info(f"[{self.call_id}] 📱 Sent phone update")
+                    # UUID already processed in run() - ignore duplicate
+                    pass
 
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
