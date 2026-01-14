@@ -672,7 +672,8 @@ serve(async (req) => {
           // Immediate flush on call end - capture all transcripts
           immediateFlush(sessionState);
           // Update call status
-          await supabase.from("live_calls")
+          await supabase
+            .from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           break;
@@ -686,16 +687,38 @@ serve(async (req) => {
     }
 
     // Send result back to OpenAI
-    openaiWs?.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "function_call_output",
-        call_id: callId,
-        output: JSON.stringify(result)
-      }
-    }));
+    openaiWs?.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "function_call_output",
+          call_id: callId,
+          output: JSON.stringify(result),
+        },
+      })
+    );
 
-    // Trigger response continuation
+    // CRITICAL: end_call should TERMINATE the session (no further responses / re-greetings)
+    if (name === "end_call") {
+      try {
+        socket.send(JSON.stringify({ type: "call_ended" }));
+      } catch {
+        // ignore
+      }
+      try {
+        openaiWs?.close();
+      } catch {
+        // ignore
+      }
+      try {
+        socket.close(1000, "Call ended");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Trigger response continuation for non-ending tool calls
     openaiWs?.send(JSON.stringify({ type: "response.create" }));
   };
 
