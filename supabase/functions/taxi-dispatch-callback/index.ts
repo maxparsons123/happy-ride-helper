@@ -11,7 +11,7 @@ const corsHeaders = {
  * 
  * Webhook endpoint for external dispatch systems to send messages back to Ada.
  * 
- * ACTIONS:
+ * ACTIONS (use "action" field):
  * 
  * 1. DISPATCH CONFIRMATION - Tell Ada to confirm the booking:
  * {
@@ -47,17 +47,20 @@ const corsHeaders = {
  *   "message": "Sorry, we can't service that area."
  * }
  * 
+ * CALL ACTIONS (use "call_action" field):
+ * 
  * 5. HANGUP - Instruct Ada to end the call:
  * {
  *   "call_id": "abc123",
- *   "action": "hangup",
+ *   "call_action": "hangup",
  *   "message": "Goodbye!"  // optional - Ada will say this before hanging up
  * }
  */
 
 interface DispatchCallback {
   call_id: string;
-  action: "confirm" | "ask" | "say" | "hangup";
+  action?: "confirm" | "ask" | "say";
+  call_action?: "hangup";
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
   eta?: string;
@@ -70,7 +73,7 @@ interface DispatchCallback {
   question?: string;
   context?: string;
   // For say action (uses message field)
-  // For hangup action - optional goodbye message
+  // For hangup call_action - optional goodbye message
 }
 
 serve(async (req) => {
@@ -89,7 +92,8 @@ serve(async (req) => {
     const callback: DispatchCallback = await req.json();
     const { 
       call_id, 
-      action = "confirm", // Default to confirm for backwards compatibility
+      action,
+      call_action,
       status, 
       eta, 
       driver_name, 
@@ -101,7 +105,7 @@ serve(async (req) => {
       context 
     } = callback;
 
-    console.log(`[${call_id}] 📥 Dispatch callback: action=${action}`);
+    console.log(`[${call_id}] 📥 Dispatch callback: action=${action}, call_action=${call_action}`);
     console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
 
     if (!call_id) {
@@ -114,6 +118,56 @@ serve(async (req) => {
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CALL_ACTION: HANGUP - Instruct Ada to end the call (check first)
+    // ═══════════════════════════════════════════════════════════════════
+    if (call_action === "hangup") {
+      const goodbyeMessage = message || "Goodbye!";
+      console.log(`[${call_id}] 📞 Dispatch hangup: "${goodbyeMessage}"`);
+
+      // Add hangup instruction to transcripts so polling can detect it
+      const { data: callData } = await supabase
+        .from("live_calls")
+        .select("transcripts")
+        .eq("call_id", call_id)
+        .single();
+
+      const transcripts = (callData?.transcripts as any[]) || [];
+      transcripts.push({
+        role: "dispatch_hangup",
+        text: goodbyeMessage,
+        timestamp: new Date().toISOString()
+      });
+
+      await supabase
+        .from("live_calls")
+        .update({
+          transcripts,
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", call_id);
+
+      await supabase.channel(`dispatch_${call_id}`).send({
+        type: "broadcast",
+        event: "dispatch_hangup",
+        payload: {
+          call_id,
+          call_action: "hangup",
+          message: goodbyeMessage,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        call_action: "hangup",
+        message: "Hangup instruction sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // ═══════════════════════════════════════════════════════════════════
     // ACTION: ASK - Send a question for Ada to ask the customer
@@ -226,164 +280,125 @@ serve(async (req) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ACTION: HANGUP - Instruct Ada to end the call
+    // ACTION: CONFIRM - Standard booking confirmation/rejection
     // ═══════════════════════════════════════════════════════════════════
-    if (action === "hangup") {
-      const goodbyeMessage = message || "Goodbye!";
-      console.log(`[${call_id}] 📞 Dispatch hangup: "${goodbyeMessage}"`);
+    // Default to confirm if action not specified (backwards compatibility)
+    if (!action || action === "confirm") {
+      if (!status) {
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'confirm' action: status" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
 
-      // Add hangup instruction to transcripts so polling can detect it
-      const { data: callData } = await supabase
-        .from("live_calls")
-        .select("transcripts")
-        .eq("call_id", call_id)
-        .single();
+      // Build confirmation message based on status
+      let confirmationMessage: string;
+      let bookingStatus: string;
 
-      const transcripts = (callData?.transcripts as any[]) || [];
-      transcripts.push({
-        role: "dispatch_hangup",
-        text: goodbyeMessage,
-        timestamp: new Date().toISOString()
-      });
+      if (status === "dispatched") {
+        bookingStatus = "dispatched";
+        const parts: string[] = ["Brilliant! Your taxi is confirmed."];
+        
+        if (driver_name) {
+          parts.push(`Your driver ${driver_name} is on the way.`);
+        }
+        if (eta) {
+          parts.push(`They'll be with you in ${eta}.`);
+        }
+        if (vehicle_reg) {
+          parts.push(`Look out for registration ${vehicle_reg}.`);
+        }
+        if (fare) {
+          parts.push(`The fare is ${fare}.`);
+        }
+        parts.push("Is there anything else I can help you with?");
+        
+        confirmationMessage = parts.join(" ");
+      } else if (status === "no_cars") {
+        bookingStatus = "no_cars";
+        confirmationMessage = message || "I'm really sorry, but we don't have any cars available at the moment. Would you like me to try again in a few minutes, or can I help with anything else?";
+      } else if (status === "rejected") {
+        bookingStatus = "rejected";
+        confirmationMessage = message || "I'm sorry, but we're unable to take this booking at the moment. Is there anything else I can help you with?";
+      } else {
+        bookingStatus = "pending";
+        confirmationMessage = message || "Your booking is being processed. Please hold on a moment.";
+      }
 
-      await supabase
+      // Update live_calls with dispatch response
+      const { error: updateError } = await supabase
         .from("live_calls")
         .update({
-          transcripts,
+          status: bookingStatus,
+          eta: eta || null,
+          fare: fare || null,
           updated_at: new Date().toISOString()
         })
         .eq("call_id", call_id);
 
+      if (updateError) {
+        console.error(`[${call_id}] ❌ Failed to update live_calls:`, updateError);
+      }
+
+      // Update bookings table if dispatched
+      if (status === "dispatched") {
+        const bookingUpdate: Record<string, any> = {
+          status: "dispatched",
+          updated_at: new Date().toISOString()
+        };
+        if (eta) bookingUpdate.eta = eta;
+        if (fare) bookingUpdate.fare = fare;
+        if (driver_name || vehicle_reg) {
+          bookingUpdate.booking_details = {
+            driver_name: driver_name || null,
+            vehicle_reg: vehicle_reg || null,
+            vehicle_type: vehicle_type || null,
+            dispatched_at: new Date().toISOString()
+          };
+        }
+
+        await supabase
+          .from("bookings")
+          .update(bookingUpdate)
+          .eq("call_id", call_id);
+      }
+
+      // Broadcast dispatch update to live calls page AND to taxi-realtime
       await supabase.channel(`dispatch_${call_id}`).send({
         type: "broadcast",
-        event: "dispatch_hangup",
+        event: "dispatch_confirm",
         payload: {
           call_id,
-          action: "hangup",
-          message: goodbyeMessage,
-          timestamp: new Date().toISOString()
+          action: "confirm",
+          status,
+          eta,
+          driver_name,
+          vehicle_reg,
+          fare,
+          confirmation_message: confirmationMessage
         }
       });
+
+      console.log(`[${call_id}] ✅ Dispatch confirm processed: ${status}`);
 
       return new Response(JSON.stringify({
         success: true,
         call_id,
-        action: "hangup",
-        message: "Hangup instruction sent to Ada"
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // ACTION: CONFIRM - Standard booking confirmation/rejection
-    // ═══════════════════════════════════════════════════════════════════
-    if (!status) {
-      return new Response(JSON.stringify({ 
-        error: "Missing required field for 'confirm' action: status" 
-      }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // Build confirmation message based on status
-    let confirmationMessage: string;
-    let bookingStatus: string;
-
-    if (status === "dispatched") {
-      bookingStatus = "dispatched";
-      const parts: string[] = ["Brilliant! Your taxi is confirmed."];
-      
-      if (driver_name) {
-        parts.push(`Your driver ${driver_name} is on the way.`);
-      }
-      if (eta) {
-        parts.push(`They'll be with you in ${eta}.`);
-      }
-      if (vehicle_reg) {
-        parts.push(`Look out for registration ${vehicle_reg}.`);
-      }
-      if (fare) {
-        parts.push(`The fare is ${fare}.`);
-      }
-      parts.push("Is there anything else I can help you with?");
-      
-      confirmationMessage = parts.join(" ");
-    } else if (status === "no_cars") {
-      bookingStatus = "no_cars";
-      confirmationMessage = message || "I'm really sorry, but we don't have any cars available at the moment. Would you like me to try again in a few minutes, or can I help with anything else?";
-    } else if (status === "rejected") {
-      bookingStatus = "rejected";
-      confirmationMessage = message || "I'm sorry, but we're unable to take this booking at the moment. Is there anything else I can help you with?";
-    } else {
-      bookingStatus = "pending";
-      confirmationMessage = message || "Your booking is being processed. Please hold on a moment.";
-    }
-
-    // Update live_calls with dispatch response
-    const { error: updateError } = await supabase
-      .from("live_calls")
-      .update({
-        status: bookingStatus,
-        eta: eta || null,
-        fare: fare || null,
-        updated_at: new Date().toISOString()
-      })
-      .eq("call_id", call_id);
-
-    if (updateError) {
-      console.error(`[${call_id}] ❌ Failed to update live_calls:`, updateError);
-    }
-
-    // Update bookings table if dispatched
-    if (status === "dispatched") {
-      const bookingUpdate: Record<string, any> = {
-        status: "dispatched",
-        updated_at: new Date().toISOString()
-      };
-      if (eta) bookingUpdate.eta = eta;
-      if (fare) bookingUpdate.fare = fare;
-      if (driver_name || vehicle_reg) {
-        bookingUpdate.booking_details = {
-          driver_name: driver_name || null,
-          vehicle_reg: vehicle_reg || null,
-          vehicle_type: vehicle_type || null,
-          dispatched_at: new Date().toISOString()
-        };
-      }
-
-      await supabase
-        .from("bookings")
-        .update(bookingUpdate)
-        .eq("call_id", call_id);
-    }
-
-    // Broadcast dispatch update to live calls page AND to taxi-realtime
-    await supabase.channel(`dispatch_${call_id}`).send({
-      type: "broadcast",
-      event: "dispatch_confirm",
-      payload: {
-        call_id,
         action: "confirm",
-        status,
-        eta,
-        driver_name,
-        vehicle_reg,
-        fare,
+        status: bookingStatus,
         confirmation_message: confirmationMessage
-      }
-    });
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    console.log(`[${call_id}] ✅ Dispatch confirm processed: ${status}`);
-
-    return new Response(JSON.stringify({
-      success: true,
-      call_id,
-      action: "confirm",
-      status: bookingStatus,
-      confirmation_message: confirmationMessage
+    // Unknown action
+    return new Response(JSON.stringify({ 
+      error: `Unknown action: ${action}` 
     }), {
+      status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
