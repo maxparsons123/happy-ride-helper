@@ -25,23 +25,32 @@ PERSONALITY: Warm, patient, relaxed. Speak in 1–2 short sentences. Ask ONLY ON
 
 GREETING:
 - New caller: "Hello, welcome to {{company_name}}! I'm {{agent_name}}. What's your name?"
-- Returning caller (no booking): "Hello [NAME]! Where can I take you today?"
+- Returning caller (no booking): "Hello [NAME]! Where would you like to be picked up from?"
 - Returning caller (active booking): "Hello [NAME]! I can see you have an active booking. Would you like to keep it, change it, or cancel it?"
 
+BOOKING FLOW (STRICT ORDER):
+1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
+2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
+3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
+4. For airports/stations: also ask "Any bags?"
+5. When ALL details are known → call book_taxi IMMEDIATELY.
+
 RULES:
-1. NEVER repeat addresses, fares, or full routes.
-2. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
-3. When pickup, destination, passengers known → call book_taxi IMMEDIATELY.
-4. For airports/stations: ask "How many passengers, and any bags?" before booking.
-5. If user corrects name → call save_customer_name immediately.
-6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
-7. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
-8. GLOBAL service — accept any address.
-9. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
-10. If asked for places → call find_nearby_places, list 2–3 options.
+1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
+2. NEVER repeat addresses, fares, or full routes.
+3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
+4. If user corrects name → call save_customer_name immediately.
+5. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
+6. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
+7. GLOBAL service — accept any address.
+8. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+9. If asked for places → call find_nearby_places, list 2–3 options.
+
+IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
+If user says "from [address]" or "pick me up at [address]" that is PICKUP.
 
 TOOL USAGE:
-- Only call book_taxi when ALL fields provided.
+- Only call book_taxi when ALL fields provided (pickup, destination, passengers).
 - NEVER invent fares/addresses.
 - Call end_call after "Safe travels!".
 `;
@@ -167,6 +176,10 @@ interface SessionState {
 
   // Debounced DB flush
   transcriptFlushTimer: number | null;
+
+  // Echo guard: track when Ada is speaking to ignore audio feedback
+  isAdaSpeaking: boolean;
+  echoGuardUntil: number; // timestamp until which to ignore audio
 }
 
 serve(async (req) => {
@@ -300,11 +313,20 @@ serve(async (req) => {
         break;
 
       case "response.audio.delta":
+        // Mark Ada as speaking (echo guard)
+        sessionState.isAdaSpeaking = true;
         // Forward audio to bridge
         socket.send(JSON.stringify({
           type: "audio",
           audio: message.delta
         }));
+        break;
+
+      case "response.audio.done":
+        // Ada finished speaking - set echo guard window (500ms)
+        sessionState.isAdaSpeaking = false;
+        sessionState.echoGuardUntil = Date.now() + 500;
+        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 500ms`);
         break;
 
       case "response.audio_transcript.delta": {
@@ -512,6 +534,12 @@ serve(async (req) => {
       
       if (isBinary) {
         if (openaiConnected && openaiWs && state) {
+          // ECHO GUARD: Skip audio while Ada is speaking or in guard window
+          if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
+            // Silently discard audio that could be Ada's echo
+            return;
+          }
+
           let audioData: Uint8Array;
           
           if (event.data instanceof Blob) {
@@ -595,7 +623,9 @@ serve(async (req) => {
           booking: { pickup: null, destination: null, passengers: null, bags: null },
           transcripts: [],
           assistantTranscriptIndex: null,
-          transcriptFlushTimer: null
+          transcriptFlushTimer: null,
+          isAdaSpeaking: false,
+          echoGuardUntil: 0
         };
 
         // Create live call record
