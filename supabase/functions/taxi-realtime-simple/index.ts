@@ -1033,6 +1033,7 @@ serve(async (req) => {
           const oldValue = args.field_to_change === "pickup" ? sessionState.booking.pickup
             : args.field_to_change === "destination" ? sessionState.booking.destination
             : args.field_to_change === "passengers" ? sessionState.booking.passengers
+            : args.field_to_change === "bags" ? sessionState.booking.bags
             : null;
           
           if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
@@ -1040,8 +1041,11 @@ serve(async (req) => {
           if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value);
           if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(args.new_value);
           
-          // Send webhook with modification details if dispatch is configured
+          // Send webhook with modification details and poll for updated fare
           const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          let updatedFare: string | null = null;
+          let updatedEta: string | null = null;
+          
           if (DISPATCH_MODIFY_URL) {
             const modifyPayload = {
               event: "booking_modified",
@@ -1063,14 +1067,52 @@ serve(async (req) => {
             };
             
             console.log(`[${sessionState.callId}] 📡 Sending booking modification webhook:`, modifyPayload);
+            
+            // Fire webhook
             fetch(DISPATCH_MODIFY_URL, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(modifyPayload),
             }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
+            
+            // Poll for updated fare/eta (10 second timeout for modifications)
+            const pollTimeout = 10000;
+            const pollInterval = 500;
+            const pollStart = Date.now();
+            
+            console.log(`[${sessionState.callId}] 🔄 Polling for updated fare after modification...`);
+            
+            while (Date.now() - pollStart < pollTimeout) {
+              const { data: callData } = await supabase
+                .from("live_calls")
+                .select("fare, eta, updated_at")
+                .eq("call_id", sessionState.callId)
+                .single();
+              
+              // Check if fare/eta was updated after our webhook
+              if (callData && new Date(callData.updated_at).getTime() > pollStart) {
+                if (callData.fare) {
+                  updatedFare = callData.fare;
+                  updatedEta = callData.eta;
+                  console.log(`[${sessionState.callId}] ✅ Got updated fare: ${updatedFare}, eta: ${updatedEta}`);
+                  break;
+                }
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, pollInterval));
+            }
           }
           
-          result = { success: true, modified: args.field_to_change, new_value: args.new_value };
+          result = { 
+            success: true, 
+            modified: args.field_to_change, 
+            new_value: args.new_value,
+            ...(updatedFare && { fare: updatedFare }),
+            ...(updatedEta && { eta: updatedEta }),
+            message: updatedFare 
+              ? `Updated ${args.field_to_change}. New fare: ${updatedFare}`
+              : `Updated ${args.field_to_change} to ${args.new_value}`
+          };
           break;
         }
 
