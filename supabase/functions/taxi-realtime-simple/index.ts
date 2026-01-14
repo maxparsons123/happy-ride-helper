@@ -564,14 +564,12 @@ serve(async (req) => {
         },
         turn_detection: {
           type: "server_vad",
-          // Lower threshold (0.5) detects quieter speech better
           threshold: 0.5,
-          // Prefix padding captures speech starts (soft consonants)
-          prefix_padding_ms: 400,
-          // Faster response - reduced from 1200ms to 800ms
-          silence_duration_ms: 800
+          prefix_padding_ms: 300,
+          silence_duration_ms: 600
         },
-        temperature: 0.6,
+        temperature: 0.4,
+        max_response_output_tokens: 150,
         tools: TOOLS,
         tool_choice: "auto"
       }
