@@ -505,6 +505,22 @@ serve(async (req) => {
       case "error":
         console.error(`[${sessionState.callId}] 🚨 OpenAI Error:`, message.error);
         break;
+
+      case "response.done": {
+        // Log when OpenAI finishes a response (useful for debugging tool calls)
+        const output = message.response?.output || [];
+        const functionCalls = output.filter((o: any) => o.type === "function_call");
+        if (functionCalls.length > 0) {
+          console.log(`[${sessionState.callId}] 🔧 Response contained ${functionCalls.length} function call(s):`, functionCalls.map((f: any) => f.name).join(", "));
+        }
+        break;
+      }
+
+      default:
+        // Log unhandled event types for debugging
+        if (message.type && !message.type.startsWith("response.audio") && !message.type.startsWith("response.audio_transcript")) {
+          console.log(`[${sessionState.callId}] 📩 OpenAI event: ${message.type}`);
+        }
     }
   };
 
