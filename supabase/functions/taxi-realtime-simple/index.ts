@@ -458,6 +458,9 @@ serve(async (req) => {
             bags: args.bags || 0
           };
           
+          // Generate job_id upfront for tracking
+          const jobId = crypto.randomUUID();
+          
           // Call external dispatch webhook for geocoding + fare/ETA
           const webhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
           let fare = "£12.50";
@@ -467,9 +470,10 @@ serve(async (req) => {
           
           if (webhookUrl) {
             try {
-              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook...`);
+              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook with job_id: ${jobId}`);
               const webhookPayload = {
                 action: "book_taxi",
+                job_id: jobId,  // Unique ID for this booking
                 call_id: sessionState.callId,
                 caller_phone: sessionState.phone,
                 caller_name: sessionState.customerName,
@@ -499,7 +503,7 @@ serve(async (req) => {
                 // Use fare/ETA from your dispatch system
                 fare = dispatchResult.fare || fare;
                 etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
-                bookingRef = dispatchResult.booking_ref || dispatchResult.booking_id || null;
+                bookingRef = dispatchResult.booking_ref || dispatchResult.job_id || jobId;
                 distance = dispatchResult.distance || dispatchResult.distance_miles || null;
                 
                 // Update pickup/destination if dispatch provides validated addresses
@@ -517,8 +521,9 @@ serve(async (req) => {
             }
           }
           
-          // Create booking in DB with dispatch fare/ETA
+          // Create booking in DB with job_id and dispatch fare/ETA
           const { error: bookingError } = await supabase.from("bookings").insert({
+            id: jobId,  // Use job_id as primary key
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
