@@ -313,20 +313,26 @@ class TaxiBridgeV25:
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
 
         try:
-            # EAGER PRE-CONNECT: Connect to AI before we have the phone number
-            # This lets OpenAI start warming up while we wait for UUID message
+            # EAGER PRE-CONNECT: Connect to AI IMMEDIATELY
+            # OpenAI will start warming up while we wait for UUID message from Asterisk
             if not await self.connect_websocket():
                 logger.error(f"[{self.call_id}] ❌ Initial connection failed, ending call")
                 return
             
-            # Send pre_connect immediately (before we have phone number)
-            # OpenAI will start connecting while we wait for Asterisk UUID
-            pre_connect_msg = {
-                "type": "pre_connect",
+            # Send pre_connect AND init together - don't wait for phone number!
+            # This saves 200-500ms by starting OpenAI session immediately
+            # Phone number will be updated when UUID arrives
+            combined_init = {
+                "type": "init",
                 "call_id": self.call_id,
+                "phone": "unknown",  # Will be updated via update_phone message
+                "user_phone": "unknown",
+                "addressTtsSplicing": True,
+                "eager_init": True,  # Flag to indicate phone may arrive later
             }
-            await self.ws.send(json.dumps(pre_connect_msg))
-            logger.info(f"[{self.call_id}] 🔔 Sent pre_connect for eager OpenAI connection")
+            await self.ws.send(json.dumps(combined_init))
+            self.init_sent = True  # Mark as sent so we don't double-send
+            logger.info(f"[{self.call_id}] 🚀 Sent eager init (phone pending) for instant greeting")
 
             # Main loop with reconnection support
             while self.running:
@@ -446,8 +452,20 @@ class TaxiBridgeV25:
                     if len(raw_hex) >= 12:
                         self.phone = raw_hex[-12:]
                     logger.info(f"[{self.call_id}] 👤 Phone: {self.phone}")
-                    # Only send init once per connection
-                    if not self.init_sent:
+                    
+                    # Since we already sent eager init, just send phone update
+                    if self.init_sent:
+                        await self.ws.send(
+                            json.dumps({
+                                "type": "update_phone",
+                                "call_id": self.call_id,
+                                "phone": self.phone,
+                                "user_phone": self.phone,
+                            })
+                        )
+                        logger.info(f"[{self.call_id}] 📱 Sent phone update: {self.phone}")
+                    else:
+                        # Fallback: send full init if eager init wasn't sent
                         await self.ws.send(
                             json.dumps({
                                 "type": "init",

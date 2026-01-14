@@ -1342,6 +1342,45 @@ serve(async (req) => {
         })();
       }
 
+      // Handle late phone number update (for eager init flow)
+      if (message.type === "update_phone" && state) {
+        const phone = message.phone || message.user_phone;
+        if (phone && phone !== "unknown") {
+          console.log(`[${state.callId}] 📱 Phone update received: ${phone}`);
+          state.phone = phone;
+          
+          // Fire-and-forget: Lookup caller history now that we have the phone
+          (async () => {
+            try {
+              const { data: callerData } = await supabase
+                .from("callers")
+                .select("name, last_pickup, last_destination, total_bookings")
+                .eq("phone_number", phone)
+                .maybeSingle();
+              
+              if (callerData && state) {
+                state.callerLastPickup = callerData.last_pickup || null;
+                state.callerLastDestination = callerData.last_destination || null;
+                state.callerTotalBookings = callerData.total_bookings || 0;
+                if (!state.customerName && callerData.name) {
+                  state.customerName = callerData.name;
+                }
+                console.log(`[${state.callId}] 👤 Late caller lookup: ${state.callerTotalBookings} bookings`);
+              }
+              
+              // Update live call with phone number
+              await supabase.from("live_calls").update({
+                caller_phone: phone,
+                caller_name: state?.customerName,
+              }).eq("call_id", state?.callId);
+            } catch (e) {
+              console.error(`[${state?.callId}] Late phone lookup failed:`, e);
+            }
+          })();
+        }
+        return;
+      }
+
       if (message.type === "audio" && openaiConnected && openaiWs && state) {
         // ECHO GUARD: Skip audio while Ada is speaking or in guard window
         if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
