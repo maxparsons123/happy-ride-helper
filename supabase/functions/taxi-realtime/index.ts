@@ -9836,30 +9836,29 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // ═══════════════════════════════════════════════════════════════════
         // SIMPLE MODE REDIRECT
-        // If agent has use_simple_mode enabled, tell bridge to reconnect to simple endpoint.
-        // (Scribe STT is currently failing to connect from the edge runtime.)
+        // If agent has use_simple_mode enabled, route to Deepgram phonecall pipeline (best 8kHz STT).
         // ═══════════════════════════════════════════════════════════════════
         if (useSimpleMode) {
-          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-realtime-simple`);
+          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-passthrough-ws (Deepgram phonecall STT)`);
 
           // Send redirect message to bridge
           socket.send(
             JSON.stringify({
               type: "redirect",
-              endpoint: "taxi-realtime-simple",
-              url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-simple`,
-              reason: "simple_mode_enabled",
+              endpoint: "taxi-passthrough-ws",
+              url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-passthrough-ws`,
+              reason: "simple_mode_deepgram",
               call_id: callId,
               // Pass through all init data so bridge can forward it
               init_data: message,
             })
           );
 
-          // Close this socket - bridge should reconnect to simple endpoint
+          // Close this socket - bridge should reconnect to passthrough endpoint
           skipDbWrites = true;
           callEnded = true;
           try {
-            socket.close(1000, "Redirecting to simple mode");
+            socket.close(1000, "Redirecting to Deepgram passthrough mode");
           } catch (_) {
             /* ignore */
           }
