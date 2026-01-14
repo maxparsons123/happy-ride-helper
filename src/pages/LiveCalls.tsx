@@ -114,7 +114,13 @@ function getCountryFromPhone(phone: string | null): { code: string; name: string
   if (!phone) return null;
   
   // Ensure phone has + prefix
-  const cleaned = phone.startsWith("+") ? phone.replace(/\s+/g, "").replace(/-/g, "") : `+${phone.replace(/\s+/g, "").replace(/-/g, "")}`;
+  let cleaned = phone.startsWith("+") ? phone.replace(/\s+/g, "").replace(/-/g, "") : `+${phone.replace(/\s+/g, "").replace(/-/g, "")}`;
+  
+  // Normalize: handle +0XX format (e.g., +031 → +31, +044 → +44)
+  // Some systems send numbers with extra leading 0 after +
+  if (/^\+0\d/.test(cleaned)) {
+    cleaned = "+" + cleaned.slice(2); // Remove the 0 after +
+  }
   
   // Try longer codes first (e.g., +353 before +3, +1868 before +1)
   const sortedCodes = Object.keys(COUNTRY_CODE_INFO).sort((a, b) => b.length - a.length);

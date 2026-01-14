@@ -109,9 +109,16 @@ function detectLanguageFromPhone(phone: string | null): string | null {
   if (!phone) return null;
   
   // Clean the phone number
-  const cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
+  let cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
   
-  // Try longer codes first (e.g., +353 before +3)
+  // Normalize: handle +0XX format (e.g., +031 → +31, +044 → +44)
+  // Some systems send numbers with extra leading 0 after +
+  if (/^\+0\d/.test(cleaned)) {
+    cleaned = "+" + cleaned.slice(2); // Remove the 0 after +
+    console.log(`📞 Normalized phone from ${phone} to ${cleaned}`);
+  }
+  
+  // Try longer codes first (e.g., +353 before +3, +1868 before +1)
   const sortedCodes = Object.keys(COUNTRY_CODE_TO_LANGUAGE).sort((a, b) => b.length - a.length);
   
   for (const code of sortedCodes) {
