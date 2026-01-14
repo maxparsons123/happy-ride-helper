@@ -1349,6 +1349,15 @@ serve(async (req) => {
           console.log(`[${state.callId}] 📱 Phone update received: ${phone}`);
           state.phone = phone;
           
+          // Re-detect language from updated phone number
+          const detectedLanguage = detectLanguageFromPhone(phone);
+          if (detectedLanguage && detectedLanguage !== "en" && state.language === "auto") {
+            console.log(`[${state.callId}] 🌐 Late language detection: ${detectedLanguage} (was auto)`);
+            state.language = detectedLanguage;
+            // NOTE: Greeting may have already started in English. 
+            // For non-English callers with eager init, first words may be English before Ada switches.
+          }
+          
           // Fire-and-forget: Lookup caller history now that we have the phone
           (async () => {
             try {
