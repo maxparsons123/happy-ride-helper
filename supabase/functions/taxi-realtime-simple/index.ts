@@ -107,29 +107,45 @@ const COUNTRY_CODE_TO_LANGUAGE: Record<string, string> = {
 // Detect language from phone number country code
 function detectLanguageFromPhone(phone: string | null): string | null {
   if (!phone) return null;
-  
+
   // Clean the phone number
   let cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
-  
-  // Normalize: handle +0XX format (e.g., +031 → +31, +044 → +44)
-  // Some systems send numbers with extra leading 0 after +
-  if (/^\+0\d/.test(cleaned)) {
-    cleaned = "+" + cleaned.slice(2); // Remove the 0 after +
-    console.log(`📞 Normalized phone from ${phone} to ${cleaned}`);
+
+  // Common normalizations:
+  // - 00CC... → +CC...
+  if (cleaned.startsWith("00")) {
+    cleaned = "+" + cleaned.slice(2);
   }
-  
+
+  // - +0CC... → +CC...
+  if (/^\+0\d/.test(cleaned)) {
+    cleaned = "+" + cleaned.slice(2);
+  }
+
+  // - 0316... (some PBX/CLI formats) → +316... (Netherlands mobiles)
+  //   This avoids guessing for all leading-0 national numbers (e.g. UK 07..., 020...).
+  if (/^0316\d+/.test(cleaned)) {
+    cleaned = "+31" + cleaned.slice(3);
+  }
+
+  // Only attempt country-code matching on E.164-like numbers
+  if (!cleaned.startsWith("+")) {
+    console.log(`📞 Phone ${phone} not in E.164 format; skipping country-code language mapping`);
+    return null;
+  }
+
   // Try longer codes first (e.g., +353 before +3, +1868 before +1)
   const sortedCodes = Object.keys(COUNTRY_CODE_TO_LANGUAGE).sort((a, b) => b.length - a.length);
-  
+
   for (const code of sortedCodes) {
     if (cleaned.startsWith(code)) {
       const lang = COUNTRY_CODE_TO_LANGUAGE[code];
-      console.log(`📞 Phone ${phone} matched ${code} → ${lang}`);
+      console.log(`📞 Phone ${phone} normalized=${cleaned} matched ${code} → ${lang}`);
       return lang;
     }
   }
-  
-  console.log(`📞 Phone ${phone} - no country code match, using auto-detect`);
+
+  console.log(`📞 Phone ${phone} normalized=${cleaned} - no country code match, using auto-detect`);
   return null;
 }
 
@@ -143,10 +159,11 @@ LANGUAGE: {{language_instruction}}
 
 PERSONALITY: Warm, patient, relaxed. Speak in 1–2 short sentences. Ask ONLY ONE question at a time.
 
-GREETING:
-- New caller: "Hello, welcome to {{company_name}}! I'm {{agent_name}}. What's your name?"
-- Returning caller (no booking): "Hello [NAME]! Where would you like to be picked up from?"
-- Returning caller (active booking): "Hello [NAME]! I can see you have an active booking. Would you like to keep it, change it, or cancel it?"
+GREETING (ALWAYS IN THE CURRENT LANGUAGE):
+- New caller: Welcome them to {{company_name}}, introduce yourself as {{agent_name}}, and ask their name.
+- Returning caller (no booking): Greet [NAME] and ask where they want pickup.
+- Returning caller (active booking): Greet [NAME], mention an active booking, ask keep/change/cancel.
+Example Dutch (nl) new caller: "Hallo, welkom bij {{company_name}}! Ik ben {{agent_name}}. Hoe heet u?"
 
 BOOKING FLOW (STRICT ORDER):
 1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
@@ -485,9 +502,37 @@ serve(async (req) => {
   // --- Send Session Update ---
   const sendSessionUpdate = (sessionState: SessionState) => {
     // Language instruction based on setting
-    const languageInstruction = sessionState.language === "auto" || sessionState.language === "en"
+    const languageNames: Record<string, string> = {
+      en: "English",
+      nl: "Dutch",
+      es: "Spanish",
+      fr: "French",
+      de: "German",
+      it: "Italian",
+      pt: "Portuguese",
+      pl: "Polish",
+      ro: "Romanian",
+      ar: "Arabic",
+      hi: "Hindi",
+      zh: "Chinese",
+      ja: "Japanese",
+      ko: "Korean",
+      tr: "Turkish",
+      ru: "Russian",
+      el: "Greek",
+      cs: "Czech",
+      hu: "Hungarian",
+      sv: "Swedish",
+      no: "Norwegian",
+      da: "Danish",
+      fi: "Finnish",
+    };
+
+    const languageName = languageNames[sessionState.language] ?? sessionState.language;
+
+    const languageInstruction = sessionState.language === "auto"
       ? "Respond in the same language the caller speaks. If they speak Spanish, respond in Spanish. If they speak French, respond in French. Match their language naturally."
-      : `Respond in ${sessionState.language}. The caller prefers this language.`;
+      : `Respond ONLY in ${languageName} (code: ${sessionState.language}). Translate ALL fixed phrases in this prompt (greetings, questions, \"Let me check your booking\", \"Safe travels!\") into ${languageName}.`;
     
     let prompt = SYSTEM_PROMPT
       .replace(/\{\{agent_name\}\}/g, sessionState.agentName)
