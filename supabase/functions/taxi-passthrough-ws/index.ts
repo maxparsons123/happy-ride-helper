@@ -812,6 +812,9 @@ serve(async (req) => {
         const message = JSON.parse(event.data);
         
         if (message.type === "init") {
+          // Log full init message for debugging redirect issues
+          console.log(`[${session.call_id}] 📥 Init message received:`, JSON.stringify(message).substring(0, 500));
+          
           session.call_id = message.call_id || session.call_id;
           session.caller_phone = message.caller_phone || message.user_phone;
           session.caller_name = message.caller_name;
