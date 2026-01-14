@@ -588,10 +588,10 @@ serve(async (req) => {
 
             // IMPORTANT: Do NOT fire-and-forget.
             // Edge runtimes can cancel background tasks when the WebSocket closes.
-            // We'll wait briefly (with a timeout) so the webhook reliably leaves the server.
+            // Wait up to 5 seconds for the webhook to complete - ngrok can be slow.
             try {
               const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 1500);
+              const timeout = setTimeout(() => controller.abort(), 5000);
 
               const resp = await fetch(webhookUrl, {
                 method: "POST",
