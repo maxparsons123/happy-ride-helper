@@ -34,7 +34,7 @@ BOOKING FLOW (STRICT ORDER):
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
 4. ONLY for AIRPORTS or TRAIN STATIONS: ask "Any bags?" — otherwise skip bags entirely.
-5. When ALL details are known → YOU MUST call book_taxi tool IMMEDIATELY. Do NOT speak a confirmation until the tool returns.
+5. When ALL details are known → call book_taxi IMMEDIATELY.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -42,21 +42,18 @@ RULES:
 3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
 4. NEVER ask about bags unless destination is an AIRPORT or TRAIN STATION.
 5. If user corrects name → call save_customer_name immediately.
-6. After book_taxi returns: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
-7. If user says "no" or "that's all" after "Anything else?" → say "Safe travels!" and call end_call.
-8. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
-9. GLOBAL service — accept any address.
-10. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
+7. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
+8. GLOBAL service — accept any address.
+9. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
 
-CRITICAL TOOL RULES:
-- You MUST call book_taxi tool when you have pickup, destination, and passengers. DO NOT just say "Booked" without calling the tool.
-- You MUST call end_call tool after saying "Safe travels!". DO NOT keep talking, re-greet, or restart booking after end_call.
-- You MUST call cancel_booking tool before saying "cancelled". DO NOT just say it's cancelled without calling the tool.
-- NEVER say a booking is confirmed unless you have called the book_taxi tool and received a response.
-- NEVER invent fares or ETAs — use the values returned by the book_taxi tool.
+TOOL USAGE:
+- Only call book_taxi when ALL fields provided (pickup, destination, passengers).
+- NEVER invent fares/addresses.
+- Call end_call after "Safe travels!".
 `;
 
 // --- Tool Schemas ---
@@ -74,28 +71,19 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description:
-      "MANDATORY: You MUST call this tool to book a taxi. Do NOT say 'Booked' without calling this tool first. Call when you have pickup, destination, and passengers.",
+    description: "Book taxi. CALL IMMEDIATELY when details known.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string", description: "Pickup address" },
-        destination: { type: "string", description: "Destination address" },
-        passengers: {
-          type: "integer",
-          minimum: 1,
-          description: "Number of passengers",
-        },
-        bags: {
-          type: "integer",
-          minimum: 0,
-          description: "Number of bags (only for airport/station trips)",
-        },
+        pickup: { type: "string" },
+        destination: { type: "string" },
+        passengers: { type: "integer", minimum: 1 },
+        bags: { type: "integer", minimum: 0 },
         pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
-        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] },
+        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
       },
-      required: ["pickup", "destination", "passengers"],
-    },
+      required: ["pickup", "destination", "passengers"]
+    }
   },
   {
     type: "function",
@@ -252,36 +240,20 @@ serve(async (req) => {
     }
 
     // Connect to Scribe WebSocket
-    // IMPORTANT: Scribe v2 realtime requires session config via query params (model_id, audio_format, commit_strategy)
-    const scribeUrl =
-      `wss://api.elevenlabs.io/v1/scribe/v2_realtime` +
-      `?token=${token}` +
-      `&model_id=scribe_v2_realtime` +
-      `&language_code=en` +
-      `&audio_format=ulaw_8000` +
-      `&commit_strategy=vad`;
-
-    scribeWs = new WebSocket(scribeUrl);
+    scribeWs = new WebSocket(
+      `wss://api.elevenlabs.io/v1/scribe/v2_realtime?token=${token}`
+    );
 
     scribeWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ ElevenLabs Scribe connected`);
-
-      // Flush any buffered pre-connect audio (to avoid missing the first utterance)
-      if (sessionState.audioBuffer.length > 0) {
-        console.log(
-          `[${sessionState.callId}] 📤 Flushing ${sessionState.audioBuffer.length} buffered audio chunk(s) to Scribe`
-        );
-        for (const chunk of sessionState.audioBuffer.splice(0)) {
-          try {
-            let binary = "";
-            for (let i = 0; i < chunk.length; i++) binary += String.fromCharCode(chunk[i]);
-            const base64Audio = btoa(binary);
-            scribeWs?.send(JSON.stringify({ audio_base_64: base64Audio }));
-          } catch (e) {
-            console.error(`[${sessionState.callId}] Buffer flush error:`, e);
-          }
-        }
-      }
+      
+      // Configure Scribe for 8kHz PCM (telephony)
+      scribeWs?.send(JSON.stringify({
+        type: "configure",
+        audio_format: "pcm_8000",  // Native 8kHz!
+        sample_rate: 8000,
+        commit_strategy: "vad",  // Voice Activity Detection
+      }));
     };
 
     scribeWs.onmessage = (event) => {
@@ -569,109 +541,36 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "book_taxi": {
+        case "book_taxi":
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers,
-            bags: args.bags || 0,
+            bags: args.bags || 0
           };
-
-          // Generate job_id upfront for tracking (and for dispatch correlation)
-          const jobId = crypto.randomUUID();
-
-          // Default fallback values (if dispatch webhook unavailable)
-          let fare = "£12.50";
-          let etaMinutes = 8;
-
-          // Call external dispatch webhook for geocoding + fare/ETA
-          const webhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
-          if (webhookUrl) {
-            const webhookPayload = {
-              action: "book_taxi",
-              job_id: jobId,
-              call_id: sessionState.callId,
-              caller_phone: sessionState.phone,
-              caller_name: sessionState.customerName,
-              ada_pickup: args.pickup,
-              ada_destination: args.destination,
-              pickup: args.pickup,
-              destination: args.destination,
-              passengers: args.passengers || 1,
-              bags: args.bags || 0,
-              vehicle_type: args.vehicle_type || "saloon",
-              pickup_time: args.pickup_time || "now",
-              timestamp: new Date().toISOString(),
-            };
-
-            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook: ${webhookUrl}`);
-            console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
-
-            // IMPORTANT: Do NOT fire-and-forget.
-            // Edge runtimes can cancel background tasks when the WebSocket closes.
-            try {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 1500);
-
-              const resp = await fetch(webhookUrl, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-Job-Id": jobId,
-                  "X-Call-Id": sessionState.callId,
-                },
-                body: JSON.stringify(webhookPayload),
-                signal: controller.signal,
-              });
-
-              clearTimeout(timeout);
-
-              const respText = await resp.text().catch(() => "");
-              if (resp.ok) {
-                console.log(
-                  `[${sessionState.callId}] ✅ Dispatch webhook delivered: ${resp.status} - ${respText.substring(0, 200)}`
-                );
-              } else {
-                console.error(
-                  `[${sessionState.callId}] ❌ Dispatch webhook rejected: ${resp.status} ${resp.statusText} - ${respText.substring(0, 200)}`
-                );
-              }
-            } catch (webhookErr) {
-              console.error(`[${sessionState.callId}] ❌ Dispatch webhook send failed:`, webhookErr);
-            }
-          } else {
-            console.log(`[${sessionState.callId}] ⚠️ DISPATCH_WEBHOOK_URL not set; skipping dispatch webhook`);
-          }
-
-          // Persist booking immediately (don’t wait for webhook)
+          
           const { error: bookingError } = await supabase.from("bookings").insert({
-            id: jobId,
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers || 1,
-            fare,
-            eta: `${etaMinutes} minutes`,
-            status: "confirmed",
-            booking_details: { job_id: jobId },
+            status: "confirmed"
           });
-
+          
           if (bookingError) {
             console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
           }
-
-          result = {
-            success: true,
-            eta_minutes: etaMinutes,
-            fare,
-            booking_ref: jobId,
-            message: "Booking confirmed",
+          
+          result = { 
+            success: true, 
+            eta_minutes: 8, 
+            fare: "£12.50",
+            message: "Booking confirmed"
           };
           break;
-        }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
@@ -692,8 +591,7 @@ serve(async (req) => {
           console.log(`[${sessionState.callId}] 👋 Ending call`);
           result = { success: true };
           immediateFlush(sessionState);
-          await supabase
-            .from("live_calls")
+          await supabase.from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           break;
@@ -706,44 +604,15 @@ serve(async (req) => {
       result = { error: "Failed to execute" };
     }
 
-    // Send result back to OpenAI
-    openaiWs?.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(result),
-        },
-      })
-    );
+    openaiWs?.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output: JSON.stringify(result)
+      }
+    }));
 
-    // CRITICAL: end_call should TERMINATE the session (no further responses / re-greetings)
-    if (name === "end_call") {
-      try {
-        socket.send(JSON.stringify({ type: "call_ended" }));
-      } catch {
-        // ignore
-      }
-      try {
-        scribeWs?.close();
-      } catch {
-        // ignore
-      }
-      try {
-        openaiWs?.close();
-      } catch {
-        // ignore
-      }
-      try {
-        socket.close(1000, "Call ended");
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    // Trigger response continuation for non-ending tool calls
     openaiWs?.send(JSON.stringify({ type: "response.create" }));
   };
 
@@ -756,42 +625,42 @@ serve(async (req) => {
     try {
       const isBinary = event.data instanceof Blob || event.data instanceof ArrayBuffer || event.data instanceof Uint8Array;
       
-       if (isBinary) {
-         if (state && scribeWs) {
-           // Echo guard check
-           if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
-             return; // Skip audio during Ada's speech
-           }
+      if (isBinary) {
+        if (state && scribeWs && scribeWs.readyState === WebSocket.OPEN) {
+          // Echo guard check
+          if (state.isAdaSpeaking || Date.now() < state.echoGuardUntil) {
+            return; // Skip audio during Ada's speech
+          }
 
-           let audioData: Uint8Array;
-
-           if (event.data instanceof Blob) {
-             audioData = new Uint8Array(await event.data.arrayBuffer());
-           } else if (event.data instanceof ArrayBuffer) {
-             audioData = new Uint8Array(event.data);
-           } else {
-             audioData = event.data;
-           }
-
-           // If Scribe isn't connected yet, buffer a few chunks so we don't miss the user's first words
-           if (scribeWs.readyState !== WebSocket.OPEN) {
-             if (state.audioBuffer.length < 60) {
-               state.audioBuffer.push(audioData);
-             }
-             return;
-           }
-
-           // Scribe supports native telephony µ-law input (ulaw_8000). Send raw bytes as base64.
-           let binary = "";
-           for (let i = 0; i < audioData.length; i++) {
-             binary += String.fromCharCode(audioData[i]);
-           }
-           const base64Audio = btoa(binary);
-
-           scribeWs.send(JSON.stringify({ audio_base_64: base64Audio }));
-         }
-         return;
-       }
+          let audioData: Uint8Array;
+          
+          if (event.data instanceof Blob) {
+            audioData = new Uint8Array(await event.data.arrayBuffer());
+          } else if (event.data instanceof ArrayBuffer) {
+            audioData = new Uint8Array(event.data);
+          } else {
+            audioData = event.data;
+          }
+          
+          // Convert µ-law to PCM16 (keep at 8kHz - Scribe supports it natively!)
+          const pcm16 = ulawToPcm16(audioData);
+          
+          // Convert to base64 for Scribe
+          const bytes = new Uint8Array(pcm16.buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64Audio = btoa(binary);
+          
+          // Send to ElevenLabs Scribe
+          scribeWs.send(JSON.stringify({
+            type: "audio",
+            audio: base64Audio
+          }));
+        }
+        return;
+      }
 
       // Handle JSON messages
       const message = JSON.parse(event.data);

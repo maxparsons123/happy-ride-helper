@@ -9836,43 +9836,26 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
         
         // ═══════════════════════════════════════════════════════════════════
         // SIMPLE MODE REDIRECT
-        // If agent has use_simple_mode enabled, route to Deepgram phonecall pipeline (best 8kHz STT).
+        // If agent has use_simple_mode enabled, tell bridge to reconnect to simple endpoint
         // ═══════════════════════════════════════════════════════════════════
         if (useSimpleMode) {
-          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-passthrough-ws (Deepgram phonecall STT)`);
-
+          console.log(`[${callId}] 🔀 Agent ${agentSlug} has use_simple_mode=true - redirecting to taxi-realtime-simple`);
+          
           // Send redirect message to bridge
-          socket.send(
-            JSON.stringify({
-              type: "redirect",
-              endpoint: "taxi-passthrough-ws",
-              url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-passthrough-ws`,
-              reason: "simple_mode_deepgram",
-              call_id: callId,
-              // Enrich init data so passthrough-ws can forward transcripts to your webhook
-              init_data: {
-                ...message,
-                caller_phone: message.caller_phone ?? message.user_phone ?? message.phone ?? userPhone ?? null,
-                caller_name: message.caller_name ?? callerName ?? null,
-                webhook_url: (
-                  message.webhook_url ??
-                  Deno.env.get("DISPATCH_WEBHOOK_URL") ??
-                  Deno.env.get("ADADIRECT_WEBHOOK_URL") ??
-                  ""
-                ).trim() || null,
-                webhook_token: message.webhook_token ?? null,
-              },
-            })
-          );
-
-          // Close this socket - bridge should reconnect to passthrough endpoint
+          socket.send(JSON.stringify({
+            type: "redirect",
+            endpoint: "taxi-realtime-simple",
+            url: `wss://${Deno.env.get("SUPABASE_URL")?.replace("https://", "")}/functions/v1/taxi-realtime-simple`,
+            reason: "simple_mode_enabled",
+            call_id: callId,
+            // Pass through all init data so bridge can forward it
+            init_data: message
+          }));
+          
+          // Close this socket - bridge should reconnect to simple endpoint
           skipDbWrites = true;
           callEnded = true;
-          try {
-            socket.close(1000, "Redirecting to Deepgram passthrough mode");
-          } catch (_) {
-            /* ignore */
-          }
+          try { socket.close(1000, "Redirecting to simple mode"); } catch (_) { /* ignore */ }
           return;
         }
         

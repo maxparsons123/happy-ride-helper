@@ -33,7 +33,7 @@ BOOKING FLOW (STRICT ORDER):
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
 4. ONLY for AIRPORTS or TRAIN STATIONS: ask "Any bags?" — otherwise skip bags entirely.
-5. When ALL details are known → YOU MUST call book_taxi tool IMMEDIATELY. Do NOT speak a confirmation until the tool returns.
+5. When ALL details are known → call book_taxi IMMEDIATELY.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -41,7 +41,7 @@ RULES:
 3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
 4. NEVER ask about bags unless destination is an AIRPORT or TRAIN STATION.
 5. If user corrects name → call save_customer_name immediately.
-6. After book_taxi returns: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
+6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
 7. If user says "no" or "that's all" after "Anything else?" → say "Safe travels!" and call end_call.
 8. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
 9. GLOBAL service — accept any address.
@@ -50,12 +50,10 @@ RULES:
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
 
-CRITICAL TOOL RULES:
-- You MUST call book_taxi tool when you have pickup, destination, and passengers. DO NOT just say "Booked" without calling the tool.
-- You MUST call end_call tool after saying "Safe travels!". DO NOT just say goodbye without calling the tool.
-- You MUST call cancel_booking tool before saying "cancelled". DO NOT just say it's cancelled without calling the tool.
-- NEVER say a booking is confirmed unless you have called the book_taxi tool and received a response.
-- NEVER invent fares or ETAs — use the values returned by the book_taxi tool.
+TOOL USAGE:
+- Only call book_taxi when ALL fields provided (pickup, destination, passengers).
+- NEVER invent fares/addresses.
+- Call end_call after "Safe travels!".
 `;
 
 // --- Tool Schemas ---
@@ -73,14 +71,14 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "MANDATORY: You MUST call this tool to book a taxi. Do NOT say 'Booked' without calling this tool first. Call when you have pickup, destination, and passengers.",
+    description: "Book taxi. CALL IMMEDIATELY when details known. Include 'bags' for airport trips.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string", description: "Pickup address" },
-        destination: { type: "string", description: "Destination address" },
-        passengers: { type: "integer", minimum: 1, description: "Number of passengers" },
-        bags: { type: "integer", minimum: 0, description: "Number of bags (only for airport/station trips)" },
+        pickup: { type: "string" },
+        destination: { type: "string" },
+        passengers: { type: "integer", minimum: 1 },
+        bags: { type: "integer", minimum: 0 },
         pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
         vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
       },
@@ -139,70 +137,16 @@ const STT_CORRECTIONS: Record<string, string> = {
   "can't sell it": "cancel it",
   "concert": "cancel",
   "counter": "cancel",
-  "truth to a": "52A",
-  "truth to": "52",
-  "day with rod": "David Road",
-  "day with road": "David Road",
-  "i am manchester": "to Manchester",
 };
 
-// Hallucination patterns to reject entirely (return empty string)
-// NOTE: keep this conservative — we must NOT discard valid short answers like "no" or "three".
-const HALLUCINATION_PATTERNS = [
-  /^(thank you[.,!]?\s*){2,}$/i,                 // repeated "Thank you"
-  /^(thanks[.,!]?\s*){2,}$/i,                    // repeated "Thanks"
-  /^(okay[.,!]?\s*){2,}$/i,                      // repeated "Okay"
-  /^(ok[.,!]?\s*){2,}$/i,                        // repeated "Ok"
-  /^(bye[.,!]?\s*){2,}$/i,                       // repeated "Bye"
-  /^(you can bring|bring them|apples|oranges)/i,  // known nonsense phrases
-  /^\.+$/,                                       // just dots
-];
-
-// Valid short utterances that should NEVER be treated as hallucinations
-const ALLOWED_SHORT_UTTERANCE =
-  /^(yes|no|yeah|yep|nope|nah|ok|okay|k|thanks|thank you|asap|now|one|two|three|four|five|six|seven|eight|nine|ten|\d+)$/i;
-
-function isHallucination(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return true;
-
-  // Preserve critical short replies (passenger counts, yes/no, etc.)
-  if (ALLOWED_SHORT_UTTERANCE.test(trimmed)) return false;
-
-  for (const pattern of HALLUCINATION_PATTERNS) {
-    if (pattern.test(trimmed)) return true;
-  }
-
-  // Excessive repetition (same word 3+ times) — usually echo/hallucination
-  const words = trimmed.toLowerCase().split(/\s+/);
-  if (words.length >= 3) {
-    const unique = new Set(words);
-    if (unique.size === 1) return true;
-  }
-
-  return false;
-}
-
 function correctTranscript(text: string): string {
-  // First check for hallucinations
-  if (isHallucination(text)) {
-    console.log(`[STT] Rejected hallucination: "${text}"`);
-    return "";
-  }
-
-  // Apply ALL corrections (not first-match), so phrases like
-  // "Truth to a Day with Rod" can become "52A David Road".
-  let out = text;
-  let outLower = out.toLowerCase();
-
+  let corrected = text.toLowerCase();
   for (const [bad, good] of Object.entries(STT_CORRECTIONS)) {
-    if (outLower.includes(bad)) {
-      out = out.replace(new RegExp(bad, "gi"), good);
-      outLower = out.toLowerCase();
+    if (corrected.includes(bad)) {
+      return text.replace(new RegExp(bad, "gi"), good);
     }
   }
-
-  return out;
+  return text;
 }
 
 // --- Session State ---
@@ -237,10 +181,6 @@ interface SessionState {
   // Echo guard: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
-
-  // OpenAI session lifecycle
-  didSendSessionUpdate: boolean;
-  didSendGreeting: boolean;
 }
 
 serve(async (req) => {
@@ -277,7 +217,7 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
       openaiConnected = true;
-      // IMPORTANT: wait for `session.created` before sending `session.update`
+      sendSessionUpdate(sessionState);
     };
 
     openaiWs.onmessage = (event) => {
@@ -381,22 +321,8 @@ serve(async (req) => {
     switch (message.type) {
       case "session.created":
         console.log(`[${sessionState.callId}] 🎉 Session created`);
-
-        // CRITICAL: configure the session AFTER `session.created` so tools/instructions apply
-        if (!sessionState.didSendSessionUpdate) {
-          sendSessionUpdate(sessionState);
-          sessionState.didSendSessionUpdate = true;
-        }
-        break;
-
-      case "session.updated":
-        console.log(`[${sessionState.callId}] ✅ Session confirmed (session.updated)`);
-
-        // Trigger greeting once we know the session config (tools/prompt) is applied
-        if (!sessionState.didSendGreeting) {
-          openaiWs?.send(JSON.stringify({ type: "response.create" }));
-          sessionState.didSendGreeting = true;
-        }
+        // Trigger greeting
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
         break;
 
       case "response.audio.delta":
@@ -482,16 +408,15 @@ serve(async (req) => {
       }
 
       case "input_audio_buffer.speech_stopped": {
-        // Server VAD auto-commits the buffer and triggers response.create
-        // Do NOT manually send response.create - it causes duplicate response errors
+        // Log VAD detection
         console.log(`[${sessionState.callId}] 🎤 Speech stopped (VAD)`);
         break;
       }
 
       case "input_audio_buffer.committed": {
-        // Server VAD committed the buffer - response.create is triggered automatically
-        // Do NOT manually send response.create here
-        console.log(`[${sessionState.callId}] 📦 Audio buffer committed`);
+        // VAD committed the buffer - now trigger response if not already active
+        console.log(`[${sessionState.callId}] 📦 Audio buffer committed, triggering response`);
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
         break;
       }
 
@@ -507,22 +432,6 @@ serve(async (req) => {
       case "error":
         console.error(`[${sessionState.callId}] 🚨 OpenAI Error:`, message.error);
         break;
-
-      case "response.done": {
-        // Log when OpenAI finishes a response (useful for debugging tool calls)
-        const output = message.response?.output || [];
-        const functionCalls = output.filter((o: any) => o.type === "function_call");
-        if (functionCalls.length > 0) {
-          console.log(`[${sessionState.callId}] 🔧 Response contained ${functionCalls.length} function call(s):`, functionCalls.map((f: any) => f.name).join(", "));
-        }
-        break;
-      }
-
-      default:
-        // Log unhandled event types for debugging
-        if (message.type && !message.type.startsWith("response.audio") && !message.type.startsWith("response.audio_transcript")) {
-          console.log(`[${sessionState.callId}] 📩 OpenAI event: ${message.type}`);
-        }
     }
   };
 
@@ -566,74 +475,71 @@ serve(async (req) => {
           let distance: string | null = null;
           
           if (webhookUrl) {
-            const webhookPayload = {
-              action: "book_taxi",
-              job_id: jobId,
-              call_id: sessionState.callId,
-              caller_phone: sessionState.phone,
-              caller_name: sessionState.customerName,
-              ada_pickup: args.pickup,
-              ada_destination: args.destination,
-              pickup: args.pickup,
-              destination: args.destination,
-              passengers: args.passengers || 1,
-              bags: args.bags || 0,
-              vehicle_type: args.vehicle_type || "saloon",
-              pickup_time: args.pickup_time || "now",
-              timestamp: new Date().toISOString(),
-            };
-
-            console.log(`[${sessionState.callId}] 📤 Sending dispatch webhook: ${webhookUrl}`);
-            console.log(`[${sessionState.callId}] 📦 Payload:`, JSON.stringify(webhookPayload));
-
-            // IMPORTANT: Do NOT fire-and-forget.
-            // Edge runtimes can cancel background tasks when the WebSocket closes.
-            // Wait up to 5 seconds for the webhook to complete - ngrok can be slow.
             try {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 5000);
-
-              const resp = await fetch(webhookUrl, {
+              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook with job_id: ${jobId}`);
+              const webhookPayload = {
+                action: "book_taxi",
+                job_id: jobId,  // Unique ID for this booking
+                call_id: sessionState.callId,
+                caller_phone: sessionState.phone,
+                caller_name: sessionState.customerName,
+                // Ada's interpreted addresses (from AI tool call)
+                ada_pickup: args.pickup,
+                ada_destination: args.destination,
+                // Legacy fields (same as Ada's)
+                pickup: args.pickup,
+                destination: args.destination,
+                passengers: args.passengers || 1,
+                bags: args.bags || 0,
+                vehicle_type: args.vehicle_type || "saloon",
+                pickup_time: args.pickup_time || "now",
+                timestamp: new Date().toISOString()
+              };
+              
+              const webhookResp = await fetch(webhookUrl, {
                 method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-Job-Id": jobId,
-                  "X-Call-Id": sessionState.callId,
-                },
-                body: JSON.stringify(webhookPayload),
-                signal: controller.signal,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(webhookPayload)
               });
-
-              clearTimeout(timeout);
-
-              const respText = await resp.text().catch(() => "");
-              if (resp.ok) {
-                console.log(
-                  `[${sessionState.callId}] ✅ Dispatch webhook delivered: ${resp.status} - ${respText.substring(0, 200)}`
-                );
+              
+              if (webhookResp.ok) {
+                const dispatchResult = await webhookResp.json();
+                console.log(`[${sessionState.callId}] 📥 Dispatch response:`, dispatchResult);
+                
+                // Use fare/ETA from your dispatch system
+                fare = dispatchResult.fare || fare;
+                etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
+                bookingRef = dispatchResult.booking_ref || dispatchResult.job_id || jobId;
+                distance = dispatchResult.distance || dispatchResult.distance_miles || null;
+                
+                // Update pickup/destination if dispatch provides validated addresses
+                if (dispatchResult.pickup_address) {
+                  sessionState.booking.pickup = dispatchResult.pickup_address;
+                }
+                if (dispatchResult.destination_address) {
+                  sessionState.booking.destination = dispatchResult.destination_address;
+                }
               } else {
-                console.error(
-                  `[${sessionState.callId}] ❌ Dispatch webhook rejected: ${resp.status} ${resp.statusText} - ${respText.substring(0, 200)}`
-                );
+                console.error(`[${sessionState.callId}] Webhook error: ${webhookResp.status}`);
               }
             } catch (webhookErr) {
-              console.error(`[${sessionState.callId}] ❌ Dispatch webhook send failed:`, webhookErr);
+              console.error(`[${sessionState.callId}] Webhook failed:`, webhookErr);
             }
           }
           
-          // Create booking in DB immediately (don't wait for webhook)
+          // Create booking in DB with job_id and dispatch fare/ETA
           const { error: bookingError } = await supabase.from("bookings").insert({
-            id: jobId,
+            id: jobId,  // Use job_id as primary key
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
-            pickup: args.pickup,
-            destination: args.destination,
+            pickup: sessionState.booking.pickup,
+            destination: sessionState.booking.destination,
             passengers: args.passengers || 1,
             fare: fare,
             eta: `${etaMinutes} minutes`,
             status: "confirmed",
-            booking_details: { job_id: jobId }
+            booking_details: bookingRef ? { booking_ref: bookingRef, distance } : null
           });
           
           if (bookingError) {
@@ -644,7 +550,7 @@ serve(async (req) => {
             success: true, 
             eta_minutes: etaMinutes, 
             fare: fare,
-            booking_ref: jobId,
+            booking_ref: bookingRef,
             message: "Booking confirmed"
           };
           break;
@@ -681,8 +587,7 @@ serve(async (req) => {
           // Immediate flush on call end - capture all transcripts
           immediateFlush(sessionState);
           // Update call status
-          await supabase
-            .from("live_calls")
+          await supabase.from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           break;
@@ -696,38 +601,16 @@ serve(async (req) => {
     }
 
     // Send result back to OpenAI
-    openaiWs?.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(result),
-        },
-      })
-    );
+    openaiWs?.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output: JSON.stringify(result)
+      }
+    }));
 
-    // CRITICAL: end_call should TERMINATE the session (no further responses / re-greetings)
-    if (name === "end_call") {
-      try {
-        socket.send(JSON.stringify({ type: "call_ended" }));
-      } catch {
-        // ignore
-      }
-      try {
-        openaiWs?.close();
-      } catch {
-        // ignore
-      }
-      try {
-        socket.close(1000, "Call ended");
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    // Trigger response continuation for non-ending tool calls
+    // Trigger response continuation
     openaiWs?.send(JSON.stringify({ type: "response.create" }));
   };
 
@@ -834,9 +717,7 @@ serve(async (req) => {
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
-          echoGuardUntil: 0,
-          didSendSessionUpdate: false,
-          didSendGreeting: false,
+          echoGuardUntil: 0
         };
 
         // Create live call record
