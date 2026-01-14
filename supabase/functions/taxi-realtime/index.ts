@@ -9854,11 +9854,12 @@ Do NOT ask the customer to confirm again. Use the previously verified fare (£${
                 ...message,
                 caller_phone: message.caller_phone ?? message.user_phone ?? message.phone ?? userPhone ?? null,
                 caller_name: message.caller_name ?? callerName ?? null,
-                webhook_url:
+                webhook_url: (
                   message.webhook_url ??
                   Deno.env.get("DISPATCH_WEBHOOK_URL") ??
                   Deno.env.get("ADADIRECT_WEBHOOK_URL") ??
-                  null,
+                  ""
+                ).trim() || null,
                 webhook_token: message.webhook_token ?? null,
               },
             })

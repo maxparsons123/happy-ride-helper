@@ -818,11 +818,27 @@ serve(async (req) => {
           session.call_id = message.call_id || session.call_id;
           session.caller_phone = message.caller_phone || message.user_phone;
           session.caller_name = message.caller_name;
-          session.webhook_url = message.webhook_url;
+          session.webhook_url = message.webhook_url?.trim() || undefined;
           session.webhook_token = message.webhook_token;
           
           console.log(`[${session.call_id}] 📞 Session initialized - phone: ${session.caller_phone}, webhook: ${session.webhook_url || "none"}`);
           
+          // Create live_calls record for UI visibility
+          const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+          try {
+            await supabase.from("live_calls").upsert({
+              call_id: session.call_id,
+              caller_phone: session.caller_phone,
+              caller_name: session.caller_name || null,
+              status: "active",
+              source: "passthrough-ws",
+              started_at: new Date().toISOString(),
+              transcripts: [],
+            }, { onConflict: "call_id" });
+            console.log(`[${session.call_id}] 📊 Created live_calls record`);
+          } catch (dbErr) {
+            console.error(`[${session.call_id}] ❌ Failed to create live_calls:`, dbErr);
+          }
           // Initialize Deepgram streaming STT
           deepgramSTT = new DeepgramStreamingSTT(
             session.call_id,
@@ -886,9 +902,22 @@ serve(async (req) => {
       }
     };
     
-    socket.onclose = () => {
+    socket.onclose = async () => {
       console.log(`[${session.call_id}] 📴 WebSocket closed`);
       deepgramSTT?.close();
+      
+      // Mark call as ended in database
+      const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+      try {
+        await supabase.from("live_calls").update({
+          status: "ended",
+          ended_at: new Date().toISOString(),
+          transcripts: session.conversation_history,
+        }).eq("call_id", session.call_id);
+        console.log(`[${session.call_id}] 📊 Updated live_calls to ended`);
+      } catch (dbErr) {
+        console.error(`[${session.call_id}] ❌ Failed to update live_calls:`, dbErr);
+      }
     };
     
     socket.onerror = (error) => {
