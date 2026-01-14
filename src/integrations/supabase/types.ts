@@ -274,6 +274,33 @@ export type Database = {
         }
         Relationships: []
       }
+      caller_gps: {
+        Row: {
+          created_at: string
+          expires_at: string
+          id: string
+          lat: number
+          lon: number
+          phone_number: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at?: string
+          id?: string
+          lat: number
+          lon: number
+          phone_number: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          id?: string
+          lat?: number
+          lon?: number
+          phone_number?: string
+        }
+        Relationships: []
+      }
       callers: {
         Row: {
           address_aliases: Json | null
@@ -395,6 +422,9 @@ export type Database = {
           ended_at: string | null
           eta: string | null
           fare: string | null
+          gps_lat: number | null
+          gps_lon: number | null
+          gps_updated_at: string | null
           id: string
           passengers: number | null
           pickup: string | null
@@ -419,6 +449,9 @@ export type Database = {
           ended_at?: string | null
           eta?: string | null
           fare?: string | null
+          gps_lat?: number | null
+          gps_lon?: number | null
+          gps_updated_at?: string | null
           id?: string
           passengers?: number | null
           pickup?: string | null
@@ -443,6 +476,9 @@ export type Database = {
           ended_at?: string | null
           eta?: string | null
           fare?: string | null
+          gps_lat?: number | null
+          gps_lon?: number | null
+          gps_updated_at?: string | null
           id?: string
           passengers?: number | null
           pickup?: string | null
