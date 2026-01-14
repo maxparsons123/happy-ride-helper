@@ -277,30 +277,42 @@ serve(async (req) => {
     console.log(`[${sessionState.callId}] 📝 Session updated`);
   };
 
-  const flushTranscriptsToDb = async (sessionState: SessionState) => {
-    try {
-      const { error } = await supabase
-        .from("live_calls")
-        .update({
-          transcripts: sessionState.transcripts,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("call_id", sessionState.callId);
-
-      if (error) {
-        console.error(`[${sessionState.callId}] ❌ Failed to save transcripts:`, error);
-      }
-    } catch (e) {
-      console.error(`[${sessionState.callId}] ❌ Transcript flush exception:`, e);
-    }
+  // Fire-and-forget DB flush - never await, never block voice flow
+  const flushTranscriptsToDb = (sessionState: SessionState) => {
+    // Clone transcripts to avoid mutation issues
+    const transcriptsCopy = [...sessionState.transcripts];
+    
+    // Fire and forget - do NOT await
+    supabase
+      .from("live_calls")
+      .update({
+        transcripts: transcriptsCopy,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("call_id", sessionState.callId)
+      .then(({ error }) => {
+        if (error) console.error(`[${sessionState.callId}] DB flush error:`, error);
+      });
   };
 
+  // Aggressive batching - only flush every 5 seconds during conversation
+  const FLUSH_INTERVAL_MS = 5000;
+  
   const scheduleTranscriptFlush = (sessionState: SessionState) => {
-    if (sessionState.transcriptFlushTimer) return;
+    if (sessionState.transcriptFlushTimer) return; // Already scheduled
     sessionState.transcriptFlushTimer = setTimeout(() => {
       sessionState.transcriptFlushTimer = null;
       flushTranscriptsToDb(sessionState);
-    }, 350) as unknown as number;
+    }, FLUSH_INTERVAL_MS) as unknown as number;
+  };
+
+  // Immediate flush for critical events (call end, booking)
+  const immediateFlush = (sessionState: SessionState) => {
+    if (sessionState.transcriptFlushTimer) {
+      clearTimeout(sessionState.transcriptFlushTimer);
+      sessionState.transcriptFlushTimer = null;
+    }
+    flushTranscriptsToDb(sessionState);
   };
 
   // --- Handle OpenAI Messages ---
@@ -340,7 +352,7 @@ serve(async (req) => {
           })
         );
 
-        // Also persist to DB so the /live UI can show it
+        // Accumulate transcript in memory only - don't flush on every delta
         if (delta) {
           if (sessionState.assistantTranscriptIndex === null) {
             sessionState.transcripts.push({
@@ -354,6 +366,7 @@ serve(async (req) => {
             const prev = sessionState.transcripts[idx];
             sessionState.transcripts[idx] = { ...prev, text: (prev.text || "") + delta };
           }
+          // Schedule batched flush (5s debounce)
           scheduleTranscriptFlush(sessionState);
         }
         break;
@@ -362,7 +375,7 @@ serve(async (req) => {
       case "response.audio_transcript.done": {
         // Mark assistant transcript as finalized for next turn
         sessionState.assistantTranscriptIndex = null;
-        scheduleTranscriptFlush(sessionState);
+        // Don't flush here - let the batched timer handle it
         break;
       }
 
@@ -385,6 +398,7 @@ serve(async (req) => {
             text: userText,
             timestamp: new Date().toISOString(),
           });
+          // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
         }
 
@@ -494,6 +508,8 @@ serve(async (req) => {
         case "end_call":
           console.log(`[${sessionState.callId}] 👋 Ending call`);
           result = { success: true };
+          // Immediate flush on call end - capture all transcripts
+          immediateFlush(sessionState);
           // Update call status
           await supabase.from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
@@ -663,6 +679,10 @@ serve(async (req) => {
 
   socket.onclose = () => {
     console.log(`[${state?.callId || "unknown"}] Client disconnected`);
+    // Final flush on disconnect to capture any remaining transcripts
+    if (state) {
+      immediateFlush(state);
+    }
     openaiWs?.close();
   };
 
