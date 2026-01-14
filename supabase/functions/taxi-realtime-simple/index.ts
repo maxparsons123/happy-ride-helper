@@ -300,6 +300,9 @@ interface SessionState {
   // Echo guard: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
+
+  // Call ended flag - prevents further processing after end_call
+  callEnded: boolean;
 }
 
 serve(async (req) => {
@@ -750,7 +753,18 @@ serve(async (req) => {
           await supabase.from("live_calls")
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
-          break;
+          
+          // Mark call as ended - prevent further processing
+          sessionState.callEnded = true;
+          
+          // Close OpenAI connection after a short delay to let goodbye audio finish
+          setTimeout(() => {
+            console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
+            openaiWs?.close();
+          }, 4000); // 4 second delay for goodbye audio
+          
+          // DON'T trigger response.create after end_call - Ada should stop talking
+          return;
 
         default:
           result = { error: "Unknown function" };
@@ -908,7 +922,8 @@ serve(async (req) => {
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
-          echoGuardUntil: 0
+          echoGuardUntil: 0,
+          callEnded: false
         };
 
         // Create live call record
