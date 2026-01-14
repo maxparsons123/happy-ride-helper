@@ -26,7 +26,7 @@ import struct
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 
 import numpy as np
 from scipy.signal import butter, resample_poly, sosfilt
