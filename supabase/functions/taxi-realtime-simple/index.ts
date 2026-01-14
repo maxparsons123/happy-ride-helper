@@ -513,6 +513,13 @@ serve(async (req) => {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
               console.log(`[${sessionState.callId}] ⏳ Waiting for dispatch response (10s timeout)...`);
+              // Get recent user transcripts for comparison with Ada's interpretation
+              const userTranscripts = sessionState.transcripts
+                .filter(t => t.role === "user")
+                .slice(-5) // Last 5 user messages
+                .map(t => t.text)
+                .join(" | ");
+              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
@@ -521,10 +528,8 @@ serve(async (req) => {
                 // Ada's interpreted addresses
                 ada_pickup: args.pickup,
                 ada_destination: args.destination,
-                // Caller's historical addresses for comparison
-                caller_last_pickup: sessionState.callerLastPickup || null,
-                caller_last_destination: sessionState.callerLastDestination || null,
-                caller_total_bookings: sessionState.callerTotalBookings || 0,
+                // Raw STT transcripts from this call for comparison
+                user_said: userTranscripts,
                 // Booking details
                 passengers: args.passengers || 1,
                 bags: args.bags || 0,
