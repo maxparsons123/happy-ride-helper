@@ -15,6 +15,117 @@ const DEFAULT_COMPANY = "247 Radio Carz";
 const DEFAULT_AGENT = "Ada";
 const DEFAULT_VOICE = "shimmer";
 
+// --- Phone Number to Language Mapping ---
+const COUNTRY_CODE_TO_LANGUAGE: Record<string, string> = {
+  // English
+  "+44": "en", // UK
+  "+1": "en",  // USA/Canada
+  "+61": "en", // Australia
+  "+64": "en", // New Zealand
+  "+353": "en", // Ireland
+  
+  // Spanish
+  "+34": "es", // Spain
+  "+52": "es", // Mexico
+  "+54": "es", // Argentina
+  "+56": "es", // Chile
+  "+57": "es", // Colombia
+  "+51": "es", // Peru
+  
+  // French
+  "+33": "fr", // France
+  "+32": "fr", // Belgium (also Dutch)
+  "+41": "fr", // Switzerland (also German/Italian)
+  
+  // German
+  "+49": "de", // Germany
+  "+43": "de", // Austria
+  
+  // Italian
+  "+39": "it", // Italy
+  
+  // Portuguese
+  "+351": "pt", // Portugal
+  "+55": "pt", // Brazil
+  
+  // Polish
+  "+48": "pl", // Poland
+  
+  // Romanian
+  "+40": "ro", // Romania
+  
+  // Dutch
+  "+31": "nl", // Netherlands
+  
+  // Arabic
+  "+966": "ar", // Saudi Arabia
+  "+971": "ar", // UAE
+  "+20": "ar",  // Egypt
+  
+  // Hindi
+  "+91": "hi", // India
+  
+  // Chinese
+  "+86": "zh", // China
+  "+852": "zh", // Hong Kong
+  "+886": "zh", // Taiwan
+  
+  // Japanese
+  "+81": "ja", // Japan
+  
+  // Korean
+  "+82": "ko", // South Korea
+  
+  // Turkish
+  "+90": "tr", // Turkey
+  
+  // Russian
+  "+7": "ru", // Russia
+  
+  // Greek
+  "+30": "el", // Greece
+  
+  // Czech
+  "+420": "cs", // Czech Republic
+  
+  // Hungarian
+  "+36": "hu", // Hungary
+  
+  // Swedish
+  "+46": "sv", // Sweden
+  
+  // Norwegian
+  "+47": "no", // Norway
+  
+  // Danish
+  "+45": "da", // Denmark
+  
+  // Finnish
+  "+358": "fi", // Finland
+};
+
+// Detect language from phone number country code
+function detectLanguageFromPhone(phone: string | null): string | null {
+  if (!phone) return null;
+  
+  // Clean the phone number
+  const cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
+  
+  // Try longer codes first (e.g., +353 before +3)
+  const sortedCodes = Object.keys(COUNTRY_CODE_TO_LANGUAGE).sort((a, b) => b.length - a.length);
+  
+  for (const code of sortedCodes) {
+    if (cleaned.startsWith(code)) {
+      const lang = COUNTRY_CODE_TO_LANGUAGE[code];
+      console.log(`📞 Phone ${phone} matched ${code} → ${lang}`);
+      return lang;
+    }
+  }
+  
+  console.log(`📞 Phone ${phone} - no country code match, using auto-detect`);
+  return null;
+}
+
 // --- System Prompt ---
 const SYSTEM_PROMPT = `
 You are receiving transcribed speech from a phone call. Transcriptions may contain errors (e.g., "click on street" instead of "Coventry"). Use context to interpret correctly.
@@ -914,6 +1025,10 @@ serve(async (req) => {
           }
         }
 
+        // Detect language from phone number country code
+        const detectedLanguage = detectLanguageFromPhone(phone);
+        const finalLanguage = message.language || detectedLanguage || "auto";
+        
         // Initialize state (fresh session only)
         state = {
           callId,
@@ -921,7 +1036,7 @@ serve(async (req) => {
           companyName: message.company_name || DEFAULT_COMPANY,
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
-          language: message.language || "auto", // Default to auto-detect
+          language: finalLanguage,
           customerName: callerName,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
@@ -936,7 +1051,7 @@ serve(async (req) => {
           callEnded: false
         };
         
-        console.log(`[${callId}] 🌐 Language set to: ${state.language}`);
+        console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state.language}`);
 
         // Create live call record
         await supabase.from("live_calls").upsert({
