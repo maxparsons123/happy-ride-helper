@@ -32,7 +32,7 @@ BOOKING FLOW (STRICT ORDER):
 1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
-4. For airports/stations: also ask "Any bags?"
+4. ONLY if destination is an AIRPORT or TRAIN STATION: ask "Any bags?" Otherwise SKIP bags entirely.
 5. When ALL details are known → call book_taxi IMMEDIATELY.
 
 RULES:
@@ -45,6 +45,7 @@ RULES:
 7. GLOBAL service — accept any address.
 8. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 9. If asked for places → call find_nearby_places, list 2–3 options.
+10. DO NOT ask about bags for cities like Manchester, London, Birmingham. Only ask for airports (Heathrow, Gatwick, Manchester Airport) or train stations.
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
@@ -264,8 +265,8 @@ serve(async (req) => {
         turn_detection: {
           type: "server_vad",
           threshold: 0.6,
-          prefix_padding_ms: 400,
-          silence_duration_ms: 1200
+          prefix_padding_ms: 500,
+          silence_duration_ms: 1500
         },
         temperature: 0.6,
         tools: TOOLS,
