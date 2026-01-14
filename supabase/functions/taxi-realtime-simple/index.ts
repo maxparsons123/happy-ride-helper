@@ -438,6 +438,7 @@ interface SessionState {
     destination: string | null;
     passengers: number | null;
     bags: number | null;
+    version: number;
   };
   transcripts: TranscriptItem[];
 
@@ -800,7 +801,8 @@ serve(async (req) => {
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers,
-            bags: args.bags || 0
+            bags: args.bags || 0,
+            version: 1
           };
           
           const jobId = crypto.randomUUID();
@@ -1024,7 +1026,7 @@ serve(async (req) => {
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
           sessionState.hasActiveBooking = false;
-          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null };
+          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, version: 0 };
           result = { success: true };
           break;
 
@@ -1047,6 +1049,9 @@ serve(async (req) => {
           let updatedEta: string | null = null;
           
           if (DISPATCH_MODIFY_URL) {
+            // Increment booking version for each modification
+            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+            
             const modifyPayload = {
               event: "booking_modified",
               call_id: sessionState.callId,
@@ -1056,13 +1061,15 @@ serve(async (req) => {
               field_changed: args.field_to_change,
               old_value: oldValue,
               new_value: args.new_value,
-              // Current complete booking state
+              // Current complete booking state with version
               booking: {
                 pickup: sessionState.booking.pickup,
                 destination: sessionState.booking.destination,
                 passengers: sessionState.booking.passengers,
-                bags: sessionState.booking.bags
+                bags: sessionState.booking.bags,
+                version: sessionState.booking.version
               },
+              booking_version: sessionState.booking.version,
               timestamp: new Date().toISOString()
             };
             
@@ -1266,7 +1273,7 @@ serve(async (req) => {
           language: finalLanguage,
           customerName: null,
           hasActiveBooking: false,
-          booking: { pickup: null, destination: null, passengers: null, bags: null },
+          booking: { pickup: null, destination: null, passengers: null, bags: null, version: 0 },
           transcripts: [],
           callerLastPickup: null,
           callerLastDestination: null,
@@ -1325,7 +1332,7 @@ serve(async (req) => {
             language: finalLanguage,
             customerName: message.customer_name || null,
             hasActiveBooking: message.has_active_booking || false,
-            booking: { pickup: null, destination: null, passengers: null, bags: null },
+            booking: { pickup: null, destination: null, passengers: null, bags: null, version: 0 },
             transcripts: [],
             callerLastPickup: null,
             callerLastDestination: null,
