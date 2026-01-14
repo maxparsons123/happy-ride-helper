@@ -41,10 +41,11 @@ RULES:
 3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
 4. NEVER ask about bags unless destination is an AIRPORT or TRAIN STATION.
 5. If user corrects name → call save_customer_name immediately.
-6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
-7. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
-8. GLOBAL service — accept any address.
-9. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
+7. If user says "no" or "that's all" after "Anything else?" → say "Safe travels!" and call end_call.
+8. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
+9. GLOBAL service — accept any address.
+10. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
@@ -263,9 +264,9 @@ serve(async (req) => {
         input_audio_transcription: { model: "whisper-1" },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.7,
+          threshold: 0.6,           // Lower = more sensitive to soft speech
           prefix_padding_ms: 400,
-          silence_duration_ms: 500
+          silence_duration_ms: 1200  // Increased from 500ms - gives user time to think
         },
         temperature: 0.6,
         tools: TOOLS,
