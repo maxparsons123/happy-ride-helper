@@ -509,6 +509,10 @@ interface SessionState {
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
 
+  // Speech timing diagnostics
+  speechStartTime: number | null;
+  speechStopTime: number | null;
+
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
 }
@@ -650,9 +654,9 @@ serve(async (req) => {
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.6,           // Slightly higher threshold to avoid triggering on soft sounds
-          prefix_padding_ms: 500,   // More padding before speech starts
-          silence_duration_ms: 1200 // Wait longer for user to finish speaking (was 800)
+          threshold: 0.6,           // Higher threshold to avoid triggering on soft sounds
+          prefix_padding_ms: 500,   // More padding before speech starts (captures full words)
+          silence_duration_ms: 1500 // Wait 1.5s of silence before responding (was 1200ms)
         },
         temperature: 0.6,
         tools: TOOLS,
@@ -772,9 +776,33 @@ serve(async (req) => {
         break;
       }
 
+      case "input_audio_buffer.speech_started": {
+        // Track when user started speaking for timing diagnostics
+        sessionState.speechStartTime = Date.now();
+        console.log(`[${sessionState.callId}] 🎙️ Speech started`);
+        break;
+      }
+
+      case "input_audio_buffer.speech_stopped": {
+        // Log speech duration for diagnostics
+        const speechDuration = sessionState.speechStartTime 
+          ? Date.now() - sessionState.speechStartTime 
+          : 0;
+        console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait 1500ms before responding`);
+        sessionState.speechStopTime = Date.now();
+        // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
+        break;
+      }
+
       case "conversation.item.input_audio_transcription.completed": {
         // User transcript from Whisper
         const rawText = String(message.transcript || "").trim();
+        
+        // Log timing: how long after speech stopped did we get the transcript?
+        const transcriptDelay = sessionState.speechStopTime 
+          ? Date.now() - sessionState.speechStopTime 
+          : 0;
+        console.log(`[${sessionState.callId}] 📝 Transcript received ${transcriptDelay}ms after speech stopped`);
         
         // Filter out hallucinations/noise
         if (!rawText || isHallucination(rawText)) {
@@ -802,13 +830,6 @@ serve(async (req) => {
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
         }
-        // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
-        break;
-      }
-
-      case "input_audio_buffer.speech_stopped": {
-        // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
-        // Manual response.create causes "conversation_already_has_active_response" errors
         break;
       }
 
@@ -1430,6 +1451,8 @@ serve(async (req) => {
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
           echoGuardUntil: 0,
+          speechStartTime: null,
+          speechStopTime: null,
           callEnded: false
         };
         
@@ -1492,6 +1515,8 @@ serve(async (req) => {
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
             echoGuardUntil: 0,
+            speechStartTime: null,
+            speechStopTime: null,
             callEnded: false
           };
         }
