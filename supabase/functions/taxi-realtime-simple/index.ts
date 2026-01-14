@@ -386,12 +386,10 @@ serve(async (req) => {
         output_audio_format: "pcm16",
         input_audio_transcription: { 
           model: "whisper-1",
-          // Dynamic language hint from session state
-          language: sessionState.language,
+          // Auto-detect language if not specified or set to "auto"
+          ...(sessionState.language && sessionState.language !== "auto" ? { language: sessionState.language } : {}),
           // Prompt hint helps Whisper recognize place names and taxi terminology
-          prompt: sessionState.language === "en" 
-            ? "Taxi booking in UK. Common places: Heathrow, Gatwick, Stansted, Birmingham, Manchester, Coventry, Warwick, Leamington, Nuneaton, Kenilworth. Street types: Road, Street, Lane, Drive, Avenue, Close. Numbers like 52A, 14B. Passengers, destination, pickup."
-            : "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination."
+          prompt: "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination."
         },
         turn_detection: {
           type: "server_vad",
@@ -915,7 +913,7 @@ serve(async (req) => {
           companyName: message.company_name || DEFAULT_COMPANY,
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
-          language: message.language || "en", // Default to English, but accept from init message
+          language: message.language || "auto", // Default to auto-detect
           customerName: callerName,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
