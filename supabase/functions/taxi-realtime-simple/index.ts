@@ -1049,39 +1049,11 @@ serve(async (req) => {
           return;
         }
 
-        // Lookup caller history from database
-        let callerLastPickup: string | null = null;
-        let callerLastDestination: string | null = null;
-        let callerTotalBookings = 0;
-        let callerName: string | null = message.customer_name || null;
-        
-        if (phone && phone !== "unknown") {
-          try {
-            const { data: callerData } = await supabase
-              .from("callers")
-              .select("name, last_pickup, last_destination, total_bookings")
-              .eq("phone_number", phone)
-              .maybeSingle();
-            
-            if (callerData) {
-              callerLastPickup = callerData.last_pickup || null;
-              callerLastDestination = callerData.last_destination || null;
-              callerTotalBookings = callerData.total_bookings || 0;
-              if (!callerName && callerData.name) {
-                callerName = callerData.name;
-              }
-              console.log(`[${callId}] 👤 Found caller history: ${callerTotalBookings} bookings, last: ${callerLastPickup} → ${callerLastDestination}`);
-            }
-          } catch (e) {
-            console.error(`[${callId}] Failed to lookup caller:`, e);
-          }
-        }
-
-        // Detect language from phone number country code
+        // Detect language from phone number FIRST (fast, no DB)
         const detectedLanguage = detectLanguageFromPhone(phone);
         const finalLanguage = message.language || detectedLanguage || "auto";
         
-        // Initialize state (fresh session only)
+        // Initialize state IMMEDIATELY with minimal data - don't wait for DB
         state = {
           callId,
           phone,
@@ -1089,13 +1061,13 @@ serve(async (req) => {
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
           language: finalLanguage,
-          customerName: callerName,
+          customerName: message.customer_name || null,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
           transcripts: [],
-          callerLastPickup,
-          callerLastDestination,
-          callerTotalBookings,
+          callerLastPickup: null,
+          callerLastDestination: null,
+          callerTotalBookings: 0,
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
@@ -1105,17 +1077,7 @@ serve(async (req) => {
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state.language}`);
 
-        // Create live call record
-        await supabase.from("live_calls").upsert({
-          call_id: callId,
-          caller_phone: phone,
-          caller_name: state.customerName,
-          status: "active",
-          source: "simple",
-          transcripts: []
-        }, { onConflict: "call_id" });
-
-        // Connect to OpenAI
+        // Connect to OpenAI IMMEDIATELY - don't wait for DB lookup
         connectToOpenAI(state);
 
         socket.send(JSON.stringify({ 
@@ -1123,6 +1085,42 @@ serve(async (req) => {
           call_id: callId,
           mode: "simple"
         }));
+
+        // Fire-and-forget: Lookup caller history and update live_calls in background
+        // This runs in parallel while Ada starts greeting
+        (async () => {
+          try {
+            if (phone && phone !== "unknown") {
+              const { data: callerData } = await supabase
+                .from("callers")
+                .select("name, last_pickup, last_destination, total_bookings")
+                .eq("phone_number", phone)
+                .maybeSingle();
+              
+              if (callerData && state) {
+                state.callerLastPickup = callerData.last_pickup || null;
+                state.callerLastDestination = callerData.last_destination || null;
+                state.callerTotalBookings = callerData.total_bookings || 0;
+                if (!state.customerName && callerData.name) {
+                  state.customerName = callerData.name;
+                }
+                console.log(`[${callId}] 👤 Loaded caller history: ${state.callerTotalBookings} bookings`);
+              }
+            }
+
+            // Create/update live call record (non-blocking)
+            await supabase.from("live_calls").upsert({
+              call_id: callId,
+              caller_phone: phone,
+              caller_name: state?.customerName,
+              status: "active",
+              source: "simple",
+              transcripts: []
+            }, { onConflict: "call_id" });
+          } catch (e) {
+            console.error(`[${callId}] Background caller lookup failed:`, e);
+          }
+        })();
       }
 
       if (message.type === "audio" && openaiConnected && openaiWs && state) {
