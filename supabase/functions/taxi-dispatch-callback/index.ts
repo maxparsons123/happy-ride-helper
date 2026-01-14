@@ -289,9 +289,13 @@ serve(async (req) => {
     // ═══════════════════════════════════════════════════════════════════
     // ACTION: CONFIRM/BOOKED - Standard booking confirmation/rejection
     // "booked" is an alias for "confirm" for backwards compatibility
+    // When action is "booked", default status to "dispatched"
     // ═══════════════════════════════════════════════════════════════════
     if (!action || action === "confirm" || action === "booked") {
-      if (!status) {
+      // For "booked" action, default to dispatched status
+      const effectiveStatus = status || (action === "booked" ? "dispatched" : null);
+      
+      if (!effectiveStatus) {
         return new Response(JSON.stringify({ 
           error: "Missing required field for 'confirm' action: status" 
         }), {
@@ -300,36 +304,41 @@ serve(async (req) => {
         });
       }
 
-      // Build confirmation message based on status
+      // Build confirmation message based on effective status
       let confirmationMessage: string;
       let bookingStatus: string;
 
-      if (status === "dispatched") {
+      if (effectiveStatus === "dispatched") {
         bookingStatus = "dispatched";
-        const parts: string[] = ["Brilliant! Your taxi is confirmed."];
-        
-        if (driver_name) {
-          parts.push(`Your driver ${driver_name} is on the way.`);
+        // If message is provided, use it directly; otherwise build default message
+        if (message) {
+          confirmationMessage = message;
+        } else {
+          const parts: string[] = ["Brilliant! Your taxi is confirmed."];
+          
+          if (driver_name) {
+            parts.push(`Your driver ${driver_name} is on the way.`);
+          }
+          if (normalizedEta) {
+            parts.push(`They'll be with you in ${normalizedEta}.`);
+          }
+          if (vehicle_reg) {
+            parts.push(`Look out for registration ${vehicle_reg}.`);
+          }
+          if (fare) {
+            parts.push(`The fare is £${fare}.`);
+          }
+          if (booking_ref) {
+            parts.push(`Your booking reference is ${booking_ref}.`);
+          }
+          parts.push("Is there anything else I can help you with?");
+          
+          confirmationMessage = parts.join(" ");
         }
-        if (normalizedEta) {
-          parts.push(`They'll be with you in ${normalizedEta}.`);
-        }
-        if (vehicle_reg) {
-          parts.push(`Look out for registration ${vehicle_reg}.`);
-        }
-        if (fare) {
-          parts.push(`The fare is £${fare}.`);
-        }
-        if (booking_ref) {
-          parts.push(`Your booking reference is ${booking_ref}.`);
-        }
-        parts.push("Is there anything else I can help you with?");
-        
-        confirmationMessage = parts.join(" ");
-      } else if (status === "no_cars") {
+      } else if (effectiveStatus === "no_cars") {
         bookingStatus = "no_cars";
         confirmationMessage = message || "I'm really sorry, but we don't have any cars available at the moment. Would you like me to try again in a few minutes, or can I help with anything else?";
-      } else if (status === "rejected") {
+      } else if (effectiveStatus === "rejected") {
         bookingStatus = "rejected";
         confirmationMessage = message || "I'm sorry, but we're unable to take this booking at the moment. Is there anything else I can help you with?";
       } else {
@@ -353,7 +362,7 @@ serve(async (req) => {
       }
 
       // Update bookings table if dispatched
-      if (status === "dispatched") {
+      if (effectiveStatus === "dispatched") {
         const bookingUpdate: Record<string, any> = {
           status: "dispatched",
           updated_at: new Date().toISOString()
@@ -383,7 +392,7 @@ serve(async (req) => {
         payload: {
           call_id,
           action: "confirm",
-          status,
+          status: effectiveStatus,
           eta: normalizedEta,
           eta_minutes,
           driver_name,
@@ -394,7 +403,7 @@ serve(async (req) => {
         }
       });
 
-      console.log(`[${call_id}] ✅ Dispatch confirm processed: ${status}`);
+      console.log(`[${call_id}] ✅ Dispatch confirm processed: ${effectiveStatus}`);
 
       return new Response(JSON.stringify({
         success: true,
