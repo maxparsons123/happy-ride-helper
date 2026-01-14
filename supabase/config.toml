@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.company-passthrough]
 verify_jwt = false
+
+[functions.taxi-gps-update]
+verify_jwt = false

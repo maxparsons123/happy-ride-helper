@@ -459,6 +459,11 @@ interface SessionState {
   callerLastDestination: string | null;
   callerTotalBookings: number;
 
+  // GPS location from external system
+  gpsLat: number | null;
+  gpsLon: number | null;
+  gpsRequired: boolean; // If true, reject calls without GPS
+
   // Streaming assistant transcript assembly (OpenAI sends token deltas)
   assistantTranscriptIndex: number | null;
 
@@ -1309,6 +1314,9 @@ serve(async (req) => {
           callerLastPickup: null,
           callerLastDestination: null,
           callerTotalBookings: 0,
+          gpsLat: null,
+          gpsLon: null,
+          gpsRequired: message.gps_required ?? false, // External system controls GPS requirement
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
@@ -1368,6 +1376,9 @@ serve(async (req) => {
             callerLastPickup: null,
             callerLastDestination: null,
             callerTotalBookings: 0,
+            gpsLat: null,
+            gpsLon: null,
+            gpsRequired: message.gps_required ?? false, // External system controls GPS requirement
             assistantTranscriptIndex: null,
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
@@ -1394,10 +1405,67 @@ serve(async (req) => {
           mode: "simple"
         }));
 
-        // Fire-and-forget: Lookup caller history and update live_calls in background
+        // Fire-and-forget: Lookup caller history, GPS, and update live_calls in background
         // This runs in parallel while Ada starts greeting
         (async () => {
           try {
+            // Lookup GPS first - this determines if we can proceed
+            if (state?.gpsRequired && phone && phone !== "unknown") {
+              // Normalize phone for GPS lookup
+              let normalizedPhone = phone.replace(/\s+/g, "").replace(/-/g, "");
+              if (!normalizedPhone.startsWith("+") && normalizedPhone.length >= 10) {
+                if (normalizedPhone.startsWith("00")) {
+                  normalizedPhone = "+" + normalizedPhone.slice(2);
+                } else if (/^(44|1|33|49|31)\d+$/.test(normalizedPhone)) {
+                  normalizedPhone = "+" + normalizedPhone;
+                }
+              }
+              
+              // Check caller_gps table for pre-submitted GPS
+              const { data: gpsData } = await supabase
+                .from("caller_gps")
+                .select("lat, lon, expires_at")
+                .eq("phone_number", normalizedPhone)
+                .gte("expires_at", new Date().toISOString())
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              
+              if (gpsData && state) {
+                state.gpsLat = gpsData.lat;
+                state.gpsLon = gpsData.lon;
+                console.log(`[${callId}] 📍 GPS loaded: ${gpsData.lat}, ${gpsData.lon}`);
+              } else if (state?.gpsRequired && !state?.gpsLat) {
+                // NO GPS and it's required - send rejection message
+                console.log(`[${callId}] ❌ GPS REQUIRED but not found - rejecting call`);
+                
+                // Send rejection message via OpenAI
+                if (openaiWs && openaiConnected) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: "[SYSTEM: GPS location not received. Reject this booking.]" }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["text", "audio"],
+                      instructions: "Tell the caller: 'I'm sorry, I need your location to book a taxi. Please enable location services in your app and try again. Goodbye.' Then call the end_call function immediately."
+                    }
+                  }));
+                }
+                
+                // Also notify bridge
+                socket.send(JSON.stringify({
+                  type: "gps_required",
+                  message: "GPS location not received - call will be rejected"
+                }));
+              }
+            }
+
             if (phone && phone !== "unknown") {
               const { data: callerData } = await supabase
                 .from("callers")
@@ -1416,14 +1484,17 @@ serve(async (req) => {
               }
             }
 
-            // Create/update live call record (non-blocking)
+            // Create/update live call record with GPS (non-blocking)
             await supabase.from("live_calls").upsert({
               call_id: callId,
               caller_phone: phone,
               caller_name: state?.customerName,
               status: "active",
               source: "simple",
-              transcripts: []
+              transcripts: [],
+              gps_lat: state?.gpsLat,
+              gps_lon: state?.gpsLon,
+              gps_updated_at: state?.gpsLat ? new Date().toISOString() : null
             }, { onConflict: "call_id" });
           } catch (e) {
             console.error(`[${callId}] Background caller lookup failed:`, e);
@@ -1475,6 +1546,33 @@ serve(async (req) => {
               console.error(`[${state?.callId}] Late phone lookup failed:`, e);
             }
           })();
+        }
+        return;
+      }
+
+      // Handle GPS update during call
+      if (message.type === "gps_update" && state) {
+        const lat = message.lat || message.latitude;
+        const lon = message.lon || message.longitude;
+        
+        if (lat && lon) {
+          state.gpsLat = lat;
+          state.gpsLon = lon;
+          console.log(`[${state.callId}] 📍 GPS updated mid-call: ${lat}, ${lon}`);
+          
+          // Update live_calls with GPS
+          supabase.from("live_calls").update({
+            gps_lat: lat,
+            gps_lon: lon,
+            gps_updated_at: new Date().toISOString()
+          }).eq("call_id", state.callId)
+            .then(() => console.log(`[${state?.callId}] ✅ GPS saved to DB`));
+          
+          socket.send(JSON.stringify({
+            type: "gps_received",
+            lat,
+            lon
+          }));
         }
         return;
       }
