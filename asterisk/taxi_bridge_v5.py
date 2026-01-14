@@ -313,10 +313,20 @@ class TaxiBridgeV25:
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
 
         try:
-            # Initial connection
+            # EAGER PRE-CONNECT: Connect to AI before we have the phone number
+            # This lets OpenAI start warming up while we wait for UUID message
             if not await self.connect_websocket():
                 logger.error(f"[{self.call_id}] ❌ Initial connection failed, ending call")
                 return
+            
+            # Send pre_connect immediately (before we have phone number)
+            # OpenAI will start connecting while we wait for Asterisk UUID
+            pre_connect_msg = {
+                "type": "pre_connect",
+                "call_id": self.call_id,
+            }
+            await self.ws.send(json.dumps(pre_connect_msg))
+            logger.info(f"[{self.call_id}] 🔔 Sent pre_connect for eager OpenAI connection")
 
             # Main loop with reconnection support
             while self.running:
