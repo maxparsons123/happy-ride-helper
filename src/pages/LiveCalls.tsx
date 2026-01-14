@@ -138,6 +138,7 @@ export default function LiveCalls() {
   const [ttsProvider, setTtsProvider] = useState<"elevenlabs" | "deepgram">("elevenlabs");
   const [useUnifiedExtraction, setUseUnifiedExtraction] = useState(false);
   const [usePassthroughMode, setUsePassthroughMode] = useState(false);
+  const [useSimpleMode, setUseSimpleMode] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
   const [selectedVoice, setSelectedVoice] = useState<string>("shimmer");
@@ -205,15 +206,20 @@ export default function LiveCalls() {
     }
   };
 
-  // Fetch agents on mount
+  // Fetch agents on mount and load simple mode state
   useEffect(() => {
     const fetchAgents = async () => {
       const { data, error } = await supabase
         .from("agents")
-        .select("id, name, slug")
+        .select("id, name, slug, use_simple_mode")
         .order("name");
       if (data && !error) {
         setAgents(data);
+        // Load simple mode state for default agent (ada)
+        const adaAgent = data.find(a => a.slug === "ada");
+        if (adaAgent) {
+          setUseSimpleMode(adaAgent.use_simple_mode ?? false);
+        }
       }
     };
     fetchAgents();
@@ -731,6 +737,21 @@ export default function LiveCalls() {
               setSelectedAgent={setSelectedAgent}
               selectedVoice={selectedVoice}
               setSelectedVoice={setSelectedVoice}
+              useSimpleMode={useSimpleMode}
+              setUseSimpleMode={async (value) => {
+                setUseSimpleMode(value);
+                // Update agent in database
+                const { error } = await supabase
+                  .from("agents")
+                  .update({ use_simple_mode: value })
+                  .eq("slug", selectedAgent || "ada");
+                if (error) {
+                  console.error("Error updating simple mode:", error);
+                  toast.error("Failed to update simple mode");
+                } else {
+                  toast.success(value ? "Simple Mode enabled" : "Simple Mode disabled");
+                }
+              }}
               addressVerification={addressVerification}
               setAddressVerification={setAddressVerification}
               useTripResolver={useTripResolver}
