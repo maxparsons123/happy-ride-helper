@@ -20,6 +20,3 @@ verify_jwt = false
 
 [functions.company-passthrough]
 verify_jwt = false
-
-[functions.taxi-realtime-scribe]
-verify_jwt = false

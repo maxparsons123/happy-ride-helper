@@ -32,20 +32,19 @@ BOOKING FLOW (STRICT ORDER):
 1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
 3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
-4. ONLY for AIRPORTS or TRAIN STATIONS: ask "Any bags?" — otherwise skip bags entirely.
+4. For airports/stations: also ask "Any bags?"
 5. When ALL details are known → call book_taxi IMMEDIATELY.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
 2. NEVER repeat addresses, fares, or full routes.
 3. NEVER say: "Just to double-check", "Shall I book that?", "Is that correct?".
-4. NEVER ask about bags unless destination is an AIRPORT or TRAIN STATION.
-5. If user corrects name → call save_customer_name immediately.
-6. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?" then WAIT for response.
-7. If user says "no" or "that's all" after "Anything else?" → say "Safe travels!" and call end_call.
-8. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
-9. GLOBAL service — accept any address.
-10. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+4. If user corrects name → call save_customer_name immediately.
+5. After booking: say ONLY "Booked! [X] minutes, [FARE]. Anything else?"
+6. If user says "cancel" → call cancel_booking FIRST, then say "That's cancelled..."
+7. GLOBAL service — accept any address.
+8. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
+9. If asked for places → call find_nearby_places, list 2–3 options.
 
 IMPORTANT: If user says "going TO [address]" that is DESTINATION, not pickup.
 If user says "from [address]" or "pick me up at [address]" that is PICKUP.
@@ -264,9 +263,9 @@ serve(async (req) => {
         input_audio_transcription: { model: "whisper-1" },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.6,           // Lower = more sensitive to soft speech
+          threshold: 0.7,
           prefix_padding_ms: 400,
-          silence_duration_ms: 1200  // Increased from 500ms - gives user time to think
+          silence_duration_ms: 500
         },
         temperature: 0.6,
         tools: TOOLS,
@@ -402,20 +401,14 @@ serve(async (req) => {
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
         }
-        // NOTE: Do NOT send response.create here - server VAD handles it automatically
-        // Sending it manually causes "conversation_already_has_active_response" errors
+
+        // IMPORTANT: Trigger assistant response after a user turn
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
         break;
       }
 
       case "input_audio_buffer.speech_stopped": {
-        // Log VAD detection
-        console.log(`[${sessionState.callId}] 🎤 Speech stopped (VAD)`);
-        break;
-      }
-
-      case "input_audio_buffer.committed": {
-        // VAD committed the buffer - now trigger response if not already active
-        console.log(`[${sessionState.callId}] 📦 Audio buffer committed, triggering response`);
+        // Fallback: sometimes Whisper event is delayed; ensure we trigger a response
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
         break;
       }
@@ -455,7 +448,7 @@ serve(async (req) => {
           result = { success: true };
           break;
 
-        case "book_taxi": {
+        case "book_taxi":
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
           sessionState.booking = {
             pickup: args.pickup,
@@ -464,82 +457,15 @@ serve(async (req) => {
             bags: args.bags || 0
           };
           
-          // Generate job_id upfront for tracking
-          const jobId = crypto.randomUUID();
-          
-          // Call external dispatch webhook for geocoding + fare/ETA
-          const webhookUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
-          let fare = "£12.50";
-          let etaMinutes = 8;
-          let bookingRef: string | null = null;
-          let distance: string | null = null;
-          
-          if (webhookUrl) {
-            try {
-              console.log(`[${sessionState.callId}] 📤 Calling dispatch webhook with job_id: ${jobId}`);
-              const webhookPayload = {
-                action: "book_taxi",
-                job_id: jobId,  // Unique ID for this booking
-                call_id: sessionState.callId,
-                caller_phone: sessionState.phone,
-                caller_name: sessionState.customerName,
-                // Ada's interpreted addresses (from AI tool call)
-                ada_pickup: args.pickup,
-                ada_destination: args.destination,
-                // Legacy fields (same as Ada's)
-                pickup: args.pickup,
-                destination: args.destination,
-                passengers: args.passengers || 1,
-                bags: args.bags || 0,
-                vehicle_type: args.vehicle_type || "saloon",
-                pickup_time: args.pickup_time || "now",
-                timestamp: new Date().toISOString()
-              };
-              
-              const webhookResp = await fetch(webhookUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(webhookPayload)
-              });
-              
-              if (webhookResp.ok) {
-                const dispatchResult = await webhookResp.json();
-                console.log(`[${sessionState.callId}] 📥 Dispatch response:`, dispatchResult);
-                
-                // Use fare/ETA from your dispatch system
-                fare = dispatchResult.fare || fare;
-                etaMinutes = dispatchResult.eta_minutes ?? dispatchResult.eta ?? etaMinutes;
-                bookingRef = dispatchResult.booking_ref || dispatchResult.job_id || jobId;
-                distance = dispatchResult.distance || dispatchResult.distance_miles || null;
-                
-                // Update pickup/destination if dispatch provides validated addresses
-                if (dispatchResult.pickup_address) {
-                  sessionState.booking.pickup = dispatchResult.pickup_address;
-                }
-                if (dispatchResult.destination_address) {
-                  sessionState.booking.destination = dispatchResult.destination_address;
-                }
-              } else {
-                console.error(`[${sessionState.callId}] Webhook error: ${webhookResp.status}`);
-              }
-            } catch (webhookErr) {
-              console.error(`[${sessionState.callId}] Webhook failed:`, webhookErr);
-            }
-          }
-          
-          // Create booking in DB with job_id and dispatch fare/ETA
+          // Create booking in DB
           const { error: bookingError } = await supabase.from("bookings").insert({
-            id: jobId,  // Use job_id as primary key
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
-            pickup: sessionState.booking.pickup,
-            destination: sessionState.booking.destination,
+            pickup: args.pickup,
+            destination: args.destination,
             passengers: args.passengers || 1,
-            fare: fare,
-            eta: `${etaMinutes} minutes`,
-            status: "confirmed",
-            booking_details: bookingRef ? { booking_ref: bookingRef, distance } : null
+            status: "confirmed"
           });
           
           if (bookingError) {
@@ -548,13 +474,11 @@ serve(async (req) => {
           
           result = { 
             success: true, 
-            eta_minutes: etaMinutes, 
-            fare: fare,
-            booking_ref: bookingRef,
+            eta_minutes: 8, 
+            fare: "£12.50",
             message: "Booking confirmed"
           };
           break;
-        }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
