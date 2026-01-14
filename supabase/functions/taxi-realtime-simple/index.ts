@@ -335,10 +335,12 @@ serve(async (req) => {
         break;
 
       case "response.audio.done":
-        // Ada finished speaking - set echo guard window (500ms)
+        // Ada finished speaking - set echo guard window (800ms)
         sessionState.isAdaSpeaking = false;
-        sessionState.echoGuardUntil = Date.now() + 500;
-        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 500ms`);
+        sessionState.echoGuardUntil = Date.now() + 800;
+        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 800ms`);
+        // Clear OpenAI's audio buffer to flush any residual echo
+        openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
         break;
 
       case "response.audio_transcript.delta": {
