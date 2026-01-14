@@ -566,10 +566,10 @@ serve(async (req) => {
           type: "server_vad",
           // Lower threshold (0.5) detects quieter speech better
           threshold: 0.5,
-          // More prefix padding captures speech starts (soft consonants)
-          prefix_padding_ms: 600,
-          // Longer silence duration prevents cutting off slow speakers
-          silence_duration_ms: 1200
+          // Prefix padding captures speech starts (soft consonants)
+          prefix_padding_ms: 400,
+          // Faster response - reduced from 1200ms to 800ms
+          silence_duration_ms: 800
         },
         temperature: 0.6,
         tools: TOOLS,
