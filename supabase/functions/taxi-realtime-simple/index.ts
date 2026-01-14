@@ -841,7 +841,7 @@ serve(async (req) => {
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
-              const pollTimeout = 15000; // 15 seconds max wait
+              const pollTimeout = 25000; // 25 seconds max wait (callback can take 15-20s)
               const pollInterval = 500; // Check every 500ms
               const pollStart = Date.now();
               let dispatchResult: any = null;
@@ -856,12 +856,14 @@ serve(async (req) => {
                   .eq("call_id", sessionState.callId)
                   .single();
                 
-                // Check if dispatch set fare/eta (confirm action)
-                if (callData?.fare && callData?.eta) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed: fare=${callData.fare}, eta=${callData.eta}`);
+                // Check if dispatch set fare OR eta OR status changed to dispatched (confirm action)
+                // More flexible: accept confirmation if ANY confirmation signal is present
+                const hasConfirmation = callData?.fare || callData?.eta || callData?.status === "dispatched";
+                if (hasConfirmation) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed: fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
                   dispatchResult = {
-                    fare: callData.fare,
-                    eta_minutes: parseInt(callData.eta) || 8,
+                    fare: callData?.fare || null,
+                    eta_minutes: parseInt(callData?.eta) || 8,
                     confirmed: true
                   };
                   break;
