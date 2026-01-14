@@ -216,6 +216,8 @@ STEP 2 - AFTER USER CONFIRMS (says yes/yeah/correct/that's right/go ahead):
 - NEVER call modify_booking before user confirms the change.
 - NEVER skip the confirmation step.
 - If user says "no" or rejects the change, ask what they'd like instead.
+- If user says "no" AND provides a different address/value (even if they say it like "change destination to ..."), treat that as the new value and ask for confirmation again.
+- If you still can’t understand the address after 2 tries, ask them to spell the street name (and the house number if relevant).
 - NEVER cancel and rebook. ALWAYS use modify_booking to preserve booking history.
 - If booking was already confirmed and user wants changes, confirm first, then call modify_booking, then call book_taxi again to get updated fare.
 
@@ -386,7 +388,12 @@ const STT_CORRECTIONS: Record<string, string> = {
   "station wrote": "Station Road",
   "london road": "London Road",
   "london wrote": "London Road",
-  
+
+  // Specific mishearings observed in testing (destination corrections)
+  "exum road": "Exmoor Road",
+  "exxon roll": "Exmoor Road",
+  "bexham road": "Exmoor Road",
+
   // Number mishearings
   "for passengers": "4 passengers",
   "fore passengers": "4 passengers",
