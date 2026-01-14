@@ -112,25 +112,38 @@ const COUNTRY_CODE_INFO: Record<string, { code: string; name: string; flag: stri
 // Detect country from phone number
 function getCountryFromPhone(phone: string | null): { code: string; name: string; flag: string; lang: string } | null {
   if (!phone) return null;
-  
-  // Ensure phone has + prefix
-  let cleaned = phone.startsWith("+") ? phone.replace(/\s+/g, "").replace(/-/g, "") : `+${phone.replace(/\s+/g, "").replace(/-/g, "")}`;
-  
-  // Normalize: handle +0XX format (e.g., +031 → +31, +044 → +44)
-  // Some systems send numbers with extra leading 0 after +
-  if (/^\+0\d/.test(cleaned)) {
-    cleaned = "+" + cleaned.slice(2); // Remove the 0 after +
+
+  // Clean the phone number
+  let cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
+
+  // Normalize only for known international-style formats (avoid guessing on local numbers like UK 07..., 020...)
+  if (cleaned.startsWith("00")) {
+    cleaned = "+" + cleaned.slice(2);
   }
-  
-  // Try longer codes first (e.g., +353 before +3, +1868 before +1)
+
+  if (/^\+0\d/.test(cleaned)) {
+    cleaned = "+" + cleaned.slice(2);
+  }
+
+  // Handle Netherlands mobile numbers sometimes coming as 0316...
+  if (/^0316\d+/.test(cleaned)) {
+    cleaned = "+31" + cleaned.slice(3);
+  }
+
+  // If it's still not E.164-like, don't guess
+  if (!cleaned.startsWith("+")) {
+    return null;
+  }
+
+  // Try longer codes first
   const sortedCodes = Object.keys(COUNTRY_CODE_INFO).sort((a, b) => b.length - a.length);
-  
+
   for (const code of sortedCodes) {
     if (cleaned.startsWith(code)) {
       return COUNTRY_CODE_INFO[code];
     }
   }
-  
+
   return null;
 }
 
