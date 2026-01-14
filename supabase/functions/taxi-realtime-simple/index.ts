@@ -408,15 +408,16 @@ serve(async (req) => {
       }
 
       case "input_audio_buffer.speech_stopped": {
-        // Log VAD detection
+        // Server VAD auto-commits the buffer and triggers response.create
+        // Do NOT manually send response.create - it causes duplicate response errors
         console.log(`[${sessionState.callId}] 🎤 Speech stopped (VAD)`);
         break;
       }
 
       case "input_audio_buffer.committed": {
-        // VAD committed the buffer - now trigger response if not already active
-        console.log(`[${sessionState.callId}] 📦 Audio buffer committed, triggering response`);
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        // Server VAD committed the buffer - response.create is triggered automatically
+        // Do NOT manually send response.create here
+        console.log(`[${sessionState.callId}] 📦 Audio buffer committed`);
         break;
       }
 
