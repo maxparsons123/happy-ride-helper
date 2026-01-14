@@ -276,6 +276,7 @@ interface SessionState {
   companyName: string;
   agentName: string;
   voice: string;
+  language: string; // Language code for Whisper STT (e.g., "en", "es", "fr")
   customerName: string | null;
   hasActiveBooking: boolean;
   booking: {
@@ -385,10 +386,12 @@ serve(async (req) => {
         output_audio_format: "pcm16",
         input_audio_transcription: { 
           model: "whisper-1",
-          // Language hint improves accuracy for UK English speakers
-          language: "en",
-          // Prompt hint helps Whisper recognize UK place names and taxi terminology
-          prompt: "Taxi booking in UK. Common places: Heathrow, Gatwick, Stansted, Birmingham, Manchester, Coventry, Warwick, Leamington, Nuneaton, Kenilworth. Street types: Road, Street, Lane, Drive, Avenue, Close. Numbers like 52A, 14B. Passengers, destination, pickup."
+          // Dynamic language hint from session state
+          language: sessionState.language,
+          // Prompt hint helps Whisper recognize place names and taxi terminology
+          prompt: sessionState.language === "en" 
+            ? "Taxi booking in UK. Common places: Heathrow, Gatwick, Stansted, Birmingham, Manchester, Coventry, Warwick, Leamington, Nuneaton, Kenilworth. Street types: Road, Street, Lane, Drive, Avenue, Close. Numbers like 52A, 14B. Passengers, destination, pickup."
+            : "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination."
         },
         turn_detection: {
           type: "server_vad",
@@ -912,6 +915,7 @@ serve(async (req) => {
           companyName: message.company_name || DEFAULT_COMPANY,
           agentName: message.agent_name || DEFAULT_AGENT,
           voice: message.voice || DEFAULT_VOICE,
+          language: message.language || "en", // Default to English, but accept from init message
           customerName: callerName,
           hasActiveBooking: message.has_active_booking || false,
           booking: { pickup: null, destination: null, passengers: null, bags: null },
@@ -925,6 +929,8 @@ serve(async (req) => {
           echoGuardUntil: 0,
           callEnded: false
         };
+        
+        console.log(`[${callId}] 🌐 Language set to: ${state.language}`);
 
         // Create live call record
         await supabase.from("live_calls").upsert({
