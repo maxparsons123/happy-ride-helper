@@ -26,6 +26,8 @@ interface LiveCallsSettingsProps {
   setSelectedAgent: (value: string) => void;
   selectedVoice: string;
   setSelectedVoice: (value: string) => void;
+  useSimpleMode: boolean;
+  setUseSimpleMode: (value: boolean) => void;
   
   // Feature toggles
   addressVerification: boolean;
@@ -52,6 +54,8 @@ export function LiveCallsSettings({
   setSelectedAgent,
   selectedVoice,
   setSelectedVoice,
+  useSimpleMode,
+  setUseSimpleMode,
   addressVerification,
   setAddressVerification,
   useTripResolver,
@@ -243,6 +247,28 @@ export function LiveCallsSettings({
                   </Select>
                 </div>
               )}
+
+              {/* Simple Mode Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Simple Mode</p>
+                  <p className="text-xs text-muted-foreground">
+                    {useSimpleMode ? "Direct OpenAI + webhook dispatch" : "Full pipeline with extraction"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs ${!useSimpleMode ? 'text-primary font-medium' : 'text-muted-foreground'}`}>
+                    Full
+                  </span>
+                  <Switch
+                    checked={useSimpleMode}
+                    onCheckedChange={setUseSimpleMode}
+                  />
+                  <span className={`text-xs ${useSimpleMode ? 'text-amber-400 font-medium' : 'text-muted-foreground'}`}>
+                    Simple
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
 
