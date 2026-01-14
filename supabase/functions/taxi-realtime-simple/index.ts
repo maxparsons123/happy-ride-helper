@@ -335,10 +335,10 @@ serve(async (req) => {
         break;
 
       case "response.audio.done":
-        // Ada finished speaking - set echo guard window (1000ms for telephony latency)
+        // Ada finished speaking - set echo guard window (800ms)
         sessionState.isAdaSpeaking = false;
-        sessionState.echoGuardUntil = Date.now() + 1000;
-        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 1000ms`);
+        sessionState.echoGuardUntil = Date.now() + 800;
+        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 800ms`);
         break;
 
       case "response.audio_transcript.delta": {
