@@ -38,7 +38,10 @@ BOOKING FLOW (STRICT ORDER):
 CRITICAL TOOL USAGE - READ CAREFULLY:
 - When you have pickup, destination, and passengers → Say "Let me check your booking" then CALL book_taxi function.
 - The book_taxi function will return fare and ETA from dispatch. You MUST WAIT for the result.
-- After receiving the tool result, say: "Booked! [ETA from tool] minutes, [FARE from tool]. Anything else?"
+- If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer. This is dispatch telling you something important (e.g., address issue).
+- If the result contains "needs_clarification: true" → Ask the customer the question in ada_message, then wait for their answer.
+- If the result contains "rejected: true" → Tell the customer we cannot process their booking using the ada_message.
+- If the result contains "success: true" → Say: "Booked! [ETA] minutes, [FARE]. Anything else?"
 - DO NOT make up fares or ETAs. You MUST use the values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
@@ -539,6 +542,31 @@ serve(async (req) => {
                 etaMinutes = dispatchResult.eta_minutes || etaMinutes;
                 bookingRef = dispatchResult.booking_ref || "";
                 distance = dispatchResult.distance || "";
+                
+                // Check if dispatch wants Ada to say something specific (e.g., address issue)
+                if (dispatchResult.ada_message) {
+                  console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
+                  // Return early with the message - don't confirm booking yet
+                  result = {
+                    success: false,
+                    needs_clarification: true,
+                    ada_message: dispatchResult.ada_message,
+                    message: "Dispatch needs clarification from customer"
+                  };
+                  break;
+                }
+                
+                // Check if dispatch rejected the booking
+                if (dispatchResult.rejected || dispatchResult.success === false) {
+                  console.log(`[${sessionState.callId}] ❌ Dispatch rejected booking: ${dispatchResult.rejection_reason || 'Unknown reason'}`);
+                  result = {
+                    success: false,
+                    rejected: true,
+                    ada_message: dispatchResult.ada_message || dispatchResult.rejection_reason || "Sorry, we can't process this booking right now.",
+                    message: "Booking rejected by dispatch"
+                  };
+                  break;
+                }
               } else {
                 console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook failed: ${webhookResponse.status}`);
               }
@@ -547,7 +575,7 @@ serve(async (req) => {
             }
           }
           
-          // Create booking in DB
+          // Create booking in DB (only if we got here - not rejected/clarification)
           const { error: bookingError } = await supabase.from("bookings").insert({
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
