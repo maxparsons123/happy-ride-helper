@@ -576,7 +576,9 @@ serve(async (req) => {
     };
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
-    console.log(`[${sessionState.callId}] 📝 Session updated`);
+    // Trigger greeting IMMEDIATELY after session update - don't wait for confirmation
+    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    console.log(`[${sessionState.callId}] 📝 Session updated + greeting triggered`);
   };
 
   // Fire-and-forget DB flush - never await, never block voice flow
@@ -627,8 +629,7 @@ serve(async (req) => {
     switch (message.type) {
       case "session.created":
         console.log(`[${sessionState.callId}] 🎉 Session created`);
-        // Trigger greeting
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        // Greeting is now triggered in sendSessionUpdate() for faster response
         break;
 
       case "response.audio.delta":
