@@ -519,6 +519,14 @@ const PHANTOM_PHRASES = [
   "[music]",
   "[applause]",
   "[laughter]",
+  // Dutch phantom phrases (Whisper training data from Dutch YouTube/podcasts)
+  "ondertitels ingediend door",
+  "ondertitels door de amara",
+  "amara.org gemeenschap",
+  "ondertiteling door",
+  "vertaald door",
+  "bewerkt door",
+  "transcriptie door",
 ];
 
 function isHallucination(text: string): boolean {
