@@ -1968,9 +1968,6 @@ serve(async (req) => {
         if (Date.now() < state.echoGuardUntil) {
           return;
         }
-
-        // If Ada is still speaking, we *may* allow barge-in. We'll decide after decoding.
-        const wasAdaSpeaking = state.isAdaSpeaking;
         
         // Bridge sends base64-encoded 8kHz µ-law audio via JSON
         const binaryStr = atob(message.audio);
@@ -1980,7 +1977,6 @@ serve(async (req) => {
         }
         
         // Step 1: Decode µ-law to 16-bit PCM (8kHz)
-        // This matches Rasa's audioop.ulaw2lin(chunk, 2) conversion
         const pcm16_8k = new Int16Array(audioData.length);
         for (let i = 0; i < audioData.length; i++) {
           const ulaw = ~audioData[i] & 0xFF;
@@ -1991,56 +1987,65 @@ serve(async (req) => {
           sample -= 0x84;
           pcm16_8k[i] = sign * sample;
         }
-        
-        let outputBytes: Uint8Array;
-        
-        if (state.useRasaAudioProcessing) {
-          // RASA-STYLE: Upsample 8kHz -> 16kHz (2x linear interpolation)
-          // This matches audioop.ratecv(linear_data, 2, 1, 8000, 16000, None)
-          // 16kHz is commonly used for speech recognition and may improve STT accuracy
-          const pcm16_16k = new Int16Array(pcm16_8k.length * 2);
-          for (let i = 0; i < pcm16_8k.length - 1; i++) {
-            const s0 = pcm16_8k[i];
-            const s1 = pcm16_8k[i + 1];
-            pcm16_16k[i * 2] = s0;
-            pcm16_16k[i * 2 + 1] = Math.round((s0 + s1) / 2);
+
+        // BARGE-IN: If Ada is currently speaking and we detect real user energy,
+        // cancel the current AI response immediately so Ada can hear the caller.
+        if (state.isAdaSpeaking) {
+          let sumSq = 0;
+          for (let i = 0; i < pcm16_8k.length; i++) {
+            const s = pcm16_8k[i];
+            sumSq += s * s;
           }
-          // Handle last sample
-          const lastIdx = pcm16_8k.length - 1;
-          pcm16_16k[lastIdx * 2] = pcm16_8k[lastIdx];
-          pcm16_16k[lastIdx * 2 + 1] = pcm16_8k[lastIdx];
-          
-          outputBytes = new Uint8Array(pcm16_16k.buffer);
-        } else {
-          // STANDARD: Upsample 8kHz -> 24kHz (3x linear interpolation)
-          // OpenAI Realtime API expects 24kHz PCM16
-          const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
-          for (let i = 0; i < pcm16_8k.length - 1; i++) {
-            const s0 = pcm16_8k[i];
-            const s1 = pcm16_8k[i + 1];
-            pcm16_24k[i * 3] = s0;
-            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
-            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+
+          // Threshold tuned for telephony; make it slightly easier in Rasa-test mode.
+          const bargeInRmsThreshold = state.useRasaAudioProcessing ? 500 : 650;
+
+          if (rms < bargeInRmsThreshold) {
+            // Still likely echo/line noise; ignore while Ada is talking.
+            return;
           }
-          // Handle last sample
-          const lastIdx = pcm16_8k.length - 1;
-          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
-          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
-          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
-          
-          outputBytes = new Uint8Array(pcm16_24k.buffer);
+
+          console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
+          try {
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          } catch (e) {
+            console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+          }
+
+          state.isAdaSpeaking = false;
+          state.echoGuardUntil = Date.now() + 200;
+          socket.send(JSON.stringify({ type: "ai_interrupted" }));
         }
         
-        // Convert to base64
-        let binary = "";
-        for (let i = 0; i < outputBytes.length; i++) {
-          binary += String.fromCharCode(outputBytes[i]);
+        // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
+        // OpenAI Realtime API requires 24kHz PCM16
+        const pcm16_24k_json = new Int16Array(pcm16_8k.length * 3);
+        for (let i = 0; i < pcm16_8k.length - 1; i++) {
+          const s0 = pcm16_8k[i];
+          const s1 = pcm16_8k[i + 1];
+          pcm16_24k_json[i * 3] = s0;
+          pcm16_24k_json[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+          pcm16_24k_json[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
         }
-        const base64Audio = btoa(binary);
+        // Handle last sample
+        const lastIdxJson = pcm16_8k.length - 1;
+        pcm16_24k_json[lastIdxJson * 3] = pcm16_8k[lastIdxJson];
+        pcm16_24k_json[lastIdxJson * 3 + 1] = pcm16_8k[lastIdxJson];
+        pcm16_24k_json[lastIdxJson * 3 + 2] = pcm16_8k[lastIdxJson];
+        
+        // Step 3: Convert to base64
+        const bytesJson = new Uint8Array(pcm16_24k_json.buffer);
+        let binaryJson = "";
+        for (let i = 0; i < bytesJson.length; i++) {
+          binaryJson += String.fromCharCode(bytesJson[i]);
+        }
+        const base64AudioJson = btoa(binaryJson);
         
         openaiWs.send(JSON.stringify({
           type: "input_audio_buffer.append",
-          audio: base64Audio
+          audio: base64AudioJson
         }));
       }
 
