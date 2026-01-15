@@ -1543,6 +1543,12 @@ serve(async (req) => {
               }
               const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
 
+              // If RMS is near full-scale, it's almost certainly clipped TTS echo (not a real barge-in).
+              // Ignore it to prevent Ada cutting herself off mid-sentence.
+              if (rms > 20000) {
+                return;
+              }
+
               // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
               const bargeInRmsThreshold = 650;
 
@@ -2071,6 +2077,12 @@ serve(async (req) => {
               sumSq += s * s;
             }
             const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+
+            // If RMS is near full-scale, it's almost certainly clipped TTS echo (not a real barge-in).
+            // Ignore it to prevent Ada cutting herself off mid-sentence.
+            if (rms > 20000) {
+              return;
+            }
 
             // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
             const bargeInRmsThreshold = 650;
