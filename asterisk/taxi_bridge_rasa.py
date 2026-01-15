@@ -417,11 +417,32 @@ class TaxiBridgeRasa:
                         self._detect_format(m_len)
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
                     cleaned, self.last_gain, is_silence = apply_noise_reduction(linear16, self.last_gain)
-                    
-                    # Skip sending pure silence to prevent Whisper hallucinations
+
+                    # IMPORTANT: Do NOT stop sending audio completely when it's silent.
+                    # OpenAI server_vad needs silence to detect end-of-turn; if we drop silent frames,
+                    # "speech_stopped" can be delayed by many seconds.
                     if is_silence:
+                        if SEND_NATIVE_ULAW and self.ast_codec == "ulaw":
+                            silence_ulaw = b"\xFF" * m_len
+                            try:
+                                await self.ws.send(silence_ulaw)
+                                self.binary_audio_count += 1
+                                self.last_ws_activity = time.time()
+                            except:
+                                self.pending_audio_buffer.append(silence_ulaw)
+                                raise
+                        else:
+                            # Fallback: send PCM silence (rare in our setup)
+                            silence_pcm = b"\x00" * (m_len if self.ast_codec != "ulaw" else self.ast_frame_bytes)
+                            try:
+                                await self.ws.send(silence_pcm)
+                                self.binary_audio_count += 1
+                                self.last_ws_activity = time.time()
+                            except:
+                                self.pending_audio_buffer.append(silence_pcm)
+                                raise
                         continue
-                    
+
                     if SEND_NATIVE_ULAW:
                         audio_to_send = lin2ulaw(cleaned)
                     else:
