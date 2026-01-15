@@ -2711,6 +2711,88 @@ serve(async (req) => {
           mode: "simple"
         }));
 
+        // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
+        const dispatchChannel = supabase.channel(`dispatch_${callId}`);
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
+          const { message, fare, eta, callback_url } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}"`);
+          
+          if (!message || !openaiWs || !openaiConnected) {
+            console.log(`[${callId}] ⚠️ Cannot process ask_confirm - no message or OpenAI not connected`);
+            return;
+          }
+          
+          // Set pending fare confirm state
+          if (state) {
+            state.pendingFareConfirm = {
+              active: true,
+              message,
+              fare: fare || null,
+              eta: eta || null,
+              callbackUrl: callback_url || null,
+              askedAt: Date.now()
+            };
+          }
+          
+          // Inject the fare question into Ada's conversation
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH FARE CONFIRMATION]: Say this EXACTLY to the customer: "${message}" Then wait for their yes/no response.` }]
+            }
+          }));
+          
+          // Trigger Ada to speak
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `The dispatch system is asking you to confirm the fare with the customer. Say this naturally: "${message}" Then wait for their response.`
+            }
+          }));
+        });
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
+          const { message: sayMessage } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH say received: "${sayMessage}"`);
+          
+          if (!sayMessage || !openaiWs || !openaiConnected) {
+            console.log(`[${callId}] ⚠️ Cannot process dispatch say - no message or OpenAI not connected`);
+            return;
+          }
+          
+          // Make Ada say the message
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH UPDATE]: Tell the customer: "${sayMessage}"` }]
+            }
+          }));
+          
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `The dispatch system has an update. Say this naturally to the customer: "${sayMessage}"`
+            }
+          }));
+        });
+        
+        dispatchChannel.on("broadcast", { event: "dispatch_hangup" }, async () => {
+          console.log(`[${callId}] 📥 DISPATCH hangup received`);
+          if (state) state.callEnded = true;
+          socket.send(JSON.stringify({ type: "hangup", reason: "dispatch_requested" }));
+        });
+        
+        dispatchChannel.subscribe((status) => {
+          console.log(`[${callId}] 📡 Dispatch channel status: ${status}`);
+        });
+
         // Fire-and-forget: Lookup caller history, GPS, and update live_calls in background
         // This runs in parallel while Ada starts greeting
         (async () => {
