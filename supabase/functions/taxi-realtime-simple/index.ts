@@ -178,22 +178,23 @@ LOCATION CHECK (IF GPS REQUIRED):
 - Wait for save_location result before proceeding with booking flow.
 - If save_location fails, apologize and ask them to try the app with location services enabled.
 
-BOOKING FLOW (STRICT ORDER):
-1. Get PICKUP address FIRST. Ask: "Where would you like to be picked up from?"
-2. Get DESTINATION address SECOND. Ask: "And where are you going to?"
-3. Get PASSENGERS if not mentioned. Ask: "How many passengers?"
-4. ONLY if destination is an AIRPORT or TRAIN STATION: ask "Any bags?" Otherwise SKIP bags entirely.
-5. When ALL details are known → Say "Let me check your booking" then CALL book_taxi function. WAIT for the result before speaking again.
+BOOKING FLOW:
+1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
+2. Get DESTINATION address. Ask: "And where are you going to?"
+3. Once you have BOTH pickup AND destination → IMMEDIATELY call book_taxi function. Default passengers to 1 if not mentioned.
+4. ONLY ask about passengers if it's a large group or they mention multiple people.
+5. ONLY ask about bags if destination is an AIRPORT or TRAIN STATION.
 
-CRITICAL TOOL USAGE - READ CAREFULLY:
-- When you have pickup, destination, and passengers → Say "Let me check your booking" then CALL book_taxi function.
-- The book_taxi function will return fare and ETA from dispatch. You MUST WAIT for the result.
-- If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer. This is dispatch telling you something important (e.g., address issue).
-- If the result contains "needs_clarification: true" → Ask the customer the question in ada_message, then wait for their answer.
-- If the result contains "rejected: true" → Tell the customer we cannot process their booking using the ada_message.
-- If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call. Do NOT ask any follow-up questions.
+CRITICAL TOOL USAGE - YOU MUST CALL FUNCTIONS:
+- When you have pickup AND destination → Say "Let me check your booking" then CALL the book_taxi function with pickup, destination, and passengers (default 1).
+- You MUST actually invoke the book_taxi function - don't just say you're checking. The function call triggers the dispatch webhook.
+- The book_taxi function returns fare and ETA from dispatch. WAIT for the result before speaking again.
+- If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer.
+- If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
+- If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
+- If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
 - If the result contains "success: true" → Say: "Booked! [ETA] minutes, [FARE]. Anything else?"
-- DO NOT make up fares or ETAs. You MUST use the values returned by book_taxi.
+- DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
@@ -258,18 +259,18 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book taxi. CALL IMMEDIATELY when details known. Include 'bags' for airport trips.",
+    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string" },
-        destination: { type: "string" },
-        passengers: { type: "integer", minimum: 1 },
-        bags: { type: "integer", minimum: 0 },
+        pickup: { type: "string", description: "Pickup address" },
+        destination: { type: "string", description: "Destination address" },
+        passengers: { type: "integer", minimum: 1, default: 1, description: "Number of passengers (default 1 if not specified)" },
+        bags: { type: "integer", minimum: 0, description: "Number of bags (only ask for airport/station trips)" },
         pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
         vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
       },
-      required: ["pickup", "destination", "passengers"]
+      required: ["pickup", "destination"]
     }
   },
   {
