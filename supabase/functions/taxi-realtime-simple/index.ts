@@ -156,6 +156,9 @@ function detectLanguageFromPhone(phone: string | null): string | null {
   return null;
 }
 
+// Normalize to digits-only for DB lookups (callers/bookings use digits-only phone_number)
+const normalizePhone = (phone: string | null | undefined) => String(phone || "").replace(/\D/g, "");
+
 // --- System Prompt ---
 const SYSTEM_PROMPT = `
 You are receiving transcribed speech from a phone call. Transcriptions may contain errors (e.g., "click on street" instead of "Coventry"). Use context to interpret correctly.
@@ -174,7 +177,9 @@ PERSONALITY: Warm, patient, relaxed. Speak in 1–2 short sentences. Ask ONLY ON
 GREETING (ALWAYS IN THE CURRENT LANGUAGE):
 - New caller: Say "Welcome to {{company_name}}, how can I help you with your travels?" then ask their name.
 - Returning caller (no booking): Say "Welcome back to {{company_name}}!" then greet [NAME] by name and ask where they want pickup.
-- Returning caller (active booking): Greet [NAME], mention an active booking, ask keep/change/cancel.
+- Returning caller (active booking): Greet [NAME], mention they have an active booking, and ask ONLY: "Do you want to keep it, change it, or cancel it?".
+  - Do NOT suggest a new pickup/destination yourself.
+  - If they say "change", ask what they want to change (pickup, destination, time, passengers) and wait for their answer.
 Example Dutch (nl) new caller: "Welkom bij {{company_name}}, hoe kan ik u helpen met uw reis? Mag ik uw naam?"
 
 NAME SAVING - MANDATORY:
@@ -814,7 +819,11 @@ serve(async (req) => {
         if (sessionState.booking.passengers) {
           bookingContext += `\n- Passengers: ${sessionState.booking.passengers}`;
         }
-        bookingContext += `\n\nIMPORTANT: ONLY use these EXACT booking details above. If caller provides a DIFFERENT address, treat it as a change request - ask "Would you like to change pickup/destination to [new address]?" then call modify_booking. Do NOT make up or guess addresses.`;
+        bookingContext += `\n\nIMPORTANT RULES (ACTIVE BOOKING):`;
+        bookingContext += `\n- Ask ONLY: "Do you want to keep it, change it, or cancel it?"`;
+        bookingContext += `\n- Do NOT suggest any new pickup/destination yourself.`;
+        bookingContext += `\n- If caller says a DIFFERENT address, treat it as a change request: ask for confirmation, then call modify_booking.`;
+        bookingContext += `\n- Do NOT make up or guess addresses.`;
         prompt += `\n\nCURRENT BOOKING:\n${bookingContext}`;
       } else {
         // Include last trip details so Ada doesn't hallucinate
@@ -1334,13 +1343,17 @@ serve(async (req) => {
           // Persist to callers table
           if (sessionState.phone) {
             try {
+              const phoneKey = normalizePhone(sessionState.phone);
               const { error } = await supabase
                 .from("callers")
-                .upsert({
-                  phone_number: sessionState.phone,
-                  name: args.name,
-                  updated_at: new Date().toISOString()
-                }, { onConflict: "phone_number" });
+                .upsert(
+                  {
+                    phone_number: phoneKey,
+                    name: args.name,
+                    updated_at: new Date().toISOString(),
+                  },
+                  { onConflict: "phone_number" }
+                );
               
               if (error) {
                 console.error(`[${sessionState.callId}] Failed to save name to DB:`, error);
@@ -1422,11 +1435,13 @@ serve(async (req) => {
                 // Also save to callers table for permanent history (known_areas)
                 if (sessionState.phone && city) {
                   try {
+                    const phoneKey = normalizePhone(sessionState.phone);
+
                     // First get current known_areas
                     const { data: callerData } = await supabase
                       .from("callers")
                       .select("known_areas")
-                      .eq("phone_number", sessionState.phone)
+                      .eq("phone_number", phoneKey)
                       .maybeSingle();
                     
                     const currentAreas = (callerData?.known_areas as Record<string, any>) || {};
@@ -1441,7 +1456,7 @@ serve(async (req) => {
                       };
                       
                       await supabase.from("callers").upsert({
-                        phone_number: sessionState.phone,
+                        phone_number: phoneKey,
                         known_areas: currentAreas,
                         updated_at: new Date().toISOString()
                       }, { onConflict: "phone_number" });
@@ -1963,7 +1978,7 @@ serve(async (req) => {
           // Create booking in DB (only if we got here - not rejected/clarification)
           const { error: bookingError } = await supabase.from("bookings").insert({
             call_id: sessionState.callId,
-            caller_phone: sessionState.phone,
+            caller_phone: normalizePhone(sessionState.phone),
             caller_name: sessionState.customerName,
             pickup: args.pickup,
             destination: args.destination,
@@ -2044,7 +2059,7 @@ serve(async (req) => {
                 body: JSON.stringify({
                   conversation: recentConversation,
                   caller_name: sessionState.customerName,
-                  caller_phone: sessionState.phone, // For alias lookup
+                  caller_phone: normalizePhone(sessionState.phone), // For alias lookup
                   is_modification: true, // Key flag - preserves unchanged fields
                   current_booking: {
                     pickup: previousBooking.pickup,
@@ -2278,7 +2293,7 @@ serve(async (req) => {
                 body: JSON.stringify({
                   conversation: conversationForVerification,
                   caller_name: sessionState.customerName,
-                  caller_phone: sessionState.phone, // For alias lookup
+                  caller_phone: normalizePhone(sessionState.phone), // For alias lookup
                   is_travel_hub_trip: isTravelHub,
                   is_modification: false,
                   current_booking: sessionState.booking.pickup ? {
@@ -2722,11 +2737,12 @@ serve(async (req) => {
         // Full booking/GPS lookup still happens in background
         if (phone && phone !== "unknown" && !state!.customerName) {
           try {
-            console.log(`[${callId}] 🔍 Fast caller lookup for: ${phone}`);
+            const phoneKey = normalizePhone(phone);
+            console.log(`[${callId}] 🔍 Fast caller lookup for: raw=${phone}, normalized=${phoneKey}`);
             const { data: callerData } = await supabase
               .from("callers")
               .select("name, last_pickup, last_destination, total_bookings")
-              .eq("phone_number", phone)
+              .eq("phone_number", phoneKey)
               .maybeSingle();
             
             if (callerData) {
@@ -3010,14 +3026,13 @@ serve(async (req) => {
             }
 
             if (phone && phone !== "unknown") {
-              // Format phone for lookups - strip '+' prefix if present
-              let lookupPhone = phone;
-              const altPhone = phone.replace(/^\+/, ''); // Also try without +
-              
+              const phoneKey = normalizePhone(phone);
+              const altPhone = String(phone || "").replace(/^\+/, "");
+
               const { data: callerData } = await supabase
                 .from("callers")
                 .select("name, last_pickup, last_destination, total_bookings")
-                .eq("phone_number", phone)
+                .eq("phone_number", phoneKey)
                 .maybeSingle();
 
               if (callerData && state) {
@@ -3032,13 +3047,15 @@ serve(async (req) => {
               
               // Check for active bookings if not already loaded
               if (!activeBooking) {
-                // Try both phone formats (with and without +)
+                // Try both phone formats (normalized digits-only + legacy no-plus)
                 const { data: bookingData } = await supabase
                   .from("bookings")
                   .select("pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
-                  .or(`caller_phone.eq.${phone},caller_phone.eq.${altPhone}`)
+                  .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
                   .in("status", ["confirmed", "dispatched", "active", "pending"])
                   .order("booked_at", { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
                   .limit(1)
                   .maybeSingle();
                 
@@ -3069,7 +3086,7 @@ serve(async (req) => {
                         role: "user",
                         content: [{
                           type: "input_text",
-                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask if they want to keep it, change it, or cancel it. Do NOT assume they want to book again - acknowledge the existing booking first.]`
+                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask ONLY if they want to keep it, change it, or cancel it. Do NOT suggest a new pickup/destination yourself. If they choose change, ask what they want to change and wait for their answer.]`
                         }]
                       }
                     }));
@@ -3137,10 +3154,11 @@ serve(async (req) => {
           // Fire-and-forget: Lookup caller history now that we have the phone
           (async () => {
             try {
+              const phoneKey = normalizePhone(phone);
               const { data: callerData } = await supabase
                 .from("callers")
                 .select("name, last_pickup, last_destination, total_bookings")
-                .eq("phone_number", phone)
+                .eq("phone_number", phoneKey)
                 .maybeSingle();
               
               if (callerData && state) {
