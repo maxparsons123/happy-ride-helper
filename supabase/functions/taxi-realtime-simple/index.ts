@@ -1213,11 +1213,49 @@ serve(async (req) => {
       const args = JSON.parse(argsJson);
 
       switch (name) {
-        case "save_customer_name":
+        case "save_customer_name": {
           console.log(`[${sessionState.callId}] 👤 Saving name: ${args.name}`);
+          const previousName = sessionState.customerName;
           sessionState.customerName = args.name;
-          result = { success: true };
+          
+          // Persist to callers table
+          if (sessionState.phone) {
+            try {
+              const { error } = await supabase
+                .from("callers")
+                .upsert({
+                  phone_number: sessionState.phone,
+                  name: args.name,
+                  updated_at: new Date().toISOString()
+                }, { onConflict: "phone_number" });
+              
+              if (error) {
+                console.error(`[${sessionState.callId}] Failed to save name to DB:`, error);
+              } else {
+                console.log(`[${sessionState.callId}] ✅ Name saved to callers table: "${previousName || 'none'}" → "${args.name}"`);
+              }
+              
+              // Also update live_calls
+              await supabase
+                .from("live_calls")
+                .update({ caller_name: args.name })
+                .eq("call_id", sessionState.callId);
+                
+            } catch (e) {
+              console.error(`[${sessionState.callId}] Error saving name:`, e);
+            }
+          }
+          
+          result = { 
+            success: true,
+            previous_name: previousName,
+            new_name: args.name,
+            message: previousName 
+              ? `Updated name from "${previousName}" to "${args.name}"`
+              : `Saved name: ${args.name}`
+          };
           break;
+        }
 
         case "save_location": {
           console.log(`[${sessionState.callId}] 📍 Saving location: ${args.location}`);
