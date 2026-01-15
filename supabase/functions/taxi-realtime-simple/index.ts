@@ -579,6 +579,7 @@ interface SessionState {
     destination: string | null;
     passengers: number | null;
     bags: number | null;
+    vehicle_type: string | null;
     version: number;
   };
   transcripts: TranscriptItem[];
@@ -1462,6 +1463,7 @@ serve(async (req) => {
             destination: args.destination,
             passengers: args.passengers,
             bags: args.bags || 0,
+            vehicle_type: args.vehicle_type || "saloon",
             version: 1
           };
           
@@ -1752,12 +1754,12 @@ serve(async (req) => {
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
           sessionState.hasActiveBooking = false;
-          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, version: 0 };
+          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
           result = { success: true };
           break;
 
         case "modify_booking": {
-          console.log(`[${sessionState.callId}] ✏️ Modifying:`, args);
+          console.log(`[${sessionState.callId}] ✏️ Modify request from Ada:`, args);
           
           // Capture previous booking state BEFORE making changes
           const previousBooking = {
@@ -1768,17 +1770,110 @@ serve(async (req) => {
             version: sessionState.booking.version
           };
           
+          console.log(`[${sessionState.callId}] 📋 Previous booking state:`, previousBooking);
+          
+          // === AI EXTRACTION FOR MODIFICATION ===
+          // Run AI extraction on recent conversation to verify the modification
+          const recentConversation = sessionState.transcripts
+            .filter(t => t.role === "user" || t.role === "assistant")
+            .slice(-8);
+          
+          let extractedModification: {
+            pickup?: string;
+            destination?: string;
+            passengers?: number;
+            luggage?: number;
+            vehicle_type?: string;
+            confidence?: string;
+          } = {};
+          
+          if (recentConversation.length > 0) {
+            try {
+              console.log(`[${sessionState.callId}] 🔍 Running AI extraction for modification...`);
+              const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                },
+                body: JSON.stringify({
+                  conversation: recentConversation,
+                  caller_name: sessionState.customerName,
+                  current_booking: previousBooking // Include current booking for context
+                })
+              });
+              
+              if (extractionResponse.ok) {
+                extractedModification = await extractionResponse.json();
+                console.log(`[${sessionState.callId}] 🔍 AI Extraction for modify:`, extractedModification);
+              }
+            } catch (extractErr) {
+              console.error(`[${sessionState.callId}] AI extraction for modify failed:`, extractErr);
+            }
+          }
+          
+          // === MERGE: Previous booking + Ada's change + AI extraction ===
+          // Priority: AI extraction (if high confidence) > Ada's new_value > Previous value
+          const normalizeForCompare = (addr: string): string => {
+            if (!addr) return "";
+            return addr.toLowerCase().replace(/[,.\-]/g, " ").replace(/\s+/g, " ").trim();
+          };
+          
+          let finalNewValue = args.new_value;
+          
+          // For address fields, cross-check with extraction
+          if (args.field_to_change === "pickup" || args.field_to_change === "destination") {
+            const extractedValue = args.field_to_change === "pickup" 
+              ? extractedModification.pickup 
+              : extractedModification.destination;
+            
+            if (extractedValue && extractedModification.confidence === "high") {
+              const adaNorm = normalizeForCompare(args.new_value);
+              const extNorm = normalizeForCompare(extractedValue);
+              
+              // If AI found something different and has high confidence, use it
+              if (adaNorm !== extNorm) {
+                console.log(`[${sessionState.callId}] 🔄 Using AI-extracted value: "${extractedValue}" instead of Ada's "${args.new_value}"`);
+                finalNewValue = extractedValue;
+              }
+            }
+          }
+          
+          // For passengers/bags, use extraction if Ada didn't provide specific value
+          if (args.field_to_change === "passengers" && extractedModification.passengers) {
+            const adaNum = parseInt(args.new_value);
+            if (isNaN(adaNum) || adaNum < 1) {
+              finalNewValue = String(extractedModification.passengers);
+              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted passengers: ${finalNewValue}`);
+            }
+          }
+          if (args.field_to_change === "bags" && extractedModification.luggage !== undefined) {
+            const adaNum = parseInt(args.new_value);
+            if (isNaN(adaNum)) {
+              finalNewValue = String(extractedModification.luggage);
+              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted bags: ${finalNewValue}`);
+            }
+          }
+          
           const oldValue = args.field_to_change === "pickup" ? sessionState.booking.pickup
             : args.field_to_change === "destination" ? sessionState.booking.destination
             : args.field_to_change === "passengers" ? sessionState.booking.passengers
             : args.field_to_change === "bags" ? sessionState.booking.bags
             : null;
           
-          // Apply the changes
-          if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
-          if (args.field_to_change === "destination") sessionState.booking.destination = args.new_value;
-          if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value);
-          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(args.new_value);
+          // Apply the changes with final verified value
+          if (args.field_to_change === "pickup") sessionState.booking.pickup = finalNewValue;
+          if (args.field_to_change === "destination") sessionState.booking.destination = finalNewValue;
+          if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(finalNewValue);
+          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(finalNewValue);
+          
+          // Also capture any other extracted details for potential use
+          if (extractedModification.vehicle_type && !sessionState.booking.vehicle_type) {
+            sessionState.booking.vehicle_type = extractedModification.vehicle_type;
+          }
+          
+          console.log(`[${sessionState.callId}] ✅ Applied modification: ${args.field_to_change} = "${finalNewValue}" (was: "${oldValue}")`);
+          console.log(`[${sessionState.callId}] 📋 Updated booking state:`, sessionState.booking);
           
           // Send webhook with modification details and poll for updated fare
           const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
@@ -1789,36 +1884,40 @@ serve(async (req) => {
             // Increment booking version for each modification
             sessionState.booking.version = (sessionState.booking.version || 1) + 1;
             
-            // Get user transcripts for STT reference (like book_taxi does)
+            // Get user transcripts for STT reference
             const userTranscripts = sessionState.transcripts
               .filter(t => t.role === "user")
               .slice(-5)
-              .map(t => t.text);
+              .map(t => ({ text: t.text, timestamp: t.timestamp }));
             
             const modifyPayload = {
               event: "booking_modified",
               call_id: sessionState.callId,
               caller_phone: sessionState.phone,
               caller_name: sessionState.customerName,
-              // What changed (for quick detection)
+              // What changed
               field_changed: args.field_to_change,
               old_value: oldValue,
-              new_value: args.new_value,
+              new_value: finalNewValue,
+              ada_original_value: args.new_value, // What Ada said (for debugging)
               // Full PREVIOUS booking state (before change)
               previous_booking: previousBooking,
-              // Full CURRENT booking state (after change) - matches book_taxi structure
+              // Full CURRENT booking state (after change)
               ada_pickup: sessionState.booking.pickup,
               ada_destination: sessionState.booking.destination,
               passengers: sessionState.booking.passengers,
               bags: sessionState.booking.bags,
+              vehicle_type: sessionState.booking.vehicle_type,
               // Raw STT transcripts for reference
               user_transcripts: userTranscripts,
+              // AI extraction result (for debugging/audit)
+              ai_extraction: extractedModification,
               // Version tracking
               booking_version: sessionState.booking.version,
               timestamp: new Date().toISOString()
             };
             
-            console.log(`[${sessionState.callId}] 📡 Sending booking modification webhook:`, modifyPayload);
+            console.log(`[${sessionState.callId}] 📡 Sending booking modification webhook`);
             
             // Fire webhook
             fetch(DISPATCH_MODIFY_URL, {
@@ -1858,12 +1957,19 @@ serve(async (req) => {
           result = { 
             success: true, 
             modified: args.field_to_change, 
-            new_value: args.new_value,
+            old_value: oldValue,
+            new_value: finalNewValue,
+            current_booking: {
+              pickup: sessionState.booking.pickup,
+              destination: sessionState.booking.destination,
+              passengers: sessionState.booking.passengers,
+              bags: sessionState.booking.bags
+            },
             ...(updatedFare && { fare: updatedFare }),
             ...(updatedEta && { eta: updatedEta }),
             message: updatedFare 
-              ? `Updated ${args.field_to_change}. New fare: ${updatedFare}`
-              : `Updated ${args.field_to_change} to ${args.new_value}`
+              ? `Updated ${args.field_to_change} from "${oldValue}" to "${finalNewValue}". New fare: ${updatedFare}`
+              : `Updated ${args.field_to_change} from "${oldValue}" to "${finalNewValue}"`
           };
           break;
         }
@@ -2121,7 +2227,7 @@ serve(async (req) => {
           language: finalLanguage,
           customerName: null,
           hasActiveBooking: false,
-          booking: { pickup: null, destination: null, passengers: null, bags: null, version: 0 },
+          booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
           transcripts: [],
           callerLastPickup: null,
           callerLastDestination: null,
@@ -2204,7 +2310,7 @@ serve(async (req) => {
             language: finalLanguage,
             customerName: message.customer_name || null,
             hasActiveBooking: message.has_active_booking || false,
-            booking: { pickup: null, destination: null, passengers: null, bags: null, version: 0 },
+            booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
             transcripts: [],
             callerLastPickup: null,
             callerLastDestination: null,
