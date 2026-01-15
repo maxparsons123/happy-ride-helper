@@ -88,89 +88,52 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Parse request immediately for validation
-  let callback: DispatchCallback;
   try {
-    callback = await req.json();
-  } catch (e) {
-    return new Response(JSON.stringify({ error: "Invalid JSON" }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  const { call_id, action, call_action, event } = callback;
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error("Missing Supabase configuration");
+    }
 
-  // Validate call_id before acknowledging
-  if (!call_id) {
-    return new Response(JSON.stringify({ 
-      error: "Missing required field: call_id" 
-    }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
+    const callback: DispatchCallback = await req.json();
+    const { 
+      call_id, 
+      event,
+      action,
+      call_action,
+      status, 
+      eta,
+      eta_minutes,
+      driver_name, 
+      vehicle_reg, 
+      vehicle_type, 
+      fare, 
+      message,
+      booking_ref,
+      question,
+      context,
+      field_changed,
+      old_value,
+      new_value
+    } = callback;
+    
+    // Normalize ETA: prefer eta_minutes if provided
+    const normalizedEta = eta_minutes ? `${eta_minutes} minutes` : eta;
 
-  console.log(`[${call_id}] 📥 Dispatch callback: event=${event}, action=${action}, call_action=${call_action}`);
+    console.log(`[${call_id}] 📥 Dispatch callback: event=${event}, action=${action}, call_action=${call_action}`);
+    console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
 
-  // ACKNOWLEDGE IMMEDIATELY - return 200 before processing
-  // This prevents the external system from retrying
-  const immediateResponse = new Response(JSON.stringify({ 
-    success: true, 
-    call_id,
-    message: "Callback received, processing in background" 
-  }), {
-    status: 200,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+    if (!call_id) {
+      return new Response(JSON.stringify({ 
+        error: "Missing required field: call_id" 
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-  // Process callback in background using EdgeRuntime.waitUntil
-  // @ts-ignore - EdgeRuntime is available in Deno edge functions
-  EdgeRuntime.waitUntil(processCallback(callback));
-
-  return immediateResponse;
-});
-
-// Background processing function
-async function processCallback(callback: DispatchCallback) {
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.error("Missing Supabase configuration");
-    return;
-  }
-
-  const { 
-    call_id, 
-    event,
-    action,
-    call_action,
-    status, 
-    eta,
-    eta_minutes,
-    driver_name, 
-    vehicle_reg, 
-    vehicle_type, 
-    fare, 
-    message,
-    booking_ref,
-    question,
-    context,
-    field_changed,
-    old_value,
-    new_value
-  } = callback;
-  
-  // Normalize ETA: prefer eta_minutes if provided
-  const normalizedEta = eta_minutes ? `${eta_minutes} minutes` : eta;
-
-  console.log(`[${call_id}] 🔄 Processing callback in background...`);
-  console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
-
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-  try {
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     // ═══════════════════════════════════════════════════════════════════
     // ACTION: UPDATE_FARE - Update fare/eta after booking modification
@@ -231,7 +194,16 @@ async function processCallback(callback: DispatchCallback) {
 
       console.log(`[${call_id}] ✅ Fare updated: ${fare}, eta: ${normalizedEta}`);
 
-      return; // Done processing update_fare
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "update_fare",
+        fare,
+        eta: normalizedEta,
+        message: "Fare updated successfully"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -274,7 +246,14 @@ async function processCallback(callback: DispatchCallback) {
         }
       });
 
-      return; // Done processing hangup
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        call_action: "hangup",
+        message: "Hangup instruction sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -282,8 +261,12 @@ async function processCallback(callback: DispatchCallback) {
     // ═══════════════════════════════════════════════════════════════════
     if (action === "ask") {
       if (!question) {
-        console.error(`[${call_id}] Missing question for ask action`);
-        return;
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'ask' action: question" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       console.log(`[${call_id}] 🎤 Dispatch asking: "${question}"`);
@@ -314,7 +297,15 @@ async function processCallback(callback: DispatchCallback) {
         })
         .eq("call_id", call_id);
 
-      return; // Done processing ask
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "ask",
+        question,
+        message: "Question sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -322,8 +313,12 @@ async function processCallback(callback: DispatchCallback) {
     // ═══════════════════════════════════════════════════════════════════
     if (action === "say") {
       if (!message) {
-        console.error(`[${call_id}] Missing message for say action`);
-        return;
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'say' action: message" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       console.log(`[${call_id}] 📢 Dispatch saying: "${message}"`);
@@ -361,7 +356,14 @@ async function processCallback(callback: DispatchCallback) {
         }
       });
 
-      return; // Done processing say
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "say",
+        message: "Message sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -374,8 +376,12 @@ async function processCallback(callback: DispatchCallback) {
       const effectiveStatus = status || (action === "booked" ? "dispatched" : null);
       
       if (!effectiveStatus) {
-        console.error(`[${call_id}] Missing status for confirm action`);
-        return;
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'confirm' action: status" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       // Build confirmation message based on effective status
@@ -427,18 +433,6 @@ async function processCallback(callback: DispatchCallback) {
         .single();
 
       const transcripts = (callData?.transcripts as any[]) || [];
-      
-      // DEDUPLICATION: Check if a dispatch_confirm already exists for this call
-      // This prevents duplicate confirmations if the webhook is called multiple times
-      const existingConfirm = transcripts.find(
-        (t: any) => t.role === "dispatch_confirm" && t.status === effectiveStatus
-      );
-      
-      if (existingConfirm) {
-        console.log(`[${call_id}] ⚠️ Duplicate dispatch_confirm (${effectiveStatus}) ignored - already exists`);
-        return;
-      }
-      
       // Add confirmation message with special role for polling to detect
       transcripts.push({
         role: "dispatch_confirm",
@@ -512,13 +506,32 @@ async function processCallback(callback: DispatchCallback) {
 
       console.log(`[${call_id}] ✅ Dispatch confirm processed: ${effectiveStatus}`);
 
-      return; // Done processing confirm
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "confirm",
+        status: bookingStatus,
+        confirmation_message: confirmationMessage
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // Unknown action
-    console.error(`[${call_id}] Unknown action: ${action}`);
+    return new Response(JSON.stringify({ 
+      error: `Unknown action: ${action}` 
+    }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
 
   } catch (error) {
-    console.error(`[${callback.call_id}] Dispatch callback processing error:`, error);
+    console.error("Dispatch callback error:", error);
+    return new Response(JSON.stringify({ 
+      error: error instanceof Error ? error.message : "Unknown error" 
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
-}
+});

@@ -183,34 +183,24 @@ NAME SAVING - MANDATORY:
 - Example flow: User says "I'm John" → CALL save_customer_name({name: "John"}) → Then say "Thank you John! Where would you like to be picked up from?"
 - If user later corrects their name → CALL save_customer_name again with the corrected name.
 
-LOCATION (OPTIONAL):
-- If caller mentions their current location (e.g., "I'm at the train station"), acknowledge it and proceed to ask for pickup address.
-- Do NOT require GPS or location verification before booking.
+LOCATION CHECK (ALWAYS):
+- If you receive "[SYSTEM: GPS not available]" at the start, you MUST ask: "Where are you calling from?" BEFORE asking for pickup.
+- When they give a location (e.g., "I'm at the train station", "I'm in Coventry", "High Street") → CALL save_location function with their answer.
+- Wait for save_location result before asking for pickup address.
+- If save_location fails, apologize and ask for a more specific location or landmark.
+- This helps us send the nearest available taxi.
 
-BOOKING FLOW - TWO PHASE CONFIRMATION:
-
-⚠️ CRITICAL: Booking happens in TWO steps to prevent premature dispatch.
-
-PHASE 1 - COLLECT & SEND BOOKING:
+BOOKING FLOW:
 1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address. Ask: "And where are you going to?"
-3. READ BACK addresses: "Just to confirm, from [PICKUP] to [DESTINATION]. Is that correct?"
-4. WAIT for user to say "yes/yeah/correct" before proceeding.
-5. Once addresses confirmed → CALL book_taxi function.
-6. book_taxi sends details to dispatch and returns fare + ETA. Taxi is NOT dispatched yet.
-
-PHASE 2 - FARE CONFIRMATION:
-7. READ the fare/ETA returned by book_taxi: "That will be [FARE], arriving in about [ETA]. Shall I book that for you?"
-8. WAIT for user to confirm ("yes", "that's fine", "book it", "go ahead").
-9. Once user confirms fare → CALL confirm_booking function.
-10. ONLY after confirm_booking succeeds, the taxi is dispatched and you can say: "Booked! You'll receive a WhatsApp confirmation."
-
-⚠️ NEVER call confirm_booking until user explicitly agrees to the fare/ETA.
-⚠️ If user says "no", "too much", "too expensive", "never mind" → CALL decline_fare, then ask if there's anything else you can help with.
-⚠️ The fare and ETA come FROM the dispatch system - do NOT make them up.
-
-ONLY ask about passengers if it's a large group or they mention multiple people. Default to 1.
-ONLY ask about bags if destination is an AIRPORT or TRAIN STATION.
+3. ⚠️ BEFORE CALLING book_taxi - READ BACK THE ADDRESSES FOR CONFIRMATION:
+   - Say: "Just to confirm, picking up from [FULL PICKUP ADDRESS] going to [FULL DESTINATION]. Is that correct?"
+   - WAIT for user to say "yes", "yeah", "correct", "that's right" before calling book_taxi.
+   - Do NOT call book_taxi until user explicitly confirms.
+   - If user says "no" or corrects an address, update it and confirm again.
+4. Once user CONFIRMS the addresses → IMMEDIATELY CALL book_taxi function with the confirmed addresses.
+5. ONLY ask about passengers if it's a large group or they mention multiple people. Default to 1.
+6. ONLY ask about bags if destination is an AIRPORT or TRAIN STATION.
 
 ADDRESS ACCURACY - CRITICAL:
 - HOUSE NUMBERS ARE CRITICAL. Listen very carefully to numbers and letters.
@@ -222,21 +212,22 @@ ADDRESS ACCURACY - CRITICAL:
 - NEVER guess or auto-correct house numbers.
 
 CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
-- When user CONFIRMS addresses → CALL book_taxi (NOT confirm_booking yet).
-- When user CONFIRMS fare/ETA → CALL confirm_booking.
+- When user CONFIRMS addresses (says "yes", "yeah", "correct", "that's right") → YOU MUST CALL the book_taxi function.
+- DO NOT just say "Let me book that" or "I'll confirm that" - YOU MUST ACTUALLY INVOKE the book_taxi function tool.
 - Speaking about booking is NOT the same as calling the function. You MUST generate a function call.
+- The book_taxi function triggers the dispatch webhook and returns fare/ETA. WAIT for the result.
 - If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer.
 - If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
 - If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
 - If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
+- If the result contains "success: true" → Confirm using the REAL fare + ETA from the tool result. NEVER say placeholder instructions like "[use actual …]" / "[gebruik daadwerkelijk …]" and NEVER invent numbers.
 - DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
 
-AFTER CONFIRM_BOOKING:
-- Once confirm_booking succeeds, tell user: "Your taxi is booked! You'll receive a WhatsApp message with confirmation details."
-- Then ask: "Is there anything else I can help you with?"
+AFTER DISPATCH CONFIRMATION (WhatsApp message):
+- When you receive confirmation that the booking is complete and WhatsApp message will be sent, ALWAYS ask: "Is there anything else I can help you with?"
 - Wait for user response before ending the call.
 - If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
 - If user has another request → Process it normally.
@@ -301,7 +292,7 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "STEP 1: Send booking details to dispatch and get fare/ETA. Call AFTER user confirms addresses. Returns fare and ETA from dispatch. Taxi is NOT dispatched yet - you must read the fare/ETA to the customer and call confirm_booking after they agree.",
+    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips.",
     parameters: {
       type: "object",
       properties: {
@@ -317,25 +308,8 @@ const TOOLS = [
   },
   {
     type: "function",
-    name: "confirm_booking",
-    description: "STEP 2: Dispatch the taxi. Call ONLY after user agrees to the fare/ETA you read from book_taxi. User must say 'yes', 'that's fine', 'book it', 'go ahead' etc. before calling this. This actually dispatches the taxi.",
-    parameters: { type: "object", properties: {} }
-  },
-  {
-    type: "function",
-    name: "decline_fare",
-    description: "Customer declined the fare/ETA (too expensive, changed mind, etc.). Call when user says 'no', 'too much', 'too expensive', 'never mind', 'forget it' after hearing the fare. Clears the pending booking gracefully.",
-    parameters: { 
-      type: "object", 
-      properties: {
-        reason: { type: "string", description: "Why declined: 'too_expensive', 'changed_mind', 'will_call_back', 'other'" }
-      }
-    }
-  },
-  {
-    type: "function",
     name: "cancel_booking",
-    description: "Cancel active or pending booking. CALL BEFORE saying 'cancelled'.",
+    description: "Cancel active booking. CALL BEFORE saying 'cancelled'.",
     parameters: { type: "object", properties: {} }
   },
   {
@@ -367,11 +341,11 @@ const TOOLS = [
   {
     type: "function",
     name: "save_location",
-    description: "Note caller's current location for context. Call when caller tells you where they are. No geocoding - just saves location text.",
+    description: "Save caller's current location when GPS is not available. Call this when caller tells you where they are (e.g., 'I'm at the train station', 'I'm on High Street'). This geocodes and saves their location.",
     parameters: {
       type: "object",
       properties: {
-        location: { type: "string", description: "The location the caller provided" }
+        location: { type: "string", description: "The location the caller provided (e.g., 'train station', 'High Street', 'Tesco on London Road')" }
       },
       required: ["location"]
     }
@@ -475,16 +449,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   "sweetspots": "Sweet Spot",
   "swee spot": "Sweet Spot",
   "suite spot": "Sweet Spot",
-  "street spots": "Sweet Spot",
-  "street spot": "Sweet Spot",
-  "treat spot": "Sweet Spot",
-  "three spot": "Sweet Spot",
-  "three spots": "Sweet Spot",
-  
-  // David Road mishearings
-  "daybreak road": "David Road",
-  "daybreak wrote": "David Road",
-  "david break road": "David Road",
 
   // Number mishearings
   "for passengers": "4 passengers",
@@ -668,26 +632,6 @@ interface SessionState {
   // Used to prevent Ada from saying "Booked!" without actually placing the booking.
   bookingConfirmedThisTurn: boolean;
   lastBookTaxiSuccessAt: number | null;
-  
-  // --- Webhook deduplication ---
-  // Track last sent webhook to prevent duplicate dispatches for the same booking
-  lastWebhookKey: string | null; // "pickup|destination|passengers" hash
-  lastWebhookSentAt: number | null;
-  
-  // --- Two-phase booking ---
-  // Pending booking awaiting user confirmation of fare/ETA
-  pendingBooking: {
-    pickup: string;
-    destination: string;
-    passengers: number;
-    bags: number;
-    vehicle_type: string;
-    pickup_time: string;
-    fare: string;
-    eta: string;
-    jobId: string;
-    preparedAt: number;
-  } | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -831,22 +775,14 @@ serve(async (req) => {
         bookingContext += `\n\nIMPORTANT: ONLY use these EXACT booking details above. If caller provides a DIFFERENT address, treat it as a change request - ask "Would you like to change pickup/destination to [new address]?" then call modify_booking. Do NOT make up or guess addresses.`;
         prompt += `\n\nCURRENT BOOKING:\n${bookingContext}`;
       } else {
-        // Include last trip details for greeting only - NOT for booking
+        // Include last trip details so Ada doesn't hallucinate
         let historyContext = `Caller is ${sessionState.customerName} (returning, ${sessionState.callerTotalBookings || 0} previous bookings).`;
         if (sessionState.callerLastPickup && sessionState.callerLastDestination) {
           historyContext += ` Their last trip was from "${sessionState.callerLastPickup}" to "${sessionState.callerLastDestination}".`;
         } else if (sessionState.callerLastPickup) {
           historyContext += ` Their last pickup was "${sessionState.callerLastPickup}".`;
         }
-        // CRITICAL: Prevent history hallucination
-        prompt += `\n\nCURRENT CONTEXT: ${historyContext}
-
-⚠️ CRITICAL - HISTORY IS FOR GREETING ONLY:
-- The last trip info above is ONLY for greeting/recognition.
-- Do NOT use history to fill in addresses the user didn't say.
-- For ALL booking details (pickup, destination), use ONLY what the customer says in THIS conversation.
-- If user says "sweetspot", use "sweetspot" - do NOT substitute with their historical destination.
-- Ask where they want to go today - do NOT assume they want the same trip.`;
+        prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
       }
     }
     
@@ -1328,74 +1264,120 @@ serve(async (req) => {
         }
 
         case "save_location": {
-          // Simple mode: geocode and save location to database for new callers
-          console.log(`[${sessionState.callId}] 📍 Geocoding location: ${args.location}`);
+          console.log(`[${sessionState.callId}] 📍 Saving location: ${args.location}`);
           
           try {
-            // Call geocode function
+            // Call geocode function to convert location to coordinates
+            const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
             const geocodeResponse = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
               method: "POST",
-              headers: {
+              headers: { 
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`
               },
-              body: JSON.stringify({
+              body: JSON.stringify({ 
                 address: args.location,
-                country: "UK"
+                // Bias towards caller's likely country based on phone
+                region: sessionState.phone?.startsWith("+44") ? "uk" 
+                      : sessionState.phone?.startsWith("+31") ? "nl"
+                      : sessionState.phone?.startsWith("+49") ? "de"
+                      : undefined
               })
             });
             
-            const geocodeResult = await geocodeResponse.json();
-            
-            if (geocodeResult.found && geocodeResult.lat && geocodeResult.lon) {
-              // Update session state
-              sessionState.gpsLat = geocodeResult.lat;
-              sessionState.gpsLon = geocodeResult.lon;
+            if (geocodeResponse.ok) {
+              const geocodeData = await geocodeResponse.json();
               
-              // Update caller_gps table
-              const normalizedPhone = sessionState.phone?.replace(/\s+/g, "").replace(/-/g, "") || "";
-              if (normalizedPhone) {
+              if (geocodeData.lat && geocodeData.lon) {
+                sessionState.gpsLat = geocodeData.lat;
+                sessionState.gpsLon = geocodeData.lon;
+                
+                const formattedAddress = geocodeData.formatted_address || args.location;
+                const city = geocodeData.city || geocodeData.locality || null;
+                
+                console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon} (${formattedAddress})`);
+                
+                // Save to caller_gps table (temporary, expires in 1 hour)
                 await supabase.from("caller_gps").upsert({
-                  phone_number: normalizedPhone.startsWith("+") ? normalizedPhone : `+${normalizedPhone}`,
-                  lat: geocodeResult.lat,
-                  lon: geocodeResult.lon,
-                  expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString() // 10 min expiry
+                  phone_number: sessionState.phone,
+                  lat: geocodeData.lat,
+                  lon: geocodeData.lon,
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
                 }, { onConflict: "phone_number" });
+                
+                // Update live_calls with GPS
+                await supabase.from("live_calls").update({
+                  gps_lat: geocodeData.lat,
+                  gps_lon: geocodeData.lon,
+                  gps_updated_at: new Date().toISOString()
+                }).eq("call_id", sessionState.callId);
+                
+                // Also save to callers table for permanent history (known_areas)
+                if (sessionState.phone && city) {
+                  try {
+                    // First get current known_areas
+                    const { data: callerData } = await supabase
+                      .from("callers")
+                      .select("known_areas")
+                      .eq("phone_number", sessionState.phone)
+                      .maybeSingle();
+                    
+                    const currentAreas = (callerData?.known_areas as Record<string, any>) || {};
+                    
+                    // Add this location to known_areas if not already there
+                    if (!currentAreas[city]) {
+                      currentAreas[city] = {
+                        lat: geocodeData.lat,
+                        lon: geocodeData.lon,
+                        address: formattedAddress,
+                        added_at: new Date().toISOString()
+                      };
+                      
+                      await supabase.from("callers").upsert({
+                        phone_number: sessionState.phone,
+                        known_areas: currentAreas,
+                        updated_at: new Date().toISOString()
+                      }, { onConflict: "phone_number" });
+                      
+                      console.log(`[${sessionState.callId}] 📍 Saved ${city} to caller's known_areas`);
+                    }
+                  } catch (e) {
+                    console.error(`[${sessionState.callId}] Failed to save known_areas:`, e);
+                  }
+                }
+                
+                result = { 
+                  success: true, 
+                  message: `Location saved: ${formattedAddress}`,
+                  formatted_address: formattedAddress,
+                  city: city,
+                  lat: geocodeData.lat,
+                  lon: geocodeData.lon
+                };
+              } else {
+                result = { 
+                  success: false, 
+                  error: "Could not find that location. Please try a more specific address or landmark."
+                };
               }
-              
-              // Update live_calls table
-              await supabase.from("live_calls").update({
-                gps_lat: geocodeResult.lat,
-                gps_lon: geocodeResult.lon,
-                gps_updated_at: new Date().toISOString()
-              }).eq("call_id", sessionState.callId);
-              
-              console.log(`[${sessionState.callId}] ✅ Location saved: ${geocodeResult.display_name} (${geocodeResult.lat}, ${geocodeResult.lon})`);
-              
-              result = { 
-                success: true, 
-                message: `Got it, you're at ${geocodeResult.display_name}. Now, where would you like to be picked up from?`
-              };
             } else {
-              // Geocoding failed, just note the location
-              console.log(`[${sessionState.callId}] ⚠️ Geocoding failed, noting location: ${args.location}`);
               result = { 
-                success: true, 
-                message: `Noted: ${args.location}. Now please tell me the pickup address.`
+                success: false, 
+                error: "Location lookup failed. Please try again."
               };
             }
-          } catch (geoErr) {
-            console.error(`[${sessionState.callId}] Geocoding error:`, geoErr);
+          } catch (e) {
+            console.error(`[${sessionState.callId}] Geocode error:`, e);
             result = { 
-              success: true, 
-              message: `Noted: ${args.location}. Now please tell me the pickup address.`
+              success: false, 
+              error: "Location lookup failed. Please try again."
             };
           }
           break;
         }
 
         case "book_taxi": {
-          console.log(`[${sessionState.callId}] 📋 BOOK_TAXI request from Ada:`, args);
+          console.log(`[${sessionState.callId}] 🚕 Booking request from Ada:`, args);
           
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison
@@ -1562,305 +1544,307 @@ serve(async (req) => {
           
           // === END VALIDATION ===
           
-          // Generate job ID and estimate fare/ETA
-          const jobId = crypto.randomUUID();
-          let fare = "£12.50";
-          let etaMinutes = 8;
-          
-          // Send booking details to dispatch - they return fare/ETA
-          const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
-          console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
-          
-          if (DISPATCH_WEBHOOK_URL) {
-            try {
-              console.log(`[${sessionState.callId}] 📡 Sending booking details to dispatch...`);
-              
-              // Get recent user transcripts
-              const userTranscripts = sessionState.transcripts
-                .filter(t => t.role === "user")
-                .slice(-6)
-                .map(t => ({ text: t.text, timestamp: t.timestamp }));
-              
-              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-              if (formattedPhone.startsWith('0')) {
-                formattedPhone = formattedPhone.slice(1);
-              }
-              
-              const bookingPayload = {
-                job_id: jobId,
-                call_id: sessionState.callId,
-                caller_phone: formattedPhone,
-                caller_name: sessionState.customerName,
-                ada_pickup: args.pickup,
-                ada_destination: args.destination,
-                user_transcripts: userTranscripts,
-                gps_lat: sessionState.gpsLat,
-                gps_lon: sessionState.gpsLon,
-                passengers: args.passengers || 1,
-                bags: args.bags || 0,
-                vehicle_type: args.vehicle_type || "saloon",
-                pickup_time: args.pickup_time || "now",
-                timestamp: new Date().toISOString()
-              };
-              
-              // Send booking and wait for fare/ETA response
-              const bookingResponse = await fetch(DISPATCH_WEBHOOK_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(bookingPayload),
-              });
-              
-              if (bookingResponse.ok) {
-                const bookingResult = await bookingResponse.json();
-                console.log(`[${sessionState.callId}] 💰 Dispatch returned:`, bookingResult);
-                if (bookingResult.fare) fare = bookingResult.fare.startsWith("£") ? bookingResult.fare : `£${bookingResult.fare}`;
-                if (bookingResult.eta_minutes) etaMinutes = bookingResult.eta_minutes;
-              }
-            } catch (bookingErr) {
-              console.error(`[${sessionState.callId}] ⚠️ Booking request failed, using defaults:`, bookingErr);
-            }
-          }
-          
-          // Store pending booking (NOT dispatched yet - awaiting user confirmation of fare)
-          sessionState.pendingBooking = {
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers || 1,
-            bags: args.bags || 0,
-            vehicle_type: args.vehicle_type || "saloon",
-            pickup_time: args.pickup_time || "now",
-            fare: fare,
-            eta: `${etaMinutes} minutes`,
-            jobId: jobId,
-            preparedAt: Date.now()
-          };
-          
-          // Update session booking state
           sessionState.booking = {
             pickup: args.pickup,
             destination: args.destination,
-            passengers: args.passengers || 1,
+            passengers: args.passengers,
             bags: args.bags || 0,
             vehicle_type: args.vehicle_type || "saloon",
             version: 1
           };
           
-          console.log(`[${sessionState.callId}] 📋 Booking sent, fare=${fare}, eta=${etaMinutes}min`);
-          console.log(`[${sessionState.callId}] ⏳ Awaiting user confirmation of fare/ETA before dispatching taxi...`);
-          
-          // Return fare/ETA for Ada to read to customer
-          result = {
-            success: true,
-            pending: true, // Indicates taxi is NOT dispatched yet
-            fare: fare,
-            eta_minutes: etaMinutes,
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers || 1,
-            message: `Booking received. Fare: ${fare}, ETA: ${etaMinutes} minutes. Awaiting customer confirmation.`,
-            ada_instruction: `Tell the customer: "That will be ${fare}, with the taxi arriving in about ${etaMinutes} minutes. Shall I book that for you?" Then WAIT for their response. If they say yes/okay/book it, call confirm_booking.`
-          };
-          break;
-        }
-
-        case "confirm_booking": {
-          console.log(`[${sessionState.callId}] ✅ CONFIRM BOOKING request from Ada`);
-          
-          // Check if there's a pending booking to confirm
-          if (!sessionState.pendingBooking) {
-            console.error(`[${sessionState.callId}] ❌ No pending booking to confirm!`);
-            result = {
-              success: false,
-              message: "No pending booking to confirm. Call book_taxi first.",
-              ada_message: "I don't have a booking ready to confirm. Let me get the details again - where would you like to go?"
-            };
-            break;
-          }
-          
-          // TIMING GUARD: Prevent confirm_booking too quickly after book_taxi
-          // Ada must read the fare to the user first (takes ~3-5 seconds of speech)
-          const timeSincePrepared = Date.now() - sessionState.pendingBooking.preparedAt;
-          const MIN_WAIT_MS = 4000; // 4 seconds minimum to read fare quote
-          
-          if (timeSincePrepared < MIN_WAIT_MS) {
-            console.log(`[${sessionState.callId}] ⚠️ confirm_booking called too quickly (${Math.round(timeSincePrepared)}ms since book_taxi)`);
-            console.log(`[${sessionState.callId}] ⏳ Must wait for user response to fare quote first`);
-            result = {
-              success: false,
-              message: `Too soon - must wait for user to respond to fare quote. Called ${Math.round(timeSincePrepared)}ms after book_taxi.`,
-              ada_instruction: `You must READ the fare (${sessionState.pendingBooking.fare}) and ETA (${sessionState.pendingBooking.eta}) to the customer and WAIT for them to say yes BEFORE calling confirm_booking.`
-            };
-            break;
-          }
-          
-          const pending = sessionState.pendingBooking;
-          const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
-          
-          console.log(`[${sessionState.callId}] 📡 User confirmed fare - NOW dispatching taxi...`);
-          console.log(`[${sessionState.callId}]   Pickup: ${pending.pickup}`);
-          console.log(`[${sessionState.callId}]   Destination: ${pending.destination}`);
-          console.log(`[${sessionState.callId}]   Fare: ${pending.fare}`);
-          
-          let dispatchSuccess = false;
+          const jobId = crypto.randomUUID();
+          let fare = "£12.50";
+          let etaMinutes = 8;
           let bookingRef = "";
+          let distance = "";
+          
+          // Call dispatch webhook if configured
+          const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
+          
+          let dispatchConfirmationSent = false;
           
           if (DISPATCH_WEBHOOK_URL) {
             try {
-              // Check deduplication - prevent double dispatch
-              const now = Date.now();
-              if (sessionState.lastWebhookSentAt && (now - sessionState.lastWebhookSentAt) < 60000) {
-                console.log(`[${sessionState.callId}] ⚠️ DUPLICATE DISPATCH BLOCKED - already dispatched ${Math.round((now - sessionState.lastWebhookSentAt) / 1000)}s ago`);
-              } else {
-                // Get recent user transcripts
-                const userTranscripts = sessionState.transcripts
-                  .filter(t => t.role === "user")
-                  .slice(-6)
-                  .map(t => ({ text: t.text, timestamp: t.timestamp }));
-                
-                let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-                if (formattedPhone.startsWith('0')) {
-                  formattedPhone = formattedPhone.slice(1);
-                }
-                
-                const dispatchPayload = {
-                  action: "confirm", // User confirmed fare - now dispatch the taxi
-                  job_id: pending.jobId,
-                  call_id: sessionState.callId,
-                  caller_phone: formattedPhone,
-                  caller_name: sessionState.customerName,
-                  ada_pickup: pending.pickup,
-                  ada_destination: pending.destination,
-                  user_transcripts: userTranscripts,
-                  gps_lat: sessionState.gpsLat,
-                  gps_lon: sessionState.gpsLon,
-                  passengers: pending.passengers,
-                  bags: pending.bags,
-                  vehicle_type: pending.vehicle_type,
-                  pickup_time: pending.pickup_time,
-                  quoted_fare: pending.fare,
-                  quoted_eta: pending.eta,
-                  timestamp: new Date().toISOString()
-                };
-                
-                // Record webhook sent
-                sessionState.lastWebhookKey = `${pending.pickup}|${pending.destination}|${pending.passengers}`.toLowerCase();
-                sessionState.lastWebhookSentAt = now;
-                
-                console.log(`[${sessionState.callId}] 📡 Sending dispatch request: ${DISPATCH_WEBHOOK_URL}`);
-                
-                // Fire dispatch webhook
-                fetch(DISPATCH_WEBHOOK_URL, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(dispatchPayload),
-                }).catch(err => console.error(`[${sessionState.callId}] Dispatch webhook failed:`, err));
-                
-                dispatchSuccess = true;
-                
-                // Poll for dispatch confirmation (similar to before)
-                const pollTimeout = 25000;
-                const pollInterval = 500;
-                const pollStart = Date.now();
-                
-                console.log(`[${sessionState.callId}] 🔄 Polling for dispatch confirmation...`);
-                
-                while (Date.now() - pollStart < pollTimeout) {
-                  const { data: callData } = await supabase
-                    .from("live_calls")
-                    .select("fare, eta, status, transcripts")
-                    .eq("call_id", sessionState.callId)
-                    .single();
-                  
-                  const transcripts = callData?.transcripts as any[] || [];
-                  const dispatchConfirm = transcripts.find(t => 
-                    t.role === "dispatch_confirm" && 
-                    new Date(t.timestamp).getTime() > pollStart
-                  );
-                  
-                  if (dispatchConfirm) {
-                    console.log(`[${sessionState.callId}] ✅ Dispatch confirmed: ${dispatchConfirm.text}`);
-                    if (dispatchConfirm.booking_ref) bookingRef = dispatchConfirm.booking_ref;
-                    break;
-                  }
-                  
-                  if (callData?.status === "dispatched" || callData?.fare) {
-                    console.log(`[${sessionState.callId}] ✅ Dispatch confirmed via status/fare`);
-                    break;
-                  }
-                  
-                  await new Promise(resolve => setTimeout(resolve, pollInterval));
-                }
+              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
+              console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
+              // Get recent user transcripts as structured array for comparison
+              const userTranscripts = sessionState.transcripts
+                .filter(t => t.role === "user")
+                .slice(-6) // Last 6 user messages
+                .map(t => ({ text: t.text, timestamp: t.timestamp }));
+              
+              // Format phone number for WhatsApp: strip '+' prefix and leading '0'
+              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              if (formattedPhone.startsWith('0')) {
+                formattedPhone = formattedPhone.slice(1);
               }
-            } catch (dispatchErr) {
-              console.error(`[${sessionState.callId}] ⚠️ Dispatch error:`, dispatchErr);
+              
+              const webhookPayload = {
+                job_id: jobId,
+                call_id: sessionState.callId,
+                caller_phone: formattedPhone,
+                caller_name: sessionState.customerName,
+                // Ada's interpreted/normalized addresses
+                ada_pickup: args.pickup,
+                ada_destination: args.destination,
+                // Raw caller addresses (what they actually said)
+                callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
+                callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
+                // Raw STT transcripts from this call - each turn separately
+                user_transcripts: userTranscripts,
+                // GPS location (if available)
+                gps_lat: sessionState.gpsLat,
+                gps_lon: sessionState.gpsLon,
+                // Booking details
+                passengers: args.passengers || 1,
+                bags: args.bags || 0,
+                vehicle_type: args.vehicle_type || "saloon",
+                vehicle_request: args.vehicle_request || null,
+                pickup_time: args.pickup_time || "now",
+                special_requests: args.special_requests || null,
+                timestamp: new Date().toISOString()
+              };
+              
+              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
+              fetch(DISPATCH_WEBHOOK_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(webhookPayload),
+              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
+              
+              // Now poll live_calls table for dispatch response (fare, eta, or say message)
+              // Dispatch will call taxi-dispatch-callback which updates live_calls
+              const pollTimeout = 25000; // 25 seconds max wait (callback can take 15-20s)
+              const pollInterval = 500; // Check every 500ms
+              const pollStart = Date.now();
+              let dispatchResult: any = null;
+              
+              console.log(`[${sessionState.callId}] 🔄 Polling for dispatch callback response (${pollTimeout/1000}s timeout)...`);
+              
+              while (Date.now() - pollStart < pollTimeout) {
+                // Check live_calls for dispatch response
+                const { data: callData } = await supabase
+                  .from("live_calls")
+                  .select("fare, eta, status, transcripts")
+                  .eq("call_id", sessionState.callId)
+                  .single();
+                
+                // Check for dispatch_confirm transcript with the confirmation message
+                const transcripts = callData?.transcripts as any[] || [];
+                const dispatchConfirm = transcripts.find(t => 
+                  t.role === "dispatch_confirm" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchConfirm) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed with message: "${dispatchConfirm.text}"`);
+                  dispatchResult = {
+                    fare: dispatchConfirm.fare || callData?.fare || null,
+                    eta_minutes: parseInt(dispatchConfirm.eta) || parseInt(callData?.eta) || 8,
+                    confirmed: true,
+                    confirmation_message: dispatchConfirm.text,
+                    booking_ref: dispatchConfirm.booking_ref || null,
+                    status: dispatchConfirm.status
+                  };
+                  break;
+                }
+                
+                // Fallback: Check if dispatch set fare OR eta OR status changed to dispatched
+                const hasConfirmation = callData?.fare || callData?.eta || callData?.status === "dispatched";
+                if (hasConfirmation) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (no message): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
+                  dispatchResult = {
+                    fare: callData?.fare || null,
+                    eta_minutes: parseInt(callData?.eta) || 8,
+                    confirmed: true
+                  };
+                  break;
+                }
+                
+                // Check if dispatch sent a "say" message (look for dispatch transcript)
+                // (using transcripts already declared above)
+                
+                // Check for hangup instruction first
+                const dispatchHangup = transcripts.find(t => 
+                  t.role === "dispatch_hangup" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchHangup) {
+                  console.log(`[${sessionState.callId}] 📞 Dispatch hangup: ${dispatchHangup.text}`);
+                  dispatchResult = {
+                    hangup: true,
+                    ada_message: dispatchHangup.text
+                  };
+                  break;
+                }
+                
+                const dispatchSay = transcripts.find(t => 
+                  t.role === "dispatch" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchSay) {
+                  console.log(`[${sessionState.callId}] 💬 Dispatch says: ${dispatchSay.text}`);
+                  dispatchResult = {
+                    ada_message: dispatchSay.text,
+                    needs_clarification: true
+                  };
+                  break;
+                }
+                
+                // Wait before next poll
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+              }
+              
+              if (dispatchResult) {
+                // Check if dispatch requested hangup - immediately end call
+                if (dispatchResult.hangup) {
+                  console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
+                  
+                  // Send the goodbye message to Ada to speak
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: `[SYSTEM: Dispatch has ended this call. Say exactly: "${dispatchResult.ada_message}" then immediately hang up.]` }]
+                    }
+                  }));
+                  
+                  // Return hangup result and trigger end_call after speech
+                  result = {
+                    success: false,
+                    hangup: true,
+                    ada_message: dispatchResult.ada_message,
+                    message: "Dispatch requested call termination - ending call"
+                  };
+                  
+                  // Mark call as ending and schedule cleanup
+                  sessionState.callEnded = true;
+                  immediateFlush(sessionState);
+                  
+                  await supabase.from("live_calls")
+                    .update({ status: "completed", ended_at: new Date().toISOString() })
+                    .eq("call_id", sessionState.callId);
+                  
+                  // Close after goodbye plays
+                  setTimeout(() => {
+                    console.log(`[${sessionState.callId}] 🔌 Closing connection after dispatch hangup`);
+                    openaiWs?.close();
+                  }, 5000);
+                  
+                  // Trigger response so Ada speaks the goodbye
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  return; // Exit early - don't continue with booking
+                }
+                
+                if (dispatchResult.ada_message && !dispatchResult.confirmed) {
+                  console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
+                  // Return early with the message - don't confirm booking yet
+                  result = {
+                    success: false,
+                    needs_clarification: true,
+                    ada_message: dispatchResult.ada_message,
+                    message: "Dispatch needs clarification from customer"
+                  };
+                  break;
+                }
+                
+                // Check if dispatch rejected the booking
+                if (dispatchResult.rejected || dispatchResult.success === false) {
+                  console.log(`[${sessionState.callId}] ❌ Dispatch rejected booking: ${dispatchResult.rejection_reason || 'Unknown reason'}`);
+                  result = {
+                    success: false,
+                    rejected: true,
+                    ada_message: dispatchResult.ada_message || dispatchResult.rejection_reason || "Sorry, we can't process this booking right now.",
+                    message: "Booking rejected by dispatch"
+                  };
+                  break;
+                }
+                
+                // Use confirmed fare/eta from dispatch
+                if (dispatchResult.confirmed) {
+                  fare = dispatchResult.fare || fare;
+                  etaMinutes = dispatchResult.eta_minutes || etaMinutes;
+                  if (dispatchResult.booking_ref) {
+                    bookingRef = dispatchResult.booking_ref;
+                  }
+                  
+                  // If dispatch provided a custom confirmation message, inject it for Ada to speak
+                  if (dispatchResult.confirmation_message) {
+                    console.log(`[${sessionState.callId}] 🎤 Injecting dispatch confirmation for Ada: "${dispatchResult.confirmation_message}"`);
+                    dispatchConfirmationSent = true;
+                    
+                    // Build the full message with fare and ETA details
+                    const fareText = fare ? `Fare is ${fare}` : "";
+                    const etaText = etaMinutes ? `arriving in about ${etaMinutes} minutes` : "";
+                    const detailsText = [fareText, etaText].filter(Boolean).join(", ");
+                    const bookingDetails = detailsText ? ` ${detailsText}.` : "";
+                    
+                    // Send system message so Ada speaks the dispatch confirmation + details + follow-up question
+                    openaiWs?.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: `[SYSTEM: Booking confirmed by dispatch. Say this to the customer: "${dispatchResult.confirmation_message}${bookingDetails} Is there anything else I can help you with?"]` }]
+                      }
+                    }));
+                    
+                    // Trigger Ada to respond with the message
+                    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  }
+                }
+              } else {
+                console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using defaults`);
+              }
+            } catch (webhookErr) {
+              console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
             }
-          } else {
-            // No dispatch webhook - just mark as success
-            dispatchSuccess = true;
           }
           
-          // Create booking in DB
+          // Create booking in DB (only if we got here - not rejected/clarification)
           const { error: bookingError } = await supabase.from("bookings").insert({
             call_id: sessionState.callId,
             caller_phone: sessionState.phone,
             caller_name: sessionState.customerName,
-            pickup: pending.pickup,
-            destination: pending.destination,
-            passengers: pending.passengers,
-            fare: pending.fare,
-            eta: pending.eta,
+            pickup: args.pickup,
+            destination: args.destination,
+            passengers: args.passengers || 1,
+            fare: fare,
+            eta: `${etaMinutes} minutes`,
             status: "confirmed",
-            booking_details: { job_id: pending.jobId, booking_ref: bookingRef }
+            booking_details: { job_id: jobId, booking_ref: bookingRef, distance: distance }
           });
           
           if (bookingError) {
             console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
           }
           
-          // Clear pending booking
-          sessionState.pendingBooking = null;
-          sessionState.hasActiveBooking = true;
+          // If we already injected dispatch message, return minimal result (Ada already speaking)
+          result = { 
+            success: true, 
+            eta_minutes: etaMinutes, 
+            fare: fare,
+            booking_ref: bookingRef,
+            message: dispatchConfirmationSent ? "Booking confirmed - dispatch message sent" : "Booking confirmed"
+          };
           
-          // Mark booking confirmed for enforcement
+          // ✅ BOOKING ENFORCEMENT: Mark that book_taxi succeeded this turn
+          // This allows Ada to say "Booked!" without being cancelled
           sessionState.bookingConfirmedThisTurn = true;
           sessionState.lastBookTaxiSuccessAt = Date.now();
-          console.log(`[${sessionState.callId}] ✅ Booking enforcement: confirm_booking succeeded, Ada may now confirm`);
+          console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
           
-          result = {
-            success: true,
-            dispatched: true,
-            fare: pending.fare,
-            eta: pending.eta,
-            booking_ref: bookingRef,
-            message: "Taxi dispatched! User will receive WhatsApp confirmation."
-          };
-          break;
-        }
-
-        case "decline_fare": {
-          console.log(`[${sessionState.callId}] 💸 Customer declined fare:`, args.reason || 'unspecified');
-          
-          // Clear the pending booking
-          const declinedBooking = sessionState.pendingBooking;
-          sessionState.pendingBooking = null;
-          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
-          
-          console.log(`[${sessionState.callId}] 📋 Cleared pending booking: ${declinedBooking?.pickup} → ${declinedBooking?.destination}`);
-          
-          result = {
-            success: true,
-            declined: true,
-            reason: args.reason || 'unspecified',
-            message: "Booking cancelled - customer declined fare.",
-            ada_instruction: "Say: 'No problem at all. Is there anything else I can help you with today?' If they say no, say 'Safe travels!' and call end_call."
-          };
           break;
         }
 
         case "cancel_booking":
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
           sessionState.hasActiveBooking = false;
-          sessionState.pendingBooking = null; // Also clear pending booking
           sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
           result = { success: true };
           break;
@@ -1988,67 +1972,51 @@ serve(async (req) => {
           let updatedEta: string | null = null;
           
           if (DISPATCH_MODIFY_URL) {
-            // === WEBHOOK DEDUPLICATION FOR MODIFICATIONS ===
-            const modifyWebhookKey = `${sessionState.booking.pickup}|${sessionState.booking.destination}|${sessionState.booking.passengers || 1}`.toLowerCase();
-            const now = Date.now();
-            const DEDUP_WINDOW_MS = 30000; // 30 seconds
+            // Increment booking version for each modification
+            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
             
-            if (sessionState.lastWebhookKey === modifyWebhookKey && 
-                sessionState.lastWebhookSentAt && 
-                (now - sessionState.lastWebhookSentAt) < DEDUP_WINDOW_MS) {
-              console.log(`[${sessionState.callId}] ⚠️ DUPLICATE MODIFY WEBHOOK BLOCKED - same booking sent ${Math.round((now - sessionState.lastWebhookSentAt) / 1000)}s ago`);
-              // Don't fire webhook again, but still poll for existing response
-            } else {
-              // Increment booking version for each modification
-              sessionState.booking.version = (sessionState.booking.version || 1) + 1;
-              
-              // Get user transcripts for STT reference (same as book_taxi)
-              const userTranscripts = sessionState.transcripts
-                .filter(t => t.role === "user")
-                .slice(-6)
-                .map(t => ({ text: t.text, timestamp: t.timestamp }));
-              
-              // Format phone number for WhatsApp: strip '+' prefix and leading '0'
-              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-              if (formattedPhone.startsWith('0')) {
-                formattedPhone = formattedPhone.slice(1);
-              }
-              
-              // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
-              const modifyPayload = {
-                job_id: crypto.randomUUID(), // New job_id for this version
-                call_id: sessionState.callId,
-                caller_phone: formattedPhone,
-                caller_name: sessionState.customerName,
-                // Ada's interpreted addresses (current state after modification)
-                ada_pickup: sessionState.booking.pickup,
-                ada_destination: sessionState.booking.destination,
-                // Raw STT transcripts from this call - each turn separately
-                user_transcripts: userTranscripts,
-                // GPS location (if available)
-                gps_lat: sessionState.gpsLat,
-                gps_lon: sessionState.gpsLon,
-                // Booking details
-                passengers: sessionState.booking.passengers || 1,
-                bags: sessionState.booking.bags || 0,
-                vehicle_type: sessionState.booking.vehicle_type || "saloon",
-                pickup_time: "now",
-                timestamp: new Date().toISOString()
-              };
-              
-              // Record this webhook for deduplication
-              sessionState.lastWebhookKey = modifyWebhookKey;
-              sessionState.lastWebhookSentAt = now;
-              
-              console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
-              
-              // Fire webhook
-              fetch(DISPATCH_MODIFY_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(modifyPayload),
-              }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
+            // Get user transcripts for STT reference (same as book_taxi)
+            const userTranscripts = sessionState.transcripts
+              .filter(t => t.role === "user")
+              .slice(-6)
+              .map(t => ({ text: t.text, timestamp: t.timestamp }));
+            
+            // Format phone number for WhatsApp: strip '+' prefix and leading '0'
+            let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+            if (formattedPhone.startsWith('0')) {
+              formattedPhone = formattedPhone.slice(1);
             }
+            
+            // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
+            const modifyPayload = {
+              job_id: crypto.randomUUID(), // New job_id for this version
+              call_id: sessionState.callId,
+              caller_phone: formattedPhone,
+              caller_name: sessionState.customerName,
+              // Ada's interpreted addresses (current state after modification)
+              ada_pickup: sessionState.booking.pickup,
+              ada_destination: sessionState.booking.destination,
+              // Raw STT transcripts from this call - each turn separately
+              user_transcripts: userTranscripts,
+              // GPS location (if available)
+              gps_lat: sessionState.gpsLat,
+              gps_lon: sessionState.gpsLon,
+              // Booking details
+              passengers: sessionState.booking.passengers || 1,
+              bags: sessionState.booking.bags || 0,
+              vehicle_type: sessionState.booking.vehicle_type || "saloon",
+              pickup_time: "now",
+              timestamp: new Date().toISOString()
+            };
+            
+            console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
+            
+            // Fire webhook
+            fetch(DISPATCH_MODIFY_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(modifyPayload),
+            }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
             
             // Poll for updated fare/eta (10 second timeout for modifications)
             const pollTimeout = 10000;
@@ -2374,9 +2342,6 @@ serve(async (req) => {
           halfDuplexBuffer: [],
           bookingConfirmedThisTurn: false,
           lastBookTaxiSuccessAt: null,
-          lastWebhookKey: null,
-          lastWebhookSentAt: null,
-          pendingBooking: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -2460,9 +2425,6 @@ serve(async (req) => {
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
-            lastWebhookKey: null,
-            lastWebhookSentAt: null,
-            pendingBooking: null,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -2487,56 +2449,6 @@ serve(async (req) => {
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
 
-        // CRITICAL: Lookup caller name AND active bookings BEFORE greeting to avoid double-greeting bug
-        // This is a fast lookup (~50ms) and ensures Ada greets returning callers correctly
-        if (phone && phone !== "unknown") {
-          try {
-            // Lookup caller data
-            if (!state!.customerName) {
-              const { data: quickCallerData } = await supabase
-                .from("callers")
-                .select("name, last_pickup, last_destination, total_bookings")
-                .eq("phone_number", phone)
-                .maybeSingle();
-              
-              if (quickCallerData && state) {
-                state.customerName = quickCallerData.name || null;
-                state.callerLastPickup = quickCallerData.last_pickup || null;
-                state.callerLastDestination = quickCallerData.last_destination || null;
-                state.callerTotalBookings = quickCallerData.total_bookings || 0;
-                console.log(`[${callId}] 👤 Pre-greeting lookup: ${quickCallerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
-              }
-            }
-            
-            // Also check for active bookings before greeting
-            const altPhone = phone.replace(/^\+/, '');
-            const { data: preBookingData } = await supabase
-              .from("bookings")
-              .select("pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
-              .or(`caller_phone.eq.${phone},caller_phone.eq.${altPhone}`)
-              .in("status", ["confirmed", "dispatched", "active", "pending"])
-              .order("booked_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            
-            if (preBookingData && state) {
-              state.hasActiveBooking = true;
-              state.booking.pickup = preBookingData.pickup;
-              state.booking.destination = preBookingData.destination;
-              state.booking.passengers = preBookingData.passengers;
-              
-              // Update name from booking if not set
-              if (!state.customerName && preBookingData.caller_name) {
-                state.customerName = preBookingData.caller_name;
-              }
-              
-              console.log(`[${callId}] 📦 Pre-greeting active booking: ${preBookingData.pickup} → ${preBookingData.destination}`);
-            }
-          } catch (lookupErr) {
-            console.error(`[${callId}] Pre-greeting lookup failed:`, lookupErr);
-          }
-        }
-
         // If pre-connected, OpenAI is already ready - just send session update + greeting
         if (preConnected && openaiConnected) {
           console.log(`[${callId}] ⚡ OpenAI already connected - triggering greeting immediately!`);
@@ -2553,8 +2465,8 @@ serve(async (req) => {
           mode: "simple"
         }));
 
-        // Fire-and-forget: Lookup active bookings, GPS, and update live_calls in background
-        // (Caller name already loaded above)
+        // Fire-and-forget: Lookup caller history, GPS, and update live_calls in background
+        // This runs in parallel while Ada starts greeting
         (async () => {
           try {
             // If caller has an active booking, load the latest booking details ASAP (non-blocking)
@@ -2739,8 +2651,8 @@ serve(async (req) => {
                 console.log(`[${callId}] 👤 Loaded caller: ${callerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
               }
               
-              // Check for active bookings if not already loaded (by pre-greeting lookup)
-              if (!activeBooking && !state?.hasActiveBooking) {
+              // Check for active bookings if not already loaded
+              if (!activeBooking) {
                 // Try both phone formats (with and without +)
                 const { data: bookingData } = await supabase
                   .from("bookings")
@@ -2763,10 +2675,9 @@ serve(async (req) => {
                     state.customerName = bookingData.caller_name;
                   }
                   
-                  console.log(`[${callId}] 📦 Found active booking (late): ${bookingData.pickup} → ${bookingData.destination}`);
+                  console.log(`[${callId}] 📦 Found active booking: ${bookingData.pickup} → ${bookingData.destination}`);
                   
-                  // Inject booking context for Ada - but do NOT trigger response.create
-                  // The initial greeting already handles active bookings via sendSessionUpdate()
+                  // Inject booking context for Ada
                   if (openaiWs && openaiConnected) {
                     const customerGreeting = state.customerName 
                       ? `The caller is ${state.customerName}.` 
@@ -2779,11 +2690,15 @@ serve(async (req) => {
                         role: "user",
                         content: [{
                           type: "input_text",
-                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. On next user input, acknowledge the booking and ask if they want to keep, change, or cancel.]`
+                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask if they want to keep it, change it, or cancel it. Do NOT assume they want to book again - acknowledge the existing booking first.]`
                         }]
                       }
                     }));
-                    // NOTE: Do NOT send response.create here - avoid double greeting
+                    
+                    // Trigger Ada to respond with this context
+                    openaiWs.send(JSON.stringify({
+                      type: "response.create"
+                    }));
                   }
                 }
               }
