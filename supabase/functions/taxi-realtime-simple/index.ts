@@ -1066,8 +1066,16 @@ serve(async (req) => {
             "driver is on",
             "fare is £",
             "fare of £",
+            "fare is",
+            "the fare",
             "arriving in about",
             "will arrive in",
+            "arrive in about",
+            "arrival is",
+            "eta is",
+            "eta of",
+            "minutes away",
+            "safe travels",
 
             // Dutch
             "geboekt!",
@@ -1082,6 +1090,8 @@ serve(async (req) => {
             "tarief",
             "aankomst",
             "over ongeveer",
+            "veilige reis",
+            "goede reis",
           ];
 
           // Guard against the model leaking instruction placeholders like:
@@ -1090,9 +1100,19 @@ serve(async (req) => {
             /\[(?:use actual|gebruik daadwerkelijk|daadwerkelijk|actual fare|fare from result|eta from result)/i.test(currentText) ||
             /\{\{[^}]+\}\}/.test(currentText);
 
+          // Detect bare price/currency mentions that indicate Ada is about to confirm
+          // This catches "163." or "£163" before the full "fare is £163" phrase
+          const hasPriceOrCurrencyMention = 
+            /(?:^|\s)£\d+/.test(currentText) ||           // £163
+            /(?:^|\s)€\d+/.test(currentText) ||           // €163
+            /(?:^|\s)\$\d+/.test(currentText) ||          // $163
+            /^\d+\.\s*$/.test(currentText.trim()) ||      // "163." standalone
+            /(?:^|\s)\d+\s*(?:euro|pond|pound)/i.test(currentText); // "163 euro"
+
           const isConfirmationPhrase =
             BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase)) ||
-            hasPlaceholderInstruction;
+            hasPlaceholderInstruction ||
+            hasPriceOrCurrencyMention;
 
           // If Ada says a confirmation phrase but book_taxi wasn't called this turn, CANCEL!
           if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
