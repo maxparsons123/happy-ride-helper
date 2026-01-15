@@ -1851,6 +1851,8 @@ serve(async (req) => {
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
+          bookingConfirmedThisTurn: false,
+          lastBookTaxiSuccessAt: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -1865,7 +1867,7 @@ serve(async (req) => {
         };
         
         preConnected = true;
-        connectToOpenAI(state, false); // Connect but DON'T trigger greeting yet
+        connectToOpenAI(state!, false); // Connect but DON'T trigger greeting yet
         
         socket.send(JSON.stringify({ 
           type: "pre_connected", 
@@ -1932,6 +1934,8 @@ serve(async (req) => {
             useRasaAudioProcessing: message.rasa_audio_processing ?? false,
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
+            bookingConfirmedThisTurn: false,
+            lastBookTaxiSuccessAt: null,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -1959,11 +1963,11 @@ serve(async (req) => {
         // If pre-connected, OpenAI is already ready - just send session update + greeting
         if (preConnected && openaiConnected) {
           console.log(`[${callId}] ⚡ OpenAI already connected - triggering greeting immediately!`);
-          sendSessionUpdate(state);
+          sendSessionUpdate(state!);
         } else {
           // Connect to OpenAI IMMEDIATELY - don't wait for DB lookup
           pendingGreeting = true;
-          connectToOpenAI(state);
+          connectToOpenAI(state!);
         }
 
         socket.send(JSON.stringify({ 
