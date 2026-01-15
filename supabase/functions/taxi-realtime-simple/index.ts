@@ -446,11 +446,57 @@ const HALLUCINATION_PATTERNS = [
   /^good afternoon\.?$/i,
 ];
 
+// Whisper "phantom radio host" hallucinations - triggered by silence/static
+// These are memorized phrases from Whisper's training data (YouTube, podcasts, etc.)
+const PHANTOM_PHRASES = [
+  "thanks for tuning in",
+  "thank you for tuning in",
+  "i'm your host",
+  "im your host",
+  "find me on facebook",
+  "find me on twitter",
+  "follow me on",
+  "thank you for watching",
+  "thanks for watching",
+  "subtitles by",
+  "please like and subscribe",
+  "like and subscribe",
+  "don't forget to subscribe",
+  "hit that subscribe button",
+  "leave a comment",
+  "see you next time",
+  "until next time",
+  "this has been",
+  "you've been listening to",
+  "you have been listening to",
+  "brought to you by",
+  "sponsored by",
+  "chopper classic", // Specific hallucination observed
+  "music playing",
+  "silence",
+  "inaudible",
+  "foreign language",
+  "[music]",
+  "[applause]",
+  "[laughter]",
+];
+
 function isHallucination(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 2) return true;
-  // Very short responses during booking flow are likely noise
-  return HALLUCINATION_PATTERNS.some(pattern => pattern.test(trimmed));
+  
+  // Check regex patterns first
+  if (HALLUCINATION_PATTERNS.some(pattern => pattern.test(trimmed))) {
+    return true;
+  }
+  
+  // Check phantom radio host phrases (Whisper training data artifacts)
+  const lowerText = trimmed.toLowerCase();
+  if (PHANTOM_PHRASES.some(phrase => lowerText.includes(phrase))) {
+    return true;
+  }
+  
+  return false;
 }
 
 function correctTranscript(text: string): string {
