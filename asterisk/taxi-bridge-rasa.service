@@ -1,0 +1,30 @@
+[Unit]
+Description=Taxi AI Bridge (Rasa 16kHz Mode)
+Documentation=https://github.com/your-org/taxi-ai
+After=network.target asterisk.service
+Wants=asterisk.service
+
+[Service]
+Type=simple
+User=asterisk
+Group=asterisk
+WorkingDirectory=/opt/taxi-bridge
+ExecStart=/usr/bin/python3 /opt/taxi-bridge/taxi_bridge_rasa.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=SUPABASE_URL=https://isnqnuveumxiughjuccs.supabase.co
+Environment=SUPABASE_ANON_KEY=your-anon-key-here
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
