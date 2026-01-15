@@ -1528,14 +1528,12 @@ serve(async (req) => {
 
           // BARGE-IN: If Ada is currently speaking and we detect real user energy,
           // cancel the current AI response immediately so Ada can hear the caller.
-          if (state.isAdaSpeaking) {
-            // If OpenAI already finished the response, don't attempt cancel, and don't block audio.
-            if (state.openAiResponseActive) {
-              // Ignore barge-in checks for the first ~0.6-0.9s of TTS to avoid echo-triggered self-interruption.
-              if (Date.now() < (state.bargeInIgnoreUntil || 0)) {
-                return;
-              }
-
+          // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
+          if (state.isAdaSpeaking && state.openAiResponseActive) {
+            // Skip barge-in check during initial echo guard, but DON'T drop audio
+            const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
+            
+            if (!inEchoGuard) {
               let sumSq = 0;
               for (let i = 0; i < pcm16_8k.length; i++) {
                 const s = pcm16_8k[i];
@@ -1543,16 +1541,10 @@ serve(async (req) => {
               }
               const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
 
-              // If RMS is near full-scale, it's almost certainly clipped TTS echo (not a real barge-in).
-              // Ignore it to prevent Ada cutting herself off mid-sentence.
-              if (rms > 20000) {
-                return;
-              }
+              // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
+              const isRealBargeIn = rms >= 650 && rms < 20000;
 
-              // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
-              const bargeInRmsThreshold = 650;
-
-              if (rms >= bargeInRmsThreshold) {
+              if (isRealBargeIn) {
                 console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
                 try {
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
@@ -1564,10 +1556,8 @@ serve(async (req) => {
                 state.isAdaSpeaking = false;
                 state.echoGuardUntil = Date.now() + 200;
                 socket.send(JSON.stringify({ type: "ai_interrupted" }));
-              } else {
-                // Still likely echo/line noise; ignore while Ada is talking.
-                return;
               }
+              // If not real barge-in, we just skip cancellation but STILL forward audio below
             }
           }
 
@@ -2063,14 +2053,12 @@ serve(async (req) => {
 
         // BARGE-IN: If Ada is currently speaking and we detect real user energy,
         // cancel the current AI response immediately so Ada can hear the caller.
-        if (state.isAdaSpeaking) {
-          // If OpenAI already finished the response, don't attempt cancel, and don't block audio.
-          if (state.openAiResponseActive) {
-            // Ignore barge-in checks for the first ~0.6-0.9s of TTS to avoid echo-triggered self-interruption.
-            if (Date.now() < (state.bargeInIgnoreUntil || 0)) {
-              return;
-            }
-
+        // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
+        if (state.isAdaSpeaking && state.openAiResponseActive) {
+          // Skip barge-in check during initial echo guard, but DON'T drop audio
+          const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
+          
+          if (!inEchoGuard) {
             let sumSq = 0;
             for (let i = 0; i < pcm16_8k.length; i++) {
               const s = pcm16_8k[i];
@@ -2078,16 +2066,10 @@ serve(async (req) => {
             }
             const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
 
-            // If RMS is near full-scale, it's almost certainly clipped TTS echo (not a real barge-in).
-            // Ignore it to prevent Ada cutting herself off mid-sentence.
-            if (rms > 20000) {
-              return;
-            }
+            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
+            const isRealBargeIn = rms >= 650 && rms < 20000;
 
-            // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
-            const bargeInRmsThreshold = 650;
-
-            if (rms >= bargeInRmsThreshold) {
+            if (isRealBargeIn) {
               console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
               try {
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
@@ -2099,10 +2081,8 @@ serve(async (req) => {
               state.isAdaSpeaking = false;
               state.echoGuardUntil = Date.now() + 200;
               socket.send(JSON.stringify({ type: "ai_interrupted" }));
-            } else {
-              // Still likely echo/line noise; ignore while Ada is talking.
-              return;
             }
+            // If not real barge-in, we just skip cancellation but STILL forward audio below
           }
         }
         
