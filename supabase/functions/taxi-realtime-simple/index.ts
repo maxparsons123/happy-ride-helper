@@ -972,6 +972,68 @@ serve(async (req) => {
           }
           // Schedule batched flush (5s debounce)
           scheduleTranscriptFlush(sessionState);
+          
+          // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
+          // Check if Ada is trying to say "Booked!" without having called book_taxi
+          const currentText = sessionState.transcripts[sessionState.assistantTranscriptIndex!]?.text || "";
+          const lowerText = currentText.toLowerCase();
+          
+          // Phrases that indicate a booking confirmation
+          const BOOKING_CONFIRMATION_PHRASES = [
+            "booked!",
+            "booked.",
+            "your taxi is confirmed",
+            "your taxi is booked",
+            "your booking is confirmed",
+            "i've booked",
+            "i have booked",
+            "booking confirmed",
+            "taxi is on its way",
+            "taxi is on the way",
+            "driver is on",
+            "fare is £",
+            "fare of £",
+            "arriving in about",
+            "will arrive in"
+          ];
+          
+          const isConfirmationPhrase = BOOKING_CONFIRMATION_PHRASES.some(phrase => lowerText.includes(phrase));
+          
+          // If Ada says a confirmation phrase but book_taxi wasn't called this turn, CANCEL!
+          if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
+            console.log(`[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`);
+            console.log(`[${sessionState.callId}] 🚨 Detected phrase in: "${currentText}"`);
+            
+            // Cancel the current response
+            if (sessionState.openAiResponseActive) {
+              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            
+            // Clear the audio buffer to stop any pending audio
+            openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            // Remove the hallucinated transcript
+            if (sessionState.assistantTranscriptIndex !== null) {
+              sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+              sessionState.assistantTranscriptIndex = null;
+            }
+            
+            // Inject a system message forcing Ada to actually call the tool
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ 
+                  type: "input_text", 
+                  text: "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]" 
+                }]
+              }
+            }));
+            
+            // Trigger a new response
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          }
         }
         break;
       }
@@ -1067,6 +1129,10 @@ serve(async (req) => {
           });
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
+          
+          // Reset booking confirmation flag on new user turn
+          // (Ada must call book_taxi again to be allowed to say "Booked!")
+          sessionState.bookingConfirmedThisTurn = false;
         }
         break;
       }
@@ -1455,6 +1521,13 @@ serve(async (req) => {
             booking_ref: bookingRef,
             message: dispatchConfirmationSent ? "Booking confirmed - dispatch message sent" : "Booking confirmed"
           };
+          
+          // ✅ BOOKING ENFORCEMENT: Mark that book_taxi succeeded this turn
+          // This allows Ada to say "Booked!" without being cancelled
+          sessionState.bookingConfirmedThisTurn = true;
+          sessionState.lastBookTaxiSuccessAt = Date.now();
+          console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
+          
           break;
         }
 
