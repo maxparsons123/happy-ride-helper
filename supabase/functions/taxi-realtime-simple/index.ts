@@ -1313,8 +1313,13 @@ serve(async (req) => {
                 .slice(-6) // Last 6 user messages
                 .map(t => ({ text: t.text, timestamp: t.timestamp }));
               
-              // Format phone number without + prefix for dispatch (e.g., "31652328530" not "+31652328530")
-              const formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              // Format phone number for WhatsApp: strip '+' prefix and leading '0' after country code
+              // e.g., "+31652328530" → "31652328530", "+310652328530" → "31652328530"
+              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              // For Dutch numbers starting with 310, remove the extra 0 (mobile numbers should be 316...)
+              if (formattedPhone.startsWith('310')) {
+                formattedPhone = '31' + formattedPhone.slice(3);
+              }
               
               const webhookPayload = {
                 job_id: jobId,
