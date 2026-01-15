@@ -1536,21 +1536,52 @@ serve(async (req) => {
             socket.send(JSON.stringify({ type: "ai_interrupted" }));
           }
 
-          // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
-          // OpenAI Realtime API requires 24kHz PCM16
-          const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
-          for (let i = 0; i < pcm16_8k.length - 1; i++) {
-            const s0 = pcm16_8k[i];
-            const s1 = pcm16_8k[i + 1];
-            pcm16_24k[i * 3] = s0;
-            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
-            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          // Step 2: Upsample to 24kHz (OpenAI Realtime API requirement)
+          // RASA mode: 8kHz → 16kHz → 24kHz (two-stage upsampling for Whisper-like processing)
+          // Standard mode: 8kHz → 24kHz (direct 3x interpolation)
+          let pcm16_24k: Int16Array;
+          
+          if (state.useRasaAudioProcessing) {
+            // RASA: Two-stage resampling (8kHz → 16kHz → 24kHz)
+            // Stage 1: 8kHz → 16kHz (2x)
+            const pcm16_16k = new Int16Array(pcm16_8k.length * 2);
+            for (let i = 0; i < pcm16_8k.length - 1; i++) {
+              const s0 = pcm16_8k[i];
+              const s1 = pcm16_8k[i + 1];
+              pcm16_16k[i * 2] = s0;
+              pcm16_16k[i * 2 + 1] = Math.round((s0 + s1) / 2);
+            }
+            const last8k = pcm16_8k.length - 1;
+            pcm16_16k[last8k * 2] = pcm16_8k[last8k];
+            pcm16_16k[last8k * 2 + 1] = pcm16_8k[last8k];
+            
+            // Stage 2: 16kHz → 24kHz (1.5x)
+            // Use ratio 3:2 - for every 2 input samples, output 3 samples
+            const outLen = Math.floor(pcm16_16k.length * 3 / 2);
+            pcm16_24k = new Int16Array(outLen);
+            for (let i = 0; i < outLen; i++) {
+              const srcIdx = (i * 2) / 3;
+              const idx0 = Math.floor(srcIdx);
+              const idx1 = Math.min(idx0 + 1, pcm16_16k.length - 1);
+              const frac = srcIdx - idx0;
+              pcm16_24k[i] = Math.round(pcm16_16k[idx0] * (1 - frac) + pcm16_16k[idx1] * frac);
+            }
+          } else {
+            // Standard: Direct 8kHz → 24kHz (3x linear interpolation)
+            pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+            for (let i = 0; i < pcm16_8k.length - 1; i++) {
+              const s0 = pcm16_8k[i];
+              const s1 = pcm16_8k[i + 1];
+              pcm16_24k[i * 3] = s0;
+              pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+              pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+            }
+            // Handle last sample
+            const lastIdx = pcm16_8k.length - 1;
+            pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+            pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+            pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
           }
-          // Handle last sample
-          const lastIdx = pcm16_8k.length - 1;
-          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
-          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
-          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
 
           // Step 3: Convert to base64
           const bytes = new Uint8Array(pcm16_24k.buffer);
