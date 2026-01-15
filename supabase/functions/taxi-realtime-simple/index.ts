@@ -772,14 +772,22 @@ serve(async (req) => {
         bookingContext += `\n\nIMPORTANT: ONLY use these EXACT booking details above. If caller provides a DIFFERENT address, treat it as a change request - ask "Would you like to change pickup/destination to [new address]?" then call modify_booking. Do NOT make up or guess addresses.`;
         prompt += `\n\nCURRENT BOOKING:\n${bookingContext}`;
       } else {
-        // Include last trip details so Ada doesn't hallucinate
+        // Include last trip details for greeting only - NOT for booking
         let historyContext = `Caller is ${sessionState.customerName} (returning, ${sessionState.callerTotalBookings || 0} previous bookings).`;
         if (sessionState.callerLastPickup && sessionState.callerLastDestination) {
           historyContext += ` Their last trip was from "${sessionState.callerLastPickup}" to "${sessionState.callerLastDestination}".`;
         } else if (sessionState.callerLastPickup) {
           historyContext += ` Their last pickup was "${sessionState.callerLastPickup}".`;
         }
-        prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
+        // CRITICAL: Prevent history hallucination
+        prompt += `\n\nCURRENT CONTEXT: ${historyContext}
+
+⚠️ CRITICAL - HISTORY IS FOR GREETING ONLY:
+- The last trip info above is ONLY for greeting/recognition.
+- Do NOT use history to fill in addresses the user didn't say.
+- For ALL booking details (pickup, destination), use ONLY what the customer says in THIS conversation.
+- If user says "sweetspot", use "sweetspot" - do NOT substitute with their historical destination.
+- Ask where they want to go today - do NOT assume they want the same trip.`;
       }
     }
     
