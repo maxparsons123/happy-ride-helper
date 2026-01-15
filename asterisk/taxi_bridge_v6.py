@@ -59,6 +59,7 @@ RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15
 
 # Audio processing - optimized for soft consonants and hallucination prevention
+# All thresholds are configurable via environment variables for A/B testing
 NOISE_GATE_THRESHOLD = 25
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 150  # Raised from 60Hz to filter engine rumble that triggers Whisper hallucinations
@@ -66,7 +67,10 @@ TARGET_RMS = 2500
 MAX_GAIN = 3.0
 MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
-MIN_ENERGY_THRESHOLD = 50  # Minimum RMS energy to send audio (filters pure silence)
+
+# RASA-inspired thresholds (configurable via env vars for tuning on noisy lines)
+MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "150"))  # Skip frames below this RMS
+NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "200"))  # Only normalize if RMS > this (prevents amplifying noise)
 
 # =============================================================================
 # LOGGING
@@ -154,9 +158,10 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
     # Check if this is effectively silence (below energy threshold)
     is_silence = rms < MIN_ENERGY_THRESHOLD
     
-    # Smoothed normalization (only if not silence)
+    # Smoothed normalization - ONLY if audio is clearly speech (above NORMALIZE_MIN_RMS)
+    # This prevents auto-amplifying background noise on noisy phone lines
     current_gain = last_gain
-    if rms > 30:
+    if rms > NORMALIZE_MIN_RMS:
         target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
         current_gain = last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - last_gain)
         audio_np *= current_gain
@@ -590,10 +595,11 @@ async def main():
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
     audio_mode = "Rasa (8→16kHz)" if RASA_AUDIO_PROCESSING else "Standard (8→24kHz)"
-    logger.info(f"🚀 Taxi Bridge v6.1 - FIXED MEMORY LEAKS")
+    logger.info(f"🚀 Taxi Bridge v6.2 - RASA ENHANCEMENTS")
     logger.info(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}")
     logger.info(f"   Connecting to: {WS_URL}")
-    logger.info(f"   Audio processing: {audio_mode} (RASA_AUDIO_PROCESSING={RASA_AUDIO_PROCESSING})")
+    logger.info(f"   Audio processing: {audio_mode}")
+    logger.info(f"   MIN_ENERGY_THRESHOLD={MIN_ENERGY_THRESHOLD}, NORMALIZE_MIN_RMS={NORMALIZE_MIN_RMS}")
 
     async with server:
         await server.serve_forever()
