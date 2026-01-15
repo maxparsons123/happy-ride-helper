@@ -568,6 +568,10 @@ interface SessionState {
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
   
+  // Half-duplex mode: when enabled, user audio is buffered while Ada speaks and only forwarded after
+  halfDuplex: boolean;
+  halfDuplexBuffer: Uint8Array[]; // Buffer for audio while Ada is speaking
+  
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -822,6 +826,54 @@ serve(async (req) => {
         sessionState.isAdaSpeaking = false;
         sessionState.echoGuardUntil = Date.now() + 800;
         console.log(`[${sessionState.callId}] 🔇 Echo guard active for 800ms`);
+        
+        // HALF-DUPLEX: Flush buffered audio now that Ada stopped speaking
+        if (sessionState.halfDuplex && sessionState.halfDuplexBuffer.length > 0) {
+          console.log(`[${sessionState.callId}] 📤 Half-duplex: flushing ${sessionState.halfDuplexBuffer.length} buffered audio chunks`);
+          // Process and send each buffered chunk
+          for (const audioData of sessionState.halfDuplexBuffer) {
+            // Decode µ-law to 16-bit PCM (8kHz)
+            const pcm16_8k = new Int16Array(audioData.length);
+            for (let i = 0; i < audioData.length; i++) {
+              const ulaw = ~audioData[i] & 0xFF;
+              const sign = (ulaw & 0x80) ? -1 : 1;
+              const exponent = (ulaw >> 4) & 0x07;
+              const mantissa = ulaw & 0x0F;
+              let sample = ((mantissa << 3) + 0x84) << exponent;
+              sample -= 0x84;
+              pcm16_8k[i] = sign * sample;
+            }
+            
+            // Upsample to 24kHz
+            const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+            for (let i = 0; i < pcm16_8k.length - 1; i++) {
+              const s0 = pcm16_8k[i];
+              const s1 = pcm16_8k[i + 1];
+              pcm16_24k[i * 3] = s0;
+              pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+              pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+            }
+            const lastIdx = pcm16_8k.length - 1;
+            pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+            pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+            pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+            
+            // Convert to base64 and send
+            const bytes = new Uint8Array(pcm16_24k.buffer);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            const base64Audio = btoa(binary);
+            
+            openaiWs?.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: base64Audio
+            }));
+          }
+          // Clear the buffer
+          sessionState.halfDuplexBuffer = [];
+        }
         break;
 
       case "response.audio_transcript.delta": {
@@ -1512,6 +1564,17 @@ serve(async (req) => {
             return;
           }
 
+          // HALF-DUPLEX MODE: Buffer audio while Ada is speaking, flush when she stops
+          if (state.halfDuplex && state.isAdaSpeaking) {
+            // Buffer the raw audio (we'll process it when Ada stops)
+            state.halfDuplexBuffer.push(audioData);
+            // Cap buffer to prevent memory issues (keep last ~5 seconds at 8kHz, 20ms chunks = 250 chunks)
+            if (state.halfDuplexBuffer.length > 250) {
+              state.halfDuplexBuffer.shift();
+            }
+            return; // Don't forward audio while Ada speaks in half-duplex mode
+          }
+
           // Bridge sends 8kHz µ-law, need to convert to 24kHz PCM16 for OpenAI
           // NOTE: OpenAI Realtime API only accepts 24kHz
           // Step 1: Decode µ-law to 16-bit PCM (8kHz)
@@ -1526,10 +1589,10 @@ serve(async (req) => {
             pcm16_8k[i] = sign * sample;
           }
 
-          // BARGE-IN: If Ada is currently speaking and we detect real user energy,
+          // BARGE-IN (only in full-duplex mode): If Ada is currently speaking and we detect real user energy,
           // cancel the current AI response immediately so Ada can hear the caller.
           // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
-          if (state.isAdaSpeaking && state.openAiResponseActive) {
+          if (!state.halfDuplex && state.isAdaSpeaking && state.openAiResponseActive) {
             // Skip barge-in check during initial echo guard, but DON'T drop audio
             const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
             
@@ -1667,6 +1730,8 @@ serve(async (req) => {
           speechStopTime: null,
           callEnded: false,
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
+          halfDuplex: message.half_duplex ?? false,
+          halfDuplexBuffer: [],
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -1746,6 +1811,8 @@ serve(async (req) => {
             speechStopTime: null,
             callEnded: false,
             useRasaAudioProcessing: message.rasa_audio_processing ?? false,
+            halfDuplex: message.half_duplex ?? false,
+            halfDuplexBuffer: [],
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -1760,9 +1827,10 @@ serve(async (req) => {
           };
         }
         
-        // Also update useRasaAudioProcessing from init message if pre-connected
+        // Also update useRasaAudioProcessing and halfDuplex from init message if pre-connected
         if (state && preConnected) {
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
+          state.halfDuplex = message.half_duplex ?? false;
         }
         
         console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
