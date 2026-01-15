@@ -1580,9 +1580,12 @@ serve(async (req) => {
                 call_id: sessionState.callId,
                 caller_phone: formattedPhone,
                 caller_name: sessionState.customerName,
-                // Ada's interpreted addresses
+                // Ada's interpreted/normalized addresses
                 ada_pickup: args.pickup,
                 ada_destination: args.destination,
+                // Raw caller addresses (what they actually said)
+                callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
+                callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
                 // GPS location (if available)
@@ -1592,7 +1595,9 @@ serve(async (req) => {
                 passengers: args.passengers || 1,
                 bags: args.bags || 0,
                 vehicle_type: args.vehicle_type || "saloon",
+                vehicle_request: args.vehicle_request || null,
                 pickup_time: args.pickup_time || "now",
+                special_requests: args.special_requests || null,
                 timestamp: new Date().toISOString()
               };
               
