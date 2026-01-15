@@ -206,7 +206,7 @@ PHASE 2 - FARE CONFIRMATION:
 10. ONLY after confirm_booking succeeds, the taxi is dispatched and you can say: "Booked! You'll receive a WhatsApp confirmation."
 
 ⚠️ NEVER call confirm_booking until user explicitly agrees to the fare/ETA.
-⚠️ If user says "no" or "too expensive" after hearing fare, ask what they'd like to do instead.
+⚠️ If user says "no", "too much", "too expensive", "never mind" → CALL decline_fare, then ask if there's anything else you can help with.
 ⚠️ The fare and ETA come FROM the dispatch system - do NOT make them up.
 
 ONLY ask about passengers if it's a large group or they mention multiple people. Default to 1.
@@ -320,6 +320,17 @@ const TOOLS = [
     name: "confirm_booking",
     description: "STEP 2: Dispatch the taxi. Call ONLY after user agrees to the fare/ETA you read from book_taxi. User must say 'yes', 'that's fine', 'book it', 'go ahead' etc. before calling this. This actually dispatches the taxi.",
     parameters: { type: "object", properties: {} }
+  },
+  {
+    type: "function",
+    name: "decline_fare",
+    description: "Customer declined the fare/ETA (too expensive, changed mind, etc.). Call when user says 'no', 'too much', 'too expensive', 'never mind', 'forget it' after hearing the fare. Clears the pending booking gracefully.",
+    parameters: { 
+      type: "object", 
+      properties: {
+        reason: { type: "string", description: "Why declined: 'too_expensive', 'changed_mind', 'will_call_back', 'other'" }
+      }
+    }
   },
   {
     type: "function",
@@ -1806,6 +1817,26 @@ serve(async (req) => {
             eta: pending.eta,
             booking_ref: bookingRef,
             message: "Taxi dispatched! User will receive WhatsApp confirmation."
+          };
+          break;
+        }
+
+        case "decline_fare": {
+          console.log(`[${sessionState.callId}] 💸 Customer declined fare:`, args.reason || 'unspecified');
+          
+          // Clear the pending booking
+          const declinedBooking = sessionState.pendingBooking;
+          sessionState.pendingBooking = null;
+          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
+          
+          console.log(`[${sessionState.callId}] 📋 Cleared pending booking: ${declinedBooking?.pickup} → ${declinedBooking?.destination}`);
+          
+          result = {
+            success: true,
+            declined: true,
+            reason: args.reason || 'unspecified',
+            message: "Booking cancelled - customer declined fare.",
+            ada_instruction: "Say: 'No problem at all. Is there anything else I can help you with today?' If they say no, say 'Safe travels!' and call end_call."
           };
           break;
         }
