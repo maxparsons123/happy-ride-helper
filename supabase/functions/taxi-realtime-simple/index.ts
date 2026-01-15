@@ -260,20 +260,16 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips. Always provide callers_pickup and callers_dropoff with the EXACT words the caller used.",
+    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string", description: "Geocoded/corrected pickup address" },
-        destination: { type: "string", description: "Geocoded/corrected destination address" },
-        callers_pickup: { type: "string", description: "EXACT words the caller used for pickup location (verbatim from transcript)" },
-        callers_dropoff: { type: "string", description: "EXACT words the caller used for destination (verbatim from transcript)" },
+        pickup: { type: "string", description: "Pickup address" },
+        destination: { type: "string", description: "Destination address" },
         passengers: { type: "integer", minimum: 1, default: 1, description: "Number of passengers (default 1 if not specified)" },
         bags: { type: "integer", minimum: 0, description: "Number of bags (only ask for airport/station trips)" },
-        pickup_time: { type: "string", description: "ISO timestamp or 'ASAP'" },
-        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] },
-        vehicle_request: { type: "string", description: "Any specific vehicle requests from caller" },
-        special_requests: { type: "string", description: "Any special requirements mentioned (wheelchair, child seat, etc.)" }
+        pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
+        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
       },
       required: ["pickup", "destination"]
     }
@@ -1174,21 +1170,14 @@ serve(async (req) => {
                 .slice(-6) // Last 6 user messages
                 .map(t => ({ text: t.text, timestamp: t.timestamp }));
               
-              // Extract caller's raw spoken addresses from transcripts for comparison
-              // Join all user transcripts to get their raw spoken text
-              const callersRawText = userTranscripts.map(t => t.text).join(" ");
-              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
                 caller_phone: sessionState.phone,
                 caller_name: sessionState.customerName,
-                // Ada's interpreted/geocoded addresses
+                // Ada's interpreted addresses
                 ada_pickup: args.pickup,
                 ada_destination: args.destination,
-                // Caller's raw spoken addresses (for comparison)
-                callers_pickup: args.callers_pickup || callersRawText,
-                callers_dropoff: args.callers_dropoff || callersRawText,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
                 // GPS location (if available)
@@ -1196,28 +1185,18 @@ serve(async (req) => {
                 gps_lon: sessionState.gpsLon,
                 // Booking details
                 passengers: args.passengers || 1,
-                // Keep numeric 'bags' for backward compatibility with existing receivers
                 bags: args.bags || 0,
-                // Also provide string 'luggage' (your C# maps bags->string)
-                luggage: String(args.bags || 0),
                 vehicle_type: args.vehicle_type || "saloon",
-                vehicle_request: args.vehicle_request || null,
-                pickup_time: args.pickup_time || "ASAP",
-                special_requests: args.special_requests || null,
+                pickup_time: args.pickup_time || "now",
                 timestamp: new Date().toISOString()
               };
               
-              // POST to dispatch webhook (fire-and-forget, don't block polling)
-              console.log(`[${sessionState.callId}] 📤 Sending webhook payload:`, JSON.stringify(webhookPayload));
+              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
               fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(webhookPayload),
-              }).then(resp => {
-                console.log(`[${sessionState.callId}] 📡 Dispatch webhook responded: ${resp.status}`);
-              }).catch(err => {
-                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, err);
-              });
+              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
