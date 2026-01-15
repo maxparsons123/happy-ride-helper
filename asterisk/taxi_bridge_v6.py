@@ -69,8 +69,9 @@ MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
 
 # RASA-inspired thresholds (configurable via env vars for tuning on noisy lines)
-MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "150"))  # Skip frames below this RMS
-NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "200"))  # Only normalize if RMS > this (prevents amplifying noise)
+# 350 is a safer default for noisy UK mobile lines (was 150, caused 19s "speech" loops)
+MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "350"))  # Skip frames below this RMS
+NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "400"))  # Only normalize if RMS > this (prevents amplifying noise)
 
 # =============================================================================
 # LOGGING

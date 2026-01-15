@@ -70,10 +70,11 @@ GAIN_SMOOTHING_FACTOR = 0.2
 
 # IMPORTANT: if this is too low, constant phone-line noise can keep server_vad "in speech" for 10-50s.
 # Make it configurable so you can tune per trunk.
-MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "150"))
+# 350 is a safer default for noisy UK mobile lines (was 150, caused 19s "speech" loops)
+MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "350"))
 
 # Only apply auto-gain when audio is clearly speech (prevents amplifying background noise)
-NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "200"))
+NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "400"))
 
 # =============================================================================
 # LOGGING
