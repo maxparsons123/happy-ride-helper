@@ -67,7 +67,13 @@ TARGET_RMS = 2500
 MAX_GAIN = 3.0
 MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
-MIN_ENERGY_THRESHOLD = 50  # Minimum RMS energy to send audio (filters pure silence)
+
+# IMPORTANT: if this is too low, constant phone-line noise can keep server_vad "in speech" for 10-50s.
+# Make it configurable so you can tune per trunk.
+MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "150"))
+
+# Only apply auto-gain when audio is clearly speech (prevents amplifying background noise)
+NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "200"))
 
 # =============================================================================
 # LOGGING
@@ -155,9 +161,9 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
     # Check if this is effectively silence (below energy threshold)
     is_silence = rms < MIN_ENERGY_THRESHOLD
     
-    # Smoothed normalization (only if not silence)
+    # Smoothed normalization (only if clearly speech, to avoid amplifying steady line noise)
     current_gain = last_gain
-    if rms > 30:
+    if rms > NORMALIZE_MIN_RMS:
         target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
         current_gain = last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - last_gain)
         audio_np *= current_gain

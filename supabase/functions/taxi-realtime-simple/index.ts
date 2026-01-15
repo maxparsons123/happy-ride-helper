@@ -716,9 +716,11 @@ serve(async (req) => {
         },
         turn_detection: {
           type: "server_vad",
-          threshold: 0.6,           // Higher threshold to avoid triggering on soft sounds
-          prefix_padding_ms: 500,   // More padding before speech starts (captures full words)
-          silence_duration_ms: 1500 // Wait 1.5s of silence before responding (was 1200ms)
+          // Rasa mode is primarily about STT experiments; for some phone lines it also needs
+          // a slightly stricter VAD threshold + shorter silence window to avoid long "in speech" hangs.
+          threshold: sessionState.useRasaAudioProcessing ? 0.75 : 0.6,
+          prefix_padding_ms: sessionState.useRasaAudioProcessing ? 300 : 500,
+          silence_duration_ms: sessionState.useRasaAudioProcessing ? 900 : 1500,
         },
         temperature: 0.6,
         tools: TOOLS,
