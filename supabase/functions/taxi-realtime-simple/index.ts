@@ -1896,7 +1896,7 @@ serve(async (req) => {
           
           if (recentConversation.length > 0) {
             try {
-              console.log(`[${sessionState.callId}] 🔍 Running AI extraction for modification...`);
+              console.log(`[${sessionState.callId}] 🔍 Running AI extraction for modification (is_modification=true)...`);
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
                 method: "POST",
                 headers: {
@@ -1906,7 +1906,15 @@ serve(async (req) => {
                 body: JSON.stringify({
                   conversation: recentConversation,
                   caller_name: sessionState.customerName,
-                  current_booking: previousBooking // Include current booking for context
+                  caller_phone: sessionState.phone, // For alias lookup
+                  is_modification: true, // Key flag - preserves unchanged fields
+                  current_booking: {
+                    pickup: previousBooking.pickup,
+                    destination: previousBooking.destination,
+                    passengers: previousBooking.passengers,
+                    luggage: previousBooking.bags ? `${previousBooking.bags} bags` : null,
+                    vehicle_type: sessionState.booking.vehicle_type
+                  }
                 })
               });
               
@@ -2121,7 +2129,7 @@ serve(async (req) => {
                 .join(" ");
               const isTravelHub = /airport|station|terminal|heathrow|gatwick|stansted|luton|birmingham|manchester|king'?s cross|st pancras|euston|paddington|victoria|coach station/i.test(recentText);
               
-              console.log(`[${sessionState.callId}] 🔍 Travel hub trip: ${isTravelHub}`);
+              console.log(`[${sessionState.callId}] 🔍 Travel hub trip: ${isTravelHub}, phone: ${sessionState.phone}`);
               
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
                 method: "POST",
@@ -2132,7 +2140,9 @@ serve(async (req) => {
                 body: JSON.stringify({
                   conversation: conversationForVerification,
                   caller_name: sessionState.customerName,
+                  caller_phone: sessionState.phone, // For alias lookup
                   is_travel_hub_trip: isTravelHub,
+                  is_modification: false,
                   current_booking: sessionState.booking.pickup ? {
                     pickup: sessionState.booking.pickup,
                     destination: sessionState.booking.destination,
@@ -2158,13 +2168,28 @@ serve(async (req) => {
           if (!verifiedBooking.pickup) missingFields.push("pickup");
           if (!verifiedBooking.destination) missingFields.push("destination");
           
+          // Determine recommended vehicle type based on passengers + luggage
+          let recommendedVehicle = verifiedBooking.vehicle_type || "saloon";
+          const pax = verifiedBooking.passengers || 1;
+          const bags = parseInt(String(verifiedBooking.luggage || "0").replace(/\D/g, "")) || 0;
+          
+          if (pax >= 7) {
+            recommendedVehicle = "8-seater";
+          } else if (pax >= 5) {
+            recommendedVehicle = "mpv";
+          } else if (pax === 4 && bags > 0) {
+            recommendedVehicle = "estate";
+          } else if (bags >= 4) {
+            recommendedVehicle = "estate";
+          }
+          
           result = {
             success: true,
             pickup: verifiedBooking.pickup || null,
             destination: verifiedBooking.destination || null,
-            passengers: verifiedBooking.passengers || 1,
+            passengers: pax,
             luggage: verifiedBooking.luggage || null,
-            vehicle_type: verifiedBooking.vehicle_type || null,
+            vehicle_type: recommendedVehicle,
             pickup_time: verifiedBooking.pickup_time || "now",
             special_requests: verifiedBooking.special_requests || null,
             missing_fields: [...new Set(missingFields)], // Dedupe
@@ -2172,7 +2197,7 @@ serve(async (req) => {
             extraction_notes: verifiedBooking.extraction_notes || null,
             message: missingFields.length > 0
               ? `Missing information: ${missingFields.join(", ")}. Please ask the customer for these details.`
-              : `All booking details verified. Pickup: "${verifiedBooking.pickup}", Destination: "${verifiedBooking.destination}". Proceed to confirm with customer.`
+              : `All booking details verified. Pickup: "${verifiedBooking.pickup}", Destination: "${verifiedBooking.destination}", ${pax} passenger(s), Vehicle: ${recommendedVehicle}. Proceed to confirm with customer.`
           };
           
           console.log(`[${sessionState.callId}] ✅ Verification result: ${missingFields.length} missing fields`);
