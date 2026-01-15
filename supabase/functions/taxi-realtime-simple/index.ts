@@ -554,10 +554,12 @@ interface SessionState {
   // Debounced DB flush
   transcriptFlushTimer: number | null;
 
-  // Echo guard: track when Ada is speaking to ignore audio feedback
+  // Echo guard / barge-in: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
   responseStartTime: number; // timestamp when current AI response started (for initial echo guard)
+  bargeInIgnoreUntil: number; // timestamp until which we ignore barge-in checks (startup echo)
+  openAiResponseActive: boolean; // true between response.created and response.done
 
   // Speech timing diagnostics
   speechStartTime: number | null;
@@ -787,12 +789,26 @@ serve(async (req) => {
         // Greeting is now triggered in sendSessionUpdate() for faster response
         break;
 
+      case "response.created":
+        // Start-of-response marker (used to avoid response.cancel_not_active)
+        sessionState.openAiResponseActive = true;
+        break;
+
+      case "response.done":
+        sessionState.openAiResponseActive = false;
+        break;
+
       case "response.audio.delta":
         // Mark Ada as speaking (echo guard)
         if (!sessionState.isAdaSpeaking) {
-          // First audio delta of this response - set initial echo guard
+          // First audio delta of this response
           sessionState.isAdaSpeaking = true;
           sessionState.responseStartTime = Date.now();
+
+          // Startup echo is strongest at the beginning of TTS on phone lines.
+          // Ignore barge-in checks briefly to avoid self-interruption.
+          const ignoreMs = sessionState.useRasaAudioProcessing ? 900 : 600;
+          sessionState.bargeInIgnoreUntil = Date.now() + ignoreMs;
         }
         // Forward audio to bridge
         socket.send(JSON.stringify({
@@ -1513,13 +1529,13 @@ serve(async (req) => {
           // BARGE-IN: If Ada is currently speaking and we detect real user energy,
           // cancel the current AI response immediately so Ada can hear the caller.
           if (state.isAdaSpeaking) {
-            // INITIAL ECHO GUARD: Ignore first 400ms of Ada's response
-            // This prevents Ada's own voice (echoing through phone) from triggering barge-in
-            const msSinceResponseStart = Date.now() - (state.responseStartTime || 0);
-            if (msSinceResponseStart < 400) {
-              // Still in initial echo guard - don't check for barge-in
-              // (Audio will still be forwarded to OpenAI below)
-            } else {
+            // If OpenAI already finished the response, don't attempt cancel, and don't block audio.
+            if (state.openAiResponseActive) {
+              // Ignore barge-in checks for the first ~0.6-0.9s of TTS to avoid echo-triggered self-interruption.
+              if (Date.now() < (state.bargeInIgnoreUntil || 0)) {
+                return;
+              }
+
               let sumSq = 0;
               for (let i = 0; i < pcm16_8k.length; i++) {
                 const s = pcm16_8k[i];
@@ -1527,8 +1543,8 @@ serve(async (req) => {
               }
               const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
 
-              // Threshold tuned for telephony; raised for Rasa mode to reduce false barge-ins
-              const bargeInRmsThreshold = state.useRasaAudioProcessing ? 800 : 650;
+              // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
+              const bargeInRmsThreshold = 650;
 
               if (rms >= bargeInRmsThreshold) {
                 console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
@@ -1649,6 +1665,8 @@ serve(async (req) => {
           isAdaSpeaking: false,
           echoGuardUntil: 0,
           responseStartTime: 0,
+          bargeInIgnoreUntil: 0,
+          openAiResponseActive: false,
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
@@ -1726,6 +1744,8 @@ serve(async (req) => {
             isAdaSpeaking: false,
             echoGuardUntil: 0,
             responseStartTime: 0,
+            bargeInIgnoreUntil: 0,
+            openAiResponseActive: false,
             speechStartTime: null,
             speechStopTime: null,
             callEnded: false,
@@ -2038,13 +2058,13 @@ serve(async (req) => {
         // BARGE-IN: If Ada is currently speaking and we detect real user energy,
         // cancel the current AI response immediately so Ada can hear the caller.
         if (state.isAdaSpeaking) {
-          // INITIAL ECHO GUARD: Ignore first 400ms of Ada's response
-          // This prevents Ada's own voice (echoing through phone) from triggering barge-in
-          const msSinceResponseStart = Date.now() - (state.responseStartTime || 0);
-          if (msSinceResponseStart < 400) {
-            // Still in initial echo guard - don't check for barge-in
-            // (Audio will still be forwarded to OpenAI below)
-          } else {
+          // If OpenAI already finished the response, don't attempt cancel, and don't block audio.
+          if (state.openAiResponseActive) {
+            // Ignore barge-in checks for the first ~0.6-0.9s of TTS to avoid echo-triggered self-interruption.
+            if (Date.now() < (state.bargeInIgnoreUntil || 0)) {
+              return;
+            }
+
             let sumSq = 0;
             for (let i = 0; i < pcm16_8k.length; i++) {
               const s = pcm16_8k[i];
@@ -2052,8 +2072,8 @@ serve(async (req) => {
             }
             const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
 
-            // Threshold tuned for telephony; raised for Rasa mode to reduce false barge-ins
-            const bargeInRmsThreshold = state.useRasaAudioProcessing ? 800 : 650;
+            // Threshold tuned for telephony. Keep Rasa at parity so barge-in still works.
+            const bargeInRmsThreshold = 650;
 
             if (rms >= bargeInRmsThreshold) {
               console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
