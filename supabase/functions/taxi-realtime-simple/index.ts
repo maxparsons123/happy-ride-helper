@@ -700,7 +700,19 @@ serve(async (req) => {
 
     if (sessionState.customerName) {
       if (sessionState.hasActiveBooking) {
-        prompt += `\n\nCURRENT CONTEXT: Caller is ${sessionState.customerName} with active booking.`;
+        // Include full active booking details so Ada doesn't hallucinate
+        let bookingContext = `Caller is ${sessionState.customerName} with an ACTIVE BOOKING.`;
+        if (sessionState.booking.pickup) {
+          bookingContext += `\n- Pickup: "${sessionState.booking.pickup}"`;
+        }
+        if (sessionState.booking.destination) {
+          bookingContext += `\n- Destination: "${sessionState.booking.destination}"`;
+        }
+        if (sessionState.booking.passengers) {
+          bookingContext += `\n- Passengers: ${sessionState.booking.passengers}`;
+        }
+        bookingContext += `\n\nIMPORTANT: ONLY use these EXACT booking details above. If caller provides a DIFFERENT address, treat it as a change request - ask "Would you like to change pickup/destination to [new address]?" then call modify_booking. Do NOT make up or guess addresses.`;
+        prompt += `\n\nCURRENT BOOKING:\n${bookingContext}`;
       } else {
         // Include last trip details so Ada doesn't hallucinate
         let historyContext = `Caller is ${sessionState.customerName} (returning, ${sessionState.callerTotalBookings || 0} previous bookings).`;
@@ -711,6 +723,15 @@ serve(async (req) => {
         }
         prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
       }
+    }
+    
+    // Inject recent transcripts so Ada only responds to what was actually said
+    if (sessionState.transcripts && sessionState.transcripts.length > 0) {
+      const recentTranscripts = sessionState.transcripts.slice(-5); // Last 5 turns
+      const transcriptSummary = recentTranscripts
+        .map((t: { role: string; text: string }) => `${t.role}: "${t.text}"`)
+        .join("\n");
+      prompt += `\n\nRECENT CONVERSATION (respond ONLY based on this - do NOT invent what was said):\n${transcriptSummary}`;
     }
 
     const sessionUpdate = {
