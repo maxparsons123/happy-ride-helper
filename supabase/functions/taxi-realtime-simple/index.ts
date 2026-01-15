@@ -3056,8 +3056,6 @@ serve(async (req) => {
                   .order("booked_at", { ascending: false })
                   .limit(1)
                   .maybeSingle();
-                  .limit(1)
-                  .maybeSingle();
                 
                 if (bookingData && state) {
                   activeBooking = bookingData;
