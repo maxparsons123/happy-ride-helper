@@ -260,18 +260,22 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips.",
+    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips. Always provide callers_pickup and callers_dropoff with the EXACT words the caller used.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string", description: "Pickup address" },
-        destination: { type: "string", description: "Destination address" },
+        pickup: { type: "string", description: "Geocoded/corrected pickup address" },
+        destination: { type: "string", description: "Geocoded/corrected destination address" },
+        callers_pickup: { type: "string", description: "EXACT words the caller used for pickup location (verbatim from transcript)" },
+        callers_dropoff: { type: "string", description: "EXACT words the caller used for destination (verbatim from transcript)" },
         passengers: { type: "integer", minimum: 1, default: 1, description: "Number of passengers (default 1 if not specified)" },
         bags: { type: "integer", minimum: 0, description: "Number of bags (only ask for airport/station trips)" },
-        pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
-        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
+        pickup_time: { type: "string", description: "ISO timestamp or 'ASAP'" },
+        vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] },
+        vehicle_request: { type: "string", description: "Any specific vehicle requests from caller" },
+        special_requests: { type: "string", description: "Any special requirements mentioned (wheelchair, child seat, etc.)" }
       },
-      required: ["pickup", "destination"]
+      required: ["pickup", "destination", "callers_pickup", "callers_dropoff"]
     }
   },
   {
@@ -1170,14 +1174,21 @@ serve(async (req) => {
                 .slice(-6) // Last 6 user messages
                 .map(t => ({ text: t.text, timestamp: t.timestamp }));
               
+              // Extract caller's raw spoken addresses from transcripts for comparison
+              // Join all user transcripts to get their raw spoken text
+              const callersRawText = userTranscripts.map(t => t.text).join(" ");
+              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
                 caller_phone: sessionState.phone,
                 caller_name: sessionState.customerName,
-                // Ada's interpreted addresses
+                // Ada's interpreted/geocoded addresses
                 ada_pickup: args.pickup,
                 ada_destination: args.destination,
+                // Caller's raw spoken addresses (for comparison)
+                callers_pickup: args.callers_pickup || callersRawText,
+                callers_dropoff: args.callers_dropoff || callersRawText,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
                 // GPS location (if available)
@@ -1185,9 +1196,11 @@ serve(async (req) => {
                 gps_lon: sessionState.gpsLon,
                 // Booking details
                 passengers: args.passengers || 1,
-                bags: args.bags || 0,
+                luggage: String(args.bags || 0),
                 vehicle_type: args.vehicle_type || "saloon",
-                pickup_time: args.pickup_time || "now",
+                vehicle_request: args.vehicle_request || null,
+                pickup_time: args.pickup_time || "ASAP",
+                special_requests: args.special_requests || null,
                 timestamp: new Date().toISOString()
               };
               
