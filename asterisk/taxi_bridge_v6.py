@@ -23,7 +23,6 @@ import struct
 import base64
 import time
 import logging
-import os
 from typing import Optional
 from collections import deque
 
@@ -50,25 +49,18 @@ AI_RATE = 24000   # AI TTS output rate
 SEND_NATIVE_ULAW = True
 
 # Reconnection settings
-
 MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15
 
-# Audio processing - optimized for soft consonants and hallucination prevention
-# All thresholds are configurable via environment variables for A/B testing
+# Audio processing - optimized for soft consonants
 NOISE_GATE_THRESHOLD = 25
 NOISE_GATE_SOFT_KNEE = True
-HIGH_PASS_CUTOFF = 150  # Raised from 60Hz to filter engine rumble that triggers Whisper hallucinations
+HIGH_PASS_CUTOFF = 60
 TARGET_RMS = 2500
 MAX_GAIN = 3.0
 MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
-
-# RASA-inspired thresholds (configurable via env vars for tuning on noisy lines)
-# 350 is a safer default for noisy UK mobile lines (was 150, caused 19s "speech" loops)
-MIN_ENERGY_THRESHOLD = int(os.environ.get("MIN_ENERGY_THRESHOLD", "350"))  # Skip frames below this RMS
-NORMALIZE_MIN_RMS = int(os.environ.get("NORMALIZE_MIN_RMS", "400"))  # Only normalize if RMS > this (prevents amplifying noise)
 
 # =============================================================================
 # LOGGING
@@ -93,7 +85,6 @@ MSG_AUDIO = 0x10
 
 _highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype='high', fs=AST_RATE, output='sos')
 
-
 def ulaw2lin(ulaw_bytes: bytes) -> bytes:
     """Decode μ-law to 16-bit linear PCM."""
     ulaw = np.frombuffer(ulaw_bytes, dtype=np.uint8)
@@ -107,7 +98,6 @@ def ulaw2lin(ulaw_bytes: bytes) -> bytes:
     pcm = np.where(sign != 0, -sample, sample).astype(np.int16)
     return pcm.tobytes()
 
-
 def lin2ulaw(pcm_bytes: bytes) -> bytes:
     """Encode 16-bit linear PCM to μ-law with optimized log2 calculation."""
     pcm = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
@@ -115,27 +105,25 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
     pcm = np.abs(pcm)
     pcm = np.clip(pcm, 0, ULAW_CLIP)
     pcm += ULAW_BIAS
+
     # Use bit_length lookup for faster integer log2 (avoids float log)
     exponent = np.maximum(0, np.floor(np.log2(np.maximum(pcm, 1))).astype(np.int32) - 7)
     exponent = np.clip(exponent, 0, 7)
+
     mantissa = (pcm >> (exponent + 3)) & 0x0F
     ulaw = (~(sign | (exponent << 4) | mantissa)) & 0xFF
     return ulaw.astype(np.uint8).tobytes()
 
-
 def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
-    """Apply noise reduction optimized for soft consonants and hallucination prevention.
-    
-    Returns: (processed_audio_bytes, new_gain, is_silence)
-    """
+    """Apply noise reduction optimized for soft consonants."""
     if not audio_bytes or len(audio_bytes) < 4:
-        return audio_bytes, last_gain, True
+        return audio_bytes, last_gain
     
     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
-        return audio_bytes, last_gain, True
+        return audio_bytes, last_gain
     
-    # High-pass filter (150Hz cuts engine rumble that triggers Whisper hallucinations)
+    # High-pass filter
     audio_np = sosfilt(_highpass_sos, audio_np)
     
     # Soft-knee noise gate
@@ -150,23 +138,16 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
         mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
         audio_np[mask] *= 0.1
     
-    # Calculate RMS energy
+    # Smoothed normalization
     rms = np.sqrt(np.mean(audio_np ** 2))
-    
-    # Check if this is effectively silence (below energy threshold)
-    is_silence = rms < MIN_ENERGY_THRESHOLD
-    
-    # Smoothed normalization - ONLY if audio is clearly speech (above NORMALIZE_MIN_RMS)
-    # This prevents auto-amplifying background noise on noisy phone lines
     current_gain = last_gain
-    if rms > NORMALIZE_MIN_RMS:
+    if rms > 30:
         target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
         current_gain = last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - last_gain)
         audio_np *= current_gain
     
     audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
-    return audio_np.tobytes(), current_gain, is_silence
-
+    return audio_np.tobytes(), current_gain
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
     """Resample audio using scipy with GCD-based ratio for non-integer multiples."""
@@ -187,7 +168,6 @@ def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
     return resampled.tobytes()
 
-
 # =============================================================================
 # BRIDGE CLASS
 # =============================================================================
@@ -198,7 +178,6 @@ class RedirectException(Exception):
         self.url = url
         self.init_data = init_data
         super().__init__(f"Redirect to {url}")
-
 
 class TaxiBridgeV6:
     def __init__(self, reader, writer):
@@ -422,24 +401,15 @@ class TaxiBridgeV6:
                 elif m_type == MSG_AUDIO:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
+
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
-                    cleaned, self.last_gain, is_silence = apply_noise_reduction(linear16, self.last_gain)
-                    
-                    # FIXED: Send silence frames to keep OpenAI VAD active
-                    if is_silence:
-                        silence_frame = b'\xFF' * len(payload)
-                        if self.ws_connected and self.ws:
-                            try:
-                                await self.ws.send(silence_frame)
-                                self.last_ws_activity = time.time()
-                            except:
-                                pass
-                        continue
-                    
+                    cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
+
                     if SEND_NATIVE_ULAW:
                         audio_to_send = lin2ulaw(cleaned)
                     else:
                         audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
+
                     if self.ws_connected and self.ws:
                         try:
                             await self.ws.send(audio_to_send)
@@ -448,10 +418,12 @@ class TaxiBridgeV6:
                         except:
                             self.pending_audio_buffer.append(audio_to_send)
                             raise
+
                 elif m_type == MSG_HANGUP:
                     logger.info(f"[{self.call_id}] 📴 Hangup")
                     await self.stop_call("Asterisk hangup")
                     return
+
             except asyncio.TimeoutError:
                 logger.warning(f"[{self.call_id}] ⏱️ Timeout")
                 await self.stop_call("Timeout")
@@ -529,6 +501,7 @@ class TaxiBridgeV6:
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
+
         while self.running:
             try:
                 # Process queued audio
@@ -538,6 +511,7 @@ class TaxiBridgeV6:
                 bytes_per_sec = AST_RATE * (1 if self.ast_codec == "ulaw" else 2)
                 expected_time = start_time + (bytes_played / bytes_per_sec)
                 sleep_time = max(0, expected_time - time.time())
+
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
 
@@ -557,6 +531,7 @@ class TaxiBridgeV6:
                     logger.error(f"[{self.call_id}] ❌ Write error: {e}")
                     await self.stop_call("Write failed")
                     return
+
             except asyncio.CancelledError:
                 logger.debug(f"[{self.call_id}] Queue->Asterisk task cancelled")
                 return
@@ -587,7 +562,6 @@ class TaxiBridgeV6:
         self.audio_queue.clear()
         self.pending_audio_buffer.clear()
 
-
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -597,14 +571,12 @@ async def main():
         lambda r, w: TaxiBridgeV6(r, w).run(),
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
-    logger.info(f"🚀 Taxi Bridge v6.1 - Memory Leak Fixes")
+    logger.info(f"🚀 Taxi Bridge v6.1 - FIXED MEMORY LEAKS")
     logger.info(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}")
     logger.info(f"   Connecting to: {WS_URL}")
-    logger.info(f"   MIN_ENERGY_THRESHOLD={MIN_ENERGY_THRESHOLD}, NORMALIZE_MIN_RMS={NORMALIZE_MIN_RMS}")
 
     async with server:
         await server.serve_forever()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
