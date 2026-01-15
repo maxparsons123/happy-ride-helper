@@ -245,6 +245,11 @@ const STT_CORRECTIONS: Record<string, string> = {
   "several sweet": "sweet spot", // common STT fragment
   "several sweet-sweet": "sweet spot",
   "sweet-sweet": "sweet spot",
+  "sweetbriar court": "sweet spot",
+  "sweetbriar": "sweet spot",
+  "sweet briar": "sweet spot",
+  "sweetbrier": "sweet spot",
+  "sweet brier": "sweet spot",
 };
 
 // Normalize address by fixing common STT mishearings
