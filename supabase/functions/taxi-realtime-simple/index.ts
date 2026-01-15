@@ -1884,40 +1884,41 @@ serve(async (req) => {
             // Increment booking version for each modification
             sessionState.booking.version = (sessionState.booking.version || 1) + 1;
             
-            // Get user transcripts for STT reference
+            // Get user transcripts for STT reference (same as book_taxi)
             const userTranscripts = sessionState.transcripts
               .filter(t => t.role === "user")
-              .slice(-5)
+              .slice(-6)
               .map(t => ({ text: t.text, timestamp: t.timestamp }));
             
+            // Format phone number for WhatsApp: strip '+' prefix and leading '0'
+            let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+            if (formattedPhone.startsWith('0')) {
+              formattedPhone = formattedPhone.slice(1);
+            }
+            
+            // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
             const modifyPayload = {
-              event: "booking_modified",
+              job_id: crypto.randomUUID(), // New job_id for this version
               call_id: sessionState.callId,
-              caller_phone: sessionState.phone,
+              caller_phone: formattedPhone,
               caller_name: sessionState.customerName,
-              // What changed
-              field_changed: args.field_to_change,
-              old_value: oldValue,
-              new_value: finalNewValue,
-              ada_original_value: args.new_value, // What Ada said (for debugging)
-              // Full PREVIOUS booking state (before change)
-              previous_booking: previousBooking,
-              // Full CURRENT booking state (after change)
+              // Ada's interpreted addresses (current state after modification)
               ada_pickup: sessionState.booking.pickup,
               ada_destination: sessionState.booking.destination,
-              passengers: sessionState.booking.passengers,
-              bags: sessionState.booking.bags,
-              vehicle_type: sessionState.booking.vehicle_type,
-              // Raw STT transcripts for reference
+              // Raw STT transcripts from this call - each turn separately
               user_transcripts: userTranscripts,
-              // AI extraction result (for debugging/audit)
-              ai_extraction: extractedModification,
-              // Version tracking
-              booking_version: sessionState.booking.version,
+              // GPS location (if available)
+              gps_lat: sessionState.gpsLat,
+              gps_lon: sessionState.gpsLon,
+              // Booking details
+              passengers: sessionState.booking.passengers || 1,
+              bags: sessionState.booking.bags || 0,
+              vehicle_type: sessionState.booking.vehicle_type || "saloon",
+              pickup_time: "now",
               timestamp: new Date().toISOString()
             };
             
-            console.log(`[${sessionState.callId}] 📡 Sending booking modification webhook`);
+            console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
             
             // Fire webhook
             fetch(DISPATCH_MODIFY_URL, {
