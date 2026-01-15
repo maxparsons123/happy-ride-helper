@@ -172,11 +172,12 @@ GREETING (ALWAYS IN THE CURRENT LANGUAGE):
 - Returning caller (active booking): Greet [NAME], mention an active booking, ask keep/change/cancel.
 Example Dutch (nl) new caller: "Hallo, welkom bij {{company_name}}! Ik ben {{agent_name}}. Hoe heet u?"
 
-LOCATION CHECK (IF GPS REQUIRED):
-- If you receive "[SYSTEM: GPS not available]" at the start, you MUST ask: "Where are you right now?" or "What's your current location?"
-- When they tell you (e.g., "I'm at the train station", "I'm on High Street near Tesco") → CALL save_location function with their answer.
-- Wait for save_location result before proceeding with booking flow.
-- If save_location fails, apologize and ask them to try the app with location services enabled.
+LOCATION CHECK (ALWAYS):
+- If you receive "[SYSTEM: GPS not available]" at the start, you MUST ask: "Where are you calling from?" BEFORE asking for pickup.
+- When they give a location (e.g., "I'm at the train station", "I'm in Coventry", "High Street") → CALL save_location function with their answer.
+- Wait for save_location result before asking for pickup address.
+- If save_location fails, apologize and ask for a more specific location or landmark.
+- This helps us send the nearest available taxi.
 
 BOOKING FLOW:
 1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
@@ -1964,9 +1965,9 @@ serve(async (req) => {
                 state.gpsLat = gpsData.lat;
                 state.gpsLon = gpsData.lon;
                 console.log(`[${callId}] 📍 GPS loaded: ${gpsData.lat}, ${gpsData.lon}`);
-              } else if (state?.gpsRequired && !state?.gpsLat) {
-                // NO GPS and it's required - ask Ada to request location
-                console.log(`[${callId}] ⚠️ GPS REQUIRED but not found - Ada will ask for location`);
+            } else {
+                // NO GPS found - ALWAYS ask Ada to request location (not just when required)
+                console.log(`[${callId}] ⚠️ GPS not found - Ada will ask for location`);
 
                 // Send system message to trigger location request flow
                 if (openaiWs && openaiConnected) {
@@ -1988,7 +1989,59 @@ serve(async (req) => {
                 // Notify bridge
                 socket.send(
                   JSON.stringify({
-                    type: "gps_required",
+                    type: "gps_missing",
+                    message: "GPS location not received - Ada will ask for location",
+                  })
+                );
+              }
+            }
+            
+            // Also check GPS for non-gps_required calls - ALWAYS try to get location
+            if (!state?.gpsRequired && phone && phone !== "unknown" && !state?.gpsLat) {
+              // Normalize phone for GPS lookup
+              let normalizedPhone = phone.replace(/\s+/g, "").replace(/-/g, "");
+              if (!normalizedPhone.startsWith("+") && normalizedPhone.length >= 10) {
+                if (normalizedPhone.startsWith("00")) {
+                  normalizedPhone = "+" + normalizedPhone.slice(2);
+                } else if (/^(44|1|33|49|31)\d+$/.test(normalizedPhone)) {
+                  normalizedPhone = "+" + normalizedPhone;
+                }
+              }
+
+              // Check caller_gps table for pre-submitted GPS
+              const { data: gpsData2 } = await supabase
+                .from("caller_gps")
+                .select("lat, lon, expires_at")
+                .eq("phone_number", normalizedPhone)
+                .gte("expires_at", new Date().toISOString())
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+              if (gpsData2 && state) {
+                state.gpsLat = gpsData2.lat;
+                state.gpsLon = gpsData2.lon;
+                console.log(`[${callId}] 📍 GPS loaded (non-required): ${gpsData2.lat}, ${gpsData2.lon}`);
+              } else if (!state?.gpsLat) {
+                // NO GPS - ask Ada to request location
+                console.log(`[${callId}] ⚠️ GPS not found (non-required) - Ada will ask for location`);
+
+                if (openaiWs && openaiConnected) {
+                  openaiWs.send(
+                    JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }],
+                      },
+                    })
+                  );
+                }
+
+                socket.send(
+                  JSON.stringify({
+                    type: "gps_missing",
                     message: "GPS location not received - Ada will ask for location",
                   })
                 );
