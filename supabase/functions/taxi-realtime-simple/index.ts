@@ -1874,6 +1874,19 @@ serve(async (req) => {
                   return; // Exit early - don't continue with booking
                 }
                 
+                // Check for fare confirmation request - DON'T confirm booking yet
+                if (dispatchResult.needs_fare_confirm) {
+                  console.log(`[${sessionState.callId}] 💰 Dispatch needs fare confirmation - NOT confirming booking yet`);
+                  result = {
+                    success: false,
+                    needs_fare_confirm: true,
+                    ada_message: dispatchResult.ada_message,
+                    message: "Dispatch awaiting fare confirmation from customer"
+                  };
+                  // pendingFareConfirm was already set when we found the ask_confirm transcript
+                  break; // Exit switch - booking NOT confirmed
+                }
+                
                 if (dispatchResult.ada_message && !dispatchResult.confirmed) {
                   console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
                   // Return early with the message - don't confirm booking yet
@@ -1883,7 +1896,7 @@ serve(async (req) => {
                     ada_message: dispatchResult.ada_message,
                     message: "Dispatch needs clarification from customer"
                   };
-                  break;
+                  break; // Exit switch - booking NOT confirmed
                 }
                 
                 // Check if dispatch rejected the booking
@@ -1937,6 +1950,14 @@ serve(async (req) => {
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
             }
+          }
+          
+          // CRITICAL: Only create booking and mark confirmed if we didn't break early
+          // with a clarification/rejection/fare-confirm response
+          if (result && (result.needs_clarification || result.needs_fare_confirm || result.rejected || result.hangup)) {
+            console.log(`[${sessionState.callId}] ⏸️ NOT confirming booking - awaiting: clarification=${result.needs_clarification}, fare_confirm=${result.needs_fare_confirm}, rejected=${result.rejected}`);
+            // Don't create booking in DB yet, don't set bookingConfirmedThisTurn
+            break;
           }
           
           // Create booking in DB (only if we got here - not rejected/clarification)
