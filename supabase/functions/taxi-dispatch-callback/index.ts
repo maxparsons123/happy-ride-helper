@@ -425,14 +425,33 @@ serve(async (req) => {
         bookingStatus = "pending";
         confirmationMessage = message || "Your booking is being processed. Please hold on a moment.";
       }
+      // Get current transcripts to append confirmation message
+      const { data: callData } = await supabase
+        .from("live_calls")
+        .select("transcripts")
+        .eq("call_id", call_id)
+        .single();
 
-      // Update live_calls with dispatch response
+      const transcripts = (callData?.transcripts as any[]) || [];
+      // Add confirmation message with special role for polling to detect
+      transcripts.push({
+        role: "dispatch_confirm",
+        text: confirmationMessage,
+        fare: fare || null,
+        eta: normalizedEta || null,
+        booking_ref: booking_ref || null,
+        status: effectiveStatus,
+        timestamp: new Date().toISOString()
+      });
+
+      // Update live_calls with dispatch response AND confirmation message
       const { error: updateError } = await supabase
         .from("live_calls")
         .update({
           status: bookingStatus,
           eta: normalizedEta || null,
           fare: fare || null,
+          transcripts,
           updated_at: new Date().toISOString()
         })
         .eq("call_id", call_id);
@@ -440,6 +459,8 @@ serve(async (req) => {
       if (updateError) {
         console.error(`[${call_id}] ❌ Failed to update live_calls:`, updateError);
       }
+      
+      console.log(`[${call_id}] 📝 Confirmation message stored: "${confirmationMessage}"`);
 
       // Update bookings table if dispatched
       if (effectiveStatus === "dispatched") {
