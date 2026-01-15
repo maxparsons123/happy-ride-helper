@@ -492,6 +492,9 @@ interface SessionState {
   // Caller history from database
   callerLastPickup: string | null;
   callerLastDestination: string | null;
+  
+  // Rasa-style audio processing toggle
+  useRasaAudioProcessing: boolean;
   callerTotalBookings: number;
 
   // GPS location from external system
@@ -1453,7 +1456,8 @@ serve(async (req) => {
           echoGuardUntil: 0,
           speechStartTime: null,
           speechStopTime: null,
-          callEnded: false
+          callEnded: false,
+          useRasaAudioProcessing: message.rasa_audio_processing ?? false
         };
         
         preConnected = true;
@@ -1517,9 +1521,17 @@ serve(async (req) => {
             echoGuardUntil: 0,
             speechStartTime: null,
             speechStopTime: null,
-            callEnded: false
+            callEnded: false,
+            useRasaAudioProcessing: message.rasa_audio_processing ?? false
           };
         }
+        
+        // Also update useRasaAudioProcessing from init message if pre-connected
+        if (state && preConnected) {
+          state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
+        }
+        
+        console.log(`[${callId}] 🎧 Audio processing: ${state.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state.language}`);
 
@@ -1787,7 +1799,6 @@ serve(async (req) => {
         }
         
         // Bridge sends base64-encoded 8kHz µ-law audio via JSON
-        // Need to decode and convert to 24kHz PCM16 for OpenAI Whisper
         const binaryStr = atob(message.audio);
         const audioData = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
@@ -1795,6 +1806,7 @@ serve(async (req) => {
         }
         
         // Step 1: Decode µ-law to 16-bit PCM (8kHz)
+        // This matches Rasa's audioop.ulaw2lin(chunk, 2) conversion
         const pcm16_8k = new Int16Array(audioData.length);
         for (let i = 0; i < audioData.length; i++) {
           const ulaw = ~audioData[i] & 0xFF;
@@ -1806,26 +1818,49 @@ serve(async (req) => {
           pcm16_8k[i] = sign * sample;
         }
         
-        // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
-        const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
-        for (let i = 0; i < pcm16_8k.length - 1; i++) {
-          const s0 = pcm16_8k[i];
-          const s1 = pcm16_8k[i + 1];
-          pcm16_24k[i * 3] = s0;
-          pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
-          pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
-        }
-        // Handle last sample
-        const lastIdx = pcm16_8k.length - 1;
-        pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
-        pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
-        pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+        let outputBytes: Uint8Array;
         
-        // Step 3: Convert to base64
-        const bytes = new Uint8Array(pcm16_24k.buffer);
+        if (state.useRasaAudioProcessing) {
+          // RASA-STYLE: Upsample 8kHz -> 16kHz (2x linear interpolation)
+          // This matches audioop.ratecv(linear_data, 2, 1, 8000, 16000, None)
+          // 16kHz is commonly used for speech recognition and may improve STT accuracy
+          const pcm16_16k = new Int16Array(pcm16_8k.length * 2);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_16k[i * 2] = s0;
+            pcm16_16k[i * 2 + 1] = Math.round((s0 + s1) / 2);
+          }
+          // Handle last sample
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_16k[lastIdx * 2] = pcm16_8k[lastIdx];
+          pcm16_16k[lastIdx * 2 + 1] = pcm16_8k[lastIdx];
+          
+          outputBytes = new Uint8Array(pcm16_16k.buffer);
+        } else {
+          // STANDARD: Upsample 8kHz -> 24kHz (3x linear interpolation)
+          // OpenAI Realtime API expects 24kHz PCM16
+          const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_24k[i * 3] = s0;
+            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          }
+          // Handle last sample
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+          
+          outputBytes = new Uint8Array(pcm16_24k.buffer);
+        }
+        
+        // Convert to base64
         let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
+        for (let i = 0; i < outputBytes.length; i++) {
+          binary += String.fromCharCode(outputBytes[i]);
         }
         const base64Audio = btoa(binary);
         
