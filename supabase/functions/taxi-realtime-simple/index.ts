@@ -1677,6 +1677,22 @@ serve(async (req) => {
             break;
           }
           
+          // TIMING GUARD: Prevent confirm_booking too quickly after book_taxi
+          // Ada must read the fare to the user first (takes ~3-5 seconds of speech)
+          const timeSincePrepared = Date.now() - sessionState.pendingBooking.preparedAt;
+          const MIN_WAIT_MS = 4000; // 4 seconds minimum to read fare quote
+          
+          if (timeSincePrepared < MIN_WAIT_MS) {
+            console.log(`[${sessionState.callId}] ⚠️ confirm_booking called too quickly (${Math.round(timeSincePrepared)}ms since book_taxi)`);
+            console.log(`[${sessionState.callId}] ⏳ Must wait for user response to fare quote first`);
+            result = {
+              success: false,
+              message: `Too soon - must wait for user to respond to fare quote. Called ${Math.round(timeSincePrepared)}ms after book_taxi.`,
+              ada_instruction: `You must READ the fare (${sessionState.pendingBooking.fare}) and ETA (${sessionState.pendingBooking.eta}) to the customer and WAIT for them to say yes BEFORE calling confirm_booking.`
+            };
+            break;
+          }
+          
           const pending = sessionState.pendingBooking;
           const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
           
