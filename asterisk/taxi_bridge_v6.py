@@ -58,14 +58,15 @@ MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15
 
-# Audio processing - optimized for soft consonants
+# Audio processing - optimized for soft consonants and hallucination prevention
 NOISE_GATE_THRESHOLD = 25
 NOISE_GATE_SOFT_KNEE = True
-HIGH_PASS_CUTOFF = 60
+HIGH_PASS_CUTOFF = 150  # Raised from 60Hz to filter engine rumble that triggers Whisper hallucinations
 TARGET_RMS = 2500
 MAX_GAIN = 3.0
 MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
+MIN_ENERGY_THRESHOLD = 50  # Minimum RMS energy to send audio (filters pure silence)
 
 # =============================================================================
 # LOGGING
@@ -121,15 +122,18 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
 
 
 def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
-    """Apply noise reduction optimized for soft consonants."""
+    """Apply noise reduction optimized for soft consonants and hallucination prevention.
+    
+    Returns: (processed_audio_bytes, new_gain, is_silence)
+    """
     if not audio_bytes or len(audio_bytes) < 4:
-        return audio_bytes, last_gain
+        return audio_bytes, last_gain, True
     
     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
-        return audio_bytes, last_gain
+        return audio_bytes, last_gain, True
     
-    # High-pass filter
+    # High-pass filter (150Hz cuts engine rumble that triggers Whisper hallucinations)
     audio_np = sosfilt(_highpass_sos, audio_np)
     
     # Soft-knee noise gate
@@ -144,8 +148,13 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
         mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
         audio_np[mask] *= 0.1
     
-    # Smoothed normalization
+    # Calculate RMS energy
     rms = np.sqrt(np.mean(audio_np ** 2))
+    
+    # Check if this is effectively silence (below energy threshold)
+    is_silence = rms < MIN_ENERGY_THRESHOLD
+    
+    # Smoothed normalization (only if not silence)
     current_gain = last_gain
     if rms > 30:
         target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
@@ -153,7 +162,7 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
         audio_np *= current_gain
     
     audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
-    return audio_np.tobytes(), current_gain
+    return audio_np.tobytes(), current_gain, is_silence
 
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
@@ -413,7 +422,12 @@ class TaxiBridgeV6:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
-                    cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
+                    cleaned, self.last_gain, is_silence = apply_noise_reduction(linear16, self.last_gain)
+                    
+                    # Skip sending pure silence to prevent Whisper hallucinations
+                    if is_silence:
+                        continue
+                    
                     if SEND_NATIVE_ULAW:
                         audio_to_send = lin2ulaw(cleaned)
                     else:
