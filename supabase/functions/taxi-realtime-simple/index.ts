@@ -1261,13 +1261,69 @@ serve(async (req) => {
         }
 
         case "save_location": {
-          // Simple mode: just note the location without geocoding
-          console.log(`[${sessionState.callId}] 📍 Noting location (no geocode): ${args.location}`);
+          // Simple mode: geocode and save location to database for new callers
+          console.log(`[${sessionState.callId}] 📍 Geocoding location: ${args.location}`);
           
-          result = { 
-            success: true, 
-            message: `Noted: ${args.location}. Now please tell me the pickup address.`
-          };
+          try {
+            // Call geocode function
+            const geocodeResponse = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+              },
+              body: JSON.stringify({
+                address: args.location,
+                country: "UK"
+              })
+            });
+            
+            const geocodeResult = await geocodeResponse.json();
+            
+            if (geocodeResult.found && geocodeResult.lat && geocodeResult.lon) {
+              // Update session state
+              sessionState.gpsLat = geocodeResult.lat;
+              sessionState.gpsLon = geocodeResult.lon;
+              
+              // Update caller_gps table
+              const normalizedPhone = sessionState.phone?.replace(/\s+/g, "").replace(/-/g, "") || "";
+              if (normalizedPhone) {
+                await supabase.from("caller_gps").upsert({
+                  phone_number: normalizedPhone.startsWith("+") ? normalizedPhone : `+${normalizedPhone}`,
+                  lat: geocodeResult.lat,
+                  lon: geocodeResult.lon,
+                  expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString() // 10 min expiry
+                }, { onConflict: "phone_number" });
+              }
+              
+              // Update live_calls table
+              await supabase.from("live_calls").update({
+                gps_lat: geocodeResult.lat,
+                gps_lon: geocodeResult.lon,
+                gps_updated_at: new Date().toISOString()
+              }).eq("call_id", sessionState.callId);
+              
+              console.log(`[${sessionState.callId}] ✅ Location saved: ${geocodeResult.display_name} (${geocodeResult.lat}, ${geocodeResult.lon})`);
+              
+              result = { 
+                success: true, 
+                message: `Got it, you're at ${geocodeResult.display_name}. Now, where would you like to be picked up from?`
+              };
+            } else {
+              // Geocoding failed, just note the location
+              console.log(`[${sessionState.callId}] ⚠️ Geocoding failed, noting location: ${args.location}`);
+              result = { 
+                success: true, 
+                message: `Noted: ${args.location}. Now please tell me the pickup address.`
+              };
+            }
+          } catch (geoErr) {
+            console.error(`[${sessionState.callId}] Geocoding error:`, geoErr);
+            result = { 
+              success: true, 
+              message: `Noted: ${args.location}. Now please tell me the pickup address.`
+            };
+          }
           break;
         }
 
@@ -2344,6 +2400,56 @@ serve(async (req) => {
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
 
+        // CRITICAL: Lookup caller name AND active bookings BEFORE greeting to avoid double-greeting bug
+        // This is a fast lookup (~50ms) and ensures Ada greets returning callers correctly
+        if (phone && phone !== "unknown") {
+          try {
+            // Lookup caller data
+            if (!state!.customerName) {
+              const { data: quickCallerData } = await supabase
+                .from("callers")
+                .select("name, last_pickup, last_destination, total_bookings")
+                .eq("phone_number", phone)
+                .maybeSingle();
+              
+              if (quickCallerData && state) {
+                state.customerName = quickCallerData.name || null;
+                state.callerLastPickup = quickCallerData.last_pickup || null;
+                state.callerLastDestination = quickCallerData.last_destination || null;
+                state.callerTotalBookings = quickCallerData.total_bookings || 0;
+                console.log(`[${callId}] 👤 Pre-greeting lookup: ${quickCallerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
+              }
+            }
+            
+            // Also check for active bookings before greeting
+            const altPhone = phone.replace(/^\+/, '');
+            const { data: preBookingData } = await supabase
+              .from("bookings")
+              .select("pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
+              .or(`caller_phone.eq.${phone},caller_phone.eq.${altPhone}`)
+              .in("status", ["confirmed", "dispatched", "active", "pending"])
+              .order("booked_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            
+            if (preBookingData && state) {
+              state.hasActiveBooking = true;
+              state.booking.pickup = preBookingData.pickup;
+              state.booking.destination = preBookingData.destination;
+              state.booking.passengers = preBookingData.passengers;
+              
+              // Update name from booking if not set
+              if (!state.customerName && preBookingData.caller_name) {
+                state.customerName = preBookingData.caller_name;
+              }
+              
+              console.log(`[${callId}] 📦 Pre-greeting active booking: ${preBookingData.pickup} → ${preBookingData.destination}`);
+            }
+          } catch (lookupErr) {
+            console.error(`[${callId}] Pre-greeting lookup failed:`, lookupErr);
+          }
+        }
+
         // If pre-connected, OpenAI is already ready - just send session update + greeting
         if (preConnected && openaiConnected) {
           console.log(`[${callId}] ⚡ OpenAI already connected - triggering greeting immediately!`);
@@ -2360,8 +2466,8 @@ serve(async (req) => {
           mode: "simple"
         }));
 
-        // Fire-and-forget: Lookup caller history, GPS, and update live_calls in background
-        // This runs in parallel while Ada starts greeting
+        // Fire-and-forget: Lookup active bookings, GPS, and update live_calls in background
+        // (Caller name already loaded above)
         (async () => {
           try {
             // If caller has an active booking, load the latest booking details ASAP (non-blocking)
@@ -2546,8 +2652,8 @@ serve(async (req) => {
                 console.log(`[${callId}] 👤 Loaded caller: ${callerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
               }
               
-              // Check for active bookings if not already loaded
-              if (!activeBooking) {
+              // Check for active bookings if not already loaded (by pre-greeting lookup)
+              if (!activeBooking && !state?.hasActiveBooking) {
                 // Try both phone formats (with and without +)
                 const { data: bookingData } = await supabase
                   .from("bookings")
@@ -2570,9 +2676,10 @@ serve(async (req) => {
                     state.customerName = bookingData.caller_name;
                   }
                   
-                  console.log(`[${callId}] 📦 Found active booking: ${bookingData.pickup} → ${bookingData.destination}`);
+                  console.log(`[${callId}] 📦 Found active booking (late): ${bookingData.pickup} → ${bookingData.destination}`);
                   
-                  // Inject booking context for Ada
+                  // Inject booking context for Ada - but do NOT trigger response.create
+                  // The initial greeting already handles active bookings via sendSessionUpdate()
                   if (openaiWs && openaiConnected) {
                     const customerGreeting = state.customerName 
                       ? `The caller is ${state.customerName}.` 
@@ -2585,15 +2692,11 @@ serve(async (req) => {
                         role: "user",
                         content: [{
                           type: "input_text",
-                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask if they want to keep it, change it, or cancel it. Do NOT assume they want to book again - acknowledge the existing booking first.]`
+                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. On next user input, acknowledge the booking and ask if they want to keep, change, or cancel.]`
                         }]
                       }
                     }));
-                    
-                    // Trigger Ada to respond with this context
-                    openaiWs.send(JSON.stringify({
-                      type: "response.create"
-                    }));
+                    // NOTE: Do NOT send response.create here - avoid double greeting
                   }
                 }
               }
