@@ -1207,13 +1207,17 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
-              // POST to dispatch webhook and log status (helps debug "not sending")
-              const resp = await fetch(DISPATCH_WEBHOOK_URL, {
+              // POST to dispatch webhook (fire-and-forget, don't block polling)
+              console.log(`[${sessionState.callId}] 📤 Sending webhook payload:`, JSON.stringify(webhookPayload));
+              fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(webhookPayload),
+              }).then(resp => {
+                console.log(`[${sessionState.callId}] 📡 Dispatch webhook responded: ${resp.status}`);
+              }).catch(err => {
+                console.error(`[${sessionState.callId}] ❌ Dispatch webhook failed:`, err);
               });
-              console.log(`[${sessionState.callId}] 📡 Dispatch webhook responded: ${resp.status}`);
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
