@@ -639,6 +639,11 @@ interface SessionState {
   // Used to prevent Ada from saying "Booked!" without actually placing the booking.
   bookingConfirmedThisTurn: boolean;
   lastBookTaxiSuccessAt: number | null;
+  
+  // --- Webhook deduplication ---
+  // Track last sent webhook to prevent duplicate dispatches for the same booking
+  lastWebhookKey: string | null; // "pickup|destination|passengers" hash
+  lastWebhookSentAt: number | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1536,52 +1541,69 @@ serve(async (req) => {
           
           if (DISPATCH_WEBHOOK_URL) {
             try {
-              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
-              console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
-              // Get recent user transcripts as structured array for comparison
-              const userTranscripts = sessionState.transcripts
-                .filter(t => t.role === "user")
-                .slice(-6) // Last 6 user messages
-                .map(t => ({ text: t.text, timestamp: t.timestamp }));
+              // === WEBHOOK DEDUPLICATION ===
+              // Prevent duplicate webhooks for the same booking details within 30 seconds
+              const webhookKey = `${args.pickup}|${args.destination}|${args.passengers || 1}`.toLowerCase();
+              const now = Date.now();
+              const DEDUP_WINDOW_MS = 30000; // 30 seconds
               
-              // Format phone number for WhatsApp: strip '+' prefix and leading '0'
-              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-              if (formattedPhone.startsWith('0')) {
-                formattedPhone = formattedPhone.slice(1);
+              if (sessionState.lastWebhookKey === webhookKey && 
+                  sessionState.lastWebhookSentAt && 
+                  (now - sessionState.lastWebhookSentAt) < DEDUP_WINDOW_MS) {
+                console.log(`[${sessionState.callId}] ⚠️ DUPLICATE WEBHOOK BLOCKED - same booking sent ${Math.round((now - sessionState.lastWebhookSentAt) / 1000)}s ago`);
+                // Don't fire webhook again, but still poll for the existing dispatch response
+              } else {
+                console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
+                console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
+                // Get recent user transcripts as structured array for comparison
+                const userTranscripts = sessionState.transcripts
+                  .filter(t => t.role === "user")
+                  .slice(-6) // Last 6 user messages
+                  .map(t => ({ text: t.text, timestamp: t.timestamp }));
+                
+                // Format phone number for WhatsApp: strip '+' prefix and leading '0'
+                let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+                if (formattedPhone.startsWith('0')) {
+                  formattedPhone = formattedPhone.slice(1);
+                }
+                
+                const webhookPayload = {
+                  job_id: jobId,
+                  call_id: sessionState.callId,
+                  caller_phone: formattedPhone,
+                  caller_name: sessionState.customerName,
+                  // Ada's interpreted/normalized addresses
+                  ada_pickup: args.pickup,
+                  ada_destination: args.destination,
+                  // Raw caller addresses (what they actually said)
+                  callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
+                  callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
+                  // Raw STT transcripts from this call - each turn separately
+                  user_transcripts: userTranscripts,
+                  // GPS location (if available)
+                  gps_lat: sessionState.gpsLat,
+                  gps_lon: sessionState.gpsLon,
+                  // Booking details
+                  passengers: args.passengers || 1,
+                  bags: args.bags || 0,
+                  vehicle_type: args.vehicle_type || "saloon",
+                  vehicle_request: args.vehicle_request || null,
+                  pickup_time: args.pickup_time || "now",
+                  special_requests: args.special_requests || null,
+                  timestamp: new Date().toISOString()
+                };
+                
+                // Record this webhook for deduplication
+                sessionState.lastWebhookKey = webhookKey;
+                sessionState.lastWebhookSentAt = now;
+                
+                // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
+                fetch(DISPATCH_WEBHOOK_URL, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(webhookPayload),
+                }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
               }
-              
-              const webhookPayload = {
-                job_id: jobId,
-                call_id: sessionState.callId,
-                caller_phone: formattedPhone,
-                caller_name: sessionState.customerName,
-                // Ada's interpreted/normalized addresses
-                ada_pickup: args.pickup,
-                ada_destination: args.destination,
-                // Raw caller addresses (what they actually said)
-                callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
-                callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
-                // Raw STT transcripts from this call - each turn separately
-                user_transcripts: userTranscripts,
-                // GPS location (if available)
-                gps_lat: sessionState.gpsLat,
-                gps_lon: sessionState.gpsLon,
-                // Booking details
-                passengers: args.passengers || 1,
-                bags: args.bags || 0,
-                vehicle_type: args.vehicle_type || "saloon",
-                vehicle_request: args.vehicle_request || null,
-                pickup_time: args.pickup_time || "now",
-                special_requests: args.special_requests || null,
-                timestamp: new Date().toISOString()
-              };
-              
-              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
-              fetch(DISPATCH_WEBHOOK_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(webhookPayload),
-              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
@@ -1941,51 +1963,67 @@ serve(async (req) => {
           let updatedEta: string | null = null;
           
           if (DISPATCH_MODIFY_URL) {
-            // Increment booking version for each modification
-            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+            // === WEBHOOK DEDUPLICATION FOR MODIFICATIONS ===
+            const modifyWebhookKey = `${sessionState.booking.pickup}|${sessionState.booking.destination}|${sessionState.booking.passengers || 1}`.toLowerCase();
+            const now = Date.now();
+            const DEDUP_WINDOW_MS = 30000; // 30 seconds
             
-            // Get user transcripts for STT reference (same as book_taxi)
-            const userTranscripts = sessionState.transcripts
-              .filter(t => t.role === "user")
-              .slice(-6)
-              .map(t => ({ text: t.text, timestamp: t.timestamp }));
-            
-            // Format phone number for WhatsApp: strip '+' prefix and leading '0'
-            let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-            if (formattedPhone.startsWith('0')) {
-              formattedPhone = formattedPhone.slice(1);
+            if (sessionState.lastWebhookKey === modifyWebhookKey && 
+                sessionState.lastWebhookSentAt && 
+                (now - sessionState.lastWebhookSentAt) < DEDUP_WINDOW_MS) {
+              console.log(`[${sessionState.callId}] ⚠️ DUPLICATE MODIFY WEBHOOK BLOCKED - same booking sent ${Math.round((now - sessionState.lastWebhookSentAt) / 1000)}s ago`);
+              // Don't fire webhook again, but still poll for existing response
+            } else {
+              // Increment booking version for each modification
+              sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+              
+              // Get user transcripts for STT reference (same as book_taxi)
+              const userTranscripts = sessionState.transcripts
+                .filter(t => t.role === "user")
+                .slice(-6)
+                .map(t => ({ text: t.text, timestamp: t.timestamp }));
+              
+              // Format phone number for WhatsApp: strip '+' prefix and leading '0'
+              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              if (formattedPhone.startsWith('0')) {
+                formattedPhone = formattedPhone.slice(1);
+              }
+              
+              // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
+              const modifyPayload = {
+                job_id: crypto.randomUUID(), // New job_id for this version
+                call_id: sessionState.callId,
+                caller_phone: formattedPhone,
+                caller_name: sessionState.customerName,
+                // Ada's interpreted addresses (current state after modification)
+                ada_pickup: sessionState.booking.pickup,
+                ada_destination: sessionState.booking.destination,
+                // Raw STT transcripts from this call - each turn separately
+                user_transcripts: userTranscripts,
+                // GPS location (if available)
+                gps_lat: sessionState.gpsLat,
+                gps_lon: sessionState.gpsLon,
+                // Booking details
+                passengers: sessionState.booking.passengers || 1,
+                bags: sessionState.booking.bags || 0,
+                vehicle_type: sessionState.booking.vehicle_type || "saloon",
+                pickup_time: "now",
+                timestamp: new Date().toISOString()
+              };
+              
+              // Record this webhook for deduplication
+              sessionState.lastWebhookKey = modifyWebhookKey;
+              sessionState.lastWebhookSentAt = now;
+              
+              console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
+              
+              // Fire webhook
+              fetch(DISPATCH_MODIFY_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(modifyPayload),
+              }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
             }
-            
-            // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
-            const modifyPayload = {
-              job_id: crypto.randomUUID(), // New job_id for this version
-              call_id: sessionState.callId,
-              caller_phone: formattedPhone,
-              caller_name: sessionState.customerName,
-              // Ada's interpreted addresses (current state after modification)
-              ada_pickup: sessionState.booking.pickup,
-              ada_destination: sessionState.booking.destination,
-              // Raw STT transcripts from this call - each turn separately
-              user_transcripts: userTranscripts,
-              // GPS location (if available)
-              gps_lat: sessionState.gpsLat,
-              gps_lon: sessionState.gpsLon,
-              // Booking details
-              passengers: sessionState.booking.passengers || 1,
-              bags: sessionState.booking.bags || 0,
-              vehicle_type: sessionState.booking.vehicle_type || "saloon",
-              pickup_time: "now",
-              timestamp: new Date().toISOString()
-            };
-            
-            console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
-            
-            // Fire webhook
-            fetch(DISPATCH_MODIFY_URL, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(modifyPayload),
-            }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
             
             // Poll for updated fare/eta (10 second timeout for modifications)
             const pollTimeout = 10000;
@@ -2311,6 +2349,8 @@ serve(async (req) => {
           halfDuplexBuffer: [],
           bookingConfirmedThisTurn: false,
           lastBookTaxiSuccessAt: null,
+          lastWebhookKey: null,
+          lastWebhookSentAt: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -2394,6 +2434,8 @@ serve(async (req) => {
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
+            lastWebhookKey: null,
+            lastWebhookSentAt: null,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
