@@ -1543,6 +1543,58 @@ serve(async (req) => {
         // This runs in parallel while Ada starts greeting
         (async () => {
           try {
+            // If caller has an active booking, load the latest booking details ASAP (non-blocking)
+            // This prevents the model from guessing / using caller history as the booking.
+            // NOTE: Use a loose type here to avoid Deno edge type inference issues.
+            let activeBooking: any = null;
+
+            if (state?.hasActiveBooking && phone && phone !== "unknown") {
+              const { data: bookingData, error: bookingError } = await supabase
+                .from("bookings")
+                .select("pickup, destination, passengers, fare, eta, status, booked_at")
+                .eq("caller_phone", phone)
+                .in("status", ["confirmed", "dispatched", "active"])
+                .order("booked_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+              if (bookingError) {
+                console.error(`[${callId}] Active booking lookup failed:`, bookingError);
+              } else if (bookingData && state) {
+                activeBooking = bookingData;
+
+                // Keep a copy in session state for context
+                state.booking.pickup = bookingData.pickup;
+                state.booking.destination = bookingData.destination;
+                state.booking.passengers = bookingData.passengers;
+
+                console.log(
+                  `[${callId}] ✅ Active booking loaded: ${bookingData.pickup} -> ${bookingData.destination} (${bookingData.passengers})`
+                );
+
+                // Inject a short, explicit context note for Ada
+                // (Do NOT create a response here; let normal turn-taking handle it.)
+                if (openaiWs && openaiConnected) {
+                  openaiWs.send(
+                    JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [
+                          {
+                            type: "input_text",
+                            text:
+                              `[SYSTEM: Active booking details loaded. Pickup: "${bookingData.pickup}". Destination: "${bookingData.destination}". Passengers: ${bookingData.passengers}. If the caller says a different pickup/destination, treat it as a requested change and ask for confirmation ("Change pickup to ...?") before calling modify_booking. Do not insist the old address is correct.]`,
+                          },
+                        ],
+                      },
+                    })
+                  );
+                }
+              }
+            }
+
             // Lookup GPS first - this determines if we can proceed
             if (state?.gpsRequired && phone && phone !== "unknown") {
               // Normalize phone for GPS lookup
@@ -1554,7 +1606,7 @@ serve(async (req) => {
                   normalizedPhone = "+" + normalizedPhone;
                 }
               }
-              
+
               // Check caller_gps table for pre-submitted GPS
               const { data: gpsData } = await supabase
                 .from("caller_gps")
@@ -1564,7 +1616,7 @@ serve(async (req) => {
                 .order("created_at", { ascending: false })
                 .limit(1)
                 .maybeSingle();
-              
+
               if (gpsData && state) {
                 state.gpsLat = gpsData.lat;
                 state.gpsLon = gpsData.lon;
@@ -1572,27 +1624,31 @@ serve(async (req) => {
               } else if (state?.gpsRequired && !state?.gpsLat) {
                 // NO GPS and it's required - ask Ada to request location
                 console.log(`[${callId}] ⚠️ GPS REQUIRED but not found - Ada will ask for location`);
-                
+
                 // Send system message to trigger location request flow
                 if (openaiWs && openaiConnected) {
                   // Inject a system message that triggers Ada to ask for location
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }]
-                    }
-                  }));
+                  openaiWs.send(
+                    JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }],
+                      },
+                    })
+                  );
                   // Note: Don't create response here - let the normal greeting flow handle it
                   // Ada will see the system message and ask for location per the prompt
                 }
-                
+
                 // Notify bridge
-                socket.send(JSON.stringify({
-                  type: "gps_required",
-                  message: "GPS location not received - Ada will ask for location"
-                }));
+                socket.send(
+                  JSON.stringify({
+                    type: "gps_required",
+                    message: "GPS location not received - Ada will ask for location",
+                  })
+                );
               }
             }
 
@@ -1602,7 +1658,7 @@ serve(async (req) => {
                 .select("name, last_pickup, last_destination, total_bookings")
                 .eq("phone_number", phone)
                 .maybeSingle();
-              
+
               if (callerData && state) {
                 state.callerLastPickup = callerData.last_pickup || null;
                 state.callerLastDestination = callerData.last_destination || null;
@@ -1614,18 +1670,35 @@ serve(async (req) => {
               }
             }
 
-            // Create/update live call record with GPS (non-blocking)
-            await supabase.from("live_calls").upsert({
-              call_id: callId,
-              caller_phone: phone,
-              caller_name: state?.customerName,
-              status: "active",
-              source: "simple",
-              transcripts: [],
-              gps_lat: state?.gpsLat,
-              gps_lon: state?.gpsLon,
-              gps_updated_at: state?.gpsLat ? new Date().toISOString() : null
-            }, { onConflict: "call_id" });
+            // Create/update live call record (non-blocking)
+            await supabase
+              .from("live_calls")
+              .upsert(
+                {
+                  call_id: callId,
+                  caller_phone: phone,
+                  caller_name: state?.customerName,
+                  status: "active",
+                  source: "simple",
+                  transcripts: [],
+                  gps_lat: state?.gpsLat,
+                  gps_lon: state?.gpsLon,
+                  gps_updated_at: state?.gpsLat ? new Date().toISOString() : null,
+
+                  // Optional context for the dashboard when an active booking exists
+                  pickup: activeBooking?.pickup ?? null,
+                  destination: activeBooking?.destination ?? null,
+                  passengers: activeBooking?.passengers ?? null,
+                  fare: activeBooking?.fare ?? null,
+                  eta: activeBooking?.eta ?? null,
+                  booking_confirmed:
+                    activeBooking?.status === "confirmed" ||
+                    activeBooking?.status === "dispatched" ||
+                    activeBooking?.status === "active" ||
+                    false,
+                },
+                { onConflict: "call_id" }
+              );
           } catch (e) {
             console.error(`[${callId}] Background caller lookup failed:`, e);
           }
