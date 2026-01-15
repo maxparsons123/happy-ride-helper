@@ -32,14 +32,26 @@ const corsHeaders = {
  *   "context": "entrance_choice"  // optional - helps track the response
  * }
  * 
- * 3. SAY MESSAGE - Make Ada say something (no response expected):
+ * 3. ASK_CONFIRM - Ask customer to confirm fare before dispatching:
+ * {
+ *   "call_id": "abc123",
+ *   "action": "ask_confirm",
+ *   "message": "Your price is £15 and driver will be 15 minutes. Shall I book that?",
+ *   "fare": "15.00",
+ *   "eta": "15 minutes",
+ *   "callback_url": "https://your-server.com/ada-response"  // optional
+ * }
+ * → If customer says YES → dispatches booking
+ * → If customer says NO → sends cancel to callback_url
+ * 
+ * 4. SAY MESSAGE - Make Ada say something (no response expected):
  * {
  *   "call_id": "abc123",
  *   "action": "say",
  *   "message": "Just to let you know, your driver John is running 2 minutes late."
  * }
  * 
- * 4. REJECT/NO CARS:
+ * 5. REJECT/NO CARS:
  * {
  *   "call_id": "abc123",
  *   "action": "confirm",
@@ -49,7 +61,7 @@ const corsHeaders = {
  * 
  * CALL ACTIONS (use "call_action" field):
  * 
- * 5. HANGUP - Instruct Ada to end the call:
+ * 6. HANGUP - Instruct Ada to end the call:
  * {
  *   "call_id": "abc123",
  *   "call_action": "hangup",
@@ -60,7 +72,7 @@ const corsHeaders = {
 interface DispatchCallback {
   call_id: string;
   event?: "booking_modified"; // For modification callbacks
-  action?: "confirm" | "ask" | "say" | "booked" | "update_fare"; // "booked" is alias for "confirm"
+  action?: "confirm" | "ask" | "ask_confirm" | "say" | "booked" | "update_fare"; // "booked" is alias for "confirm"
   call_action?: "hangup";
   // For confirm action
   status?: "dispatched" | "rejected" | "no_cars" | "pending";
@@ -75,6 +87,8 @@ interface DispatchCallback {
   // For ask action
   question?: string;
   context?: string;
+  // For ask_confirm action - fare confirmation with callback
+  callback_url?: string; // URL to POST yes/no response
   // For say action (uses message field)
   // For hangup call_action - optional goodbye message
   // For booking_modified event
@@ -113,6 +127,7 @@ serve(async (req) => {
       booking_ref,
       question,
       context,
+      callback_url,
       field_changed,
       old_value,
       new_value
@@ -123,6 +138,8 @@ serve(async (req) => {
 
     console.log(`[${call_id}] 📥 Dispatch callback: event=${event}, action=${action}, call_action=${call_action}`);
     console.log(`[${call_id}] Payload:`, JSON.stringify(callback));
+
+
 
     if (!call_id) {
       return new Response(JSON.stringify({ 
@@ -303,6 +320,85 @@ serve(async (req) => {
         action: "ask",
         question,
         message: "Question sent to Ada"
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTION: ASK_CONFIRM - Ask customer to confirm fare before dispatch
+    // Customer response (yes/no) is monitored by taxi-realtime-simple
+    // ═══════════════════════════════════════════════════════════════════
+    if (action === "ask_confirm") {
+      if (!message) {
+        return new Response(JSON.stringify({ 
+          error: "Missing required field for 'ask_confirm' action: message" 
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      console.log(`[${call_id}] 💰 Dispatch ask_confirm: "${message}"`);
+      console.log(`[${call_id}] Fare: ${fare}, ETA: ${normalizedEta}, Callback: ${callback_url}`);
+
+      // Get current transcripts
+      const { data: callData } = await supabase
+        .from("live_calls")
+        .select("transcripts")
+        .eq("call_id", call_id)
+        .single();
+
+      const transcripts = (callData?.transcripts as any[]) || [];
+      
+      // Add the fare confirmation request with special role
+      transcripts.push({
+        role: "dispatch_ask_confirm",
+        text: message,
+        fare: fare || null,
+        eta: normalizedEta || null,
+        callback_url: callback_url || null,
+        timestamp: new Date().toISOString()
+      });
+
+      // Update live_calls with pending confirmation state
+      await supabase
+        .from("live_calls")
+        .update({
+          transcripts,
+          fare: fare || null,
+          eta: normalizedEta || null,
+          clarification_attempts: {
+            pending_fare_confirm: true,
+            fare_message: message,
+            callback_url: callback_url || null,
+            asked_at: new Date().toISOString()
+          },
+          updated_at: new Date().toISOString()
+        })
+        .eq("call_id", call_id);
+
+      // Broadcast to active WebSocket session
+      await supabase.channel(`dispatch_${call_id}`).send({
+        type: "broadcast",
+        event: "dispatch_ask_confirm",
+        payload: {
+          call_id,
+          action: "ask_confirm",
+          message,
+          fare: fare || null,
+          eta: normalizedEta || null,
+          callback_url: callback_url || null,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      return new Response(JSON.stringify({
+        success: true,
+        call_id,
+        action: "ask_confirm",
+        message: "Fare confirmation question sent to Ada",
+        awaiting_response: true
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

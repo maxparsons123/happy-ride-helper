@@ -653,6 +653,16 @@ interface SessionState {
   bookingConfirmedThisTurn: boolean;
   lastBookTaxiSuccessAt: number | null;
 
+  // Pending fare confirmation from dispatch (ask_confirm action)
+  pendingFareConfirm: {
+    active: boolean;
+    message: string | null;
+    fare: string | null;
+    eta: string | null;
+    callbackUrl: string | null;
+    askedAt: number | null;
+  } | null;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -1206,6 +1216,56 @@ serve(async (req) => {
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
           sessionState.bookingConfirmedThisTurn = false;
+          
+          // --- Check for pending fare confirmation response ---
+          if (sessionState.pendingFareConfirm?.active) {
+            const lowerText = userText.toLowerCase();
+            const isYes = /\b(yes|yeah|yep|sure|okay|ok|go ahead|book it|please|that's fine|fine|correct|right)\b/i.test(lowerText);
+            const isNo = /\b(no|nope|nah|cancel|too much|expensive|forget it|never mind|don't|stop)\b/i.test(lowerText);
+            
+            if (isYes || isNo) {
+              console.log(`[${sessionState.callId}] 💰 Fare confirm response: ${isYes ? 'YES' : 'NO'}`);
+              
+              // Send callback to dispatch if URL provided
+              if (sessionState.pendingFareConfirm.callbackUrl) {
+                const callbackPayload = {
+                  call_id: sessionState.callId,
+                  response: isYes ? "confirmed" : "cancelled",
+                  fare: sessionState.pendingFareConfirm.fare,
+                  eta: sessionState.pendingFareConfirm.eta,
+                  customer_response: userText,
+                  timestamp: new Date().toISOString()
+                };
+                
+                // Fire and forget - don't block voice flow
+                fetch(sessionState.pendingFareConfirm.callbackUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(callbackPayload)
+                }).then(res => {
+                  console.log(`[${sessionState.callId}] 📤 Fare callback sent: ${res.status}`);
+                }).catch(err => {
+                  console.error(`[${sessionState.callId}] ❌ Fare callback failed:`, err);
+                });
+              }
+              
+              // Clear pending state
+              sessionState.pendingFareConfirm = null;
+              
+              // If NO, inject system message to tell Ada to apologize and ask if they want to try different options
+              if (isNo) {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: "[SYSTEM: Customer declined the fare. Apologize briefly and ask if they'd like to try a different time, location, or if there's anything else you can help with.]" }]
+                  }
+                }));
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              }
+            }
+          }
         }
         break;
       }
@@ -1697,6 +1757,32 @@ serve(async (req) => {
                   dispatchResult = {
                     hangup: true,
                     ada_message: dispatchHangup.text
+                  };
+                  break;
+                }
+                
+                // Check for ask_confirm (fare confirmation) request
+                const dispatchAskConfirm = transcripts.find(t => 
+                  t.role === "dispatch_ask_confirm" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchAskConfirm) {
+                  console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}"`);
+                  
+                  // Store pending fare confirmation state
+                  sessionState.pendingFareConfirm = {
+                    active: true,
+                    message: dispatchAskConfirm.text,
+                    fare: dispatchAskConfirm.fare || null,
+                    eta: dispatchAskConfirm.eta || null,
+                    callbackUrl: dispatchAskConfirm.callback_url || null,
+                    askedAt: Date.now()
+                  };
+                  
+                  dispatchResult = {
+                    ada_message: dispatchAskConfirm.text,
+                    needs_fare_confirm: true
                   };
                   break;
                 }
@@ -2474,6 +2560,7 @@ serve(async (req) => {
           halfDuplexBuffer: [],
           bookingConfirmedThisTurn: false,
           lastBookTaxiSuccessAt: null,
+          pendingFareConfirm: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -2557,6 +2644,7 @@ serve(async (req) => {
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
+            pendingFareConfirm: null,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
