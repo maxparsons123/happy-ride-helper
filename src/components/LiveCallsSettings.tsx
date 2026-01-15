@@ -40,6 +40,10 @@ interface LiveCallsSettingsProps {
   setUseUnifiedExtraction: (value: boolean) => void;
   usePassthroughMode: boolean;
   setUsePassthroughMode: (value: boolean) => void;
+  
+  // Audio processing
+  useRasaAudioProcessing: boolean;
+  setUseRasaAudioProcessing: (value: boolean) => void;
 }
 
 export function LiveCallsSettings({
@@ -66,6 +70,8 @@ export function LiveCallsSettings({
   setUseUnifiedExtraction,
   usePassthroughMode,
   setUsePassthroughMode,
+  useRasaAudioProcessing,
+  setUseRasaAudioProcessing,
 }: LiveCallsSettingsProps) {
   return (
     <Sheet>
@@ -326,6 +332,42 @@ export function LiveCallsSettings({
                   checked={addressTtsSplicing}
                   onCheckedChange={setAddressTtsSplicing}
                 />
+              </div>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Audio Processing Section */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+              <Volume2 className="w-4 h-4" />
+              Audio Processing
+            </div>
+            
+            <div className="space-y-4 pl-6">
+              {/* Rasa-Style Audio Processing */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Rasa-Style Processing</p>
+                  <p className="text-xs text-muted-foreground">
+                    {useRasaAudioProcessing 
+                      ? "μ-law→PCM16, 8→16kHz, interim transcripts" 
+                      : "Standard OpenAI audio format"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs ${!useRasaAudioProcessing ? 'text-primary font-medium' : 'text-muted-foreground'}`}>
+                    Standard
+                  </span>
+                  <Switch
+                    checked={useRasaAudioProcessing}
+                    onCheckedChange={setUseRasaAudioProcessing}
+                  />
+                  <span className={`text-xs ${useRasaAudioProcessing ? 'text-orange-400 font-medium' : 'text-muted-foreground'}`}>
+                    Rasa
+                  </span>
+                </div>
               </div>
             </div>
           </div>
