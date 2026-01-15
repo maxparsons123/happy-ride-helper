@@ -183,12 +183,9 @@ NAME SAVING - MANDATORY:
 - Example flow: User says "I'm John" → CALL save_customer_name({name: "John"}) → Then say "Thank you John! Where would you like to be picked up from?"
 - If user later corrects their name → CALL save_customer_name again with the corrected name.
 
-LOCATION CHECK (ALWAYS):
-- If you receive "[SYSTEM: GPS not available]" at the start, you MUST ask: "Where are you calling from?" BEFORE asking for pickup.
-- When they give a location (e.g., "I'm at the train station", "I'm in Coventry", "High Street") → CALL save_location function with their answer.
-- Wait for save_location result before asking for pickup address.
-- If save_location fails, apologize and ask for a more specific location or landmark.
-- This helps us send the nearest available taxi.
+LOCATION (OPTIONAL):
+- If caller mentions their current location (e.g., "I'm at the train station"), acknowledge it and proceed to ask for pickup address.
+- Do NOT require GPS or location verification before booking.
 
 BOOKING FLOW:
 1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
@@ -341,11 +338,11 @@ const TOOLS = [
   {
     type: "function",
     name: "save_location",
-    description: "Save caller's current location when GPS is not available. Call this when caller tells you where they are (e.g., 'I'm at the train station', 'I'm on High Street'). This geocodes and saves their location.",
+    description: "Note caller's current location for context. Call when caller tells you where they are. No geocoding - just saves location text.",
     parameters: {
       type: "object",
       properties: {
-        location: { type: "string", description: "The location the caller provided (e.g., 'train station', 'High Street', 'Tesco on London Road')" }
+        location: { type: "string", description: "The location the caller provided" }
       },
       required: ["location"]
     }
@@ -1264,115 +1261,13 @@ serve(async (req) => {
         }
 
         case "save_location": {
-          console.log(`[${sessionState.callId}] 📍 Saving location: ${args.location}`);
+          // Simple mode: just note the location without geocoding
+          console.log(`[${sessionState.callId}] 📍 Noting location (no geocode): ${args.location}`);
           
-          try {
-            // Call geocode function to convert location to coordinates
-            const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-            const geocodeResponse = await fetch(`${SUPABASE_URL}/functions/v1/geocode`, {
-              method: "POST",
-              headers: { 
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`
-              },
-              body: JSON.stringify({ 
-                address: args.location,
-                // Bias towards caller's likely country based on phone
-                region: sessionState.phone?.startsWith("+44") ? "uk" 
-                      : sessionState.phone?.startsWith("+31") ? "nl"
-                      : sessionState.phone?.startsWith("+49") ? "de"
-                      : undefined
-              })
-            });
-            
-            if (geocodeResponse.ok) {
-              const geocodeData = await geocodeResponse.json();
-              
-              if (geocodeData.lat && geocodeData.lon) {
-                sessionState.gpsLat = geocodeData.lat;
-                sessionState.gpsLon = geocodeData.lon;
-                
-                const formattedAddress = geocodeData.formatted_address || args.location;
-                const city = geocodeData.city || geocodeData.locality || null;
-                
-                console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon} (${formattedAddress})`);
-                
-                // Save to caller_gps table (temporary, expires in 1 hour)
-                await supabase.from("caller_gps").upsert({
-                  phone_number: sessionState.phone,
-                  lat: geocodeData.lat,
-                  lon: geocodeData.lon,
-                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
-                }, { onConflict: "phone_number" });
-                
-                // Update live_calls with GPS
-                await supabase.from("live_calls").update({
-                  gps_lat: geocodeData.lat,
-                  gps_lon: geocodeData.lon,
-                  gps_updated_at: new Date().toISOString()
-                }).eq("call_id", sessionState.callId);
-                
-                // Also save to callers table for permanent history (known_areas)
-                if (sessionState.phone && city) {
-                  try {
-                    // First get current known_areas
-                    const { data: callerData } = await supabase
-                      .from("callers")
-                      .select("known_areas")
-                      .eq("phone_number", sessionState.phone)
-                      .maybeSingle();
-                    
-                    const currentAreas = (callerData?.known_areas as Record<string, any>) || {};
-                    
-                    // Add this location to known_areas if not already there
-                    if (!currentAreas[city]) {
-                      currentAreas[city] = {
-                        lat: geocodeData.lat,
-                        lon: geocodeData.lon,
-                        address: formattedAddress,
-                        added_at: new Date().toISOString()
-                      };
-                      
-                      await supabase.from("callers").upsert({
-                        phone_number: sessionState.phone,
-                        known_areas: currentAreas,
-                        updated_at: new Date().toISOString()
-                      }, { onConflict: "phone_number" });
-                      
-                      console.log(`[${sessionState.callId}] 📍 Saved ${city} to caller's known_areas`);
-                    }
-                  } catch (e) {
-                    console.error(`[${sessionState.callId}] Failed to save known_areas:`, e);
-                  }
-                }
-                
-                result = { 
-                  success: true, 
-                  message: `Location saved: ${formattedAddress}`,
-                  formatted_address: formattedAddress,
-                  city: city,
-                  lat: geocodeData.lat,
-                  lon: geocodeData.lon
-                };
-              } else {
-                result = { 
-                  success: false, 
-                  error: "Could not find that location. Please try a more specific address or landmark."
-                };
-              }
-            } else {
-              result = { 
-                success: false, 
-                error: "Location lookup failed. Please try again."
-              };
-            }
-          } catch (e) {
-            console.error(`[${sessionState.callId}] Geocode error:`, e);
-            result = { 
-              success: false, 
-              error: "Location lookup failed. Please try again."
-            };
-          }
+          result = { 
+            success: true, 
+            message: `Noted: ${args.location}. Now please tell me the pickup address.`
+          };
           break;
         }
 
