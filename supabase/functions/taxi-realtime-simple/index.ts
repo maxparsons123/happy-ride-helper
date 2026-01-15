@@ -1291,6 +1291,99 @@ serve(async (req) => {
 
         case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
+          
+          // === PRE-WEBHOOK VALIDATION ===
+          // 1. Normalize addresses for comparison
+          const normalizeForComparison = (addr: string): string => {
+            if (!addr) return "";
+            return addr
+              .toLowerCase()
+              .replace(/[,.\-]/g, " ")
+              .replace(/\s+/g, " ")
+              .replace(/\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|court|ct|place|pl)\b/gi, "")
+              .replace(/\b(netherlands|uk|united kingdom|england|nederland)\b/gi, "")
+              .trim();
+          };
+          
+          const pickupNorm = normalizeForComparison(args.pickup || "");
+          const destNorm = normalizeForComparison(args.destination || "");
+          
+          // 2. Check if pickup equals destination (common AI error)
+          if (pickupNorm && destNorm && pickupNorm === destNorm) {
+            console.log(`[${sessionState.callId}] ❌ BLOCKED: Pickup equals destination!`);
+            console.log(`[${sessionState.callId}] ❌ Pickup: "${args.pickup}" | Destination: "${args.destination}"`);
+            
+            result = {
+              success: false,
+              error: "booking_validation_failed",
+              ada_message: "I notice the pickup and destination are the same. Could you please confirm where you'd like to go to?",
+              needs_clarification: true,
+              field: "destination"
+            };
+            break;
+          }
+          
+          // 3. Check for suspiciously similar addresses (80%+ overlap)
+          const similarity = (a: string, b: string): number => {
+            if (!a || !b) return 0;
+            const wordsA = a.split(" ").filter(w => w.length > 2);
+            const wordsB = b.split(" ").filter(w => w.length > 2);
+            if (wordsA.length === 0 || wordsB.length === 0) return 0;
+            const common = wordsA.filter(w => wordsB.includes(w)).length;
+            return common / Math.max(wordsA.length, wordsB.length);
+          };
+          
+          const addressSimilarity = similarity(pickupNorm, destNorm);
+          if (addressSimilarity > 0.8) {
+            console.log(`[${sessionState.callId}] ⚠️ WARNING: Addresses are ${Math.round(addressSimilarity * 100)}% similar`);
+            console.log(`[${sessionState.callId}] ⚠️ Pickup: "${args.pickup}" | Destination: "${args.destination}"`);
+            
+            // Use AI extraction to verify from raw transcripts
+            const userTranscriptsForExtraction = sessionState.transcripts
+              .filter(t => t.role === "user" || t.role === "assistant")
+              .slice(-10);
+            
+            if (userTranscriptsForExtraction.length > 0) {
+              try {
+                console.log(`[${sessionState.callId}] 🔍 Running AI extraction to verify addresses...`);
+                const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                  },
+                  body: JSON.stringify({
+                    conversation: userTranscriptsForExtraction,
+                    caller_name: sessionState.customerName,
+                    current_booking: {}
+                  })
+                });
+                
+                if (extractionResponse.ok) {
+                  const extracted = await extractionResponse.json();
+                  console.log(`[${sessionState.callId}] 🔍 AI Extraction result:`, extracted);
+                  
+                  // If AI found different addresses, use those instead
+                  if (extracted.pickup && extracted.destination) {
+                    const extractedPickupNorm = normalizeForComparison(extracted.pickup);
+                    const extractedDestNorm = normalizeForComparison(extracted.destination);
+                    
+                    if (extractedPickupNorm !== extractedDestNorm) {
+                      console.log(`[${sessionState.callId}] ✅ AI found distinct addresses, using those instead`);
+                      args.pickup = extracted.pickup;
+                      args.destination = extracted.destination;
+                    }
+                  }
+                }
+              } catch (extractErr) {
+                console.error(`[${sessionState.callId}] AI extraction failed:`, extractErr);
+                // Continue with Ada's addresses if extraction fails
+              }
+            }
+          }
+          
+          // === END VALIDATION ===
+          
           sessionState.booking = {
             pickup: args.pickup,
             destination: args.destination,
