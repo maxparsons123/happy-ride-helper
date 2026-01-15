@@ -1,5 +1,6 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.89.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,26 +8,17 @@ const corsHeaders = {
 };
 
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 /**
- * UNIFIED BOOKING EXTRACTION
+ * UNIFIED BOOKING EXTRACTION (v2 - Tool Calling)
  * 
- * This function takes the FULL conversation transcript and extracts ALL booking
- * details in a single AI pass. This is more reliable than inline regex parsing
- * because the AI can understand context (e.g., "two passengers" vs "two bags").
- * 
- * Returns:
- * {
- *   pickup: string | null,
- *   destination: string | null,
- *   passengers: number | null,
- *   luggage: string | null,
- *   pickup_time: string | null,
- *   vehicle_type: string | null,
- *   special_requests: string | null,
- *   missing_fields: string[],
- *   confidence: "high" | "medium" | "low"
- * }
+ * Uses tool calling for reliable structured extraction (like the C# AiBooking function).
+ * Supports:
+ * - Alias resolution (home → 52a david road)
+ * - New bookings AND modifications
+ * - Comparison against Ada's interpretation
  */
 
 const getLondonTime = () => {
@@ -42,98 +34,164 @@ const getLondonTime = () => {
   });
 };
 
-const UNIFIED_EXTRACTION_PROMPT = (now: string, callerName: string | null, callerCity: string | null) => `
-You are a BOOKING EXTRACTION AI. Your job is to extract ALL booking details from a taxi conversation transcript.
+// Build system prompt with alias instructions if available
+const buildSystemPrompt = (
+  now: string, 
+  callerName: string | null, 
+  callerCity: string | null,
+  aliases: Record<string, string> | null,
+  existingBooking: ExistingBooking | null
+) => {
+  let aliasInstruction = "";
+  if (aliases && Object.keys(aliases).length > 0) {
+    const aliasJson = JSON.stringify(aliases);
+    aliasInstruction = `
+The user has saved the following location aliases:
+${aliasJson}
 
+Rules:
+1. If the pickup or drop-off location matches (exactly or approximately) one of these alias keys, replace it with the corresponding full address.
+2. Apply fuzzy matching to handle typos or variations (e.g., 'hme' → 'home', 'my place' → 'home').
+3. Always output the full address in the final result, not the alias name.
+4. If alias is used with extra text (e.g., 'home station'), still map the alias part and keep the rest.
+`;
+  }
+
+  let modificationInstruction = "";
+  if (existingBooking) {
+    modificationInstruction = `
+EXISTING BOOKING (for modification):
+- Pickup: "${existingBooking.pickup || 'not set'}"
+- Destination: "${existingBooking.destination || 'not set'}"
+- Passengers: ${existingBooking.passengers || 1}
+- Luggage: "${existingBooking.luggage || 'not specified'}"
+- Vehicle: "${existingBooking.vehicle_type || 'saloon'}"
+- Time: "${existingBooking.pickup_time || 'ASAP'}"
+
+MODIFICATION RULES:
+- ONLY update fields that the user explicitly wants to change.
+- Keep ALL other fields exactly as they are in the existing booking.
+- If user says "change pickup to X" → only update pickup, keep destination/passengers/etc unchanged.
+- If user says "add 2 bags" → only update luggage, keep everything else unchanged.
+`;
+  }
+
+  return `You are an expert multilingual taxi booking assistant.
 Current time (London): ${now}
 ${callerName ? `Caller's name: ${callerName}` : "Caller's name: Unknown"}
 ${callerCity ? `Caller's city: ${callerCity} (use as default city for addresses without explicit city)` : ""}
 
-==================================================
-EXTRACTION RULES
-==================================================
+${aliasInstruction}
+${modificationInstruction}
 
-You must extract EXACTLY what the CUSTOMER said. Pay careful attention to:
+EXTRACTION RULES:
 
-1. PICKUP LOCATION
-   - "from X", "pick me up at X", "collect me from X"
-   - House numbers with letters: "52A", "1214B" (preserve exactly)
-   - If they say "my location" or "here" → pickup = "by_gps"
+1. **Location Detection**:
+   - Look for 'from', 'pick up from', 'collect from' → pickup_location
+   - Look for 'to', 'going to', 'heading to', 'take me to' → dropoff_location
+   - If user says 'my location', 'here', 'where I am' → set pickup_location = 'by_gps'
+   - If 'as directed' or no destination given → dropoff_location = 'as directed'
 
-2. DESTINATION
-   - "to Y", "going to Y", "heading to Y", "take me to Y"
-   - If not mentioned → destination = null
+2. **House Numbers - CRITICAL**:
+   - Preserve EXACT house numbers including letters: "52A", "1214B", "7b"
+   - If ambiguous (e.g., "5th to 8th" might be mishearing), flag as uncertain
 
-3. PASSENGERS (number)
-   - "just me" / "myself" → 1
-   - "two of us" / "couple" → 2
-   - "three passengers" → 3
-   - IMPORTANT: Only count this when they're answering "how many passengers" OR explicitly stating passenger count
-   - DO NOT confuse with luggage count!
+3. **Time Normalization**:
+   - Convert to 'YYYY-MM-DD HH:MM' (24-hour format)
+   - 'now', 'asap', 'straight away' → 'ASAP'
+   - 'in 20 minutes' → calculate from current time
+   - If time is earlier than now → assume tomorrow
 
-4. LUGGAGE (string)
-   - "2 bags" / "two suitcases" / "some luggage"
-   - "no bags" / "no luggage" → "no luggage"
-   - IMPORTANT: Only count this when they're answering "how many bags" OR explicitly stating luggage
-   - DO NOT confuse with passenger count!
-   - If they mention passengers but not bags → luggage = null (not confirmed)
+4. **Passengers vs Luggage - CONTEXT MATTERS**:
+   - "two passengers" → passengers = 2 (NOT luggage)
+   - "two bags" / "two suitcases" → luggage = "2 bags" (NOT passengers)
+   - If user answers "how many passengers?" with "two" → passengers = 2
+   - If user answers "how many bags?" with "two" → luggage = "2 bags"
+   - NEVER confuse these based on preceding question context
 
-5. PICKUP TIME
-   - "now" / "asap" / "straight away" → "ASAP"
-   - "5pm" / "at 3:30" → "YYYY-MM-DD HH:MM"
-   - "in 20 minutes" → calculate from ${now}
+5. **Vehicle Types**:
+   - Detect: saloon, estate, MPV, people carrier, minibus, 6-seater, 8-seater
+   - Only set if explicitly requested
 
-6. VEHICLE TYPE
-   - "6 seater" / "estate" / "MPV" / "minibus" / "saloon"
-   - Only if explicitly requested
-
-7. SPECIAL REQUESTS
+6. **Special Requests**:
    - "ring when outside", "wheelchair access", "child seat", "specific driver"
+   - Do NOT include phone numbers here
 
-==================================================
-CONTEXT DISAMBIGUATION (CRITICAL)
-==================================================
-
-When a number is mentioned, determine what it refers to based on the PRECEDING question:
-
-- If Ada just asked "how many passengers?" and customer says "two" → passengers = 2
-- If Ada just asked "how many bags?" and customer says "two" → luggage = "2 bags"
-- If customer says "two passengers and three bags" → passengers = 2, luggage = "3 bags"
-- If customer says "two passengers" (with word "passengers") → passengers = 2, DO NOT set luggage
-
-The last question Ada asked is the CONTEXT for ambiguous single-word answers.
-
-==================================================
-MISSING FIELDS
-==================================================
-
-Return a list of fields that are still needed to complete the booking:
-- If no pickup → "pickup"
-- If no destination → "destination"  
-- If no passengers → "passengers"
-- If trip involves airport/station but no luggage info → "luggage"
-
-==================================================
-OUTPUT FORMAT (REQUIRED)
-==================================================
-
-Return ONLY valid JSON:
-
-{
-  "pickup": string | null,
-  "destination": string | null,
-  "passengers": number | null,
-  "luggage": string | null,
-  "pickup_time": string | null,
-  "vehicle_type": string | null,
-  "special_requests": string | null,
-  "missing_fields": ["pickup", "destination", "passengers", "luggage"],
-  "confidence": "high" | "medium" | "low",
-  "extraction_notes": "Brief note about any ambiguity or assumptions"
-}
-
-NO extra text. NO explanations outside the JSON.
+7. **Missing Fields**:
+   - Return list of essential fields still needed: pickup, destination, passengers, luggage (if airport/station trip)
 `;
+};
+
+// Tool definition for structured extraction
+const BOOKING_EXTRACTION_TOOL = {
+  type: "function",
+  function: {
+    name: "extract_booking",
+    description: "Extract all taxi booking details from the conversation transcript.",
+    parameters: {
+      type: "object",
+      properties: {
+        pickup_location: { 
+          type: "string", 
+          description: "Pickup address. Use 'by_gps' if user says 'my location' or 'here'." 
+        },
+        dropoff_location: { 
+          type: "string", 
+          description: "Destination address. Use 'as directed' if not specified." 
+        },
+        pickup_time: { 
+          type: "string", 
+          description: "Pickup time in 'YYYY-MM-DD HH:MM' format, or 'ASAP' for immediate." 
+        },
+        number_of_passengers: { 
+          type: "integer", 
+          description: "Number of passengers (1-8). Default 1 if not specified." 
+        },
+        luggage: { 
+          type: "string", 
+          description: "Luggage description (e.g., '2 bags', 'no luggage'). Leave empty if not mentioned." 
+        },
+        vehicle_type: { 
+          type: "string", 
+          enum: ["saloon", "estate", "mpv", "minibus", "8-seater"],
+          description: "Requested vehicle type. Only set if explicitly requested." 
+        },
+        special_requests: { 
+          type: "string", 
+          description: "Any special requests (ring on arrival, wheelchair, child seat, etc.)" 
+        },
+        nearest_place: { 
+          type: "string", 
+          description: "If user asks for 'nearest' or 'closest' something (e.g., 'nearest hotel')." 
+        },
+        missing_fields: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of essential fields still needed: pickup, destination, passengers, luggage (if travel hub)"
+        },
+        confidence: {
+          type: "string",
+          enum: ["high", "medium", "low"],
+          description: "Confidence in extraction accuracy"
+        },
+        extraction_notes: {
+          type: "string",
+          description: "Brief note about any ambiguity, assumptions, or alias resolutions applied"
+        }
+      },
+      required: ["pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "missing_fields", "confidence"]
+    }
+  }
+};
+
+interface ExistingBooking {
+  pickup?: string | null;
+  destination?: string | null;
+  passengers?: number | null;
+  luggage?: string | null;
+  vehicle_type?: string | null;
+  pickup_time?: string | null;
+}
 
 interface ExtractionRequest {
   // The full conversation transcript (array of messages)
@@ -142,20 +200,16 @@ interface ExtractionRequest {
     text: string;
     timestamp?: string;
   }>;
-  // Current known booking state (to understand what's already collected)
-  current_booking?: {
-    pickup?: string | null;
-    destination?: string | null;
-    passengers?: number | null;
-    luggage?: string | null;
-    pickup_time?: string | null;
-    vehicle_type?: string | null;
-  };
+  // Current known booking state (for modifications)
+  current_booking?: ExistingBooking;
   // Caller context
   caller_name?: string | null;
   caller_city?: string | null;
-  // Is this a travel hub trip? (airport/station)
+  caller_phone?: string | null;
+  // Is this a travel hub trip? (airport/station - needs luggage)
   is_travel_hub_trip?: boolean;
+  // Is this a modification request?
+  is_modification?: boolean;
 }
 
 serve(async (req) => {
@@ -170,10 +224,12 @@ serve(async (req) => {
     
     const { 
       conversation = [],
-      current_booking = {},
+      current_booking = null,
       caller_name = null,
       caller_city = null,
-      is_travel_hub_trip = false
+      caller_phone = null,
+      is_travel_hub_trip = false,
+      is_modification = false
     } = request;
     
     if (!conversation || conversation.length === 0) {
@@ -182,45 +238,64 @@ serve(async (req) => {
           error: "No conversation provided",
           pickup: null,
           destination: null,
-          passengers: null,
+          passengers: 1,
           luggage: null,
-          pickup_time: null,
+          pickup_time: "ASAP",
           vehicle_type: null,
           special_requests: null,
-          missing_fields: ["pickup", "destination", "passengers"],
+          missing_fields: ["pickup", "destination"],
           confidence: "low"
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const now = getLondonTime();
-    const systemPrompt = UNIFIED_EXTRACTION_PROMPT(now, caller_name, caller_city);
-
-    // Format conversation for the AI
-    // Include the current booking state as context
-    let conversationText = "";
-    
-    if (current_booking && Object.keys(current_booking).some(k => current_booking[k as keyof typeof current_booking])) {
-      conversationText += "=== CURRENT BOOKING STATE ===\n";
-      if (current_booking.pickup) conversationText += `Pickup: ${current_booking.pickup}\n`;
-      if (current_booking.destination) conversationText += `Destination: ${current_booking.destination}\n`;
-      if (current_booking.passengers) conversationText += `Passengers: ${current_booking.passengers}\n`;
-      if (current_booking.luggage) conversationText += `Luggage: ${current_booking.luggage}\n`;
-      if (current_booking.pickup_time) conversationText += `Time: ${current_booking.pickup_time}\n`;
-      if (current_booking.vehicle_type) conversationText += `Vehicle: ${current_booking.vehicle_type}\n`;
-      conversationText += "\n";
+    // Fetch user aliases from database if phone provided
+    let aliases: Record<string, string> | null = null;
+    if (caller_phone) {
+      try {
+        const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+        const { data: callerData } = await supabase
+          .from("callers")
+          .select("address_aliases")
+          .eq("phone_number", caller_phone)
+          .maybeSingle();
+        
+        if (callerData?.address_aliases) {
+          // Handle both formats: {"home": "address"} or {"Aliases": {"home": "address"}}
+          const rawAliases = callerData.address_aliases as Record<string, any>;
+          if (rawAliases.Aliases) {
+            aliases = rawAliases.Aliases;
+          } else {
+            aliases = rawAliases;
+          }
+          console.log(`[taxi-extract-unified] Loaded ${Object.keys(aliases || {}).length} aliases for ${caller_phone}`);
+        }
+      } catch (e) {
+        console.error(`[taxi-extract-unified] Failed to load aliases:`, e);
+      }
     }
 
-    conversationText += "=== CONVERSATION TRANSCRIPT ===\n";
+    const now = getLondonTime();
+    const systemPrompt = buildSystemPrompt(
+      now, 
+      caller_name, 
+      caller_city, 
+      aliases,
+      is_modification ? current_booking : null
+    );
+
+    // Format conversation for the AI
+    let conversationText = "=== CONVERSATION TRANSCRIPT ===\n";
     for (const msg of conversation) {
       const role = msg.role === "user" ? "CUSTOMER" : msg.role === "assistant" ? "ADA" : "SYSTEM";
       conversationText += `${role}: ${msg.text}\n`;
     }
 
-    console.log(`[taxi-extract-unified] Processing ${conversation.length} messages...`);
+    console.log(`[taxi-extract-unified] Processing ${conversation.length} messages, is_modification=${is_modification}`);
     console.log(`[taxi-extract-unified] Last customer message: "${conversation.filter(m => m.role === 'user').slice(-1)[0]?.text || 'none'}"`);
 
+    // Use tool calling for structured extraction (like C# AiBooking)
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -233,6 +308,8 @@ serve(async (req) => {
           { role: "system", content: systemPrompt },
           { role: "user", content: conversationText }
         ],
+        tools: [BOOKING_EXTRACTION_TOOL],
+        tool_choice: { type: "function", function: { name: "extract_booking" } },
         temperature: 0.1,
       }),
     });
@@ -244,24 +321,15 @@ serve(async (req) => {
     }
 
     const data = await response.json();
-    const content = data.choices[0]?.message?.content;
     
-    if (!content) {
-      throw new Error("No content in response");
+    // Extract from tool call response
+    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+    if (!toolCall || toolCall.function.name !== "extract_booking") {
+      throw new Error("No valid tool call in response");
     }
 
-    // Parse JSON from response
-    let jsonStr = content;
-    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[1].trim();
-    }
-    const rawJsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (rawJsonMatch) {
-      jsonStr = rawJsonMatch[0];
-    }
-
-    const extracted = JSON.parse(jsonStr);
+    const argsJson = toolCall.function.arguments;
+    const extracted = typeof argsJson === 'string' ? JSON.parse(argsJson) : argsJson;
     
     // Ensure missing_fields includes luggage for travel hub trips
     if (is_travel_hub_trip && !extracted.luggage && !extracted.missing_fields?.includes("luggage")) {
@@ -269,13 +337,61 @@ serve(async (req) => {
       extracted.missing_fields.push("luggage");
     }
 
+    // For modifications: merge with existing booking (only changed fields update)
+    let finalResult = {
+      pickup: extracted.pickup_location || null,
+      destination: extracted.dropoff_location || null,
+      passengers: extracted.number_of_passengers || 1,
+      luggage: extracted.luggage || null,
+      vehicle_type: extracted.vehicle_type || null,
+      pickup_time: extracted.pickup_time || "ASAP",
+      special_requests: extracted.special_requests || null,
+      nearest_place: extracted.nearest_place || null,
+      missing_fields: extracted.missing_fields || [],
+      confidence: extracted.confidence || "medium",
+      extraction_notes: extracted.extraction_notes || null,
+    };
+
+    if (is_modification && current_booking) {
+      // Keep existing values for fields not explicitly changed
+      finalResult = {
+        pickup: extracted.pickup_location || current_booking.pickup || null,
+        destination: extracted.dropoff_location || current_booking.destination || null,
+        passengers: extracted.number_of_passengers || current_booking.passengers || 1,
+        luggage: extracted.luggage || current_booking.luggage || null,
+        vehicle_type: extracted.vehicle_type || current_booking.vehicle_type || null,
+        pickup_time: extracted.pickup_time || current_booking.pickup_time || "ASAP",
+        special_requests: extracted.special_requests || null,
+        nearest_place: extracted.nearest_place || null,
+        missing_fields: extracted.missing_fields || [],
+        confidence: extracted.confidence || "medium",
+        extraction_notes: extracted.extraction_notes || null,
+      };
+      console.log(`[taxi-extract-unified] Merged with existing booking for modification`);
+    }
+
+    // Apply alias fallback in TypeScript (in case AI missed it)
+    if (aliases) {
+      for (const [key, value] of Object.entries(aliases)) {
+        if (finalResult.pickup?.toLowerCase().includes(key.toLowerCase())) {
+          console.log(`[taxi-extract-unified] Applied alias: pickup "${key}" → "${value}"`);
+          finalResult.pickup = value;
+        }
+        if (finalResult.destination?.toLowerCase().includes(key.toLowerCase())) {
+          console.log(`[taxi-extract-unified] Applied alias: destination "${key}" → "${value}"`);
+          finalResult.destination = value;
+        }
+      }
+    }
+
     const processingTime = Date.now() - startTime;
-    console.log(`[taxi-extract-unified] Extracted in ${processingTime}ms:`, extracted);
+    console.log(`[taxi-extract-unified] Extracted in ${processingTime}ms:`, finalResult);
 
     return new Response(
       JSON.stringify({
-        ...extracted,
-        processing_time_ms: processingTime
+        ...finalResult,
+        processing_time_ms: processingTime,
+        raw_extraction: extracted // Include raw for debugging
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
@@ -290,12 +406,12 @@ serve(async (req) => {
         error: errorMessage,
         pickup: null,
         destination: null,
-        passengers: null,
+        passengers: 1,
         luggage: null,
-        pickup_time: null,
+        pickup_time: "ASAP",
         vehicle_type: null,
         special_requests: null,
-        missing_fields: ["pickup", "destination", "passengers"],
+        missing_fields: ["pickup", "destination"],
         confidence: "low",
         processing_time_ms: processingTime
       }),
