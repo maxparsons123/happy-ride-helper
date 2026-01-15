@@ -193,14 +193,19 @@ LOCATION CHECK (ALWAYS):
 BOOKING FLOW:
 1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address. Ask: "And where are you going to?"
-3. ⚠️ BEFORE CALLING book_taxi - READ BACK THE ADDRESSES FOR CONFIRMATION:
+3. ⚠️ CALL verify_booking BEFORE CONFIRMING:
+   - After getting both pickup and destination, CALL verify_booking to check all components.
+   - The tool returns: pickup, destination, passengers, luggage, vehicle_type, missing_fields.
+   - If missing_fields is NOT empty (e.g., ["luggage"] for airport trips), ask the customer for that info FIRST.
+   - If all fields are complete, proceed to step 4.
+4. READ BACK THE ADDRESSES FOR CONFIRMATION:
    - Say: "Just to confirm, picking up from [FULL PICKUP ADDRESS] going to [FULL DESTINATION]. Is that correct?"
    - WAIT for user to say "yes", "yeah", "correct", "that's right" before calling book_taxi.
    - Do NOT call book_taxi until user explicitly confirms.
    - If user says "no" or corrects an address, update it and confirm again.
-4. Once user CONFIRMS the addresses → IMMEDIATELY CALL book_taxi function with the confirmed addresses.
-5. ONLY ask about passengers if it's a large group or they mention multiple people. Default to 1.
-6. ONLY ask about bags if destination is an AIRPORT or TRAIN STATION.
+5. Once user CONFIRMS the addresses → IMMEDIATELY CALL book_taxi function with the confirmed addresses.
+6. ONLY ask about passengers if verify_booking shows it in missing_fields OR user mentions multiple people.
+7. ONLY ask about bags if verify_booking shows "luggage" in missing_fields (usually for airport/station trips).
 
 ADDRESS ACCURACY - CRITICAL:
 - HOUSE NUMBERS ARE CRITICAL. Listen very carefully to numbers and letters.
@@ -349,6 +354,12 @@ const TOOLS = [
       },
       required: ["location"]
     }
+  },
+  {
+    type: "function",
+    name: "verify_booking",
+    description: "⚠️ CALL THIS BEFORE CONFIRMING WITH THE USER. After collecting pickup AND destination, call this to verify all booking details. It returns: extracted pickup/destination, passengers, bags, vehicle_type, and any missing_fields. If missing_fields is not empty, ask the user for that info BEFORE confirming. If all fields are complete, proceed to read back addresses for confirmation.",
+    parameters: { type: "object", properties: {} }
   },
   {
     type: "function",
@@ -2080,6 +2091,93 @@ serve(async (req) => {
             ]
           };
           break;
+
+        case "verify_booking": {
+          console.log(`[${sessionState.callId}] 🔍 Pre-confirmation booking verification...`);
+          
+          // Run AI extraction on full conversation to get all booking components
+          const conversationForVerification = sessionState.transcripts
+            .filter(t => t.role === "user" || t.role === "assistant")
+            .slice(-15); // More context for thorough extraction
+          
+          let verifiedBooking: {
+            pickup?: string | null;
+            destination?: string | null;
+            passengers?: number | null;
+            luggage?: string | null;
+            vehicle_type?: string | null;
+            pickup_time?: string | null;
+            special_requests?: string | null;
+            missing_fields?: string[];
+            confidence?: string;
+            extraction_notes?: string;
+          } = {};
+          
+          if (conversationForVerification.length > 0) {
+            try {
+              // Determine if this is a travel hub trip (needs luggage)
+              const recentText = conversationForVerification
+                .map(t => t.text.toLowerCase())
+                .join(" ");
+              const isTravelHub = /airport|station|terminal|heathrow|gatwick|stansted|luton|birmingham|manchester|king'?s cross|st pancras|euston|paddington|victoria|coach station/i.test(recentText);
+              
+              console.log(`[${sessionState.callId}] 🔍 Travel hub trip: ${isTravelHub}`);
+              
+              const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                },
+                body: JSON.stringify({
+                  conversation: conversationForVerification,
+                  caller_name: sessionState.customerName,
+                  is_travel_hub_trip: isTravelHub,
+                  current_booking: sessionState.booking.pickup ? {
+                    pickup: sessionState.booking.pickup,
+                    destination: sessionState.booking.destination,
+                    passengers: sessionState.booking.passengers,
+                    luggage: sessionState.booking.bags
+                  } : undefined
+                })
+              });
+              
+              if (extractionResponse.ok) {
+                verifiedBooking = await extractionResponse.json();
+                console.log(`[${sessionState.callId}] 🔍 Verified booking:`, verifiedBooking);
+              }
+            } catch (extractErr) {
+              console.error(`[${sessionState.callId}] Verification extraction failed:`, extractErr);
+            }
+          }
+          
+          // Build result with all extracted components
+          const missingFields = verifiedBooking.missing_fields || [];
+          
+          // Check for essential missing fields
+          if (!verifiedBooking.pickup) missingFields.push("pickup");
+          if (!verifiedBooking.destination) missingFields.push("destination");
+          
+          result = {
+            success: true,
+            pickup: verifiedBooking.pickup || null,
+            destination: verifiedBooking.destination || null,
+            passengers: verifiedBooking.passengers || 1,
+            luggage: verifiedBooking.luggage || null,
+            vehicle_type: verifiedBooking.vehicle_type || null,
+            pickup_time: verifiedBooking.pickup_time || "now",
+            special_requests: verifiedBooking.special_requests || null,
+            missing_fields: [...new Set(missingFields)], // Dedupe
+            confidence: verifiedBooking.confidence || "medium",
+            extraction_notes: verifiedBooking.extraction_notes || null,
+            message: missingFields.length > 0
+              ? `Missing information: ${missingFields.join(", ")}. Please ask the customer for these details.`
+              : `All booking details verified. Pickup: "${verifiedBooking.pickup}", Destination: "${verifiedBooking.destination}". Proceed to confirm with customer.`
+          };
+          
+          console.log(`[${sessionState.callId}] ✅ Verification result: ${missingFields.length} missing fields`);
+          break;
+        }
 
         case "end_call": {
           console.log(`[${sessionState.callId}] 👋 Ending call`);
