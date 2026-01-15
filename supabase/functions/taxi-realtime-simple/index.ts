@@ -1275,10 +1275,13 @@ serve(async (req) => {
                 .slice(-6) // Last 6 user messages
                 .map(t => ({ text: t.text, timestamp: t.timestamp }));
               
+              // Format phone number without + prefix for dispatch (e.g., "31652328530" not "+31652328530")
+              const formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
-                caller_phone: sessionState.phone,
+                caller_phone: formattedPhone,
                 caller_name: sessionState.customerName,
                 // Ada's interpreted addresses
                 ada_pickup: args.pickup,
