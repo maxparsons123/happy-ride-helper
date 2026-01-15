@@ -275,7 +275,7 @@ const TOOLS = [
         vehicle_request: { type: "string", description: "Any specific vehicle requests from caller" },
         special_requests: { type: "string", description: "Any special requirements mentioned (wheelchair, child seat, etc.)" }
       },
-      required: ["pickup", "destination", "callers_pickup", "callers_dropoff"]
+      required: ["pickup", "destination"]
     }
   },
   {
@@ -1196,6 +1196,9 @@ serve(async (req) => {
                 gps_lon: sessionState.gpsLon,
                 // Booking details
                 passengers: args.passengers || 1,
+                // Keep numeric 'bags' for backward compatibility with existing receivers
+                bags: args.bags || 0,
+                // Also provide string 'luggage' (your C# maps bags->string)
                 luggage: String(args.bags || 0),
                 vehicle_type: args.vehicle_type || "saloon",
                 vehicle_request: args.vehicle_request || null,
@@ -1204,12 +1207,13 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
-              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
-              fetch(DISPATCH_WEBHOOK_URL, {
+              // POST to dispatch webhook and log status (helps debug "not sending")
+              const resp = await fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(webhookPayload),
-              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
+              });
+              console.log(`[${sessionState.callId}] 📡 Dispatch webhook responded: ${resp.status}`);
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
