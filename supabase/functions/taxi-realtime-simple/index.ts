@@ -214,7 +214,7 @@ CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
 - If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
 - If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
 - If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
-- If the result contains "success: true" → The fare and ETA are in the result. Say: "Booked! Picking up from [pickup] to [destination], fare [use actual fare from result], arriving in about [use actual eta from result] minutes."
+- If the result contains "success: true" → Confirm using the REAL fare + ETA from the tool result. NEVER say placeholder instructions like "[use actual …]" / "[gebruik daadwerkelijk …]" and NEVER invent numbers.
 - DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
@@ -979,12 +979,14 @@ serve(async (req) => {
           scheduleTranscriptFlush(sessionState);
           
           // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
-          // Check if Ada is trying to say "Booked!" without having called book_taxi
+          // Check if Ada is trying to confirm a booking without having called book_taxi
           const currentText = sessionState.transcripts[sessionState.assistantTranscriptIndex!]?.text || "";
           const lowerText = currentText.toLowerCase();
-          
-          // Phrases that indicate a booking confirmation
+
+          // Phrases that indicate a booking confirmation (multi-language)
+          // NOTE: This runs on streaming transcript deltas to cancel fast.
           const BOOKING_CONFIRMATION_PHRASES = [
+            // English
             "booked!",
             "booked.",
             "your taxi is confirmed",
@@ -999,43 +1001,74 @@ serve(async (req) => {
             "fare is £",
             "fare of £",
             "arriving in about",
-            "will arrive in"
+            "will arrive in",
+
+            // Dutch
+            "geboekt!",
+            "geboekt.",
+            "boekt!",
+            "boekt.",
+            "uw taxi is bevestigd",
+            "uw taxi is geboekt",
+            "uw boeking is bevestigd",
+            "taxi is onderweg",
+            "de taxi is onderweg",
+            "tarief",
+            "aankomst",
+            "over ongeveer",
           ];
-          
-          const isConfirmationPhrase = BOOKING_CONFIRMATION_PHRASES.some(phrase => lowerText.includes(phrase));
-          
+
+          // Guard against the model leaking instruction placeholders like:
+          // "tarief [gebruik daadwerkelijk tarief uit resultaat]"
+          const hasPlaceholderInstruction =
+            /\[(?:use actual|gebruik daadwerkelijk|daadwerkelijk|actual fare|fare from result|eta from result)/i.test(currentText) ||
+            /\{\{[^}]+\}\}/.test(currentText);
+
+          const isConfirmationPhrase =
+            BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase)) ||
+            hasPlaceholderInstruction;
+
           // If Ada says a confirmation phrase but book_taxi wasn't called this turn, CANCEL!
           if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
-            console.log(`[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`);
-            console.log(`[${sessionState.callId}] 🚨 Detected phrase in: "${currentText}"`);
-            
+            console.log(
+              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
+            );
+            console.log(
+              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
+            );
+
             // Cancel the current response
             if (sessionState.openAiResponseActive) {
               openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
             }
-            
+
             // Clear the audio buffer to stop any pending audio
             openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            
+
             // Remove the hallucinated transcript
             if (sessionState.assistantTranscriptIndex !== null) {
               sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
               sessionState.assistantTranscriptIndex = null;
             }
-            
+
             // Inject a system message forcing Ada to actually call the tool
-            openaiWs?.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{ 
-                  type: "input_text", 
-                  text: "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]" 
-                }]
-              }
-            }));
-            
+            openaiWs?.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text:
+                        "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]",
+                    },
+                  ],
+                },
+              })
+            );
+
             // Trigger a new response
             openaiWs?.send(JSON.stringify({ type: "response.create" }));
           }
