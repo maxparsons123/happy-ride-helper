@@ -1271,8 +1271,11 @@ serve(async (req) => {
               },
               body: JSON.stringify({ 
                 address: args.location,
-                // Bias towards UK if we have phone hint
-                region: sessionState.phone?.startsWith("+44") ? "uk" : undefined
+                // Bias towards caller's likely country based on phone
+                region: sessionState.phone?.startsWith("+44") ? "uk" 
+                      : sessionState.phone?.startsWith("+31") ? "nl"
+                      : sessionState.phone?.startsWith("+49") ? "de"
+                      : undefined
               })
             });
             
@@ -1283,14 +1286,17 @@ serve(async (req) => {
                 sessionState.gpsLat = geocodeData.lat;
                 sessionState.gpsLon = geocodeData.lon;
                 
-                console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon}`);
+                const formattedAddress = geocodeData.formatted_address || args.location;
+                const city = geocodeData.city || geocodeData.locality || null;
                 
-                // Save to caller_gps table
+                console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon} (${formattedAddress})`);
+                
+                // Save to caller_gps table (temporary, expires in 1 hour)
                 await supabase.from("caller_gps").upsert({
                   phone_number: sessionState.phone,
                   lat: geocodeData.lat,
                   lon: geocodeData.lon,
-                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour
+                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
                 }, { onConflict: "phone_number" });
                 
                 // Update live_calls with GPS
@@ -1300,9 +1306,45 @@ serve(async (req) => {
                   gps_updated_at: new Date().toISOString()
                 }).eq("call_id", sessionState.callId);
                 
+                // Also save to callers table for permanent history (known_areas)
+                if (sessionState.phone && city) {
+                  try {
+                    // First get current known_areas
+                    const { data: callerData } = await supabase
+                      .from("callers")
+                      .select("known_areas")
+                      .eq("phone_number", sessionState.phone)
+                      .maybeSingle();
+                    
+                    const currentAreas = (callerData?.known_areas as Record<string, any>) || {};
+                    
+                    // Add this location to known_areas if not already there
+                    if (!currentAreas[city]) {
+                      currentAreas[city] = {
+                        lat: geocodeData.lat,
+                        lon: geocodeData.lon,
+                        address: formattedAddress,
+                        added_at: new Date().toISOString()
+                      };
+                      
+                      await supabase.from("callers").upsert({
+                        phone_number: sessionState.phone,
+                        known_areas: currentAreas,
+                        updated_at: new Date().toISOString()
+                      }, { onConflict: "phone_number" });
+                      
+                      console.log(`[${sessionState.callId}] 📍 Saved ${city} to caller's known_areas`);
+                    }
+                  } catch (e) {
+                    console.error(`[${sessionState.callId}] Failed to save known_areas:`, e);
+                  }
+                }
+                
                 result = { 
                   success: true, 
-                  message: `Location saved: ${geocodeData.formatted_address || args.location}`,
+                  message: `Location saved: ${formattedAddress}`,
+                  formatted_address: formattedAddress,
+                  city: city,
                   lat: geocodeData.lat,
                   lon: geocodeData.lon
                 };
