@@ -433,6 +433,26 @@ serve(async (req) => {
         .single();
 
       const transcripts = (callData?.transcripts as any[]) || [];
+      
+      // DEDUPLICATION: Check if a dispatch_confirm already exists for this call
+      // This prevents duplicate confirmations if the webhook is called multiple times
+      const existingConfirm = transcripts.find(
+        (t: any) => t.role === "dispatch_confirm" && t.status === effectiveStatus
+      );
+      
+      if (existingConfirm) {
+        console.log(`[${call_id}] ⚠️ Duplicate dispatch_confirm (${effectiveStatus}) ignored - already exists`);
+        return new Response(JSON.stringify({
+          success: true,
+          call_id,
+          action: action || "confirm",
+          status: effectiveStatus,
+          message: "Confirmation already processed (duplicate ignored)"
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      
       // Add confirmation message with special role for polling to detect
       transcripts.push({
         role: "dispatch_confirm",
