@@ -2578,6 +2578,10 @@ serve(async (req) => {
             }
 
             if (phone && phone !== "unknown") {
+              // Format phone for lookups - strip '+' prefix if present
+              let lookupPhone = phone;
+              const altPhone = phone.replace(/^\+/, ''); // Also try without +
+              
               const { data: callerData } = await supabase
                 .from("callers")
                 .select("name, last_pickup, last_destination, total_bookings")
@@ -2591,7 +2595,59 @@ serve(async (req) => {
                 if (!state.customerName && callerData.name) {
                   state.customerName = callerData.name;
                 }
-                console.log(`[${callId}] 👤 Loaded caller history: ${state.callerTotalBookings} bookings`);
+                console.log(`[${callId}] 👤 Loaded caller: ${callerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
+              }
+              
+              // Check for active bookings if not already loaded
+              if (!activeBooking) {
+                // Try both phone formats (with and without +)
+                const { data: bookingData } = await supabase
+                  .from("bookings")
+                  .select("pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
+                  .or(`caller_phone.eq.${phone},caller_phone.eq.${altPhone}`)
+                  .in("status", ["confirmed", "dispatched", "active", "pending"])
+                  .order("booked_at", { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+                
+                if (bookingData && state) {
+                  activeBooking = bookingData;
+                  state.hasActiveBooking = true;
+                  state.booking.pickup = bookingData.pickup;
+                  state.booking.destination = bookingData.destination;
+                  state.booking.passengers = bookingData.passengers;
+                  
+                  // Update name from booking if not set
+                  if (!state.customerName && bookingData.caller_name) {
+                    state.customerName = bookingData.caller_name;
+                  }
+                  
+                  console.log(`[${callId}] 📦 Found active booking: ${bookingData.pickup} → ${bookingData.destination}`);
+                  
+                  // Inject booking context for Ada
+                  if (openaiWs && openaiConnected) {
+                    const customerGreeting = state.customerName 
+                      ? `The caller is ${state.customerName}.` 
+                      : "";
+                    
+                    openaiWs.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{
+                          type: "input_text",
+                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask if they want to keep it, change it, or cancel it. Do NOT assume they want to book again - acknowledge the existing booking first.]`
+                        }]
+                      }
+                    }));
+                    
+                    // Trigger Ada to respond with this context
+                    openaiWs.send(JSON.stringify({
+                      type: "response.create"
+                    }));
+                  }
+                }
               }
             }
 
