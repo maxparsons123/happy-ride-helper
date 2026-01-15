@@ -557,6 +557,7 @@ interface SessionState {
   // Echo guard: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
+  responseStartTime: number; // timestamp when current AI response started (for initial echo guard)
 
   // Speech timing diagnostics
   speechStartTime: number | null;
@@ -788,7 +789,11 @@ serve(async (req) => {
 
       case "response.audio.delta":
         // Mark Ada as speaking (echo guard)
-        sessionState.isAdaSpeaking = true;
+        if (!sessionState.isAdaSpeaking) {
+          // First audio delta of this response - set initial echo guard
+          sessionState.isAdaSpeaking = true;
+          sessionState.responseStartTime = Date.now();
+        }
         // Forward audio to bridge
         socket.send(JSON.stringify({
           type: "audio",
@@ -1508,32 +1513,40 @@ serve(async (req) => {
           // BARGE-IN: If Ada is currently speaking and we detect real user energy,
           // cancel the current AI response immediately so Ada can hear the caller.
           if (state.isAdaSpeaking) {
-            let sumSq = 0;
-            for (let i = 0; i < pcm16_8k.length; i++) {
-              const s = pcm16_8k[i];
-              sumSq += s * s;
+            // INITIAL ECHO GUARD: Ignore first 400ms of Ada's response
+            // This prevents Ada's own voice (echoing through phone) from triggering barge-in
+            const msSinceResponseStart = Date.now() - (state.responseStartTime || 0);
+            if (msSinceResponseStart < 400) {
+              // Still in initial echo guard - don't check for barge-in
+              // (Audio will still be forwarded to OpenAI below)
+            } else {
+              let sumSq = 0;
+              for (let i = 0; i < pcm16_8k.length; i++) {
+                const s = pcm16_8k[i];
+                sumSq += s * s;
+              }
+              const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+
+              // Threshold tuned for telephony; raised for Rasa mode to reduce false barge-ins
+              const bargeInRmsThreshold = state.useRasaAudioProcessing ? 800 : 650;
+
+              if (rms >= bargeInRmsThreshold) {
+                console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
+                try {
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                } catch (e) {
+                  console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+                }
+
+                state.isAdaSpeaking = false;
+                state.echoGuardUntil = Date.now() + 200;
+                socket.send(JSON.stringify({ type: "ai_interrupted" }));
+              } else {
+                // Still likely echo/line noise; ignore while Ada is talking.
+                return;
+              }
             }
-            const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
-
-            // Threshold tuned for telephony; make it slightly easier in Rasa-test mode.
-            const bargeInRmsThreshold = state.useRasaAudioProcessing ? 500 : 650;
-
-            if (rms < bargeInRmsThreshold) {
-              // Still likely echo/line noise; ignore while Ada is talking.
-              return;
-            }
-
-            console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
-            try {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            } catch (e) {
-              console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
-            }
-
-            state.isAdaSpeaking = false;
-            state.echoGuardUntil = Date.now() + 200;
-            socket.send(JSON.stringify({ type: "ai_interrupted" }));
           }
 
           // Step 2: Upsample to 24kHz (OpenAI Realtime API requirement)
@@ -1635,6 +1648,7 @@ serve(async (req) => {
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
           echoGuardUntil: 0,
+          responseStartTime: 0,
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
@@ -1711,6 +1725,7 @@ serve(async (req) => {
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
             echoGuardUntil: 0,
+            responseStartTime: 0,
             speechStartTime: null,
             speechStopTime: null,
             callEnded: false,
@@ -2023,32 +2038,40 @@ serve(async (req) => {
         // BARGE-IN: If Ada is currently speaking and we detect real user energy,
         // cancel the current AI response immediately so Ada can hear the caller.
         if (state.isAdaSpeaking) {
-          let sumSq = 0;
-          for (let i = 0; i < pcm16_8k.length; i++) {
-            const s = pcm16_8k[i];
-            sumSq += s * s;
+          // INITIAL ECHO GUARD: Ignore first 400ms of Ada's response
+          // This prevents Ada's own voice (echoing through phone) from triggering barge-in
+          const msSinceResponseStart = Date.now() - (state.responseStartTime || 0);
+          if (msSinceResponseStart < 400) {
+            // Still in initial echo guard - don't check for barge-in
+            // (Audio will still be forwarded to OpenAI below)
+          } else {
+            let sumSq = 0;
+            for (let i = 0; i < pcm16_8k.length; i++) {
+              const s = pcm16_8k[i];
+              sumSq += s * s;
+            }
+            const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+
+            // Threshold tuned for telephony; raised for Rasa mode to reduce false barge-ins
+            const bargeInRmsThreshold = state.useRasaAudioProcessing ? 800 : 650;
+
+            if (rms >= bargeInRmsThreshold) {
+              console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
+              try {
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              } catch (e) {
+                console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+              }
+
+              state.isAdaSpeaking = false;
+              state.echoGuardUntil = Date.now() + 200;
+              socket.send(JSON.stringify({ type: "ai_interrupted" }));
+            } else {
+              // Still likely echo/line noise; ignore while Ada is talking.
+              return;
+            }
           }
-          const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
-
-          // Threshold tuned for telephony; make it slightly easier in Rasa-test mode.
-          const bargeInRmsThreshold = state.useRasaAudioProcessing ? 500 : 650;
-
-          if (rms < bargeInRmsThreshold) {
-            // Still likely echo/line noise; ignore while Ada is talking.
-            return;
-          }
-
-          console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
-          try {
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          } catch (e) {
-            console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
-          }
-
-          state.isAdaSpeaking = false;
-          state.echoGuardUntil = Date.now() + 200;
-          socket.send(JSON.stringify({ type: "ai_interrupted" }));
         }
         
         // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
