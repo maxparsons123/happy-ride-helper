@@ -400,6 +400,7 @@ serve(async (req) => {
         message: "Fare confirmation question sent to Ada",
         awaiting_response: true
       }), {
+        status: 201, // 201 = Accepted, waiting for customer response
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
