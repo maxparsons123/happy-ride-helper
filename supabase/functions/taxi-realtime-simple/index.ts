@@ -702,7 +702,14 @@ serve(async (req) => {
       if (sessionState.hasActiveBooking) {
         prompt += `\n\nCURRENT CONTEXT: Caller is ${sessionState.customerName} with active booking.`;
       } else {
-        prompt += `\n\nCURRENT CONTEXT: Caller is ${sessionState.customerName} (returning).`;
+        // Include last trip details so Ada doesn't hallucinate
+        let historyContext = `Caller is ${sessionState.customerName} (returning, ${sessionState.callerTotalBookings || 0} previous bookings).`;
+        if (sessionState.callerLastPickup && sessionState.callerLastDestination) {
+          historyContext += ` Their last trip was from "${sessionState.callerLastPickup}" to "${sessionState.callerLastDestination}".`;
+        } else if (sessionState.callerLastPickup) {
+          historyContext += ` Their last pickup was "${sessionState.callerLastPickup}".`;
+        }
+        prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
       }
     }
 
