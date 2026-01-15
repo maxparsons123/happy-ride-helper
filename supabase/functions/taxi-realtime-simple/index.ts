@@ -1290,9 +1290,9 @@ serve(async (req) => {
         }
 
         case "book_taxi": {
-          console.log(`[${sessionState.callId}] 🚕 Booking:`, args);
+          console.log(`[${sessionState.callId}] 🚕 Booking request from Ada:`, args);
           
-          // === PRE-WEBHOOK VALIDATION ===
+          // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison
           const normalizeForComparison = (addr: string): string => {
             if (!addr) return "";
@@ -1301,29 +1301,67 @@ serve(async (req) => {
               .replace(/[,.\-]/g, " ")
               .replace(/\s+/g, " ")
               .replace(/\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|court|ct|place|pl)\b/gi, "")
-              .replace(/\b(netherlands|uk|united kingdom|england|nederland)\b/gi, "")
+              .replace(/\b(netherlands|uk|united kingdom|england|nederland|the netherlands)\b/gi, "")
+              .replace(/\b(in|naar|van|to|from)\b/gi, "")
               .trim();
           };
           
-          const pickupNorm = normalizeForComparison(args.pickup || "");
-          const destNorm = normalizeForComparison(args.destination || "");
+          // 2. Run AI extraction on conversation (both user + assistant turns)
+          const conversationForExtraction = sessionState.transcripts
+            .filter(t => t.role === "user" || t.role === "assistant")
+            .slice(-12); // Last 12 turns for context
           
-          // 2. Check if pickup equals destination (common AI error)
-          if (pickupNorm && destNorm && pickupNorm === destNorm) {
-            console.log(`[${sessionState.callId}] ❌ BLOCKED: Pickup equals destination!`);
-            console.log(`[${sessionState.callId}] ❌ Pickup: "${args.pickup}" | Destination: "${args.destination}"`);
-            
-            result = {
-              success: false,
-              error: "booking_validation_failed",
-              ada_message: "I notice the pickup and destination are the same. Could you please confirm where you'd like to go to?",
-              needs_clarification: true,
-              field: "destination"
-            };
-            break;
+          let extractedBooking: {
+            pickup?: string;
+            destination?: string;
+            passengers?: number;
+            luggage?: number;
+            vehicle_type?: string;
+            pickup_time?: string;
+            confidence?: string;
+            missing_fields?: string[];
+          } = {};
+          
+          if (conversationForExtraction.length > 0) {
+            try {
+              console.log(`[${sessionState.callId}] 🔍 Running dual-source AI extraction...`);
+              const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                },
+                body: JSON.stringify({
+                  conversation: conversationForExtraction,
+                  caller_name: sessionState.customerName,
+                  current_booking: {
+                    pickup: args.pickup,
+                    destination: args.destination
+                  }
+                })
+              });
+              
+              if (extractionResponse.ok) {
+                extractedBooking = await extractionResponse.json();
+                console.log(`[${sessionState.callId}] 🔍 AI Extraction result:`, extractedBooking);
+              }
+            } catch (extractErr) {
+              console.error(`[${sessionState.callId}] AI extraction failed:`, extractErr);
+            }
           }
           
-          // 3. Check for suspiciously similar addresses (80%+ overlap)
+          // 3. Compare Ada's interpretation vs AI extraction
+          const adaPickup = args.pickup || "";
+          const adaDestination = args.destination || "";
+          const extractedPickup = extractedBooking.pickup || "";
+          const extractedDestination = extractedBooking.destination || "";
+          
+          const adaPickupNorm = normalizeForComparison(adaPickup);
+          const adaDestNorm = normalizeForComparison(adaDestination);
+          const extPickupNorm = normalizeForComparison(extractedPickup);
+          const extDestNorm = normalizeForComparison(extractedDestination);
+          
+          // Calculate similarity between sources
           const similarity = (a: string, b: string): number => {
             if (!a || !b) return 0;
             const wordsA = a.split(" ").filter(w => w.length > 2);
@@ -1333,54 +1371,89 @@ serve(async (req) => {
             return common / Math.max(wordsA.length, wordsB.length);
           };
           
-          const addressSimilarity = similarity(pickupNorm, destNorm);
-          if (addressSimilarity > 0.8) {
-            console.log(`[${sessionState.callId}] ⚠️ WARNING: Addresses are ${Math.round(addressSimilarity * 100)}% similar`);
-            console.log(`[${sessionState.callId}] ⚠️ Pickup: "${args.pickup}" | Destination: "${args.destination}"`);
-            
-            // Use AI extraction to verify from raw transcripts
-            const userTranscriptsForExtraction = sessionState.transcripts
-              .filter(t => t.role === "user" || t.role === "assistant")
-              .slice(-10);
-            
-            if (userTranscriptsForExtraction.length > 0) {
-              try {
-                console.log(`[${sessionState.callId}] 🔍 Running AI extraction to verify addresses...`);
-                const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-                  },
-                  body: JSON.stringify({
-                    conversation: userTranscriptsForExtraction,
-                    caller_name: sessionState.customerName,
-                    current_booking: {}
-                  })
-                });
-                
-                if (extractionResponse.ok) {
-                  const extracted = await extractionResponse.json();
-                  console.log(`[${sessionState.callId}] 🔍 AI Extraction result:`, extracted);
-                  
-                  // If AI found different addresses, use those instead
-                  if (extracted.pickup && extracted.destination) {
-                    const extractedPickupNorm = normalizeForComparison(extracted.pickup);
-                    const extractedDestNorm = normalizeForComparison(extracted.destination);
-                    
-                    if (extractedPickupNorm !== extractedDestNorm) {
-                      console.log(`[${sessionState.callId}] ✅ AI found distinct addresses, using those instead`);
-                      args.pickup = extracted.pickup;
-                      args.destination = extracted.destination;
-                    }
-                  }
-                }
-              } catch (extractErr) {
-                console.error(`[${sessionState.callId}] AI extraction failed:`, extractErr);
-                // Continue with Ada's addresses if extraction fails
-              }
+          const pickupSourceMatch = similarity(adaPickupNorm, extPickupNorm);
+          const destSourceMatch = similarity(adaDestNorm, extDestNorm);
+          
+          console.log(`[${sessionState.callId}] 📊 Source comparison:`);
+          console.log(`[${sessionState.callId}]   Ada pickup: "${adaPickup}" | Extracted: "${extractedPickup}" | Match: ${Math.round(pickupSourceMatch * 100)}%`);
+          console.log(`[${sessionState.callId}]   Ada dest: "${adaDestination}" | Extracted: "${extractedDestination}" | Match: ${Math.round(destSourceMatch * 100)}%`);
+          
+          // 4. Determine final addresses
+          let finalPickup = adaPickup;
+          let finalDestination = adaDestination;
+          let sourceDiscrepancy = false;
+          
+          // If Ada's pickup = destination (common error), prefer extraction
+          if (adaPickupNorm && adaDestNorm && adaPickupNorm === adaDestNorm) {
+            console.log(`[${sessionState.callId}] ⚠️ Ada's pickup = destination, checking extraction...`);
+            if (extPickupNorm && extDestNorm && extPickupNorm !== extDestNorm) {
+              console.log(`[${sessionState.callId}] ✅ Using extracted addresses (distinct)`);
+              finalPickup = extractedPickup;
+              finalDestination = extractedDestination;
+            } else {
+              // Both sources agree they're the same - block booking
+              console.log(`[${sessionState.callId}] ❌ BLOCKED: Both sources show same address`);
+              result = {
+                success: false,
+                error: "booking_validation_failed",
+                ada_message: "I notice the pickup and destination appear to be the same. Could you please confirm where you'd like to go to?",
+                needs_clarification: true,
+                field: "destination"
+              };
+              break;
             }
           }
+          
+          // If sources disagree significantly (< 50% match), flag for clarification
+          if (extractedPickup && pickupSourceMatch < 0.5) {
+            console.log(`[${sessionState.callId}] ⚠️ Pickup discrepancy detected`);
+            sourceDiscrepancy = true;
+          }
+          if (extractedDestination && destSourceMatch < 0.5) {
+            console.log(`[${sessionState.callId}] ⚠️ Destination discrepancy detected`);
+            sourceDiscrepancy = true;
+          }
+          
+          // If major discrepancy, prefer extracted (from conversation) over Ada's interpretation
+          if (sourceDiscrepancy && extractedBooking.confidence === "high") {
+            console.log(`[${sessionState.callId}] 🔄 Using high-confidence extracted addresses due to discrepancy`);
+            if (extractedPickup) finalPickup = extractedPickup;
+            if (extractedDestination) finalDestination = extractedDestination;
+          }
+          
+          // 5. Final validation - ensure pickup != destination
+          const finalPickupNorm = normalizeForComparison(finalPickup);
+          const finalDestNorm = normalizeForComparison(finalDestination);
+          
+          if (finalPickupNorm && finalDestNorm && finalPickupNorm === finalDestNorm) {
+            console.log(`[${sessionState.callId}] ❌ BLOCKED: Final pickup equals destination`);
+            result = {
+              success: false,
+              error: "booking_validation_failed", 
+              ada_message: "I'm having trouble distinguishing the pickup from the destination. Could you tell me again where you'd like to be picked up from, and where you're going?",
+              needs_clarification: true
+            };
+            break;
+          }
+          
+          // 6. Enrich booking with extracted details
+          const finalPassengers = args.passengers || extractedBooking.passengers || 1;
+          const finalBags = args.bags ?? extractedBooking.luggage ?? 0;
+          const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || "saloon";
+          const finalPickupTime = args.pickup_time || extractedBooking.pickup_time || "now";
+          
+          console.log(`[${sessionState.callId}] ✅ Final booking details:`);
+          console.log(`[${sessionState.callId}]   Pickup: "${finalPickup}"`);
+          console.log(`[${sessionState.callId}]   Destination: "${finalDestination}"`);
+          console.log(`[${sessionState.callId}]   Passengers: ${finalPassengers}, Bags: ${finalBags}, Vehicle: ${finalVehicleType}`);
+          
+          // Update args with final values
+          args.pickup = finalPickup;
+          args.destination = finalDestination;
+          args.passengers = finalPassengers;
+          args.bags = finalBags;
+          args.vehicle_type = finalVehicleType;
+          args.pickup_time = finalPickupTime;
           
           // === END VALIDATION ===
           
