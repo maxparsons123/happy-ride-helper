@@ -209,7 +209,7 @@ CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
 - If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
 - If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
 - If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
-- If the result contains "success: true" → Read back: "Booked! Picking up from [PICKUP] to [DESTINATION], fare [FARE], arriving in about [ETA] minutes."
+- If the result contains "success: true" → The fare and ETA are in the result. Say: "Booked! Picking up from [pickup] to [destination], fare [use actual fare from result], arriving in about [use actual eta from result] minutes."
 - DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
@@ -1395,13 +1395,19 @@ serve(async (req) => {
                     console.log(`[${sessionState.callId}] 🎤 Injecting dispatch confirmation for Ada: "${dispatchResult.confirmation_message}"`);
                     dispatchConfirmationSent = true;
                     
-                    // Send system message so Ada speaks the exact dispatch confirmation
+                    // Build the full message with fare and ETA details
+                    const fareText = fare ? `Fare is ${fare}` : "";
+                    const etaText = etaMinutes ? `arriving in about ${etaMinutes} minutes` : "";
+                    const detailsText = [fareText, etaText].filter(Boolean).join(", ");
+                    const bookingDetails = detailsText ? ` ${detailsText}.` : "";
+                    
+                    // Send system message so Ada speaks the dispatch confirmation + details + follow-up question
                     openaiWs?.send(JSON.stringify({
                       type: "conversation.item.create",
                       item: {
                         type: "message",
                         role: "user",
-                        content: [{ type: "input_text", text: `[SYSTEM: Booking confirmed by dispatch. Say exactly this to the customer: "${dispatchResult.confirmation_message}"]` }]
+                        content: [{ type: "input_text", text: `[SYSTEM: Booking confirmed by dispatch. Say this to the customer: "${dispatchResult.confirmation_message}${bookingDetails} Is there anything else I can help you with?"]` }]
                       }
                     }));
                     
