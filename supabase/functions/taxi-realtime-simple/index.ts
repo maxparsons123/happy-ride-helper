@@ -1542,15 +1542,18 @@ serve(async (req) => {
           if (DISPATCH_WEBHOOK_URL) {
             try {
               // === WEBHOOK DEDUPLICATION ===
-              // Prevent duplicate webhooks for the same booking details within 30 seconds
-              const webhookKey = `${args.pickup}|${args.destination}|${args.passengers || 1}`.toLowerCase();
+              // CRITICAL: Only allow ONE booking webhook per call session
+              // If a webhook was already sent for this call, block subsequent book_taxi calls
+              // (user must use modify_booking to change details after initial booking)
               const now = Date.now();
-              const DEDUP_WINDOW_MS = 30000; // 30 seconds
+              const DEDUP_WINDOW_MS = 60000; // 60 seconds - entire call session
               
-              if (sessionState.lastWebhookKey === webhookKey && 
-                  sessionState.lastWebhookSentAt && 
+              if (sessionState.lastWebhookSentAt && 
                   (now - sessionState.lastWebhookSentAt) < DEDUP_WINDOW_MS) {
-                console.log(`[${sessionState.callId}] ⚠️ DUPLICATE WEBHOOK BLOCKED - same booking sent ${Math.round((now - sessionState.lastWebhookSentAt) / 1000)}s ago`);
+                const timeSince = Math.round((now - sessionState.lastWebhookSentAt) / 1000);
+                console.log(`[${sessionState.callId}] ⚠️ DUPLICATE BOOKING BLOCKED - webhook already sent ${timeSince}s ago`);
+                console.log(`[${sessionState.callId}]   Previous: ${sessionState.lastWebhookKey}`);
+                console.log(`[${sessionState.callId}]   Current: ${args.pickup}|${args.destination}|${args.passengers || 1}`);
                 // Don't fire webhook again, but still poll for the existing dispatch response
               } else {
                 console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
@@ -1593,8 +1596,8 @@ serve(async (req) => {
                   timestamp: new Date().toISOString()
                 };
                 
-                // Record this webhook for deduplication
-                sessionState.lastWebhookKey = webhookKey;
+                // Record this webhook for deduplication (block ALL future book_taxi webhooks for this session)
+                sessionState.lastWebhookKey = `${args.pickup}|${args.destination}|${args.passengers || 1}`.toLowerCase();
                 sessionState.lastWebhookSentAt = now;
                 
                 // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
