@@ -191,22 +191,23 @@ BOOKING FLOW - TWO PHASE CONFIRMATION:
 
 ⚠️ CRITICAL: Booking happens in TWO steps to prevent premature dispatch.
 
-PHASE 1 - ADDRESS CONFIRMATION:
+PHASE 1 - COLLECT & SEND BOOKING:
 1. Get PICKUP address. Ask: "Where would you like to be picked up from?"
 2. Get DESTINATION address. Ask: "And where are you going to?"
 3. READ BACK addresses: "Just to confirm, from [PICKUP] to [DESTINATION]. Is that correct?"
 4. WAIT for user to say "yes/yeah/correct" before proceeding.
-5. Once addresses confirmed → CALL prepare_booking function.
+5. Once addresses confirmed → CALL book_taxi function.
+6. book_taxi sends details to dispatch and returns fare + ETA. Taxi is NOT dispatched yet.
 
 PHASE 2 - FARE CONFIRMATION:
-6. prepare_booking returns fare and ETA (taxi is NOT dispatched yet).
-7. READ the fare/ETA to customer: "That will be [FARE], arriving in [ETA]. Shall I book that for you?"
+7. READ the fare/ETA returned by book_taxi: "That will be [FARE], arriving in about [ETA]. Shall I book that for you?"
 8. WAIT for user to confirm ("yes", "that's fine", "book it", "go ahead").
-9. Once fare confirmed → CALL confirm_booking function.
-10. ONLY after confirm_booking succeeds, say: "Booked! You'll receive a WhatsApp confirmation."
+9. Once user confirms fare → CALL confirm_booking function.
+10. ONLY after confirm_booking succeeds, the taxi is dispatched and you can say: "Booked! You'll receive a WhatsApp confirmation."
 
 ⚠️ NEVER call confirm_booking until user explicitly agrees to the fare/ETA.
 ⚠️ If user says "no" or "too expensive" after hearing fare, ask what they'd like to do instead.
+⚠️ The fare and ETA come FROM the dispatch system - do NOT make them up.
 
 ONLY ask about passengers if it's a large group or they mention multiple people. Default to 1.
 ONLY ask about bags if destination is an AIRPORT or TRAIN STATION.
@@ -221,14 +222,14 @@ ADDRESS ACCURACY - CRITICAL:
 - NEVER guess or auto-correct house numbers.
 
 CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
-- When user CONFIRMS addresses → CALL prepare_booking (NOT confirm_booking yet).
+- When user CONFIRMS addresses → CALL book_taxi (NOT confirm_booking yet).
 - When user CONFIRMS fare/ETA → CALL confirm_booking.
 - Speaking about booking is NOT the same as calling the function. You MUST generate a function call.
 - If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer.
 - If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
 - If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
 - If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
-- DO NOT make up fares or ETAs. ONLY use values returned by prepare_booking.
+- DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
 - If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
@@ -299,8 +300,8 @@ const TOOLS = [
   },
   {
     type: "function",
-    name: "prepare_booking",
-    description: "STEP 1: Prepare a booking and get fare/ETA quote. Call this AFTER user confirms addresses. This validates details and returns the fare/ETA. Does NOT dispatch the taxi yet - you must call confirm_booking after user agrees to the fare.",
+    name: "book_taxi",
+    description: "STEP 1: Send booking details to dispatch and get fare/ETA. Call AFTER user confirms addresses. Returns fare and ETA from dispatch. Taxi is NOT dispatched yet - you must read the fare/ETA to the customer and call confirm_booking after they agree.",
     parameters: {
       type: "object",
       properties: {
@@ -317,7 +318,7 @@ const TOOLS = [
   {
     type: "function",
     name: "confirm_booking",
-    description: "STEP 2: Confirm and dispatch the booking. Call ONLY after user agrees to the fare/ETA from prepare_booking. This sends the actual dispatch request. User must say 'yes', 'that's fine', 'book it', 'go ahead' etc. before calling this.",
+    description: "STEP 2: Dispatch the taxi. Call ONLY after user agrees to the fare/ETA you read from book_taxi. User must say 'yes', 'that's fine', 'book it', 'go ahead' etc. before calling this. This actually dispatches the taxi.",
     parameters: { type: "object", properties: {} }
   },
   {
@@ -1382,8 +1383,8 @@ serve(async (req) => {
           break;
         }
 
-        case "prepare_booking": {
-          console.log(`[${sessionState.callId}] 📋 PREPARE BOOKING request from Ada:`, args);
+        case "book_taxi": {
+          console.log(`[${sessionState.callId}] 📋 BOOK_TAXI request from Ada:`, args);
           
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison
@@ -1555,13 +1556,13 @@ serve(async (req) => {
           let fare = "£12.50";
           let etaMinutes = 8;
           
-          // Call dispatch for quote (action: "quote") if configured
+          // Send booking details to dispatch - they return fare/ETA
           const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
           console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
           
           if (DISPATCH_WEBHOOK_URL) {
             try {
-              console.log(`[${sessionState.callId}] 💰 Requesting fare quote from dispatch...`);
+              console.log(`[${sessionState.callId}] 📡 Sending booking details to dispatch...`);
               
               // Get recent user transcripts
               const userTranscripts = sessionState.transcripts
@@ -1574,8 +1575,7 @@ serve(async (req) => {
                 formattedPhone = formattedPhone.slice(1);
               }
               
-              const quotePayload = {
-                action: "quote", // NEW: Request quote only, not dispatch
+              const bookingPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
                 caller_phone: formattedPhone,
@@ -1592,25 +1592,25 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
-              // Fire quote request and wait for response
-              const quoteResponse = await fetch(DISPATCH_WEBHOOK_URL, {
+              // Send booking and wait for fare/ETA response
+              const bookingResponse = await fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(quotePayload),
+                body: JSON.stringify(bookingPayload),
               });
               
-              if (quoteResponse.ok) {
-                const quoteResult = await quoteResponse.json();
-                console.log(`[${sessionState.callId}] 💰 Quote received:`, quoteResult);
-                if (quoteResult.fare) fare = quoteResult.fare.startsWith("£") ? quoteResult.fare : `£${quoteResult.fare}`;
-                if (quoteResult.eta_minutes) etaMinutes = quoteResult.eta_minutes;
+              if (bookingResponse.ok) {
+                const bookingResult = await bookingResponse.json();
+                console.log(`[${sessionState.callId}] 💰 Dispatch returned:`, bookingResult);
+                if (bookingResult.fare) fare = bookingResult.fare.startsWith("£") ? bookingResult.fare : `£${bookingResult.fare}`;
+                if (bookingResult.eta_minutes) etaMinutes = bookingResult.eta_minutes;
               }
-            } catch (quoteErr) {
-              console.error(`[${sessionState.callId}] ⚠️ Quote request failed, using defaults:`, quoteErr);
+            } catch (bookingErr) {
+              console.error(`[${sessionState.callId}] ⚠️ Booking request failed, using defaults:`, bookingErr);
             }
           }
           
-          // Store pending booking (NOT dispatched yet)
+          // Store pending booking (NOT dispatched yet - awaiting user confirmation of fare)
           sessionState.pendingBooking = {
             pickup: args.pickup,
             destination: args.destination,
@@ -1634,19 +1634,19 @@ serve(async (req) => {
             version: 1
           };
           
-          console.log(`[${sessionState.callId}] 📋 Pending booking prepared: ${args.pickup} → ${args.destination}, fare=${fare}, eta=${etaMinutes}min`);
-          console.log(`[${sessionState.callId}] ⏳ Awaiting user confirmation of fare/ETA before dispatching...`);
+          console.log(`[${sessionState.callId}] 📋 Booking sent, fare=${fare}, eta=${etaMinutes}min`);
+          console.log(`[${sessionState.callId}] ⏳ Awaiting user confirmation of fare/ETA before dispatching taxi...`);
           
-          // Return quote for Ada to read to customer
+          // Return fare/ETA for Ada to read to customer
           result = {
             success: true,
-            pending: true, // Indicates booking is NOT dispatched yet
+            pending: true, // Indicates taxi is NOT dispatched yet
             fare: fare,
             eta_minutes: etaMinutes,
             pickup: args.pickup,
             destination: args.destination,
             passengers: args.passengers || 1,
-            message: `Quote ready: ${fare}, ${etaMinutes} minutes. User must confirm before dispatching.`,
+            message: `Booking received. Fare: ${fare}, ETA: ${etaMinutes} minutes. Awaiting customer confirmation.`,
             ada_instruction: `Tell the customer: "That will be ${fare}, with the taxi arriving in about ${etaMinutes} minutes. Shall I book that for you?" Then WAIT for their response. If they say yes/okay/book it, call confirm_booking.`
           };
           break;
@@ -1660,7 +1660,7 @@ serve(async (req) => {
             console.error(`[${sessionState.callId}] ❌ No pending booking to confirm!`);
             result = {
               success: false,
-              message: "No pending booking to confirm. Call prepare_booking first.",
+              message: "No pending booking to confirm. Call book_taxi first.",
               ada_message: "I don't have a booking ready to confirm. Let me get the details again - where would you like to go?"
             };
             break;
@@ -1696,7 +1696,7 @@ serve(async (req) => {
                 }
                 
                 const dispatchPayload = {
-                  action: "book", // Actual dispatch request
+                  action: "confirm", // User confirmed fare - now dispatch the taxi
                   job_id: pending.jobId,
                   call_id: sessionState.callId,
                   caller_phone: formattedPhone,
