@@ -1226,22 +1226,36 @@ serve(async (req) => {
             if (isYes || isNo) {
               console.log(`[${sessionState.callId}] 💰 Fare confirm response: ${isYes ? 'YES' : 'NO'}`);
               
-              // Send callback to dispatch if URL provided
+              const responsePayload = {
+                call_id: sessionState.callId,
+                response: isYes ? "confirmed" : "cancelled",
+                fare: sessionState.pendingFareConfirm.fare,
+                eta: sessionState.pendingFareConfirm.eta,
+                customer_response: userText,
+                responded_at: new Date().toISOString()
+              };
+              
+              // Always store in database for polling
+              supabase.from("live_calls")
+                .update({
+                  clarification_attempts: {
+                    fare_confirm_response: responsePayload.response,
+                    fare: responsePayload.fare,
+                    eta: responsePayload.eta,
+                    customer_said: userText,
+                    responded_at: responsePayload.responded_at
+                  },
+                  updated_at: new Date().toISOString()
+                })
+                .eq("call_id", sessionState.callId)
+                .then(() => console.log(`[${sessionState.callId}] 💾 Fare response saved to DB`));
+              
+              // Also send callback if URL provided
               if (sessionState.pendingFareConfirm.callbackUrl) {
-                const callbackPayload = {
-                  call_id: sessionState.callId,
-                  response: isYes ? "confirmed" : "cancelled",
-                  fare: sessionState.pendingFareConfirm.fare,
-                  eta: sessionState.pendingFareConfirm.eta,
-                  customer_response: userText,
-                  timestamp: new Date().toISOString()
-                };
-                
-                // Fire and forget - don't block voice flow
                 fetch(sessionState.pendingFareConfirm.callbackUrl, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(callbackPayload)
+                  body: JSON.stringify(responsePayload)
                 }).then(res => {
                   console.log(`[${sessionState.callId}] 📤 Fare callback sent: ${res.status}`);
                 }).catch(err => {
@@ -1252,7 +1266,7 @@ serve(async (req) => {
               // Clear pending state
               sessionState.pendingFareConfirm = null;
               
-              // If NO, inject system message to tell Ada to apologize and ask if they want to try different options
+              // If NO, inject system message to tell Ada to apologize
               if (isNo) {
                 openaiWs?.send(JSON.stringify({
                   type: "conversation.item.create",
