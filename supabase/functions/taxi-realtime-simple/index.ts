@@ -1158,6 +1158,8 @@ serve(async (req) => {
           const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
           console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
           
+          let dispatchConfirmationSent = false;
+          
           if (DISPATCH_WEBHOOK_URL) {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
@@ -1213,11 +1215,30 @@ serve(async (req) => {
                   .eq("call_id", sessionState.callId)
                   .single();
                 
-                // Check if dispatch set fare OR eta OR status changed to dispatched (confirm action)
-                // More flexible: accept confirmation if ANY confirmation signal is present
+                // Check for dispatch_confirm transcript with the confirmation message
+                const transcripts = callData?.transcripts as any[] || [];
+                const dispatchConfirm = transcripts.find(t => 
+                  t.role === "dispatch_confirm" && 
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+                
+                if (dispatchConfirm) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed with message: "${dispatchConfirm.text}"`);
+                  dispatchResult = {
+                    fare: dispatchConfirm.fare || callData?.fare || null,
+                    eta_minutes: parseInt(dispatchConfirm.eta) || parseInt(callData?.eta) || 8,
+                    confirmed: true,
+                    confirmation_message: dispatchConfirm.text,
+                    booking_ref: dispatchConfirm.booking_ref || null,
+                    status: dispatchConfirm.status
+                  };
+                  break;
+                }
+                
+                // Fallback: Check if dispatch set fare OR eta OR status changed to dispatched
                 const hasConfirmation = callData?.fare || callData?.eta || callData?.status === "dispatched";
                 if (hasConfirmation) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed: fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (no message): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
                   dispatchResult = {
                     fare: callData?.fare || null,
                     eta_minutes: parseInt(callData?.eta) || 8,
@@ -1227,7 +1248,7 @@ serve(async (req) => {
                 }
                 
                 // Check if dispatch sent a "say" message (look for dispatch transcript)
-                const transcripts = callData?.transcripts as any[] || [];
+                // (using transcripts already declared above)
                 
                 // Check for hangup instruction first
                 const dispatchHangup = transcripts.find(t => 
@@ -1332,6 +1353,28 @@ serve(async (req) => {
                 if (dispatchResult.confirmed) {
                   fare = dispatchResult.fare || fare;
                   etaMinutes = dispatchResult.eta_minutes || etaMinutes;
+                  if (dispatchResult.booking_ref) {
+                    bookingRef = dispatchResult.booking_ref;
+                  }
+                  
+                  // If dispatch provided a custom confirmation message, inject it for Ada to speak
+                  if (dispatchResult.confirmation_message) {
+                    console.log(`[${sessionState.callId}] 🎤 Injecting dispatch confirmation for Ada: "${dispatchResult.confirmation_message}"`);
+                    dispatchConfirmationSent = true;
+                    
+                    // Send system message so Ada speaks the exact dispatch confirmation
+                    openaiWs?.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: `[SYSTEM: Booking confirmed by dispatch. Say exactly this to the customer: "${dispatchResult.confirmation_message}"]` }]
+                      }
+                    }));
+                    
+                    // Trigger Ada to respond with the message
+                    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  }
                 }
               } else {
                 console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using defaults`);
@@ -1359,12 +1402,13 @@ serve(async (req) => {
             console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
           }
           
+          // If we already injected dispatch message, return minimal result (Ada already speaking)
           result = { 
             success: true, 
             eta_minutes: etaMinutes, 
             fare: fare,
             booking_ref: bookingRef,
-            message: "Booking confirmed"
+            message: dispatchConfirmationSent ? "Booking confirmed - dispatch message sent" : "Booking confirmed"
           };
           break;
         }
