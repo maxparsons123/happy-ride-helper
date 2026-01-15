@@ -573,7 +573,7 @@ interface SessionState {
   // Caller history from database
   callerLastPickup: string | null;
   callerLastDestination: string | null;
-  
+
   // Rasa-style audio processing toggle
   useRasaAudioProcessing: boolean;
   callerTotalBookings: number;
@@ -602,11 +602,17 @@ interface SessionState {
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
-  
+
   // Half-duplex mode: when enabled, user audio is buffered while Ada speaks and only forwarded after
   halfDuplex: boolean;
   halfDuplexBuffer: Uint8Array[]; // Buffer for audio while Ada is speaking
-  
+
+  // --- Booking tool enforcement ---
+  // True only after a successful book_taxi tool result for the CURRENT booking.
+  // Used to prevent Ada from saying "Booked!" without actually placing the booking.
+  bookingConfirmedThisTurn: boolean;
+  lastBookTaxiSuccessAt: number | null;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
