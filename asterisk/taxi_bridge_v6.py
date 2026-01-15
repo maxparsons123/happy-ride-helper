@@ -23,6 +23,7 @@ import struct
 import base64
 import time
 import logging
+import os
 from typing import Optional
 from collections import deque
 
@@ -47,6 +48,10 @@ AI_RATE = 24000   # AI TTS output rate
 
 # Send native 8kHz µ-law to edge function (optimized for OpenAI Whisper)
 SEND_NATIVE_ULAW = True
+
+# Rasa-style audio processing (A/B test: 8kHz→16kHz instead of 8kHz→24kHz)
+# Set via environment variable for easy toggling without code changes
+RASA_AUDIO_PROCESSING = os.environ.get("RASA_AUDIO_PROCESSING", "false").lower() in ("true", "1", "yes")
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 3
@@ -339,10 +344,12 @@ class TaxiBridgeV6:
                 "phone": self.phone if self.phone != "Unknown" else "unknown",
                 "user_phone": self.phone if self.phone != "Unknown" else "unknown",
                 "addressTtsSplicing": True,
+                "rasa_audio_processing": RASA_AUDIO_PROCESSING,
             }
             await self.ws.send(json.dumps(init_msg))
             self.init_sent = True
-            logger.info(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}")
+            audio_mode = "Rasa (8→16kHz)" if RASA_AUDIO_PROCESSING else "Standard (8→24kHz)"
+            logger.info(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}, audio: {audio_mode}")
 
             # 🔥 FIXED: Simplified main loop with proper exception handling
             while self.running:
@@ -568,9 +575,11 @@ async def main():
         lambda r, w: TaxiBridgeV6(r, w).run(),
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
+    audio_mode = "Rasa (8→16kHz)" if RASA_AUDIO_PROCESSING else "Standard (8→24kHz)"
     logger.info(f"🚀 Taxi Bridge v6.1 - FIXED MEMORY LEAKS")
     logger.info(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}")
     logger.info(f"   Connecting to: {WS_URL}")
+    logger.info(f"   Audio processing: {audio_mode} (RASA_AUDIO_PROCESSING={RASA_AUDIO_PROCESSING})")
 
     async with server:
         await server.serve_forever()
