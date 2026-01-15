@@ -1488,7 +1488,8 @@ serve(async (req) => {
           }
           
           // Bridge sends 8kHz µ-law, need to convert to 24kHz PCM16 for OpenAI
-          // Step 1: Decode µ-law to 16-bit PCM
+          // NOTE: OpenAI Realtime API only accepts 24kHz - Rasa mode flag is for logging/metrics only
+          // Step 1: Decode µ-law to 16-bit PCM (8kHz)
           const pcm16_8k = new Int16Array(audioData.length);
           for (let i = 0; i < audioData.length; i++) {
             const ulaw = ~audioData[i] & 0xFF;
@@ -1501,6 +1502,7 @@ serve(async (req) => {
           }
           
           // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
+          // OpenAI Realtime API requires 24kHz PCM16 - cannot use 16kHz
           const pcm16_24k = new Int16Array(pcm16_8k.length * 3);
           for (let i = 0; i < pcm16_8k.length - 1; i++) {
             const s0 = pcm16_8k[i];
