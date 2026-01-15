@@ -518,6 +518,19 @@ interface SessionState {
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
+  
+  // STT Accuracy Metrics (for A/B testing audio processing modes)
+  sttMetrics: {
+    totalTranscripts: number;
+    totalWords: number;
+    totalChars: number;
+    correctedTranscripts: number;
+    filteredHallucinations: number;
+    avgTranscriptDelayMs: number;
+    transcriptDelays: number[];
+    avgSpeechDurationMs: number;
+    speechDurations: number[];
+  };
 }
 
 serve(async (req) => {
@@ -793,6 +806,13 @@ serve(async (req) => {
           : 0;
         console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait 1500ms before responding`);
         sessionState.speechStopTime = Date.now();
+        
+        // Track speech duration for STT metrics
+        if (speechDuration > 0) {
+          sessionState.sttMetrics.speechDurations.push(speechDuration);
+          const durations = sessionState.sttMetrics.speechDurations;
+          sessionState.sttMetrics.avgSpeechDurationMs = durations.reduce((a, b) => a + b, 0) / durations.length;
+        }
         // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
         break;
       }
@@ -805,16 +825,39 @@ serve(async (req) => {
         const transcriptDelay = sessionState.speechStopTime 
           ? Date.now() - sessionState.speechStopTime 
           : 0;
+        
+        // Track transcript delay for STT metrics
+        if (transcriptDelay > 0) {
+          sessionState.sttMetrics.transcriptDelays.push(transcriptDelay);
+          const delays = sessionState.sttMetrics.transcriptDelays;
+          sessionState.sttMetrics.avgTranscriptDelayMs = delays.reduce((a, b) => a + b, 0) / delays.length;
+        }
+        
         console.log(`[${sessionState.callId}] 📝 Transcript received ${transcriptDelay}ms after speech stopped`);
         
         // Filter out hallucinations/noise
         if (!rawText || isHallucination(rawText)) {
-          console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}"`);
+          sessionState.sttMetrics.filteredHallucinations++;
+          console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}" (total filtered: ${sessionState.sttMetrics.filteredHallucinations})`);
           break;
         }
         
         const userText = correctTranscript(rawText);
-        console.log(`[${sessionState.callId}] 👤 User: "${userText}"${rawText !== userText ? ` (corrected from: "${rawText}")` : ""}`);
+        const wasCorreced = rawText !== userText;
+        
+        // Update STT metrics
+        sessionState.sttMetrics.totalTranscripts++;
+        sessionState.sttMetrics.totalChars += userText.length;
+        sessionState.sttMetrics.totalWords += userText.split(/\s+/).filter(w => w.length > 0).length;
+        if (wasCorreced) {
+          sessionState.sttMetrics.correctedTranscripts++;
+        }
+        
+        // Enhanced logging with audio processing mode context
+        const audioMode = sessionState.useRasaAudioProcessing ? "RASA" : "STD";
+        const correctionRate = ((sessionState.sttMetrics.correctedTranscripts / sessionState.sttMetrics.totalTranscripts) * 100).toFixed(1);
+        console.log(`[${sessionState.callId}] 👤 [${audioMode}] User: "${userText}"${wasCorreced ? ` (corrected from: "${rawText}")` : ""}`);
+        console.log(`[${sessionState.callId}] 📊 [${audioMode}] STT Stats: transcripts=${sessionState.sttMetrics.totalTranscripts}, words=${sessionState.sttMetrics.totalWords}, corrected=${correctionRate}%, avgDelay=${sessionState.sttMetrics.avgTranscriptDelayMs.toFixed(0)}ms`);
 
         socket.send(
           JSON.stringify({
@@ -1302,9 +1345,32 @@ serve(async (req) => {
           };
           break;
 
-        case "end_call":
+        case "end_call": {
           console.log(`[${sessionState.callId}] 👋 Ending call`);
           result = { success: true };
+          
+          // === STT ACCURACY METRICS SUMMARY ===
+          const m = sessionState.sttMetrics;
+          const audioMode = sessionState.useRasaAudioProcessing ? "RASA (8→16kHz)" : "STANDARD (8→24kHz)";
+          const correctionRate = m.totalTranscripts > 0 
+            ? ((m.correctedTranscripts / m.totalTranscripts) * 100).toFixed(1) 
+            : "0.0";
+          const hallucinationRate = (m.totalTranscripts + m.filteredHallucinations) > 0
+            ? ((m.filteredHallucinations / (m.totalTranscripts + m.filteredHallucinations)) * 100).toFixed(1)
+            : "0.0";
+          
+          console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
+          console.log(`[${sessionState.callId}] 📊 STT ACCURACY METRICS - ${audioMode}`);
+          console.log(`[${sessionState.callId}] ───────────────────────────────────────────────────────────`);
+          console.log(`[${sessionState.callId}]   Total transcripts:      ${m.totalTranscripts}`);
+          console.log(`[${sessionState.callId}]   Total words:            ${m.totalWords}`);
+          console.log(`[${sessionState.callId}]   Total characters:       ${m.totalChars}`);
+          console.log(`[${sessionState.callId}]   Corrected transcripts:  ${m.correctedTranscripts} (${correctionRate}%)`);
+          console.log(`[${sessionState.callId}]   Filtered hallucinations: ${m.filteredHallucinations} (${hallucinationRate}%)`);
+          console.log(`[${sessionState.callId}]   Avg transcript delay:   ${m.avgTranscriptDelayMs.toFixed(0)}ms`);
+          console.log(`[${sessionState.callId}]   Avg speech duration:    ${m.avgSpeechDurationMs.toFixed(0)}ms`);
+          console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
+          
           // Immediate flush on call end - capture all transcripts
           immediateFlush(sessionState);
           // Update call status
@@ -1323,6 +1389,7 @@ serve(async (req) => {
           
           // DON'T trigger response.create after end_call - Ada should stop talking
           return;
+        }
 
         default:
           result = { error: "Unknown function" };
@@ -1449,7 +1516,7 @@ serve(async (req) => {
           callerTotalBookings: 0,
           gpsLat: null,
           gpsLon: null,
-          gpsRequired: message.gps_required ?? false, // External system controls GPS requirement
+          gpsRequired: message.gps_required ?? false,
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
@@ -1457,7 +1524,18 @@ serve(async (req) => {
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
-          useRasaAudioProcessing: message.rasa_audio_processing ?? false
+          useRasaAudioProcessing: message.rasa_audio_processing ?? false,
+          sttMetrics: {
+            totalTranscripts: 0,
+            totalWords: 0,
+            totalChars: 0,
+            correctedTranscripts: 0,
+            filteredHallucinations: 0,
+            avgTranscriptDelayMs: 0,
+            transcriptDelays: [],
+            avgSpeechDurationMs: 0,
+            speechDurations: [],
+          }
         };
         
         preConnected = true;
@@ -1514,7 +1592,7 @@ serve(async (req) => {
             callerTotalBookings: 0,
             gpsLat: null,
             gpsLon: null,
-            gpsRequired: message.gps_required ?? false, // External system controls GPS requirement
+            gpsRequired: message.gps_required ?? false,
             assistantTranscriptIndex: null,
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
@@ -1522,7 +1600,18 @@ serve(async (req) => {
             speechStartTime: null,
             speechStopTime: null,
             callEnded: false,
-            useRasaAudioProcessing: message.rasa_audio_processing ?? false
+            useRasaAudioProcessing: message.rasa_audio_processing ?? false,
+            sttMetrics: {
+              totalTranscripts: 0,
+              totalWords: 0,
+              totalChars: 0,
+              correctedTranscripts: 0,
+              filteredHallucinations: 0,
+              avgTranscriptDelayMs: 0,
+              transcriptDelays: [],
+              avgSpeechDurationMs: 0,
+              speechDurations: [],
+            }
           };
         }
         
@@ -1531,9 +1620,9 @@ serve(async (req) => {
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
         }
         
-        console.log(`[${callId}] 🎧 Audio processing: ${state.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
+        console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
         
-        console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state.language}`);
+        console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
 
         // If pre-connected, OpenAI is already ready - just send session update + greeting
         if (preConnected && openaiConnected) {
