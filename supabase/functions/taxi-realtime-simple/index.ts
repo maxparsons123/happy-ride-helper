@@ -1232,8 +1232,9 @@ serve(async (req) => {
           // --- Check for pending fare confirmation response ---
           if (sessionState.pendingFareConfirm?.active) {
             const lowerText = userText.toLowerCase();
-            const isYes = /\b(yes|yeah|yep|sure|okay|ok|go ahead|book it|please|that's fine|fine|correct|right)\b/i.test(lowerText);
-            const isNo = /\b(no|nope|nah|cancel|too much|expensive|forget it|never mind|don't|stop)\b/i.test(lowerText);
+            // Multilingual yes/no detection (EN, NL, DE, FR, ES, IT, PL)
+            const isYes = /\b(yes|yeah|yep|sure|okay|ok|go ahead|book it|please|that's fine|fine|correct|right|ja|jawel|jazeker|prima|goed|akkoord|oké|in orde|doe maar|graag|naturlich|natürlich|klar|genau|richtig|sicher|bitte|oui|d'accord|bien sûr|certainement|parfait|sí|si|claro|vale|por supuesto|correcto|certo|va bene|perfetto|esatto|tak|dobrze|zgadza się|w porządku)\b/i.test(lowerText);
+            const isNo = /\b(no|nope|nah|cancel|too much|expensive|forget it|never mind|don't|stop|nee|neen|niet|annuleren|te duur|laat maar|vergeet het|stoppen|nein|nicht|abbrechen|zu teuer|vergiss es|non|annuler|trop cher|laisse tomber|oublie|demasiado caro|cancela|olvídalo|troppo caro|annulla|lascia perdere|nie|anuluj|za drogo|zapomnij)\b/i.test(lowerText);
             
             if (isYes || isNo) {
               console.log(`[${sessionState.callId}] 💰 Fare confirm response: ${isYes ? 'YES' : 'NO'}`);
@@ -2735,13 +2736,17 @@ serve(async (req) => {
             };
           }
           
+          // Determine language instruction based on session
+          const langCode = state?.language || "en";
+          const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+          
           // Inject the fare question into Ada's conversation
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "input_text", text: `[DISPATCH FARE CONFIRMATION]: Say this EXACTLY to the customer: "${message}" Then wait for their yes/no response.` }]
+              content: [{ type: "input_text", text: `[DISPATCH FARE CONFIRMATION]: Translate and say this message to the customer IN ${langName.toUpperCase()}: "${message}" Then wait for their yes/no response. DO NOT speak English unless the customer is speaking English.` }]
             }
           }));
           
@@ -2750,7 +2755,7 @@ serve(async (req) => {
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `The dispatch system is asking you to confirm the fare with the customer. Say this naturally: "${message}" Then wait for their response.`
+              instructions: `IMPORTANT: The dispatch system is asking you to confirm the fare. You MUST speak in ${langName} (the same language you've been using). Translate and say this message naturally in ${langName}: "${message}" Then wait for their response. NEVER switch to English mid-conversation.`
             }
           }));
         });
