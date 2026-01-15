@@ -227,6 +227,7 @@ export default function LiveCalls() {
   const [useUnifiedExtraction, setUseUnifiedExtraction] = useState(false);
   const [usePassthroughMode, setUsePassthroughMode] = useState(false);
   const [useRasaAudioProcessing, setUseRasaAudioProcessing] = useState(false);
+  const [useHalfDuplex, setUseHalfDuplex] = useState(false);
   const [useSimpleMode, setUseSimpleMode] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>("ada");
@@ -853,6 +854,8 @@ export default function LiveCalls() {
               setUsePassthroughMode={setUsePassthroughMode}
               useRasaAudioProcessing={useRasaAudioProcessing}
               setUseRasaAudioProcessing={setUseRasaAudioProcessing}
+              useHalfDuplex={useHalfDuplex}
+              setUseHalfDuplex={setUseHalfDuplex}
             />
 
             {/* Billing Page Link */}

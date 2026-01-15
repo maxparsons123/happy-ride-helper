@@ -44,6 +44,8 @@ interface LiveCallsSettingsProps {
   // Audio processing
   useRasaAudioProcessing: boolean;
   setUseRasaAudioProcessing: (value: boolean) => void;
+  useHalfDuplex: boolean;
+  setUseHalfDuplex: (value: boolean) => void;
 }
 
 export function LiveCallsSettings({
@@ -72,6 +74,8 @@ export function LiveCallsSettings({
   setUsePassthroughMode,
   useRasaAudioProcessing,
   setUseRasaAudioProcessing,
+  useHalfDuplex,
+  setUseHalfDuplex,
 }: LiveCallsSettingsProps) {
   return (
     <Sheet>
@@ -366,6 +370,30 @@ export function LiveCallsSettings({
                   />
                   <span className={`text-xs ${useRasaAudioProcessing ? 'text-orange-400 font-medium' : 'text-muted-foreground'}`}>
                     Rasa
+                  </span>
+                </div>
+              </div>
+
+              {/* Half-Duplex Mode */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Half-Duplex Mode</p>
+                  <p className="text-xs text-muted-foreground">
+                    {useHalfDuplex 
+                      ? "User audio buffered while Ada speaks (no barge-in)" 
+                      : "Full duplex with barge-in detection"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs ${!useHalfDuplex ? 'text-green-400 font-medium' : 'text-muted-foreground'}`}>
+                    Full
+                  </span>
+                  <Switch
+                    checked={useHalfDuplex}
+                    onCheckedChange={setUseHalfDuplex}
+                  />
+                  <span className={`text-xs ${useHalfDuplex ? 'text-yellow-400 font-medium' : 'text-muted-foreground'}`}>
+                    Half
                   </span>
                 </div>
               </div>
