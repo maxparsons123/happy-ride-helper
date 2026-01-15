@@ -420,6 +420,18 @@ const STT_CORRECTIONS: Record<string, string> = {
   "exum road": "Exmoor Road",
   "exxon roll": "Exmoor Road",
   "bexham road": "Exmoor Road",
+  
+  // Sweet Spot venue mishearings
+  "sweetbutt": "Sweet Spot",
+  "sweet butt": "Sweet Spot",
+  "sweetbatz": "Sweet Spot",
+  "sweet batz": "Sweet Spot",
+  "sweetbats": "Sweet Spot",
+  "sweet bats": "Sweet Spot",
+  "sweet spots": "Sweet Spot",
+  "sweetspots": "Sweet Spot",
+  "swee spot": "Sweet Spot",
+  "suite spot": "Sweet Spot",
 
   // Number mishearings
   "for passengers": "4 passengers",
