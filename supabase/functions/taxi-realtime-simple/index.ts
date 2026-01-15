@@ -2717,6 +2717,31 @@ serve(async (req) => {
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
 
+        // === FAST CALLER LOOKUP (before greeting) ===
+        // This is a quick lookup to get the caller's name BEFORE we greet them
+        // Full booking/GPS lookup still happens in background
+        if (phone && phone !== "unknown" && !state!.customerName) {
+          try {
+            console.log(`[${callId}] 🔍 Fast caller lookup for: ${phone}`);
+            const { data: callerData } = await supabase
+              .from("callers")
+              .select("name, last_pickup, last_destination, total_bookings")
+              .eq("phone_number", phone)
+              .maybeSingle();
+            
+            if (callerData) {
+              state!.customerName = callerData.name || null;
+              state!.callerLastPickup = callerData.last_pickup || null;
+              state!.callerLastDestination = callerData.last_destination || null;
+              state!.callerTotalBookings = callerData.total_bookings || 0;
+              console.log(`[${callId}] 👤 Fast lookup found: ${callerData.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
+            }
+          } catch (e) {
+            console.error(`[${callId}] Fast caller lookup failed:`, e);
+            // Continue without name - will ask for it
+          }
+        }
+
         // If pre-connected, OpenAI is already ready - just send session update + greeting
         if (preConnected && openaiConnected) {
           console.log(`[${callId}] ⚡ OpenAI already connected - triggering greeting immediately!`);
