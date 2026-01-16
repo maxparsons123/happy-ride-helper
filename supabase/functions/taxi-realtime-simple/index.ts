@@ -2114,6 +2114,29 @@ serve(async (req) => {
         case "modify_booking": {
           console.log(`[${sessionState.callId}] ✏️ Modify request from Ada:`, args);
           
+          // === GUARD: Only allow modify_booking if booking was already confirmed ===
+          // If no confirmed booking exists (version = 0 or booking incomplete), reject
+          if (!sessionState.bookingConfirmedThisTurn && sessionState.booking.version === 0) {
+            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: No confirmed booking exists yet (version=0)`);
+            result = {
+              success: false,
+              error: "no_confirmed_booking",
+              message: "There is no confirmed booking to modify. Please complete the booking first using book_taxi."
+            };
+            break;
+          }
+          
+          // If booking state is incomplete (missing pickup or destination), reject modification
+          if (!sessionState.booking.pickup || !sessionState.booking.destination) {
+            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: Booking incomplete - pickup: "${sessionState.booking.pickup}", dest: "${sessionState.booking.destination}"`);
+            result = {
+              success: false,
+              error: "incomplete_booking",
+              message: "Please confirm the complete booking with book_taxi before making modifications."
+            };
+            break;
+          }
+          
           // Capture previous booking state BEFORE making changes
           const previousBooking = {
             pickup: sessionState.booking.pickup,
