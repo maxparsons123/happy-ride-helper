@@ -2662,10 +2662,15 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           }
           
           // 6. Enrich booking with extracted details
-          const finalPassengers = args.passengers || extractedBooking.passengers || 1;
+          // PRESERVE existing booking details - priority: args > extraction > existing session > defaults
+          const existingPassengers = sessionState.booking?.passengers;
+          const existingBags = sessionState.booking?.bags;
+          const existingVehicleType = sessionState.booking?.vehicle_type;
+          
+          const finalPassengers = args.passengers || extractedBooking.passengers || existingPassengers || 1;
           
           // Parse bags - extractedBooking.luggage may be a string like "no baggage" or "2 bags"
-          let finalBags = 0;
+          let finalBags = existingBags ?? 0;  // Default to existing, fallback to 0
           if (typeof args.bags === 'number') {
             finalBags = args.bags;
           } else if (extractedBooking.luggage) {
@@ -2674,11 +2679,11 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
               finalBags = 0;
             } else {
               const match = luggageStr.match(/(\d+)/);
-              finalBags = match ? parseInt(match[1], 10) : 0;
+              if (match) finalBags = parseInt(match[1], 10);
             }
           }
           
-          const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || "saloon";
+          const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || existingVehicleType || "saloon";
           const finalPickupTime = args.pickup_time || extractedBooking.pickup_time || "now";
           
           console.log(`[${sessionState.callId}] ✅ Final booking details:`);
