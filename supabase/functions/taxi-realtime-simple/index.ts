@@ -1367,7 +1367,16 @@ serve(async (req) => {
             "réservé", "confirmé", "taxi en route", "bonne route", "bon voyage",
             "reservado", "confirmado", "taxi en camino", "buen viaje"
           ];
-          const hasHardBlockPhrase = HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
+          
+          // IMPORTANT: Cancellation phrases should NOT trigger booking enforcement!
+          // Phrases like "your booking has been cancelled" or "I've cancelled that" are valid after cancel_booking.
+          const CANCELLATION_PHRASES = [
+            "cancelled", "canceled", "cancellation", "geannuleerd", "annulering",
+            "storniert", "annuliert", "annulé", "cancelado"
+          ];
+          const isCancellationContext = CANCELLATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+          
+          const hasHardBlockPhrase = !isCancellationContext && HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
 
           // If pendingQuote is active, ONLY block hard confirmation phrases, placeholder leaks, and fare mismatches.
           // If no pendingQuote, block all confirmation + fare phrases (original behavior)
