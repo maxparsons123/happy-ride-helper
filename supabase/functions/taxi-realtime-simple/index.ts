@@ -4202,8 +4202,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore true duplicates
           // IMPORTANT: If fare/eta changed, treat it as an update (do NOT ignore), otherwise booking enforcement
           // will see a mismatch and cancel Ada mid-sentence.
+          // CRITICAL: If pendingQuote was set by polling loop but Ada hasn't spoken yet (no lastQuotePromptAt),
+          // we MUST allow the broadcast to trigger the speech!
           if (state?.pendingQuote) {
             const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
+            const adaHasSpoken = state.lastQuotePromptAt && (Date.now() - state.lastQuotePromptAt < 10000);
 
             const normNum = (v: unknown) => {
               const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
@@ -4225,11 +4228,17 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
             const isTrueDuplicate = fareSame && etaSame;
 
-            if (timeSinceLastAsk < 10000 && isTrueDuplicate) { // Within 10 seconds and same fare/eta = duplicate
-              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - same fare/eta (${timeSinceLastAsk}ms ago)`);
+            // Only block if Ada has ALREADY spoken the fare (lastQuotePromptAt is set)
+            // If pendingQuote was set by polling loop but no speech yet, allow the broadcast
+            if (timeSinceLastAsk < 10000 && isTrueDuplicate && adaHasSpoken) {
+              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - same fare/eta and Ada already spoke (${timeSinceLastAsk}ms ago)`);
               // ✅ Track duplicate fare prompts in STT metrics
               if (state) state.sttMetrics.duplicateFarePrompts++;
               return;
+            }
+
+            if (isTrueDuplicate && !adaHasSpoken) {
+              console.log(`[${callId}] ✅ Allowing ask_confirm - pendingQuote exists but Ada hasn't spoken yet`);
             }
 
             if (!isTrueDuplicate) {
