@@ -2484,10 +2484,26 @@ serve(async (req) => {
             break;
           }
           
-          // Create booking in DB (only if we got here - not rejected/clarification)
-          const { error: bookingError } = await supabase.from("bookings").insert({
+          // Create/update booking in DB (only if we got here - not rejected/clarification)
+          // First, mark any old confirmed/active bookings for this caller as 'completed'
+          const callerPhoneNorm = normalizePhone(sessionState.phone);
+          const { error: completeOldError } = await supabase
+            .from("bookings")
+            .update({ status: "completed", completed_at: new Date().toISOString() })
+            .eq("caller_phone", callerPhoneNorm)
+            .in("status", ["confirmed", "dispatched", "active", "pending"])
+            .neq("call_id", sessionState.callId);
+          
+          if (completeOldError) {
+            console.error(`[${sessionState.callId}] Failed to complete old bookings:`, completeOldError);
+          } else {
+            console.log(`[${sessionState.callId}] ✅ Marked old bookings as completed for ${callerPhoneNorm}`);
+          }
+          
+          // Now upsert the current booking (update if exists for this call_id, else insert)
+          const { error: bookingError } = await supabase.from("bookings").upsert({
             call_id: sessionState.callId,
-            caller_phone: normalizePhone(sessionState.phone),
+            caller_phone: callerPhoneNorm,
             caller_name: sessionState.customerName,
             pickup: args.pickup,
             destination: args.destination,
@@ -2495,8 +2511,9 @@ serve(async (req) => {
             fare: fare,
             eta: `${etaMinutes} minutes`,
             status: "confirmed",
-            booking_details: { job_id: jobId, booking_ref: bookingRef, distance: distance }
-          });
+            booking_details: { job_id: jobId, booking_ref: bookingRef, distance: distance },
+            updated_at: new Date().toISOString()
+          }, { onConflict: "call_id" });
           
           if (bookingError) {
             console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
@@ -2700,6 +2717,22 @@ serve(async (req) => {
             passengers: sessionState.booking.passengers || 1,
             updated_at: new Date().toISOString()
           }).eq("call_id", sessionState.callId);
+          
+          // ALSO update the bookings table with the modification
+          const callerPhoneNormMod = normalizePhone(sessionState.phone);
+          const { error: bookingUpdateError } = await supabase.from("bookings").update({
+            pickup: sessionState.booking.pickup,
+            destination: sessionState.booking.destination,
+            passengers: sessionState.booking.passengers || 1,
+            updated_at: new Date().toISOString()
+          }).eq("caller_phone", callerPhoneNormMod)
+            .in("status", ["confirmed", "dispatched", "active", "pending"]);
+          
+          if (bookingUpdateError) {
+            console.error(`[${sessionState.callId}] Failed to update bookings table:`, bookingUpdateError);
+          } else {
+            console.log(`[${sessionState.callId}] ✅ Bookings table updated: ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
+          }
           
           // Send webhook with modification details and poll for updated fare
           const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
