@@ -3156,6 +3156,15 @@ serve(async (req) => {
             return;
           }
           
+          // GUARD: If there's already a pending fare confirmation, ignore this one (prevents duplicates)
+          if (state?.pendingFareConfirm?.active) {
+            const timeSinceLastAsk = Date.now() - (state.pendingFareConfirm.askedAt || 0);
+            if (timeSinceLastAsk < 10000) { // Within 10 seconds = duplicate
+              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm (previous one sent ${timeSinceLastAsk}ms ago)`);
+              return;
+            }
+          }
+          
           // Set pending fare confirm state
           if (state) {
             state.pendingFareConfirm = {
@@ -3172,11 +3181,14 @@ serve(async (req) => {
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
           
+          // Wait a bit for any in-flight response to complete before cancelling
+          await new Promise(resolve => setTimeout(resolve, 200));
+          
           // Cancel any active response first to avoid "conversation_already_has_active_response" error
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           
-          // Small delay to let the cancel take effect
-          await new Promise(resolve => setTimeout(resolve, 100));
+          // Wait for cancel to take effect
+          await new Promise(resolve => setTimeout(resolve, 150));
           
           // Inject the fare question into Ada's conversation
           openaiWs.send(JSON.stringify({
