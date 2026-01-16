@@ -2187,25 +2187,25 @@ Do NOT say 'booked' until the tool returns success.]`
           // === END VALIDATION ===
           
           sessionState.booking = {
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers,
-            bags: args.bags || 0,
-            vehicle_type: args.vehicle_type || "saloon",
-            version: 1
+            pickup: finalPickup,
+            destination: finalDestination,
+            passengers: finalPassengers,
+            bags: finalBags,
+            vehicle_type: finalVehicleType,
+            version: 1,
           };
           
           // Sync pickup/destination to live_calls for dashboard display
           await supabase.from("live_calls").update({
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers || 1,
+            pickup: finalPickup,
+            destination: finalDestination,
+            passengers: finalPassengers,
             updated_at: new Date().toISOString()
           }).eq("call_id", sessionState.callId);
           
           // Guard against accidental duplicate re-booking loops right after a successful confirmation.
           // (This can happen if Ada gets pulled into an unrelated chat turn and then calls book_taxi again.)
-          const currentTripKey = makeTripKey(args.pickup, args.destination);
+          const currentTripKey = makeTripKey(finalPickup, finalDestination);
           const isDuplicateRecentTrip =
             !!sessionState.lastConfirmedTripKey &&
             sessionState.lastConfirmedTripKey === currentTripKey &&
@@ -2279,9 +2279,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 call_id: sessionState.callId,
                 caller_phone: formattedPhone,
                 caller_name: sessionState.customerName,
-                // Ada's interpreted/normalized addresses
-                ada_pickup: args.pickup,
-                ada_destination: args.destination,
+                // Normalized/validated addresses (after dual-source + modification guard)
+                ada_pickup: finalPickup,
+                ada_destination: finalDestination,
                 // Raw caller addresses (what they actually said)
                 callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
                 callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
@@ -2291,9 +2291,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 gps_lat: sessionState.gpsLat,
                 gps_lon: sessionState.gpsLon,
                 // Booking details
-                passengers: args.passengers || 1,
-                bags: args.bags || 0,
-                vehicle_type: args.vehicle_type || "saloon",
+                passengers: finalPassengers,
+                bags: finalBags,
+                vehicle_type: finalVehicleType,
                 vehicle_request: args.vehicle_request || null,
                 pickup_time: args.pickup_time || "now",
                 special_requests: args.special_requests || null,
@@ -2385,8 +2385,8 @@ Do NOT say 'booked' until the tool returns success.]`
                   sessionState.pendingQuote = {
                     fare: dispatchAskConfirm.fare || null,
                     eta: dispatchAskConfirm.eta || null,
-                    pickup: args.pickup,
-                    destination: args.destination,
+                    pickup: finalPickup,
+                    destination: finalDestination,
                     callback_url: dispatchAskConfirm.callback_url || null,
                     timestamp: Date.now()
                   };
