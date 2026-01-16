@@ -1511,14 +1511,63 @@ Do NOT say 'booked' until the tool returns success.]`
 
           const lowerUserText = userText.toLowerCase();
 
-          // === POST-BOOKING GOODBYE SHORTCUT (CRITICAL) ===
+          // === EXPLICIT BYE/GOODBYE DETECTION (HIGHEST PRIORITY) ===
+          // If user says "bye" (even multiple times), they want to end the call immediately.
+          // This takes priority over fare confirmation, booking prompts, etc.
+          const isExplicitGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText) &&
+            // Exclude "bye" in compound phrases like "good bye sweet spot" (unlikely but guard against)
+            !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
+          
+          if (isExplicitGoodbye && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" - ending call immediately`);
+            
+            // ✅ CRITICAL: Mark call as ending IMMEDIATELY to block all further processing
+            sessionState.callEnded = true;
+            
+            // Clear pendingQuote to prevent any fare prompts from being processed
+            sessionState.pendingQuote = null;
+
+            // Cancel any in-flight assistant speech to avoid overlap
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: "[SYSTEM: The customer said goodbye. Say 'Safe travels!' and nothing more. Then stay completely silent.]",
+                    },
+                  ],
+                },
+              })
+            );
+
+            openaiWs.send(JSON.stringify({ type: "response.create" }));
+            
+            // Close OpenAI connection after delay to let goodbye audio finish
+            setTimeout(() => {
+              console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after explicit goodbye`);
+              openaiWs?.close();
+            }, 3000); // 3 second delay for goodbye audio
+            
+            break;
+          }
+
+          // === POST-BOOKING GOODBYE SHORTCUT (SECONDARY) ===
           // If a booking was just confirmed and the caller says thanks/that's all, end cleanly.
           // This prevents Ada from accidentally starting a new quote from stale booking context.
           if (
             sessionState.lastBookTaxiSuccessAt &&
             Date.now() - sessionState.lastBookTaxiSuccessAt < 2 * 60 * 1000 &&
             !sessionState.pendingQuote &&
-            /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you|bye|goodbye)\b/i.test(lowerUserText) &&
+            /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you)\b/i.test(lowerUserText) &&
             openaiWs &&
             openaiConnected
           ) {
@@ -3574,6 +3623,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
           if (!spokenMessage || !openaiWs || !openaiConnected) {
             console.log(`[${callId}] ⚠️ Cannot process ask_confirm - no message or OpenAI not connected`);
+            return;
+          }
+
+          // GUARD 0: If call is ending/ended, ignore ALL dispatch messages
+          if (state?.callEnded) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - call is ended/ending`);
             return;
           }
 
