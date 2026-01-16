@@ -2029,6 +2029,29 @@ serve(async (req) => {
                 throw new Error(`Dispatch webhook POST failed with status ${postResp.status}`);
               }
               
+              // Tell Ada to say "please wait" while we wait for dispatch response
+              const langCode = sessionState.language || "en";
+              const waitMessages: Record<string, string> = {
+                en: "Just a moment while I process your booking.",
+                nl: "Een ogenblik terwijl ik uw boeking verwerk.",
+                de: "Einen Moment bitte, ich bearbeite Ihre Buchung.",
+                fr: "Un instant, je traite votre réservation.",
+                es: "Un momento mientras proceso su reserva.",
+                it: "Un momento mentre elaboro la sua prenotazione.",
+                pl: "Chwileczkę, przetwarzam Twoją rezerwację."
+              };
+              const waitMessage = waitMessages[langCode] || waitMessages.en;
+              
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: `[SYSTEM: Say exactly: "${waitMessage}" Then wait silently for the fare details. Do NOT confirm the booking yet.]` }]
+                }
+              }));
+              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
               const pollTimeout = 25000; // 25 seconds max wait (callback can take 15-20s)
