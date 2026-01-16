@@ -1887,6 +1887,49 @@ Do NOT say 'booked' until the tool returns success.]`
             }, 350);
           }
           
+          // === ADDRESS CORRECTION DETECTION ===
+          // Catch "No, the pickup is X" or "No, it's X" type corrections
+          const pickupCorrectionMatch = userText.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:pickup|pick\s*up)\s+(?:is|should be|location is)\s+(.+)/i) ||
+            userText.match(/(?:no|not|wrong)[,.]?\s*(?:i(?:'?m| am)\s+at|from)\s+(.+)/i);
+          const destCorrectionMatch = userText.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:destination|drop\s*off|going to)\s+(?:is|should be)\s+(.+)/i) ||
+            userText.match(/(?:no|not|wrong)[,.]?\s*(?:to|going to)\s+(.+)/i);
+          
+          const isCorrectionUtterance = (pickupCorrectionMatch || destCorrectionMatch) && hasExistingBookingContext;
+          
+          if (isCorrectionUtterance && openaiWs && openaiConnected && !sessionState.callEnded) {
+            const correctedPickup = pickupCorrectionMatch ? pickupCorrectionMatch[1].trim() : null;
+            const correctedDest = destCorrectionMatch ? destCorrectionMatch[1].trim() : null;
+            
+            console.log(`[${sessionState.callId}] 🔧 Address correction detected: pickup="${correctedPickup || 'unchanged'}", dest="${correctedDest || 'unchanged'}"`);
+            
+            // Cancel any in-flight response
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            
+            const fieldToChange = correctedPickup ? "pickup" : "destination";
+            const newValue = correctedPickup || correctedDest;
+            
+            setTimeout(() => {
+              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: The customer is CORRECTING the ${fieldToChange}. The new ${fieldToChange} is: "${newValue}". IMMEDIATELY call modify_booking with field_to_change: "${fieldToChange}" and new_value: "${newValue}". Then call book_taxi with confirmation_state: "request_quote". Do NOT ask for confirmation - just do it and announce the new fare.]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              }, 200);
+            }, 200);
+          }
           // === POST-BOOKING RESPONSE HELPER ===
           // If booking was confirmed and user says something positive (not goodbye/thanks),
           // ensure Ada responds to their new request. This catches "yes I need another taxi" etc.
