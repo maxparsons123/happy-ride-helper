@@ -2170,15 +2170,32 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
           
-          // === FIX #1: BLOCK request_quote if a booking was recently confirmed ===
+          // === FIX #1: BLOCK request_quote shortly after a successful booking ONLY if it's the same trip ===
+          // We must allow an immediate re-quote if the caller just changed the route.
           if (sessionState.lastBookTaxiSuccessAt && Date.now() - sessionState.lastBookTaxiSuccessAt < 60000) {
-            console.log(`[${sessionState.callId}] 🔁 Ignoring request_quote within 60s of successful booking (${Date.now() - sessionState.lastBookTaxiSuccessAt}ms ago)`);
-            result = {
-              success: true,
-              already_confirmed: true,
-              message: "Booking already confirmed. Ask: 'Is there anything else I can help you with?'"
-            };
-            break;
+            const requestedTripKey = makeTripKey(
+              args.pickup || sessionState.booking.pickup,
+              args.destination || sessionState.booking.destination,
+            );
+
+            const isSameTripAsLastConfirm =
+              !!sessionState.lastConfirmedTripKey && requestedTripKey === sessionState.lastConfirmedTripKey;
+
+            if (isSameTripAsLastConfirm) {
+              console.log(
+                `[${sessionState.callId}] 🔁 Ignoring request_quote within 60s of successful booking (${Date.now() - sessionState.lastBookTaxiSuccessAt}ms ago)`
+              );
+              result = {
+                success: true,
+                already_confirmed: true,
+                message: "Booking already confirmed. Ask: 'Is there anything else I can help you with?'",
+              };
+              break;
+            }
+
+            console.log(
+              `[${sessionState.callId}] ✅ Allowing request_quote within 60s because trip changed (last=${sessionState.lastConfirmedTripKey}, now=${requestedTripKey})`
+            );
           }
           
           // === EARLY EXIT: Prevent duplicate request_quote while pending ===
@@ -3814,11 +3831,18 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
-          // GUARD 2: If booking was confirmed recently (within 60s), also ignore
-          // Extended from 30s to 60s to match the book_taxi("request_quote") guard
+          // GUARD 2: If booking was confirmed recently (within 60s), ignore ONLY if it's the same trip.
+          // If the trip changed, we must allow the new fare prompt.
           if (state?.lastBookTaxiSuccessAt && Date.now() - state.lastBookTaxiSuccessAt < 60000) {
-            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was confirmed ${Date.now() - state.lastBookTaxiSuccessAt}ms ago`);
-            return;
+            const tripKeyNow = makeTripKeyLocal(state?.booking?.pickup || null, state?.booking?.destination || null);
+            const isSameTripAsLastConfirm = !!state?.lastConfirmedTripKey && tripKeyNow === state.lastConfirmedTripKey;
+
+            if (isSameTripAsLastConfirm) {
+              console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was confirmed ${Date.now() - state.lastBookTaxiSuccessAt}ms ago`);
+              return;
+            }
+
+            console.log(`[${callId}] ✅ Allowing ask_confirm within 60s because trip changed (last=${state?.lastConfirmedTripKey}, now=${tripKeyNow})`);
           }
 
           // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore duplicate

@@ -23,3 +23,9 @@ verify_jwt = false
 
 [functions.taxi-gps-update]
 verify_jwt = false
+
+[functions.geocode]
+verify_jwt = false
+
+[functions.taxi-trip-resolve]
+verify_jwt = false
