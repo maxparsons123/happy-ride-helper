@@ -2000,11 +2000,46 @@ serve(async (req) => {
             sourceDiscrepancy = true;
           }
           
+          // === MODIFICATION GUARD ===
+          // If Ada passed the SAME destination as the existing active booking (stale value),
+          // but extraction found a DIFFERENT destination with medium+ confidence, prefer extraction.
+          // This catches cases where Ada forgets to update destination in modify flows.
+          const activeBookingDest = sessionState.booking?.destination;
+          const adaUsedStaleDestination =
+            activeBookingDest &&
+            normalizeForComparison(adaDestination) === normalizeForComparison(activeBookingDest) &&
+            extDestNorm &&
+            extDestNorm !== normalizeForComparison(activeBookingDest);
+
+          if (adaUsedStaleDestination) {
+            console.log(
+              `[${sessionState.callId}] 🔄 MODIFICATION GUARD: Ada used stale destination "${adaDestination}" (same as active booking). Extraction found "${extractedDestination}". Overriding.`
+            );
+            finalDestination = extractedDestination;
+            sourceDiscrepancy = true;
+          }
+          
+          // Same guard for pickup (less common but possible)
+          const activeBookingPickup = sessionState.booking?.pickup;
+          const adaUsedStalePickup =
+            activeBookingPickup &&
+            normalizeForComparison(adaPickup) === normalizeForComparison(activeBookingPickup) &&
+            extPickupNorm &&
+            extPickupNorm !== normalizeForComparison(activeBookingPickup);
+
+          if (adaUsedStalePickup) {
+            console.log(
+              `[${sessionState.callId}] 🔄 MODIFICATION GUARD: Ada used stale pickup "${adaPickup}" (same as active booking). Extraction found "${extractedPickup}". Overriding.`
+            );
+            finalPickup = extractedPickup;
+            sourceDiscrepancy = true;
+          }
+          
           // If major discrepancy, prefer extracted (from conversation) over Ada's interpretation
-          if (sourceDiscrepancy && extractedBooking.confidence === "high") {
-            console.log(`[${sessionState.callId}] 🔄 Using high-confidence extracted addresses due to discrepancy`);
-            if (extractedPickup) finalPickup = extractedPickup;
-            if (extractedDestination) finalDestination = extractedDestination;
+          if (sourceDiscrepancy && (extractedBooking.confidence === "high" || extractedBooking.confidence === "medium")) {
+            console.log(`[${sessionState.callId}] 🔄 Using extracted addresses due to discrepancy (confidence: ${extractedBooking.confidence})`);
+            if (extractedPickup && !adaUsedStalePickup) finalPickup = extractedPickup;
+            if (extractedDestination && !adaUsedStaleDestination) finalDestination = extractedDestination;
           }
           
           // 5. Final validation - ensure pickup != destination
