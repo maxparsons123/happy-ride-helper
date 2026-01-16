@@ -1393,6 +1393,10 @@ serve(async (req) => {
               sessionState.assistantTranscriptIndex = null;
             }
 
+            // IMPORTANT: Reset audio buffering so recovery response is also checked
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+
           // Inject a system message to recover safely
             // - If we are awaiting fare approval (pendingQuote), guide Ada to proper yes/no handling
             // - Otherwise, force the tool call to obtain the fare
@@ -1422,12 +1426,21 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs?.send(JSON.stringify({ type: "response.create" }));
           } else if (!sessionState.bookingConfirmedThisTurn && sessionState.pendingAudioBuffer.length > 0) {
-            // Transcript so far doesn't contain confirmation phrases - it's safe to flush buffered audio
-            // This releases audio incrementally as we verify each chunk of transcript
-            const chunksToFlush = sessionState.pendingAudioBuffer.splice(0, sessionState.pendingAudioBuffer.length);
-            for (const audioChunk of chunksToFlush) {
-              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            // WAIT for sentence completion before releasing audio
+            // Only flush when we have a reasonable amount of text (complete thought)
+            // Check for sentence endings or substantial content (>30 chars with punctuation or >60 chars)
+            const hasCompleteSentence = /[.!?]/.test(currentText) || currentText.length > 60;
+            
+            if (hasCompleteSentence) {
+              // Transcript so far doesn't contain confirmation phrases AND forms a complete thought
+              // Safe to flush buffered audio
+              const chunksToFlush = sessionState.pendingAudioBuffer.splice(0, sessionState.pendingAudioBuffer.length);
+              for (const audioChunk of chunksToFlush) {
+                socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+              }
+              sessionState.audioVerified = true; // Mark verified for rest of this response
             }
+            // If not complete, keep buffering - will be released on transcript.done or safety flush
           }
         }
         break;
@@ -1436,7 +1449,17 @@ Do NOT say 'booked' until the tool returns success.]`
       case "response.audio_transcript.done": {
         // Mark assistant transcript as finalized for next turn
         sessionState.assistantTranscriptIndex = null;
-        // Don't flush here - let the batched timer handle it
+        
+        // FINAL FLUSH: Release any remaining buffered audio now that transcript is complete
+        // This ensures we don't hold audio forever waiting for sentence completion
+        if (sessionState.pendingAudioBuffer.length > 0) {
+          console.log(`[${sessionState.callId}] 🔊 Final flush: ${sessionState.pendingAudioBuffer.length} buffered audio chunks on transcript.done`);
+          for (const audioChunk of sessionState.pendingAudioBuffer) {
+            socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+          }
+          sessionState.pendingAudioBuffer = [];
+          sessionState.audioVerified = true;
+        }
         break;
       }
 
@@ -1488,6 +1511,29 @@ Do NOT say 'booked' until the tool returns success.]`
         if (!rawText || isHallucination(rawText)) {
           sessionState.sttMetrics.filteredHallucinations++;
           console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}" (total filtered: ${sessionState.sttMetrics.filteredHallucinations})`);
+          break;
+        }
+        
+        // Echo guard: Filter transcripts that are echoes of dispatch TTS fare scripts
+        // These happen when Whisper transcribes Ada's voice playing the fare prompt
+        const lowerRaw = rawText.toLowerCase();
+        const isDispatchFareEcho = (
+          // Partial fare script echoes
+          /\band your driver will be\b/i.test(lowerRaw) ||
+          /\byour price for the journey\b/i.test(lowerRaw) ||
+          /\bdo you want me to go ahead\b/i.test(lowerRaw) ||
+          /\bbook that\??\s*$/i.test(lowerRaw) ||
+          // Fragments like ".40 and your driver" (starts with a number fragment)
+          /^\d*[.,]\d{1,2}\s+and\s/i.test(rawText) ||
+          // "15 minutes do you want" - ETA fragment into question
+          /\d+\s*minutes?\s*do you\b/i.test(lowerRaw) ||
+          // Full fare script patterns
+          /\bprice.*is.*\d+.*driver.*will be\b/i.test(lowerRaw)
+        );
+        
+        if (isDispatchFareEcho && sessionState.pendingQuote) {
+          console.log(`[${sessionState.callId}] 🔇 Filtered dispatch fare echo: "${rawText}"`);
+          sessionState.sttMetrics.filteredHallucinations++;
           break;
         }
         
