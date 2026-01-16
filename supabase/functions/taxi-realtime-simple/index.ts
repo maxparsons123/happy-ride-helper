@@ -707,6 +707,7 @@ interface SessionState {
   // Used to prevent Ada from saying "Booked!" without actually placing the booking.
   bookingConfirmedThisTurn: boolean;
   lastBookTaxiSuccessAt: number | null;
+  lastConfirmedTripKey: string | null;
   
   // Audio buffering for confirmation enforcement
   // When true, audio is forwarded immediately; when false, audio is buffered until transcript verification
@@ -1799,6 +1800,7 @@ serve(async (req) => {
             // Mark booking as confirmed
             sessionState.bookingConfirmedThisTurn = true;
             sessionState.lastBookTaxiSuccessAt = Date.now();
+            sessionState.lastConfirmedTripKey = `${pendingQuote.pickup || ""}|||${pendingQuote.destination || ""}`;
             sessionState.pendingQuote = null; // Clear pending quote
             sessionState.lastQuotePromptAt = null; // Reset prompt tracking
             sessionState.lastQuotePromptText = null;
@@ -2036,6 +2038,26 @@ serve(async (req) => {
             updated_at: new Date().toISOString()
           }).eq("call_id", sessionState.callId);
           
+          // Guard against accidental duplicate re-booking loops right after a successful confirmation.
+          // (This can happen if Ada gets pulled into an unrelated chat turn and then calls book_taxi again.)
+          const currentTripKey = `${args.pickup || ""}|||${args.destination || ""}`;
+          const isDuplicateRecentTrip =
+            !!sessionState.lastConfirmedTripKey &&
+            sessionState.lastConfirmedTripKey === currentTripKey &&
+            !!sessionState.lastBookTaxiSuccessAt &&
+            Date.now() - sessionState.lastBookTaxiSuccessAt < 5 * 60 * 1000 &&
+            !sessionState.pendingQuote;
+
+          if (isDuplicateRecentTrip) {
+            console.log(`[${sessionState.callId}] 🔁 Ignoring duplicate book_taxi(request_quote) for recently confirmed trip`);
+            result = {
+              success: true,
+              already_confirmed: true,
+              message: 'Booking already confirmed. Now ask the customer: "Is there anything else I can help you with?"',
+            };
+            break;
+          }
+
           const jobId = crypto.randomUUID();
           let fare = "£12.50";
           let etaMinutes = 8;
@@ -2436,6 +2458,7 @@ serve(async (req) => {
           // This allows Ada to say "Booked!" without being cancelled
           sessionState.bookingConfirmedThisTurn = true;
           sessionState.lastBookTaxiSuccessAt = Date.now();
+          sessionState.lastConfirmedTripKey = `${args.pickup || ""}|||${args.destination || ""}`;
           console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
           
           // RELEASE BUFFERED AUDIO: Now that booking is confirmed, flush any pending audio
@@ -2454,6 +2477,8 @@ serve(async (req) => {
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
           sessionState.hasActiveBooking = false;
           sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
+          sessionState.pendingQuote = null;
+          sessionState.lastConfirmedTripKey = null;
           result = { success: true };
           break;
 
@@ -3150,6 +3175,7 @@ serve(async (req) => {
           halfDuplexBuffer: [],
           bookingConfirmedThisTurn: false,
           lastBookTaxiSuccessAt: null,
+          lastConfirmedTripKey: null,
           audioVerified: true, // Start verified - only buffer after user confirms addresses
           pendingAudioBuffer: [],
           pendingQuote: null,
@@ -3239,6 +3265,7 @@ serve(async (req) => {
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
+            lastConfirmedTripKey: null,
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingQuote: null,
