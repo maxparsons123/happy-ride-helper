@@ -722,6 +722,10 @@ interface SessionState {
     timestamp: number;
   } | null;
 
+  // Prevent repeated fare prompts (double response.create / duplicate dispatch events)
+  lastQuotePromptAt: number | null;
+  lastQuotePromptText: string | null;
+
   // Dispatch events that arrive while OpenAI isn't ready / while a response is active
   pendingDispatchEvents: { event: string; payload: any; receivedAt: number }[];
 
@@ -1320,8 +1324,12 @@ serve(async (req) => {
               sessionState.assistantTranscriptIndex = null;
             }
 
-            // Inject a system message to force tool call
-            const systemErrorText = "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
+            // Inject a system message to recover safely
+            // - If we are awaiting fare approval (pendingQuote), DO NOT force another request_quote (that causes loops)
+            // - Otherwise, force the tool call to obtain the fare
+            const systemErrorText = hasPendingQuote
+              ? "[SYSTEM ERROR: You are awaiting the customer's yes/no on the fare quote. Do NOT say 'booked' or confirm. Ask ONLY: \"Would you like me to book that?\" Then WAIT silently for their reply. Do NOT call any tools.]"
+              : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
             
             openaiWs?.send(
               JSON.stringify({
@@ -2064,10 +2072,11 @@ serve(async (req) => {
                   };
 
                   dispatchResult = {
+                    needs_fare_confirm: true,
                     ada_message: dispatchAskConfirm.text,
                     fare: dispatchAskConfirm.fare || null,
                     eta: dispatchAskConfirm.eta || null,
-                    quote_ready: true
+                    quote_ready: true,
                   };
                   break;
                 }
@@ -2756,29 +2765,58 @@ serve(async (req) => {
     }));
 
     // === CRITICAL: Only trigger response.create if we want Ada to respond ===
-    // If fare confirmation is pending or this was a blocked duplicate call,
-    // DON'T trigger a new response - Ada should WAIT for customer input
-    const shouldWaitForCustomer = result.needs_fare_confirm || result.blocked || result.already_confirmed;
+    // If we're awaiting a fare yes/no (pendingQuote / needs_fare_confirm), Ada must WAIT.
+    const shouldWaitForCustomer =
+      !!sessionState.pendingQuote ||
+      result.needs_fare_confirm ||
+      result.quote_ready ||
+      result.blocked ||
+      result.already_confirmed;
     
     if (shouldWaitForCustomer) {
-      console.log(`[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (needs_fare_confirm=${result.needs_fare_confirm}, blocked=${result.blocked}, already_confirmed=${result.already_confirmed})`);
-      
-      // If we have an ada_message and it's the FIRST time (not blocked), inject it for Ada to speak
+      console.log(
+        `[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (pendingQuote=${!!sessionState.pendingQuote}, needs_fare_confirm=${result.needs_fare_confirm}, quote_ready=${result.quote_ready}, blocked=${result.blocked}, already_confirmed=${result.already_confirmed})`
+      );
+
+      // If we have an ada_message and it's not blocked, inject it ONCE (prevents repeated fare prompts)
       if (result.ada_message && !result.blocked) {
-        openaiWs?.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: `[SYSTEM: Speak this fare/ETA confirmation to the customer and then WAIT for their response. DO NOT call any tools. Just say: "${result.ada_message}"]` }]
-          }
-        }));
+        const now = Date.now();
+        const isDuplicatePrompt =
+          sessionState.lastQuotePromptAt !== null &&
+          sessionState.lastQuotePromptText === result.ada_message &&
+          now - sessionState.lastQuotePromptAt < 8000;
+
+        if (isDuplicatePrompt) {
+          console.log(`[${sessionState.callId}] 🔁 Skipping duplicate fare prompt injection`);
+          return;
+        }
+
+        sessionState.lastQuotePromptAt = now;
+        sessionState.lastQuotePromptText = result.ada_message;
+
+        openaiWs?.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `[SYSTEM: Speak this fare/ETA confirmation to the customer and then WAIT for their response. Do NOT call any tools. Just say: "${result.ada_message}"]`,
+                },
+              ],
+            },
+          })
+        );
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
-    } else {
-      // Normal case - trigger response continuation
-      openaiWs?.send(JSON.stringify({ type: "response.create" }));
+
+      return;
     }
+
+    // Normal case - trigger response continuation
+    openaiWs?.send(JSON.stringify({ type: "response.create" }));
   };
 
   // --- Bridge WebSocket Handlers ---
@@ -2982,6 +3020,8 @@ serve(async (req) => {
           audioVerified: true, // Start verified - only buffer after user confirms addresses
           pendingAudioBuffer: [],
           pendingQuote: null,
+          lastQuotePromptAt: null,
+          lastQuotePromptText: null,
           pendingDispatchEvents: [],
           sttMetrics: {
             totalTranscripts: 0,
@@ -3069,6 +3109,8 @@ serve(async (req) => {
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingQuote: null,
+            lastQuotePromptAt: null,
+            lastQuotePromptText: null,
             pendingDispatchEvents: [],
             sttMetrics: {
               totalTranscripts: 0,
@@ -3166,6 +3208,10 @@ serve(async (req) => {
               destination: state.booking.destination,
               timestamp: Date.now()
             };
+
+            // Mark that we are actively prompting the fare question (prevents tool handler duplicating it)
+            state.lastQuotePromptAt = Date.now();
+            state.lastQuotePromptText = message;
           }
           
           // Determine language instruction based on session
