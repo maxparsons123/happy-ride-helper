@@ -2019,6 +2019,46 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
               passengers: sessionState.booking.passengers || 1,
               updated_at: new Date().toISOString(),
             }).eq("call_id", sessionState.callId);
+
+            // Persist confirmed booking so it resumes correctly on redial
+            try {
+              const callerPhoneNorm = normalizePhone(sessionState.phone);
+              const bookingCallId = sessionState.activeBookingCallId || sessionState.callId;
+
+              // Ensure only ONE active booking per caller
+              const { error: completeOldError } = await supabase
+                .from("bookings")
+                .update({ status: "completed", completed_at: new Date().toISOString() })
+                .eq("caller_phone", callerPhoneNorm)
+                .in("status", ["confirmed", "dispatched", "active", "pending"])
+                .neq("call_id", bookingCallId);
+
+              if (completeOldError) {
+                console.error(`[${sessionState.callId}] Failed to complete old bookings:`, completeOldError);
+              }
+
+              const { error: upsertError } = await supabase.from("bookings").upsert({
+                call_id: bookingCallId,
+                caller_phone: callerPhoneNorm,
+                caller_name: sessionState.customerName,
+                pickup: finalPickup,
+                destination: finalDestination,
+                passengers: sessionState.booking.passengers || 1,
+                fare: pendingQuote.fare,
+                eta: pendingQuote.eta,
+                status: "confirmed",
+                updated_at: new Date().toISOString(),
+              }, { onConflict: "call_id" });
+
+              if (upsertError) {
+                console.error(`[${sessionState.callId}] Booking DB error:`, upsertError);
+              } else {
+                sessionState.hasActiveBooking = true;
+                sessionState.activeBookingCallId = bookingCallId;
+              }
+            } catch (persistErr) {
+              console.error(`[${sessionState.callId}] Booking persistence error:`, persistErr);
+            }
             
             // POST confirmation to callback_url if provided (tells C# to dispatch the driver)
             if (pendingQuote.callback_url) {
@@ -4049,9 +4089,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             if (state?.hasActiveBooking && phone && phone !== "unknown") {
               const { data: bookingData, error: bookingError } = await supabase
                 .from("bookings")
-                .select("pickup, destination, passengers, fare, eta, status, booked_at")
+                .select("pickup, destination, passengers, fare, eta, status, booked_at, updated_at")
                 .eq("caller_phone", phone)
                 .in("status", ["confirmed", "dispatched", "active"])
+                .order("updated_at", { ascending: false })
                 .order("booked_at", { ascending: false })
                 .limit(1)
                 .maybeSingle();
@@ -4229,9 +4270,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                 // Try both phone formats (normalized digits-only + legacy no-plus)
                 const { data: bookingData } = await supabase
                   .from("bookings")
-                  .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
+                  .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, updated_at, caller_name")
                   .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
                   .in("status", ["confirmed", "dispatched", "active", "pending"])
+                  .order("updated_at", { ascending: false })
                   .order("booked_at", { ascending: false })
                   .limit(1)
                   .maybeSingle();
