@@ -1419,14 +1419,14 @@ serve(async (req) => {
 
           // Inject a system message to recover safely
             // - If we are awaiting fare approval (pendingQuote), guide Ada to proper yes/no handling
-            // - Otherwise, force the tool call to obtain the fare
+            // - Otherwise, force the tool call to obtain the fare SILENTLY
             const systemErrorText = hasPendingQuote
               ? `[SYSTEM ERROR: You said a booking confirmation phrase before the book_taxi tool succeeded. The fare quote (${sessionState.pendingQuote?.fare || 'pending'}) was already given. NOW YOU MUST:
 - If the customer said YES/yeah/go ahead → CALL book_taxi NOW with confirmation_state: "confirmed", pickup: "${sessionState.pendingQuote?.pickup || sessionState.booking?.pickup || ''}", destination: "${sessionState.pendingQuote?.destination || sessionState.booking?.destination || ''}"
 - If the customer said NO/cancel → CALL book_taxi with confirmation_state: "rejected"
 - If you haven't heard their response yet → Ask: "Would you like me to book that?" and WAIT.
 Do NOT say 'booked' until the tool returns success.]`
-              : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
+              : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. IMMEDIATELY call book_taxi with confirmation_state: 'request_quote'. DO NOT SPEAK - just call the tool silently. The dispatch system will provide the fare to speak.]";
             
             openaiWs?.send(
               JSON.stringify({
@@ -1444,7 +1444,8 @@ Do NOT say 'booked' until the tool returns success.]`
               })
             );
 
-            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            // Use safeResponseCreate to avoid concurrent response errors
+            safeResponseCreate(sessionState, "booking-enforcement-recovery");
           } else if (!sessionState.bookingConfirmedThisTurn && sessionState.pendingAudioBuffer.length > 0) {
             // WAIT for sentence completion before releasing audio
             // Only flush when we have a reasonable amount of text (complete thought)
