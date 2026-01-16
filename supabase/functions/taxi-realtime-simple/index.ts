@@ -1764,6 +1764,19 @@ serve(async (req) => {
         case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking request from Ada:`, args);
           
+          // === GUARD: Prevent duplicate book_taxi calls while fare confirmation is pending ===
+          if (sessionState.pendingFareConfirm?.active) {
+            const timeSinceAsk = Date.now() - (sessionState.pendingFareConfirm.askedAt || 0);
+            console.log(`[${sessionState.callId}] ⚠️ BLOCKED: book_taxi called while fare confirmation pending (${timeSinceAsk}ms ago)`);
+            result = {
+              success: false,
+              blocked: true,
+              message: "Fare confirmation already in progress. Wait for customer response.",
+              needs_fare_confirm: true
+            };
+            break;
+          }
+          
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison
           const normalizeForComparison = (addr: string): string => {
