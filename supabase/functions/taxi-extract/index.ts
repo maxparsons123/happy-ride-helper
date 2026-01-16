@@ -460,12 +460,11 @@ GENERAL RULES (CRITICAL)
 ==================================================
 GPS PICKUP RULE
 ==================================================
+DO NOT use "by_gps" for pickup_location.
 If user says "my location", "here", "where I am", "current location":
-• set pickup_location = "by_gps"
+• Leave pickup_location empty/null so the agent asks for a specific address.
 
-If ANY place name, landmark, venue, or address is present:
-• DO NOT use "by_gps"
-• Return the EXACT text of the place instead
+Always return a specific street address, landmark, or venue name.
 
 ==================================================
 ADDRESS RULES (STRICT)
