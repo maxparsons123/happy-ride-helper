@@ -2029,28 +2029,9 @@ serve(async (req) => {
                 throw new Error(`Dispatch webhook POST failed with status ${postResp.status}`);
               }
               
-              // Tell Ada to say "please wait" while we wait for dispatch response
-              const langCode = sessionState.language || "en";
-              const waitMessages: Record<string, string> = {
-                en: "Just a moment while I process your booking.",
-                nl: "Een ogenblik terwijl ik uw boeking verwerk.",
-                de: "Einen Moment bitte, ich bearbeite Ihre Buchung.",
-                fr: "Un instant, je traite votre réservation.",
-                es: "Un momento mientras proceso su reserva.",
-                it: "Un momento mentre elaboro la sua prenotazione.",
-                pl: "Chwileczkę, przetwarzam Twoją rezerwację."
-              };
-              const waitMessage = waitMessages[langCode] || waitMessages.en;
-              
-              openaiWs?.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: `[SYSTEM: Say exactly: "${waitMessage}" Then wait silently for the fare details. Do NOT confirm the booking yet.]` }]
-                }
-              }));
-              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              // DON'T tell Ada to say "please wait" here - the dispatch ask_confirm will come very quickly
+              // and we don't want to cause a "conversation_already_has_active_response" error
+              // The ask_confirm handler will make Ada speak the fare confirmation message directly
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
@@ -3190,6 +3171,12 @@ serve(async (req) => {
           // Determine language instruction based on session
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+          
+          // Cancel any active response first to avoid "conversation_already_has_active_response" error
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          
+          // Small delay to let the cancel take effect
+          await new Promise(resolve => setTimeout(resolve, 100));
           
           // Inject the fare question into Ada's conversation
           openaiWs.send(JSON.stringify({
