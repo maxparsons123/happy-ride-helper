@@ -1481,6 +1481,45 @@ Do NOT say 'booked' until the tool returns success.]`
 
           const lowerUserText = userText.toLowerCase();
 
+          // === POST-BOOKING GOODBYE SHORTCUT (CRITICAL) ===
+          // If a booking was just confirmed and the caller says thanks/that's all, end cleanly.
+          // This prevents Ada from accidentally starting a new quote from stale booking context.
+          if (
+            sessionState.lastBookTaxiSuccessAt &&
+            Date.now() - sessionState.lastBookTaxiSuccessAt < 2 * 60 * 1000 &&
+            !sessionState.pendingQuote &&
+            /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you|bye|goodbye)\b/i.test(lowerUserText) &&
+            openaiWs &&
+            openaiConnected
+          ) {
+            console.log(`[${sessionState.callId}] 👋 Caller finished after booking - triggering end_call`);
+
+            // Cancel any in-flight assistant speech to avoid overlap
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: "[SYSTEM: The customer is done and is thanking you. Call end_call NOW. Do not ask any more questions.]",
+                    },
+                  ],
+                },
+              })
+            );
+
+            openaiWs.send(JSON.stringify({ type: "response.create" }));
+            break;
+          }
+
           // === FARE YES/NO HANDOFF (CRITICAL) ===
           // If dispatch already gave us a fare quote (pendingQuote), we must turn the caller's yes/no
           // into an explicit book_taxi tool call with confirmation_state confirmed/rejected.
@@ -2110,6 +2149,26 @@ Do NOT say 'booked' until the tool returns success.]`
           args.bags = finalBags;
           args.vehicle_type = finalVehicleType;
           args.pickup_time = finalPickupTime;
+
+          // If we overrode Ada's stale route using extraction, inject a context correction.
+          // This helps Ada stop "remembering" the old active-booking destination in later turns.
+          if (sourceDiscrepancy && openaiWs && openaiConnected) {
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: `[SYSTEM: IMPORTANT ROUTE UPDATE: The correct trip is Pickup="${finalPickup}" and Destination="${finalDestination}". Use these exact values for all future tool calls in this call, even if you recall an older destination from an active booking.]`,
+                    },
+                  ],
+                },
+              })
+            );
+          }
           
           // === END VALIDATION ===
           
