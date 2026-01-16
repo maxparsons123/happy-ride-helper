@@ -2106,8 +2106,31 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             result = {
               success: true,
               rejected: true,
-              message: "No problem, I've cancelled that. Now ask the customer: \"Is there anything else I can help you with?\""
+              message: "No problem, I've cancelled that."
             };
+            
+            // ✅ INJECT SYSTEM MESSAGE so Ada says "Is there anything else I can help you with?"
+            if (openaiWs && openaiConnected) {
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: The customer rejected the booking. Say: "No problem at all. Is there anything else I can help you with?" Then WAIT for their response.]`
+                      }]
+                    }
+                  }));
+                  
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 300);
+              }, 300);
+            }
             break;
           }
           
