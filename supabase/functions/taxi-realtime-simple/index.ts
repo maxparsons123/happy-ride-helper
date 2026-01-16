@@ -661,9 +661,11 @@ function isHallucination(text: string): boolean {
     return true;
   }
   
-  // Check phantom radio host phrases (Whisper training data artifacts)
-  const lowerText = trimmed.toLowerCase();
-  if (PHANTOM_PHRASES.some(phrase => lowerText.includes(phrase))) {
+  // Check phantom phrases with normalized comparison (strip punctuation)
+  const clean = trimmed.toLowerCase().replace(/[^\w\s]/g, "");
+  if (PHANTOM_PHRASES.some(phrase => 
+    clean.includes(phrase.toLowerCase().replace(/[^\w\s]/g, ""))
+  )) {
     return true;
   }
   
