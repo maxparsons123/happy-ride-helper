@@ -2170,6 +2170,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                   fare: pendingQuote.fare,
                   eta: pendingQuote.eta,
                   customer_name: sessionState.customerName,
+                  caller_phone: sessionState.phone,
                   timestamp: new Date().toISOString()
                 };
                 
@@ -2251,6 +2252,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                   response: "rejected",  // C# bridge compatibility
                   pickup: pendingQuote.pickup,
                   destination: pendingQuote.destination,
+                  caller_phone: sessionState.phone,
                   timestamp: new Date().toISOString()
                 };
                 
