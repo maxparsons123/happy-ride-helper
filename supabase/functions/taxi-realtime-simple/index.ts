@@ -1432,13 +1432,23 @@ serve(async (req) => {
           ];
           const isCancellationContext = CANCELLATION_PHRASES.some((phrase) => lowerText.includes(phrase));
           
-          const hasHardBlockPhrase = !isCancellationContext && HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
+          // IMPORTANT: Goodbye phrases should NOT trigger booking enforcement!
+          // "Safe travels" is a farewell, not a booking confirmation.
+          const GOODBYE_PHRASES = [
+            "safe travels", "have a great", "have a good", "goodbye", "bye bye", "bye for now",
+            "take care", "goede reis", "tot ziens", "gute reise", "auf wiedersehen",
+            "bon voyage", "au revoir", "buen viaje", "adiós"
+          ];
+          const isGoodbyeContext = GOODBYE_PHRASES.some((phrase) => lowerText.includes(phrase));
+          
+          const hasHardBlockPhrase = !isCancellationContext && !isGoodbyeContext && HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
 
           // If pendingQuote is active, ONLY block hard confirmation phrases, placeholder leaks, and fare mismatches.
           // If no pendingQuote, block all confirmation + fare phrases (original behavior)
-          const isDisallowedConfirmationPhrase = hasPendingQuote
+          // EXCEPT: Never block goodbye phrases!
+          const isDisallowedConfirmationPhrase = !isGoodbyeContext && (hasPendingQuote
             ? (hasHardBlockPhrase || hasPlaceholderInstruction || hasFareMismatch)
-            : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention);
+            : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention));
 
            // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
            if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
