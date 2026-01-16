@@ -706,6 +706,10 @@ interface SessionState {
     askedAt: number | null;
   } | null;
   
+  // Fare confirmation flow complete - customer said "yes" to ask_confirm
+  // Prevents duplicate book_taxi calls after fare is confirmed
+  fareConfirmationComplete: boolean;
+  
   // Awaiting dispatch confirm action after user accepted fare
   awaitingDispatchConfirm: boolean;
 
@@ -1529,7 +1533,9 @@ serve(async (req) => {
                 // User accepted fare - confirm immediately using fare/ETA from ask_confirm
                 // Mark booking as confirmed so Ada can speak the confirmation
                 sessionState.bookingConfirmedThisTurn = true;
-                console.log(`[${sessionState.callId}] ✅ Customer accepted fare - confirming immediately`);
+                sessionState.fareConfirmationComplete = true; // 🔥 CRITICAL: Prevent duplicate book_taxi calls
+                sessionState.lastBookTaxiSuccessAt = Date.now(); // Mark as if book_taxi just succeeded
+                console.log(`[${sessionState.callId}] ✅ Customer accepted fare - booking complete (fareConfirmationComplete=true)`);
                 
                 // Build confirmation message with fare and ETA
                 const fareText = confirmedFare ? `£${confirmedFare}` : "";
@@ -1540,12 +1546,13 @@ serve(async (req) => {
                 const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
                 
                 // Tell Ada to confirm the booking with the actual fare and ETA
+                // CRITICAL: Explicitly tell Ada NOT to call book_taxi - it's already done!
                 openaiWs?.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
                     type: "message",
                     role: "user",
-                    content: [{ type: "input_text", text: `[SYSTEM: Customer confirmed! The booking is complete. Speak in ${langName}. Say: "Brilliant! Your taxi is booked.${fareText ? ` Fare is ${fareText}.` : ""}${etaText ? ` Driver will be with you in about ${etaText}.` : ""} Is there anything else I can help you with?" Be natural and brief.]` }]
+                    content: [{ type: "input_text", text: `[SYSTEM: Booking already confirmed by dispatch - DO NOT call book_taxi again! Just speak the confirmation. Speak in ${langName}. Say: "Brilliant! Your taxi is booked.${fareText ? ` Fare is ${fareText}.` : ""}${etaText ? ` Driver will be with you in about ${etaText}.` : ""} Is there anything else I can help you with?" Be natural and brief. DO NOT CALL ANY TOOLS.]` }]
                   }
                 }));
                 openaiWs?.send(JSON.stringify({ type: "response.create" }));
@@ -1764,7 +1771,7 @@ serve(async (req) => {
         case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking request from Ada:`, args);
           
-          // === GUARD: Prevent duplicate book_taxi calls while fare confirmation is pending ===
+          // === GUARD 1: Prevent duplicate book_taxi calls while fare confirmation is pending ===
           if (sessionState.pendingFareConfirm?.active) {
             const timeSinceAsk = Date.now() - (sessionState.pendingFareConfirm.askedAt || 0);
             console.log(`[${sessionState.callId}] ⚠️ BLOCKED: book_taxi called while fare confirmation pending (${timeSinceAsk}ms ago)`);
@@ -1773,6 +1780,18 @@ serve(async (req) => {
               blocked: true,
               message: "Fare confirmation already in progress. Wait for customer response.",
               needs_fare_confirm: true
+            };
+            break;
+          }
+          
+          // === GUARD 2: Prevent book_taxi after customer already confirmed fare ===
+          if (sessionState.fareConfirmationComplete) {
+            const timeSinceConfirm = Date.now() - (sessionState.lastBookTaxiSuccessAt || 0);
+            console.log(`[${sessionState.callId}] ⚠️ BLOCKED: book_taxi called after fare confirmation complete (${timeSinceConfirm}ms ago)`);
+            result = {
+              success: true,
+              already_confirmed: true,
+              message: "Booking already confirmed. No action needed."
             };
             break;
           }
@@ -3002,6 +3021,7 @@ serve(async (req) => {
           audioVerified: true, // Start verified - only buffer after user confirms addresses
           pendingAudioBuffer: [],
           pendingFareConfirm: null,
+          fareConfirmationComplete: false,
           awaitingDispatchConfirm: false,
           pendingDispatchEvents: [],
           sttMetrics: {
@@ -3090,6 +3110,7 @@ serve(async (req) => {
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingFareConfirm: null,
+            fareConfirmationComplete: false,
             awaitingDispatchConfirm: false,
             pendingDispatchEvents: [],
             sttMetrics: {
