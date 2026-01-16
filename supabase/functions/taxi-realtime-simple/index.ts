@@ -2242,25 +2242,10 @@ Do NOT say 'booked' until the tool returns success.]`
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
               console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
               
-              // === MAKE ADA SAY "PLEASE WAIT" BEFORE DISPATCH ===
-              // Cancel any in-flight response first
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-              
-              // Inject system message to make Ada speak the "please wait" message
-              openaiWs?.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: "[SYSTEM: Say EXACTLY: 'Please wait while I process your booking.' - nothing more, then wait silently for the fare and ETA.]" }]
-                }
-              }));
-              
-              // Trigger Ada to speak
-              openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              
-              // Brief pause to let Ada start speaking before we hit the dispatch webhook
-              await new Promise(resolve => setTimeout(resolve, 300));
+              // NOTE: Do NOT force Ada to say "Please wait" here.
+              // Dispatch typically returns `ask_confirm` quickly; forcing a response here can interrupt
+              // or duplicate the fare prompt (price → please-wait → price).
+              // If we need a waiting prompt, it should be a delayed fallback only when dispatch is slow.
 
               // Get recent user transcripts as structured array for comparison
               const userTranscripts = sessionState.transcripts
