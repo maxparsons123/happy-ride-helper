@@ -1858,6 +1858,14 @@ serve(async (req) => {
             version: 1
           };
           
+          // Sync pickup/destination to live_calls for dashboard display
+          await supabase.from("live_calls").update({
+            pickup: args.pickup,
+            destination: args.destination,
+            passengers: args.passengers || 1,
+            updated_at: new Date().toISOString()
+          }).eq("call_id", sessionState.callId);
+          
           const jobId = crypto.randomUUID();
           let fare = "£12.50";
           let etaMinutes = 8;
@@ -2404,6 +2412,14 @@ serve(async (req) => {
           
           console.log(`[${sessionState.callId}] ✅ Applied modification: ${finalFieldToChange} = "${finalNewValue}" (was: "${oldValue}")`);
           console.log(`[${sessionState.callId}] 📋 Updated booking state:`, sessionState.booking);
+          
+          // Sync updated pickup/destination to live_calls for dashboard display
+          await supabase.from("live_calls").update({
+            pickup: sessionState.booking.pickup,
+            destination: sessionState.booking.destination,
+            passengers: sessionState.booking.passengers || 1,
+            updated_at: new Date().toISOString()
+          }).eq("call_id", sessionState.callId);
           
           // Send webhook with modification details and poll for updated fare
           const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
