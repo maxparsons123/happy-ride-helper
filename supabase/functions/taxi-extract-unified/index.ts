@@ -89,7 +89,7 @@ EXTRACTION RULES:
 1. **Location Detection**:
    - Look for 'from', 'pick up from', 'collect from' → pickup_location
    - Look for 'to', 'going to', 'heading to', 'take me to' → dropoff_location
-   - If user says 'my location', 'here', 'where I am' → set pickup_location = 'by_gps'
+   - If user says 'my location', 'here', 'where I am', 'current location' → DO NOT use 'by_gps'. Instead, leave pickup_location empty/null so Ada asks for a specific address.
    - If 'as directed' or no destination given → dropoff_location = 'as directed'
 
 2. **House Numbers - CRITICAL**:
@@ -133,7 +133,7 @@ const BOOKING_EXTRACTION_TOOL = {
       properties: {
         pickup_location: { 
           type: "string", 
-          description: "Pickup address. Use 'by_gps' if user says 'my location' or 'here'." 
+          description: "Pickup address. Must be a specific street address, landmark, or venue. Do NOT use 'by_gps'." 
         },
         dropoff_location: { 
           type: "string", 
