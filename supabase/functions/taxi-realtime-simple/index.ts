@@ -2168,24 +2168,24 @@ serve(async (req) => {
                   }
                 }
               } else {
-                console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - NOT confirming booking`);
+              console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - NOT confirming booking`);
 
-                // If dispatch is enabled, we must NOT allow a confirmation without a fresh callback.
+                // Dispatch failed - tell customer to ring back later
                 result = {
                   success: false,
                   needs_clarification: true,
-                  ada_message: "Sorry, I'm having trouble confirming that with dispatch right now. Can you try again in a moment?",
+                  ada_message: "I'm sorry, we're having some technical issues at the moment. Please ring back a bit later and we'll get that sorted for you.",
                   message: "Dispatch callback timeout"
                 };
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
 
-              // If we can't even POST (or we error polling), do not let Ada confirm.
+              // Dispatch failed - tell customer to ring back later
               result = {
                 success: false,
                 needs_clarification: true,
-                ada_message: "Sorry, I'm having trouble sending that booking through right now. Can you try again?",
+                ada_message: "I'm sorry, we're having some technical issues at the moment. Please ring back a bit later and we'll get that sorted for you.",
                 message: "Dispatch webhook error"
               };
             }
