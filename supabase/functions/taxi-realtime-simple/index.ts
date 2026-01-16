@@ -2040,8 +2040,33 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
               confirmed: true,
               fare: pendingQuote.fare,
               eta_minutes: pendingQuote.eta,
-              message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}. Now ask the customer: "Is there anything else I can help you with?"`
+              message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}.`
             };
+            
+            // ✅ INJECT SYSTEM MESSAGE so Ada says "Is there anything else I can help you with?"
+            // The tool result message alone is not enough - we need an explicit prompt.
+            if (openaiWs && openaiConnected) {
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: Booking confirmed successfully! Say to the customer: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response.]`
+                      }]
+                    }
+                  }));
+                  
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 300);
+              }, 300);
+            }
+            
             break;
           }
           
