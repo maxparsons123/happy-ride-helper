@@ -1185,6 +1185,8 @@ serve(async (req) => {
             "driver will be",
             "cab is on",
             "car is on",
+            "please wait while i process your booking",
+            "please wait while i process that",
             
             // English - fare/price phrases  
             "fare is £",
