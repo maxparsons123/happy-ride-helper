@@ -236,6 +236,14 @@ CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
 - If user corrects name → CALL save_customer_name function immediately.
 - Call end_call function after saying "Safe travels!".
 
+🚫 ABSOLUTELY FORBIDDEN - YOU WILL BE CANCELLED IF YOU DO THESE:
+- NEVER say "Booked!", "Your taxi is confirmed", "taxi is on its way", "driver is on the way" unless book_taxi succeeded.
+- NEVER mention a fare amount (£15, €20, $25) unless book_taxi returned that exact value.
+- NEVER mention an ETA (5 minutes, arriving in 8 minutes) unless book_taxi returned that exact value.
+- NEVER say "safe travels" or "have a good trip" until AFTER book_taxi succeeded AND user confirms they're done.
+- You CANNOT confirm a booking by speaking. You MUST call the book_taxi function tool FIRST.
+- If you try to confirm without calling book_taxi, your response will be CANCELLED and you'll be forced to call the tool.
+
 AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - When you receive confirmation that the booking is complete and WhatsApp message will be sent, ALWAYS ask: "Is there anything else I can help you with?"
 - Wait for user response before ending the call.
@@ -1051,23 +1059,43 @@ serve(async (req) => {
 
           // Phrases that indicate a booking confirmation (multi-language)
           // NOTE: This runs on streaming transcript deltas to cancel fast.
+          // AGGRESSIVE: Cancel on ANY phrase that sounds like confirmation
           const BOOKING_CONFIRMATION_PHRASES = [
-            // English
+            // English - booking/confirmation phrases
             "booked!",
             "booked.",
+            "booked for you",
+            "that's booked",
+            "all booked",
             "your taxi is confirmed",
             "your taxi is booked",
             "your booking is confirmed",
             "i've booked",
             "i have booked",
             "booking confirmed",
+            "booking complete",
+            "booking is done",
             "taxi is on its way",
             "taxi is on the way",
             "driver is on",
+            "driver will be",
+            "cab is on",
+            "car is on",
+            
+            // English - fare/price phrases  
             "fare is £",
             "fare of £",
             "fare is",
             "the fare",
+            "that will be £",
+            "that's £",
+            "cost is £",
+            "price is £",
+            "total is £",
+            "will cost",
+            "will be around",
+            
+            // English - ETA/arrival phrases
             "arriving in about",
             "will arrive in",
             "arrive in about",
@@ -1075,11 +1103,29 @@ serve(async (req) => {
             "eta is",
             "eta of",
             "minutes away",
+            "be there in",
+            "be with you in",
+            "on their way",
+            
+            // English - closing phrases
             "safe travels",
+            "have a good",
+            "enjoy your",
+            "see you",
+            
+            // English - "let me" phrases that often precede hallucinated confirmations
+            "let me book",
+            "i'll book",
+            "booking that",
+            "confirming that",
+            "getting that",
 
             // Dutch
             "geboekt!",
             "geboekt.",
+            "geboekt voor",
+            "dat is geboekt",
+            "alles geboekt",
             "boekt!",
             "boekt.",
             "uw taxi is bevestigd",
@@ -1092,6 +1138,33 @@ serve(async (req) => {
             "over ongeveer",
             "veilige reis",
             "goede reis",
+            "prettige reis",
+            "zal er zijn",
+            "komt eraan",
+            
+            // German
+            "gebucht",
+            "buchung bestätigt",
+            "taxi ist unterwegs",
+            "fahrer kommt",
+            "gute fahrt",
+            "preis ist",
+            "ankunft in",
+            
+            // French
+            "réservé",
+            "confirmé",
+            "taxi en route",
+            "bonne route",
+            "bon voyage",
+            "tarif est",
+            
+            // Spanish
+            "reservado",
+            "confirmado",
+            "taxi en camino",
+            "buen viaje",
+            "precio es",
           ];
 
           // Guard against the model leaking instruction placeholders like:
