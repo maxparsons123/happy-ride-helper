@@ -2816,8 +2816,30 @@ serve(async (req) => {
       }
     }));
 
-    // Trigger response continuation
-    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    // === CRITICAL: Only trigger response.create if we want Ada to respond ===
+    // If fare confirmation is pending or this was a blocked duplicate call,
+    // DON'T trigger a new response - Ada should WAIT for customer input
+    const shouldWaitForCustomer = result.needs_fare_confirm || result.blocked || result.already_confirmed;
+    
+    if (shouldWaitForCustomer) {
+      console.log(`[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (needs_fare_confirm=${result.needs_fare_confirm}, blocked=${result.blocked}, already_confirmed=${result.already_confirmed})`);
+      
+      // If we have an ada_message and it's the FIRST time (not blocked), inject it for Ada to speak
+      if (result.ada_message && !result.blocked) {
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: `[SYSTEM: Speak this fare/ETA confirmation to the customer and then WAIT for their response. DO NOT call any tools. Just say: "${result.ada_message}"]` }]
+          }
+        }));
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+      }
+    } else {
+      // Normal case - trigger response continuation
+      openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    }
   };
 
   // --- Bridge WebSocket Handlers ---
