@@ -3024,7 +3024,10 @@ Do NOT say 'booked' until the tool returns success.]`
 
         case "end_call": {
           console.log(`[${sessionState.callId}] 👋 Ending call`);
-          result = { success: true };
+          result = { 
+            success: true,
+            message: "Call ending. Say 'Safe travels!' or a brief goodbye, then the call will end."
+          };
           
           // === STT ACCURACY METRICS SUMMARY ===
           const m = sessionState.sttMetrics;
@@ -3055,16 +3058,29 @@ Do NOT say 'booked' until the tool returns success.]`
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           
-          // Mark call as ended - prevent further processing
+          // Mark call as ending (but not ended yet - let goodbye play)
           sessionState.callEnded = true;
           
-          // Close OpenAI connection after a short delay to let goodbye audio finish
+          // Inject goodbye instruction so Ada says farewell
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "[SYSTEM: The customer is done. Say a brief, warm goodbye like 'Safe travels!' or 'Take care, bye!' - nothing more. Then stay silent.]" }]
+            }
+          }));
+          
+          // Trigger Ada to speak the goodbye
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          
+          // Close OpenAI connection after delay to let goodbye audio finish
           setTimeout(() => {
             console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
             openaiWs?.close();
           }, 4000); // 4 second delay for goodbye audio
           
-          // DON'T trigger response.create after end_call - Ada should stop talking
+          // Return early - don't trigger another response.create at the end
           return;
         }
 
