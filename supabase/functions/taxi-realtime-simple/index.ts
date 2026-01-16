@@ -2157,9 +2157,10 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             if (pendingQuote.callback_url) {
               try {
                 console.log(`[${sessionState.callId}] 📡 POSTing confirmation to callback_url: ${pendingQuote.callback_url}`);
-                const confirmPayload = {
+              const confirmPayload = {
                   call_id: sessionState.callId,
                   action: "confirmed",
+                  response: "confirmed",  // C# bridge compatibility
                   pickup: finalPickup,
                   destination: finalDestination,
                   fare: pendingQuote.fare,
@@ -2243,6 +2244,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                 const rejectPayload = {
                   call_id: sessionState.callId,
                   action: "rejected",
+                  response: "rejected",  // C# bridge compatibility
                   pickup: pendingQuote.pickup,
                   destination: pendingQuote.destination,
                   timestamp: new Date().toISOString()
