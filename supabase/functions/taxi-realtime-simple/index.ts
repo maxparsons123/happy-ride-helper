@@ -2073,45 +2073,17 @@ serve(async (req) => {
                   break;
                 }
                 
-                // Fallback: ONLY treat fare/eta/status as confirmation if they were updated AFTER we sent this booking
-                const hasConfirmation = hasFreshUpdate && (callData?.fare || callData?.eta || callData?.status === "dispatched");
-                if (hasConfirmation) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (fresh update, no message): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
-                  dispatchResult = {
-                    fare: callData?.fare || null,
-                    eta_minutes: parseInt(callData?.eta) || 8,
-                    confirmed: true
-                  };
-                  break;
-                }
-                
-                // Check if dispatch sent a "say" message (look for dispatch transcript)
-                // (using transcripts already declared above)
-                
-                // Check for hangup instruction first
-                const dispatchHangup = transcripts.find(t => 
-                  t.role === "dispatch_hangup" && 
+                // Check for ask_confirm (fare confirmation) request FIRST.
+                // Dispatch typically sets fare/eta in DB at the same time, so we must not treat
+                // a fresh fare/eta update as a confirmed booking if ask_confirm exists.
+                const dispatchAskConfirm = transcripts.find(t =>
+                  t.role === "dispatch_ask_confirm" &&
                   new Date(t.timestamp).getTime() > pollStart
                 );
-                
-                if (dispatchHangup) {
-                  console.log(`[${sessionState.callId}] 📞 Dispatch hangup: ${dispatchHangup.text}`);
-                  dispatchResult = {
-                    hangup: true,
-                    ada_message: dispatchHangup.text
-                  };
-                  break;
-                }
-                
-                // Check for ask_confirm (fare confirmation) request
-                const dispatchAskConfirm = transcripts.find(t => 
-                  t.role === "dispatch_ask_confirm" && 
-                  new Date(t.timestamp).getTime() > pollStart
-                );
-                
+
                 if (dispatchAskConfirm) {
                   console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}"`);
-                  
+
                   // Store pending fare confirmation state
                   sessionState.pendingFareConfirm = {
                     active: true,
@@ -2121,24 +2093,53 @@ serve(async (req) => {
                     callbackUrl: dispatchAskConfirm.callback_url || null,
                     askedAt: Date.now()
                   };
-                  
+
                   dispatchResult = {
                     ada_message: dispatchAskConfirm.text,
                     needs_fare_confirm: true
                   };
                   break;
                 }
-                
-                const dispatchSay = transcripts.find(t => 
-                  t.role === "dispatch" && 
+
+                // Check for hangup instruction
+                const dispatchHangup = transcripts.find(t =>
+                  t.role === "dispatch_hangup" &&
                   new Date(t.timestamp).getTime() > pollStart
                 );
-                
+
+                if (dispatchHangup) {
+                  console.log(`[${sessionState.callId}] 📞 Dispatch hangup: ${dispatchHangup.text}`);
+                  dispatchResult = {
+                    hangup: true,
+                    ada_message: dispatchHangup.text
+                  };
+                  break;
+                }
+
+                // Check if dispatch sent a general message
+                const dispatchSay = transcripts.find(t =>
+                  t.role === "dispatch" &&
+                  new Date(t.timestamp).getTime() > pollStart
+                );
+
                 if (dispatchSay) {
                   console.log(`[${sessionState.callId}] 💬 Dispatch says: ${dispatchSay.text}`);
                   dispatchResult = {
                     ada_message: dispatchSay.text,
                     needs_clarification: true
+                  };
+                  break;
+                }
+
+                // Fallback: ONLY treat fare/eta/status as a confirmation if they were updated AFTER we sent this booking
+                // AND there is no ask_confirm request present.
+                const hasConfirmation = hasFreshUpdate && (callData?.fare || callData?.eta || callData?.status === "dispatched" || callData?.status === "active");
+                if (hasConfirmation) {
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (fresh update, no ask_confirm): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
+                  dispatchResult = {
+                    fare: callData?.fare || null,
+                    eta_minutes: parseInt(callData?.eta) || 8,
+                    confirmed: true
                   };
                   break;
                 }
@@ -3180,32 +3181,39 @@ serve(async (req) => {
           // Determine language instruction based on session
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
-          
+
+          // HARD BLOCK: even if book_taxi succeeded earlier, do NOT allow Ada to confirm a booking
+          // during fare confirmation. She must wait for the customer's yes/no.
+          if (state) state.bookingConfirmedThisTurn = false;
+
           // Wait a bit for any in-flight response to complete before cancelling
           await new Promise(resolve => setTimeout(resolve, 200));
-          
+
           // Cancel any active response first to avoid "conversation_already_has_active_response" error
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          
+
           // Wait for cancel to take effect
           await new Promise(resolve => setTimeout(resolve, 150));
-          
+
           // Inject the fare question into Ada's conversation
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "input_text", text: `[DISPATCH FARE CONFIRMATION]: Translate and say this message to the customer IN ${langName.toUpperCase()}: "${message}" Then wait for their yes/no response. DO NOT speak English unless the customer is speaking English.` }]
+              content: [{
+                type: "input_text",
+                text: `[DISPATCH FARE CONFIRMATION]: Translate and say this message to the customer IN ${langName.toUpperCase()}: "${message}"\n\nCRITICAL RULES: Ask the question ONLY. Do NOT confirm the booking yet. Do NOT say 'booked' or 'confirmed'. Then wait for their yes/no response.`
+              }]
             }
           }));
-          
+
           // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `IMPORTANT: The dispatch system is asking you to confirm the fare. You MUST speak in ${langName} (the same language you've been using). Translate and say this message naturally in ${langName}: "${message}" Then wait for their response. NEVER switch to English mid-conversation.`
+              instructions: `IMPORTANT: You are ONLY asking for fare approval. Speak in ${langName}. Translate and say: "${message}" Then STOP and wait silently for yes/no. Do NOT confirm or book anything yet. Do NOT say booked/confirmed.`
             }
           }));
         });
