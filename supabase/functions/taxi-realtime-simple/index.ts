@@ -297,9 +297,22 @@ Examples:
 - "pick me up at the station going to the airport" → Pickup: station, Destination: airport
 - "I want to go from home to work" → Pickup: home, Destination: work
 
-If user is MODIFYING a booking and says "change it from [A] to [B]":
-- This still means: Pickup: A, Destination: B
-- Echo back: "So pickup from [A] and destination [B]?"
+⚠️ MODIFICATION REQUESTS - SAME RULE APPLIES:
+When user says "change my booking from [A] to [B]" or "change from [A] going to [B]":
+- This is a COMPLETE booking statement: Pickup = A, Destination = B
+- They are NOT asking to "change pickup FROM A TO something else"
+- They ARE giving you the full route: pickup [A], destination [B]
+- NEVER interpret this as changing pickup address!
+
+Examples:
+- "change my booking from 52a david road going to sweetspot" → Keep Pickup: 52a David Road, Set Destination: Sweet Spot
+- "change it from the hotel to the airport" → Pickup: hotel, Destination: airport
+- "can i change from home going to the shops" → Pickup: home, Destination: shops
+
+If they ONLY want to change one field, they'll say:
+- "change my pickup to [X]" → Only change pickup
+- "change my destination to [Y]" → Only change destination
+- "change the address" → Ask which one (pickup or destination)
 
 TURN-TAKING AWARENESS:
 When the user finishes speaking, look for:
