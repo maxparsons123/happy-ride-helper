@@ -2470,6 +2470,8 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           // 1. Normalize addresses for comparison (normalizeForComparison is defined above)
           
           // 2. Run AI extraction on conversation (both user + assistant turns)
+          // OPTIMIZATION: Only run extraction if pickup != destination (likely error case)
+          // For normal bookings with distinct addresses, skip extraction to save 500-2000ms
           const conversationForExtraction = sessionState.transcripts
             .filter(t => t.role === "user" || t.role === "assistant")
             .slice(-12); // Last 12 turns for context
@@ -2485,9 +2487,15 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             missing_fields?: string[];
           } = {};
           
-          if (conversationForExtraction.length > 0) {
+          // Pre-check: Are Ada's pickup and destination the same? (common error that needs extraction)
+          const adaPickupPreCheck = normalizeForComparison(args.pickup || "");
+          const adaDestPreCheck = normalizeForComparison(args.destination || "");
+          const needsExtractionValidation = adaPickupPreCheck && adaDestPreCheck && adaPickupPreCheck === adaDestPreCheck;
+          
+          if (needsExtractionValidation && conversationForExtraction.length > 0) {
+            // Only run AI extraction when we suspect Ada made an error (pickup = destination)
             try {
-              console.log(`[${sessionState.callId}] 🔍 Running dual-source AI extraction...`);
+              console.log(`[${sessionState.callId}] 🔍 Running AI extraction (pickup=destination detected)...`);
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
                 method: "POST",
                 headers: {
@@ -2511,6 +2519,9 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             } catch (extractErr) {
               console.error(`[${sessionState.callId}] AI extraction failed:`, extractErr);
             }
+          } else if (conversationForExtraction.length > 0) {
+            // Skip extraction for normal bookings - log but don't wait
+            console.log(`[${sessionState.callId}] ⚡ Skipping AI extraction (addresses look valid)`);
           }
           
           // 3. Compare Ada's interpretation vs AI extraction
