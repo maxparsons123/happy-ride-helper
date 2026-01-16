@@ -2490,12 +2490,28 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           // Pre-check: Are Ada's pickup and destination the same? (common error that needs extraction)
           const adaPickupPreCheck = normalizeForComparison(args.pickup || "");
           const adaDestPreCheck = normalizeForComparison(args.destination || "");
-          const needsExtractionValidation = adaPickupPreCheck && adaDestPreCheck && adaPickupPreCheck === adaDestPreCheck;
+          const pickupEqualsDestination = adaPickupPreCheck && adaDestPreCheck && adaPickupPreCheck === adaDestPreCheck;
+          
+          // ALSO check if Ada might be using stale booking data (modification guard)
+          // This catches cases where Ada says "Sweet Spot" in conversation but passes "Liverpool" in args
+          const existingDest = sessionState.booking?.destination;
+          const existingPickup = sessionState.booking?.pickup;
+          const adaUsingStaleDest = existingDest && 
+            normalizeForComparison(args.destination || "") === normalizeForComparison(existingDest) &&
+            sessionState.hasActiveBooking;
+          const adaUsingStalePickup = existingPickup && 
+            normalizeForComparison(args.pickup || "") === normalizeForComparison(existingPickup) &&
+            sessionState.hasActiveBooking;
+          
+          // Run extraction if: pickup=destination OR Ada is reusing active booking addresses (possible stale data)
+          const needsExtractionValidation = pickupEqualsDestination || adaUsingStaleDest || adaUsingStalePickup;
           
           if (needsExtractionValidation && conversationForExtraction.length > 0) {
-            // Only run AI extraction when we suspect Ada made an error (pickup = destination)
+            const reason = pickupEqualsDestination ? "pickup=destination" : 
+              adaUsingStaleDest ? "possible stale destination from active booking" :
+              "possible stale pickup from active booking";
             try {
-              console.log(`[${sessionState.callId}] 🔍 Running AI extraction (pickup=destination detected)...`);
+              console.log(`[${sessionState.callId}] 🔍 Running AI extraction (${reason})...`);
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
                 method: "POST",
                 headers: {
@@ -2521,7 +2537,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             }
           } else if (conversationForExtraction.length > 0) {
             // Skip extraction for normal bookings - log but don't wait
-            console.log(`[${sessionState.callId}] ⚡ Skipping AI extraction (addresses look valid)`);
+            console.log(`[${sessionState.callId}] ⚡ Skipping AI extraction (addresses look valid, no active booking overlap)`);
           }
           
           // 3. Compare Ada's interpretation vs AI extraction
