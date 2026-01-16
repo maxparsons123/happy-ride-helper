@@ -709,6 +709,9 @@ interface SessionState {
   // Awaiting dispatch confirm action after user accepted fare
   awaitingDispatchConfirm: boolean;
 
+  // Dispatch events that arrive while OpenAI isn't ready / while a response is active
+  pendingDispatchEvents: { event: string; payload: any; receivedAt: number }[];
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -2926,12 +2929,13 @@ serve(async (req) => {
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
-            bookingConfirmedThisTurn: false,
-            lastBookTaxiSuccessAt: null,
-            audioVerified: true, // Start verified - only buffer after user confirms addresses
-            pendingAudioBuffer: [],
-            pendingFareConfirm: null,
-            awaitingDispatchConfirm: false,
+          bookingConfirmedThisTurn: false,
+          lastBookTaxiSuccessAt: null,
+          audioVerified: true, // Start verified - only buffer after user confirms addresses
+          pendingAudioBuffer: [],
+          pendingFareConfirm: null,
+          awaitingDispatchConfirm: false,
+          pendingDispatchEvents: [],
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -3019,6 +3023,7 @@ serve(async (req) => {
             pendingAudioBuffer: [],
             pendingFareConfirm: null,
             awaitingDispatchConfirm: false,
+            pendingDispatchEvents: [],
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
