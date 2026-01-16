@@ -1466,6 +1466,12 @@ Do NOT say 'booked' until the tool returns success.]`
           })
         );
 
+        // ✅ CALL-ENDED GUARD: Don't process new user input if call is ending
+        if (sessionState.callEnded) {
+          console.log(`[${sessionState.callId}] 🛑 Ignoring user transcript after call ended: "${userText}"`);
+          break;
+        }
+
         if (userText) {
           sessionState.transcripts.push({
             role: "user",
@@ -1493,6 +1499,9 @@ Do NOT say 'booked' until the tool returns success.]`
             openaiConnected
           ) {
             console.log(`[${sessionState.callId}] 👋 Caller finished after booking - triggering end_call`);
+            
+            // ✅ CRITICAL: Mark call as ending IMMEDIATELY to block all further processing
+            sessionState.callEnded = true;
 
             // Cancel any in-flight assistant speech to avoid overlap
             if (sessionState.openAiResponseActive) {
@@ -1509,7 +1518,7 @@ Do NOT say 'booked' until the tool returns success.]`
                   content: [
                     {
                       type: "input_text",
-                      text: "[SYSTEM: The customer is done and is thanking you. Call end_call NOW. Do not ask any more questions.]",
+                      text: "[SYSTEM: The customer is done and is thanking you. Say 'Safe travels!' and nothing more. Then stay completely silent.]",
                     },
                   ],
                 },
@@ -1517,6 +1526,13 @@ Do NOT say 'booked' until the tool returns success.]`
             );
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
+            
+            // Close OpenAI connection after delay to let goodbye audio finish
+            setTimeout(() => {
+              console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after post-booking goodbye`);
+              openaiWs?.close();
+            }, 3000); // 3 second delay for goodbye audio
+            
             break;
           }
 
@@ -3092,6 +3108,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
       const isBinary = event.data instanceof Blob || event.data instanceof ArrayBuffer || event.data instanceof Uint8Array;
       
       if (isBinary) {
+        // ✅ CALL-ENDED GUARD: Don't forward audio if call is ending
+        if (state?.callEnded) {
+          return;
+        }
+        
         if (openaiConnected && openaiWs && state) {
           let audioData: Uint8Array;
 
