@@ -15,6 +15,33 @@ const DEFAULT_COMPANY = "247 Radio Carz";
 const DEFAULT_AGENT = "Ada";
 const DEFAULT_VOICE = "shimmer";
 
+// Language code to name mapping (for prompt injection)
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: "English",
+  nl: "Dutch",
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+  it: "Italian",
+  pt: "Portuguese",
+  pl: "Polish",
+  ro: "Romanian",
+  ar: "Arabic",
+  hi: "Hindi",
+  zh: "Chinese",
+  ja: "Japanese",
+  ko: "Korean",
+  tr: "Turkish",
+  ru: "Russian",
+  el: "Greek",
+  cs: "Czech",
+  hu: "Hungarian",
+  sv: "Swedish",
+  no: "Norwegian",
+  da: "Danish",
+  fi: "Finnish",
+};
+
 // --- Phone Number to Language Mapping ---
 const COUNTRY_CODE_TO_LANGUAGE: Record<string, string> = {
   // English
@@ -678,7 +705,328 @@ function correctTranscript(text: string): string {
   return corrected.charAt(0).toUpperCase() + corrected.slice(1);
 }
 
-// --- Session State ---
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADA MODULE - Modular AI Assistant Functions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Ada - Modular AI Taxi Dispatcher
+ * 
+ * Submodules:
+ * - Ada.Prompts: System prompt generation
+ * - Ada.Scripts: Pre-defined response scripts
+ * - Ada.Responses: Response injection helpers
+ * - Ada.Tools: Tool handler utilities
+ */
+const Ada = {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PROMPTS - System prompt and context generation
+  // ─────────────────────────────────────────────────────────────────────────────
+  Prompts: {
+    /** Get the base system instructions */
+    getSystemInstructions: (): string => SYSTEM_PROMPT,
+    
+    /** Build dynamic context based on caller history */
+    buildCallerContext: (params: {
+      customerName: string | null;
+      lastPickup: string | null;
+      lastDestination: string | null;
+      totalBookings: number;
+    }): string => {
+      if (!params.lastPickup && !params.lastDestination) return "";
+      
+      const namePart = params.customerName ? `${params.customerName}'s` : "Caller's";
+      return `\n\n[RETURNING CALLER CONTEXT]\n${namePart} last trip: ${params.lastPickup || "unknown"} → ${params.lastDestination || "unknown"} (${params.totalBookings} total bookings).`;
+    },
+    
+    /** Build active booking context */
+    buildBookingContext: (params: {
+      pickup: string | null;
+      destination: string | null;
+      passengers: number | null;
+      bags: number | null;
+    }): string => {
+      if (!params.pickup && !params.destination) return "";
+      
+      const parts: string[] = [];
+      if (params.pickup) parts.push(`Pickup: ${params.pickup}`);
+      if (params.destination) parts.push(`Destination: ${params.destination}`);
+      if (params.passengers) parts.push(`${params.passengers} passenger(s)`);
+      if (params.bags) parts.push(`${params.bags} bag(s)`);
+      
+      return `\n\n[ACTIVE BOOKING]\n${parts.join(", ")}`;
+    },
+    
+    /** Assemble the full system prompt */
+    assembleFullPrompt: (params: {
+      baseInstructions?: string;
+      companyName: string;
+      agentName: string;
+      callerContext?: string;
+      bookingContext?: string;
+    }): string => {
+      let prompt = params.baseInstructions || SYSTEM_PROMPT;
+      
+      // Replace placeholders
+      prompt = prompt.replace(/\[COMPANY\]/g, params.companyName);
+      prompt = prompt.replace(/\[AGENT\]/g, params.agentName);
+      
+      // Append contexts
+      if (params.callerContext) prompt += params.callerContext;
+      if (params.bookingContext) prompt += params.bookingContext;
+      
+      return prompt;
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // SCRIPTS - Pre-defined response scripts
+  // ─────────────────────────────────────────────────────────────────────────────
+  Scripts: {
+    /** Booking confirmed - taxi on the way */
+    bookingConfirmed: (): string => 
+      "That's on the way. Is there anything else I can help you with?",
+    
+    /** Fare quote prompt */
+    fareQuote: (fare: string, eta: string): string => 
+      `Hi, your price for the journey is ${fare} and your driver will be ${eta}. Do you want me to go ahead and book that?`,
+    
+    /** Goodbye message */
+    goodbye: (): string => "Safe travels!",
+    
+    /** Anything else prompt */
+    anythingElse: (): string => "Is there anything else I can help you with?",
+    
+    /** No cars available */
+    noCars: (): string => 
+      "I'm really sorry, but we don't have any cars available at the moment. Would you like me to try again in a few minutes, or can I help with anything else?",
+    
+    /** Technical issues */
+    technicalIssues: (): string => 
+      "I'm sorry, we're having some technical issues at the moment. Please ring back a bit later and we'll get that sorted for you.",
+    
+    /** Booking cancelled */
+    bookingCancelled: (): string => 
+      "I've cancelled that booking for you. Is there anything else I can help with?",
+    
+    /** Change acknowledged */
+    changeAcknowledged: (field: string, newValue: string): string => 
+      `Got it, ${field} is ${newValue}. Is that correct?`,
+    
+    /** New fare after change */
+    newFare: (fare: string): string => 
+      `The fare is ${fare}. Shall I book that?`
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RESPONSES - Response injection helpers
+  // ─────────────────────────────────────────────────────────────────────────────
+  Responses: {
+    /** Create a system message for OpenAI */
+    createSystemMessage: (text: string): object => ({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }]
+      }
+    }),
+    
+    /** Create a response.create trigger */
+    createResponseTrigger: (instructions?: string): object => ({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        ...(instructions ? { instructions } : {})
+      }
+    }),
+    
+    /** Build fare confirmation injection */
+    buildFareConfirmation: (params: {
+      fare: string;
+      eta: string;
+      language: string;
+      pickup: string;
+      destination: string;
+    }): { message: object; trigger: object } => {
+      const script = Ada.Scripts.fareQuote(params.fare, params.eta);
+      const langName = LANGUAGE_NAMES[params.language] || "English";
+      
+      return {
+        message: Ada.Responses.createSystemMessage(
+          `[DISPATCH FARE CONFIRMATION]: Read this EXACTLY to the customer IN ${langName.toUpperCase()}: "${script}"\n\n` +
+          `After saying it, WAIT for yes/no.\n` +
+          `If YES → CALL book_taxi with confirmation_state: "confirmed", pickup: "${params.pickup}", destination: "${params.destination}"\n` +
+          `If NO → CALL book_taxi with confirmation_state: "rejected"`
+        ),
+        trigger: Ada.Responses.createResponseTrigger(
+          `Say EXACTLY: "${script}" Then STOP and wait for yes/no.`
+        )
+      };
+    },
+    
+    /** Build booking confirmation injection */
+    buildBookingConfirmation: (language: string): { message: object; trigger: object } => {
+      const script = Ada.Scripts.bookingConfirmed();
+      const langName = LANGUAGE_NAMES[language] || "English";
+      
+      return {
+        message: Ada.Responses.createSystemMessage(
+          `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${script}" Be natural and brief. Do not add any extra details.`
+        ),
+        trigger: Ada.Responses.createResponseTrigger(
+          `IMPORTANT: Say EXACTLY: "${script}" Do not add extra details.`
+        )
+      };
+    },
+    
+    /** Build goodbye injection */
+    buildGoodbye: (language: string): { message: object; trigger: object } => {
+      const script = Ada.Scripts.goodbye();
+      const langName = LANGUAGE_NAMES[language] || "English";
+      
+      return {
+        message: Ada.Responses.createSystemMessage(
+          `[SYSTEM: The customer said goodbye. Say "${script}" IN ${langName.toUpperCase()} and nothing more. Then stay completely silent.]`
+        ),
+        trigger: Ada.Responses.createResponseTrigger(
+          `Say ONLY: "${script}" Then stay silent.`
+        )
+      };
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TOOLS - Tool result helpers
+  // ─────────────────────────────────────────────────────────────────────────────
+  Tools: {
+    /** Parse luggage from string to integer */
+    parseLuggage: (bagsInput: unknown): number => {
+      if (typeof bagsInput === "number") return bagsInput;
+      if (typeof bagsInput !== "string") return 0;
+      
+      const lower = bagsInput.toLowerCase().trim();
+      if (lower === "no" || lower === "none" || lower === "no baggage" || lower === "no bags") return 0;
+      
+      const numMatch = lower.match(/(\d+)/);
+      return numMatch ? parseInt(numMatch[1], 10) : 0;
+    },
+    
+    /** Normalize trip key for duplicate detection */
+    makeTripKey: (pickup: string | null, destination: string | null): string => {
+      const normalize = (s: string | null) => (s || "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .replace(/\b(road|rd|street|st|avenue|ave|lane|ln|drive|dr|close|cl|way|place|pl)\b/gi, "")
+        .trim();
+      return `${normalize(pickup)}::${normalize(destination)}`;
+    },
+    
+    /** Check if address is invalid */
+    isInvalidAddress: (addr: string | null): boolean => {
+      if (!addr) return true;
+      const lower = addr.toLowerCase().trim();
+      return lower === "" || 
+             lower === "[redacted]" || 
+             lower === "by_gps" || 
+             lower === "unknown" ||
+             lower === "null";
+    },
+    
+    /** Build webhook payload for dispatch */
+    buildWebhookPayload: (params: {
+      callId: string;
+      phone: string | null;
+      action: string;
+      pickup: string;
+      destination: string;
+      passengers?: number;
+      bags?: number;
+      pickupTime?: string;
+      vehicleType?: string;
+      customerName?: string | null;
+      transcripts?: string[];
+    }): object => ({
+      job_id: params.callId,
+      call_id: params.callId,
+      caller_phone: params.phone,
+      action: params.action,
+      ada_pickup: params.pickup,
+      ada_dropoff: params.destination,
+      passengers: params.passengers || 1,
+      bags: params.bags || 0,
+      pickup_time: params.pickupTime || "now",
+      vehicle_type: params.vehicleType || "saloon",
+      customer_name: params.customerName || null,
+      user_transcripts: params.transcripts || []
+    })
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DETECTION - Intent and phrase detection
+  // ─────────────────────────────────────────────────────────────────────────────
+  Detection: {
+    /** Goodbye phrases that end the call */
+    GOODBYE_PHRASES: [
+      "bye", "goodbye", "see ya", "see you", "cya", "i'm done", "im done", 
+      "hang up", "end call", "no thank you", "no thanks", "no that's all", 
+      "no thats all", "nothing else", "that's it", "thats it", "that'll be all",
+      "thatll be all", "i'm good", "im good", "all good", "all done"
+    ],
+    
+    /** Phrases indicating "yes" to fare */
+    YES_PHRASES: [
+      "yes", "yeah", "yep", "yup", "go ahead", "book it", "do it", "please do",
+      "sure", "okay", "ok", "alright", "sounds good", "correct", "that's right",
+      "thats right", "that's correct", "thats correct", "right", "confirm",
+      "confirmed", "i confirm", "please", "proceed"
+    ],
+    
+    /** Phrases indicating "no" to fare */
+    NO_PHRASES: [
+      "no", "nope", "don't", "do not", "dont", "cancel", "stop", "never mind",
+      "nevermind", "not now", "nah", "too expensive"
+    ],
+    
+    /** Check if text matches goodbye intent */
+    isGoodbye: (text: string): boolean => {
+      const lower = text.toLowerCase();
+      return Ada.Detection.GOODBYE_PHRASES.some(p => lower.includes(p)) &&
+             !/going to|from|pick ?up|drop ?off/i.test(text);
+    },
+    
+    /** Check if text matches "yes" to fare */
+    isYesToFare: (text: string): boolean => {
+      const lower = text.toLowerCase();
+      return Ada.Detection.YES_PHRASES.some(p => new RegExp(`\\b${p}\\b`, "i").test(lower));
+    },
+    
+    /** Check if text matches "no" to fare */
+    isNoToFare: (text: string): boolean => {
+      const lower = text.toLowerCase();
+      return Ada.Detection.NO_PHRASES.some(p => new RegExp(`\\b${p}\\b`, "i").test(lower));
+    },
+    
+    /** Detect address correction intent */
+    detectAddressCorrection: (text: string): { field: "pickup" | "destination" | null; value: string | null } => {
+      const pickupMatch = text.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:pickup|pick\s*up)\s+(?:is|should be|location is)\s+(.+)/i) ||
+                          text.match(/(?:no|not|wrong)[,.]?\s*(?:i(?:'?m| am)\s+at|from)\s+(.+)/i);
+      
+      const destMatch = text.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:destination|drop\s*off|going to)\s+(?:is|should be)\s+(.+)/i) ||
+                        text.match(/(?:no|not|wrong)[,.]?\s*(?:to|going to)\s+(.+)/i);
+      
+      if (pickupMatch) return { field: "pickup", value: pickupMatch[1].trim() };
+      if (destMatch) return { field: "destination", value: destMatch[1].trim() };
+      return { field: null, value: null };
+    }
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// END ADA MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+
 interface TranscriptItem {
   role: "user" | "assistant";
   text: string;
