@@ -2593,19 +2593,17 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                   break;
                 }
 
-                // Fallback: ONLY treat fare/eta/status as a confirmation if they were updated AFTER we sent this booking
-                // AND there is no ask_confirm request present.
-                const hasConfirmation = hasFreshUpdate && (callData?.fare || callData?.eta || callData?.status === "dispatched" || callData?.status === "active");
-                if (hasConfirmation) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (fresh update, no ask_confirm): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
-                  dispatchResult = {
-                    fare: callData?.fare || null,
-                    eta_minutes: parseInt(callData?.eta) || 8,
-                    confirmed: true
-                  };
-                  break;
-                }
-                
+                // --- REMOVED AUTO-CONFIRM FALLBACK ---
+                // Previously, a fresh fare/eta/status update was treated as an implicit confirm.
+                // But the C# dispatcher now sends explicit ask_confirm or dispatch_confirm messages
+                // via the broadcast channel — so we NO LONGER auto-confirm based on DB fields.
+                // This prevents double-fare-prompt races where both the broadcast and the poll
+                // independently triggered Ada to speak.
+                //
+                // If you still need an auto-confirm fallback for old dispatchers that don't
+                // broadcast, enable it only if dispatch_ask_confirm was NOT found in transcripts
+                // AND pendingQuote is null (no fare was ever sent).
+
                 // Wait before next poll
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
               }
