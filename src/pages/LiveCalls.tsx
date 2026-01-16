@@ -1291,8 +1291,14 @@ export default function LiveCalls() {
                           <span>{selectedCallData.passengers || "—"} passengers</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <DollarSign className="w-4 h-4 text-primary" />
-                          <span>{selectedCallData.fare || "—"}</span>
+                          <Receipt className="w-4 h-4 text-primary" />
+                          <span>
+                            {selectedCallData.fare 
+                              ? (selectedCallData.fare.startsWith('£') || selectedCallData.fare.startsWith('€') || selectedCallData.fare.startsWith('$') 
+                                  ? selectedCallData.fare 
+                                  : `£${selectedCallData.fare}`)
+                              : "—"}
+                          </span>
                         </div>
                       </div>
 
