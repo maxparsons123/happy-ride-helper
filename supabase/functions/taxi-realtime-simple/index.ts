@@ -3783,8 +3783,21 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
+          // Use the same normalization as book_taxi to avoid mismatches like "52a david|||wolverhampton" vs "52adavidroad|||wolverhampton"
+          const normalizeForTripKey = (addr: string): string => {
+            if (!addr) return "";
+            return addr
+              .toLowerCase()
+              .replace(/[,.\-]/g, " ")
+              .replace(/\s+/g, " ")
+              .replace(/\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|court|ct|place|pl)\b/gi, "")
+              .replace(/\b(netherlands|uk|united kingdom|england|nederland|the netherlands)\b/gi, "")
+              .replace(/\b(in|naar|van|to|from)\b/gi, "")
+              .trim();
+          };
+          
           const makeTripKeyLocal = (p: string | null, d: string | null) =>
-            `${String(p || "").toLowerCase().replace(/\W/g, "")}|||${String(d || "").toLowerCase().replace(/\W/g, "")}`;
+            `${normalizeForTripKey(p || "")}|||${normalizeForTripKey(d || "")}`;
 
           const tripKeyNow = makeTripKeyLocal(state?.booking?.pickup || null, state?.booking?.destination || null);
           if (state?.quoteTripKey && tripKeyNow !== state.quoteTripKey) {
