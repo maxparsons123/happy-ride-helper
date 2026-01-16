@@ -262,14 +262,21 @@ AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
 - If user has another request → Process it normally.
 
-BOOKING MODIFICATIONS - IMMEDIATE ACTION WITH CONFIRMATION:
-⚠️ When customer requests a change, ACKNOWLEDGE it first, then DO IT.
+BOOKING MODIFICATIONS - CONFIRM BEFORE FARE:
+⚠️ When customer requests a change, CONFIRM it first, THEN get fare only after they agree.
 
-- If customer says "change destination to X" → Say "Got it, updating destination." → call modify_booking → call book_taxi(request_quote) → announce new fare.
-- If customer says "change pickup to X" → Say "Got it, updating pickup." → call modify_booking → call book_taxi(request_quote) → announce new fare.
-- If customer says "no, the pickup is X" → Say "Got it, updating pickup to X." → call modify_booking → call book_taxi(request_quote) → announce new fare.
-- After getting new fare, say: "The new fare is [FARE]. Shall I book that?"
-- NEVER repeat unchanged details (passengers, bags, etc. are preserved automatically).
+STEP 1 - ACKNOWLEDGE AND CONFIRM:
+- Customer says "change destination to X" → Say: "Got it, changing destination to X. Is that right?"
+- Customer says "change pickup to X" → Say: "Got it, changing pickup to X. Is that right?"
+- Customer says "no, the pickup is X" → Say: "Got it, pickup is X. Is that correct?"
+- WAIT for customer to confirm (yes/yeah/correct).
+
+STEP 2 - AFTER CUSTOMER CONFIRMS:
+- Call modify_booking with the new value.
+- Call book_taxi with confirmation_state: "request_quote".
+- Announce the new fare: "The fare is [FARE]. Shall I book that?"
+
+NEVER get a fare quote before the customer confirms they're happy with the change.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -1875,7 +1882,7 @@ Do NOT say 'booked' until the tool returns success.]`
                       content: [
                         {
                           type: "input_text",
-                          text: `[SYSTEM: The caller wants to change their booking. New route: Pickup="${pickupHint || "pickup"}", Destination="${destHint || "destination"}". First say: "Got it, updating your route." Then call modify_booking for any changed fields, then call book_taxi with confirmation_state request_quote. After getting fare, say: "The new fare is X. Shall I book that?"]`,
+                          text: `[SYSTEM: The caller wants to change their booking. New route: Pickup="${pickupHint || "pickup"}", Destination="${destHint || "destination"}". Say: "Got it, changing to pickup from ${pickupHint || "pickup"} going to ${destHint || "destination"}. Is that right?" Then WAIT for confirmation. Only after they say yes/yeah, call modify_booking and book_taxi.]`,
                         },
                       ],
                     },
@@ -1921,7 +1928,7 @@ Do NOT say 'booked' until the tool returns success.]`
                     role: "user",
                     content: [{
                       type: "input_text",
-                      text: `[SYSTEM: The customer is CORRECTING the ${fieldToChange}. The new ${fieldToChange} is: "${newValue}". First say: "Got it, updating the ${fieldToChange} to ${newValue}." Then IMMEDIATELY call modify_booking with field_to_change: "${fieldToChange}" and new_value: "${newValue}". Then call book_taxi with confirmation_state: "request_quote" and announce the new fare.]`,
+                      text: `[SYSTEM: The customer is CORRECTING the ${fieldToChange}. The new ${fieldToChange} is: "${newValue}". Say: "Got it, ${fieldToChange} is ${newValue}. Is that correct?" Then WAIT for their confirmation (yes/yeah/correct). Only AFTER they confirm, call modify_booking and then book_taxi with confirmation_state: "request_quote".]`,
                     }],
                   },
                 }));
