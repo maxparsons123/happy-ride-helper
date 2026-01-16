@@ -1974,20 +1974,18 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
           
-          // === PENDING QUOTE GUARD ===
-          // Prevent duplicate request_quote calls while a quote is already pending
-          if (sessionState.pendingQuote && Date.now() - sessionState.pendingQuote.timestamp < 30000) {
-            console.log(`[${sessionState.callId}] ⏸️ Ignoring duplicate request_quote - quote already pending for this trip`);
-            result = {
-              success: true,
-              blocked: true,
-              needs_fare_confirm: true,
-              ada_message: sessionState.pendingQuote.lastPrompt || `The fare is ${sessionState.pendingQuote.fare} and your driver will be ${sessionState.pendingQuote.eta}. Would you like me to book that?`,
-              fare: sessionState.pendingQuote.fare,
-              eta: sessionState.pendingQuote.eta,
-              message: "Quote already pending - waiting for customer confirmation"
-            };
-            break;
+          // === EARLY EXIT: Prevent duplicate request_quote while pending ===
+          if (sessionState.pendingQuote) {
+            const timeSinceLast = Date.now() - sessionState.pendingQuote.timestamp;
+            if (timeSinceLast < 15000) { // 15 seconds
+              console.log(`[${sessionState.callId}] ⏸️ Ignoring duplicate request_quote - pending for ${timeSinceLast}ms`);
+              result = {
+                success: false,
+                error: "duplicate_request",
+                message: "Already requesting fare quote. Please wait."
+              };
+              break;
+            }
           }
           
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
