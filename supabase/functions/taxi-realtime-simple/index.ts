@@ -691,7 +691,7 @@ interface SessionState {
   responseStartTime: number; // timestamp when current AI response started (for initial echo guard)
   bargeInIgnoreUntil: number; // timestamp until which we ignore barge-in checks (startup echo)
   openAiResponseActive: boolean; // true between response.created and response.done
-
+  deferredResponseCreate: boolean; // if true, send response.create right after response.done
   // Speech timing diagnostics
   speechStartTime: number | null;
   speechStopTime: number | null;
@@ -1015,6 +1015,22 @@ serve(async (req) => {
     flushTranscriptsToDb(sessionState);
   };
 
+  // Helper: avoid conversation_already_has_active_response by deferring response.create
+  const safeResponseCreate = (sessionState: SessionState, reason?: string) => {
+    if (!openaiWs || !openaiConnected) return;
+    if (sessionState.callEnded) return;
+
+    if (sessionState.openAiResponseActive) {
+      sessionState.deferredResponseCreate = true;
+      console.log(
+        `[${sessionState.callId}] ⏳ Deferring response.create` + (reason ? ` (${reason})` : "")
+      );
+      return;
+    }
+
+    openaiWs.send(JSON.stringify({ type: "response.create" }));
+  };
+
   // --- Handle OpenAI Messages ---
   const handleOpenAIMessage = (message: any, sessionState: SessionState) => {
     // Log all message types for debugging
@@ -1042,6 +1058,12 @@ serve(async (req) => {
 
       case "response.done":
         sessionState.openAiResponseActive = false;
+
+        // If we tried to speak while a response was in-flight, do it now.
+        if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
+          sessionState.deferredResponseCreate = false;
+          safeResponseCreate(sessionState, "deferred-after-response.done");
+        }
         break;
 
       case "response.audio.delta":
@@ -2040,15 +2062,21 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
               confirmed: true,
               fare: pendingQuote.fare,
               eta_minutes: pendingQuote.eta,
+              suppress_response_create: true,
               message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}.`
             };
             
             // ✅ INJECT SYSTEM MESSAGE so Ada says "Is there anything else I can help you with?"
             // The tool result message alone is not enough - we need an explicit prompt.
             if (openaiWs && openaiConnected) {
+              // Cancel-Clear-Inject protocol to avoid response collisions
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+
               setTimeout(() => {
                 openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                
+
                 setTimeout(() => {
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
@@ -2057,14 +2085,14 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                       role: "user",
                       content: [{
                         type: "input_text",
-                        text: `[SYSTEM: Booking confirmed successfully! Say to the customer: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response.]`
-                      }]
-                    }
+                        text: `[SYSTEM: Booking confirmed successfully! Say to the customer: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response.]`,
+                      }],
+                    },
                   }));
-                  
-                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
-                }, 300);
-              }, 300);
+
+                  safeResponseCreate(sessionState, "post-confirm-followup");
+                }, 350);
+              }, 400);
             }
             
             break;
@@ -2106,14 +2134,20 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             result = {
               success: true,
               rejected: true,
+              suppress_response_create: true,
               message: "No problem, I've cancelled that."
             };
             
             // ✅ INJECT SYSTEM MESSAGE so Ada says "Is there anything else I can help you with?"
             if (openaiWs && openaiConnected) {
+              // Cancel-Clear-Inject protocol to avoid response collisions
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+
               setTimeout(() => {
                 openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                
+
                 setTimeout(() => {
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
@@ -2122,14 +2156,14 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                       role: "user",
                       content: [{
                         type: "input_text",
-                        text: `[SYSTEM: The customer rejected the booking. Say: "No problem at all. Is there anything else I can help you with?" Then WAIT for their response.]`
-                      }]
-                    }
+                        text: `[SYSTEM: The customer rejected the booking. Say: "No problem at all. Is there anything else I can help you with?" Then WAIT for their response.]`,
+                      }],
+                    },
                   }));
-                  
-                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
-                }, 300);
-              }, 300);
+
+                  safeResponseCreate(sessionState, "post-reject-followup");
+                }, 350);
+              }, 400);
             }
             break;
           }
@@ -3211,7 +3245,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           }));
           
           // Trigger Ada to speak the goodbye
-          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          safeResponseCreate(sessionState, "end_call_goodbye");
           
           // Close OpenAI connection after delay to let goodbye audio finish
           setTimeout(() => {
@@ -3301,7 +3335,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             },
           })
         );
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        safeResponseCreate(sessionState, "toolhandler-fareprompt");
       } else if (sessionState.pendingQuote) {
         console.log(`[${sessionState.callId}] ⏳ Skipping tool handler fare prompt - dispatch broadcast will handle it`);
       }
@@ -3309,8 +3343,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
       return;
     }
 
+    // If a tool handler already injected a scripted message and scheduled speech,
+    // don't auto-trigger another response.create here.
+    if ((result as any)?.suppress_response_create) {
+      console.log(`[${sessionState.callId}] ⏭️ Suppressing auto response.create (tool requested manual speech injection)`);
+      return;
+    }
+
     // Normal case - trigger response continuation
-    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    safeResponseCreate(sessionState, "handleFunctionCall-normal");
   };
 
   // --- Bridge WebSocket Handlers ---
@@ -3519,6 +3560,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           responseStartTime: 0,
           bargeInIgnoreUntil: 0,
           openAiResponseActive: false,
+          deferredResponseCreate: false,
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
@@ -3612,6 +3654,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             responseStartTime: 0,
             bargeInIgnoreUntil: 0,
             openAiResponseActive: false,
+            deferredResponseCreate: false,
             speechStartTime: null,
             speechStopTime: null,
             callEnded: false,
