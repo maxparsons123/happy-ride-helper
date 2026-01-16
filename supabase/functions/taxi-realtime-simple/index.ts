@@ -286,6 +286,13 @@ RULES:
 5. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 6. DO NOT ask about bags for cities. Only ask for airports or train stations.
 
+⚠️ NO REPETITION RULE:
+- NEVER say the same thing twice in a row or within the same turn.
+- If you've already acknowledged a change once, do NOT acknowledge it again.
+- If you've already announced a fare, do NOT announce it again.
+- If you've already asked "Is that correct?", do NOT ask again.
+- Keep responses brief and move forward - don't loop or repeat yourself.
+
 ⚠️ CRITICAL ADDRESS PARSING - READ CAREFULLY:
 When user says "from [A] to [B]" or "from [A] going to [B]":
   - A = PICKUP (the starting point)
@@ -1669,7 +1676,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // === EXPLICIT BYE/GOODBYE DETECTION (HIGHEST PRIORITY) ===
           // If user says "bye" (even multiple times), they want to end the call immediately.
           // This takes priority over fare confirmation, booking prompts, etc.
-          const isExplicitGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText) &&
+          // Also triggers on "no thank you" / "no thanks" which typically follows "anything else?"
+          const isExplicitGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call|no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText) &&
             // Exclude "bye" in compound phrases like "good bye sweet spot" (unlikely but guard against)
             !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
           
