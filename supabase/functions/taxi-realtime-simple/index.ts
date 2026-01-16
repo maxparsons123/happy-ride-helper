@@ -262,33 +262,26 @@ AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
 - If user has another request → Process it normally.
 
-BOOKING MODIFICATIONS - THREE-STEP CONFIRMATION REQUIRED:
-⚠️ CHANGES REQUIRE CONFIRMATION, THEN FULL READ-BACK, THEN BOOKING.
+BOOKING MODIFICATIONS - TWO-STEP CONFIRMATION:
+⚠️ ONLY MENTION WHAT CHANGED, NEVER REPEAT UNCHANGED DETAILS.
 
-STEP 1 - ASK FOR CONFIRMATION OF CHANGE:
-- If customer wants to change PICKUP → Ask: "Change pickup to [NEW ADDRESS]?" and WAIT.
+STEP 1 - CONFIRM THE CHANGE:
 - If customer wants to change DESTINATION → Ask: "Change destination to [NEW ADDRESS]?" and WAIT.
+- If customer wants to change PICKUP → Ask: "Change pickup to [NEW ADDRESS]?" and WAIT.
 - If customer wants to change BOTH → Ask: "Change pickup to [PICKUP] and destination to [DESTINATION]?" and WAIT.
 - If customer wants to change PASSENGERS → Ask: "Update to [NUMBER] passengers?" and WAIT.
 
-STEP 2 - AFTER USER CONFIRMS CHANGE (yes/yeah/correct/that's right/go ahead):
+STEP 2 - AFTER USER CONFIRMS (yes/yeah/go ahead):
 - Call modify_booking for each field changed.
-- ⚠️ THEN READ BACK THE FULL UPDATED BOOKING:
-  "Updated! Just to confirm the full booking: picking up from [FULL PICKUP] going to [FULL DESTINATION]. Is that correct?"
-- WAIT for user to confirm the FULL BOOKING before proceeding.
-
-STEP 3 - AFTER USER CONFIRMS FULL BOOKING:
-- Call book_taxi to get updated fare/ETA from dispatch.
-- Read back the ACTUAL fare and ETA values from the tool result.
-- NEVER say "your booking is complete" without calling book_taxi first.
+- Call book_taxi with confirmation_state: "request_quote" to get updated fare.
+- Read the NEW fare/ETA to the customer.
+- NEVER repeat unchanged details (e.g., if only destination changed, don't mention pickup again).
 
 ⚠️ CRITICAL MODIFICATION RULES:
-- NEVER call modify_booking before user confirms the change.
-- NEVER skip the full read-back confirmation step after modifying.
-- NEVER complete booking without reading back the full details first.
-- If user says "no" or rejects → ask what they'd like instead.
-- If user says "no" AND provides a new address → treat as new value and confirm again.
+- ONLY mention the field(s) that changed - never repeat unchanged details like pickup, passengers, etc.
+- Passengers, bags, vehicle type are PRESERVED automatically - don't ask about them again unless user wants to change them.
 - NEVER cancel and rebook. ALWAYS use modify_booking.
+- If user says "no" → ask what they'd like instead.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -1909,6 +1902,30 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                 openaiWs?.send(JSON.stringify({ type: "response.create" }));
               }, 350);
             }, 350);
+          }
+          
+          // === POST-BOOKING RESPONSE HELPER ===
+          // If booking was confirmed and user says something positive (not goodbye/thanks),
+          // ensure Ada responds to their new request. This catches "yes I need another taxi" etc.
+          const isPostBookingResponse = 
+            sessionState.lastBookTaxiSuccessAt && 
+            Date.now() - sessionState.lastBookTaxiSuccessAt < 2 * 60 * 1000 &&
+            !sessionState.pendingQuote &&
+            !sessionState.callEnded;
+            
+          const isNewRequestAfterBooking = isPostBookingResponse &&
+            !/\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you|bye|goodbye)\b/i.test(lowerUserText) &&
+            /\b(yes|yeah|yep|sure|another|need|want|can you|book|taxi|pickup|pick up)\b/i.test(lowerUserText);
+          
+          if (isNewRequestAfterBooking && openaiWs && openaiConnected) {
+            console.log(`[${sessionState.callId}] 🆕 New request after booking: "${userText}"`);
+            
+            // Reset booking state for new request
+            sessionState.booking = { pickup: "", destination: "", passengers: 1, bags: 0, vehicle_type: "saloon", version: 0 };
+            sessionState.hasActiveBooking = false;
+            
+            // Ensure OpenAI responds to this new request
+            safeResponseCreate(sessionState, "post-booking-new-request");
           }
           
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
