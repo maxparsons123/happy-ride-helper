@@ -2893,85 +2893,14 @@ Do NOT say 'booked' until the tool returns success.]`
             console.error(`[${sessionState.callId}] Failed to update bookings table:`, bookingUpdateError);
           }
           
-          // Send webhook with modification details and poll for updated fare
-          const DISPATCH_MODIFY_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
-          let updatedFare: string | null = null;
-          let updatedEta: string | null = null;
+          // ✅ CRITICAL: DO NOT CALL DISPATCH WEBHOOK HERE
+          // Instead, force Ada to call book_taxi which sends one clean, up-to-date webhook.
+          // This eliminates the double-webhook race condition.
           
-          if (DISPATCH_MODIFY_URL) {
-            // Increment booking version for each modification
-            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
-            
-            // Get user transcripts for STT reference (same as book_taxi)
-            const userTranscripts = sessionState.transcripts
-              .filter(t => t.role === "user")
-              .slice(-6)
-              .map(t => ({ text: t.text, timestamp: t.timestamp }));
-            
-            // Format phone number for WhatsApp: strip '+' prefix and leading '0'
-            let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-            if (formattedPhone.startsWith('0')) {
-              formattedPhone = formattedPhone.slice(1);
-            }
-            
-            // Use EXACT same payload structure as book_taxi - dispatch can detect update via call_id
-            const modifyPayload = {
-              job_id: crypto.randomUUID(), // New job_id for this version
-              call_id: sessionState.callId,
-              caller_phone: formattedPhone,
-              caller_name: sessionState.customerName,
-              // Ada's interpreted addresses (current state after modification)
-              ada_pickup: sessionState.booking.pickup,
-              ada_destination: sessionState.booking.destination,
-              // Raw STT transcripts from this call - each turn separately
-              user_transcripts: userTranscripts,
-              // GPS location (if available)
-              gps_lat: sessionState.gpsLat,
-              gps_lon: sessionState.gpsLon,
-              // Booking details
-              passengers: sessionState.booking.passengers || 1,
-              bags: sessionState.booking.bags || 0,
-              vehicle_type: sessionState.booking.vehicle_type || "saloon",
-              pickup_time: "now",
-              timestamp: new Date().toISOString()
-            };
-            
-            console.log(`[${sessionState.callId}] 📡 Sending booking update (same format as new booking)`);
-            
-            // Fire webhook
-            fetch(DISPATCH_MODIFY_URL, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(modifyPayload),
-            }).catch(err => console.error(`[${sessionState.callId}] Modify webhook failed:`, err));
-            
-            // Poll for updated fare/eta (10 second timeout for modifications)
-            const pollTimeout = 10000;
-            const pollInterval = 500;
-            const pollStart = Date.now();
-            
-            console.log(`[${sessionState.callId}] 🔄 Polling for updated fare after modification...`);
-            
-            while (Date.now() - pollStart < pollTimeout) {
-              const { data: callData } = await supabase
-                .from("live_calls")
-                .select("fare, eta, updated_at")
-                .eq("call_id", sessionState.callId)
-                .single();
-              
-              // Check if fare/eta was updated after our webhook
-              if (callData && new Date(callData.updated_at).getTime() > pollStart) {
-                if (callData.fare) {
-                  updatedFare = callData.fare;
-                  updatedEta = callData.eta;
-                  console.log(`[${sessionState.callId}] ✅ Got updated fare: ${updatedFare}, eta: ${updatedEta}`);
-                  break;
-                }
-              }
-              
-              await new Promise(resolve => setTimeout(resolve, pollInterval));
-            }
-          }
+          // Increment booking version for each modification
+          sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+          
+          console.log(`[${sessionState.callId}] ✅ Modification applied locally. Ada must now call book_taxi to send webhook.`);
           
           result = { 
             success: true, 
@@ -2984,12 +2913,31 @@ Do NOT say 'booked' until the tool returns success.]`
               passengers: sessionState.booking.passengers,
               bags: sessionState.booking.bags
             },
-            ...(updatedFare && { fare: updatedFare }),
-            ...(updatedEta && { eta: updatedEta }),
-            message: updatedFare 
-              ? `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}". New fare: ${updatedFare}`
-              : `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}"`
+            message: `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}". Now you MUST call book_taxi with confirmation_state: "request_quote" to get the updated fare and ETA for the new route.`
           };
+          
+          // ✅ Inject system message to force Ada to call book_taxi with updated route
+          if (openaiWs) {
+            // Cancel any in-flight response before injecting
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            await new Promise(resolve => setTimeout(resolve, 300));
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: You just modified the booking. The updated route is Pickup="${sessionState.booking.pickup}" Destination="${sessionState.booking.destination}". NOW YOU MUST CALL book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" TO GET THE UPDATED FARE AND ETA. Do NOT confirm anything until you call this tool and receive the fare from dispatch.]`
+                }]
+              }
+            }));
+          }
+          
           break;
         }
 
