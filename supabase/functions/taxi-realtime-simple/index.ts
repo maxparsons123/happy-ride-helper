@@ -2063,19 +2063,46 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
 
             // Final route (prefer current tool args, fallback to pendingQuote/session)
-            const finalPickup = args.pickup || pendingQuote.pickup || sessionState.booking.pickup;
-            const finalDestination = args.destination || pendingQuote.destination || sessionState.booking.destination;
+            const isGpsPickup = (value: unknown) =>
+              typeof value === "string" && value.trim().toLowerCase() === "by_gps";
+
+            const finalPickupCandidate =
+              args.pickup || pendingQuote.pickup || sessionState.booking.pickup;
+            const finalDestination =
+              args.destination || pendingQuote.destination || sessionState.booking.destination;
+
+            const finalPickup = isGpsPickup(finalPickupCandidate) ? null : finalPickupCandidate;
+
+            // Never allow GPS sentinel as a pickup address.
+            // If we somehow reach confirmation with an invalid pickup, force the agent to collect a real address.
+            if (!finalPickup) {
+              console.log(
+                `[${sessionState.callId}] ❌ Confirm blocked: pickup is missing/invalid (by_gps)`
+              );
+              result = {
+                success: false,
+                error: "pickup_required",
+                needs_clarification: true,
+                field: "pickup",
+                ada_message:
+                  "I’ll need the pickup address first. What’s the full pickup address, please?",
+              };
+              break;
+            }
 
             // Persist latest route to session + dashboard (fixes cases where UI still shows the old destination)
-            if (finalPickup) sessionState.booking.pickup = finalPickup;
+            sessionState.booking.pickup = finalPickup;
             if (finalDestination) sessionState.booking.destination = finalDestination;
 
-            await supabase.from("live_calls").update({
-              pickup: finalPickup,
-              destination: finalDestination,
-              passengers: sessionState.booking.passengers || 1,
-              updated_at: new Date().toISOString(),
-            }).eq("call_id", sessionState.callId);
+            await supabase
+              .from("live_calls")
+              .update({
+                pickup: finalPickup,
+                destination: finalDestination,
+                passengers: sessionState.booking.passengers || 1,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("call_id", sessionState.callId);
 
             // Persist confirmed booking so it resumes correctly on redial
             try {
