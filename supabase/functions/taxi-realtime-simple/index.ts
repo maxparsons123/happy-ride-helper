@@ -3557,13 +3557,19 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
           
-          // GUARD 3: If there's already a pending quote, ignore duplicate ask_confirm
+          // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore duplicate
           if (state?.pendingQuote) {
             const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
             if (timeSinceLastAsk < 10000) { // Within 10 seconds = duplicate
-              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm (previous one sent ${timeSinceLastAsk}ms ago)`);
+              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - pendingQuote exists (${timeSinceLastAsk}ms ago)`);
               return;
             }
+          }
+          
+          // GUARD 4: If tool handler already injected a fare prompt very recently (within 3s), skip
+          if (state?.lastQuotePromptAt && Date.now() - state.lastQuotePromptAt < 3000) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - fare prompt already injected ${Date.now() - state.lastQuotePromptAt}ms ago by tool handler`);
+            return;
           }
           
           // Store pending quote state
