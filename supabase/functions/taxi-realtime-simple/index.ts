@@ -2692,135 +2692,23 @@ Do NOT say 'booked' until the tool returns success.]`
             break;
           }
           
-          // Capture previous booking state BEFORE making changes
-          const previousBooking = {
-            pickup: sessionState.booking.pickup,
-            destination: sessionState.booking.destination,
-            passengers: sessionState.booking.passengers,
-            bags: sessionState.booking.bags,
-            version: sessionState.booking.version
-          };
+          // Capture previous value BEFORE making changes
+          const oldValue = 
+            args.field_to_change === "pickup" ? sessionState.booking.pickup :
+            args.field_to_change === "destination" ? sessionState.booking.destination :
+            args.field_to_change === "passengers" ? sessionState.booking.passengers :
+            args.field_to_change === "bags" ? sessionState.booking.bags :
+            null;
           
-          console.log(`[${sessionState.callId}] 📋 Previous booking state:`, previousBooking);
+          console.log(`[${sessionState.callId}] 📋 Modifying ${args.field_to_change}: "${oldValue}" → "${args.new_value}"`);
           
-          // === AI EXTRACTION FOR MODIFICATION ===
-          // Run AI extraction on recent conversation to verify the modification
-          const recentConversation = sessionState.transcripts
-            .filter(t => t.role === "user" || t.role === "assistant")
-            .slice(-8);
+          // Apply change to session state IMMEDIATELY (no AI extraction here - book_taxi will validate)
+          if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
+          if (args.field_to_change === "destination") sessionState.booking.destination = args.new_value;
+          if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value) || 1;
+          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(args.new_value) || 0;
           
-          let extractedModification: {
-            pickup?: string;
-            destination?: string;
-            passengers?: number;
-            luggage?: number;
-            vehicle_type?: string;
-            confidence?: string;
-          } = {};
-          
-          if (recentConversation.length > 0) {
-            try {
-              console.log(`[${sessionState.callId}] 🔍 Running AI extraction for modification (is_modification=true)...`);
-              const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-                },
-                body: JSON.stringify({
-                  conversation: recentConversation,
-                  caller_name: sessionState.customerName,
-                  caller_phone: normalizePhone(sessionState.phone), // For alias lookup
-                  is_modification: true, // Key flag - preserves unchanged fields
-                  current_booking: {
-                    pickup: previousBooking.pickup,
-                    destination: previousBooking.destination,
-                    passengers: previousBooking.passengers,
-                    luggage: previousBooking.bags ? `${previousBooking.bags} bags` : null,
-                    vehicle_type: sessionState.booking.vehicle_type
-                  }
-                })
-              });
-              
-              if (extractionResponse.ok) {
-                extractedModification = await extractionResponse.json();
-                console.log(`[${sessionState.callId}] 🔍 AI Extraction for modify:`, extractedModification);
-              }
-            } catch (extractErr) {
-              console.error(`[${sessionState.callId}] AI extraction for modify failed:`, extractErr);
-            }
-          }
-          
-          // === MERGE: Previous booking + Ada's change + AI extraction ===
-          // Priority: AI extraction (if high confidence) > Ada's new_value > Previous value
-          const normalizeForCompare = (addr: string): string => {
-            if (!addr) return "";
-            return addr.toLowerCase().replace(/[,.\-]/g, " ").replace(/\s+/g, " ").trim();
-          };
-          
-          let finalNewValue = args.new_value;
-          const finalFieldToChange = args.field_to_change;
-          
-          // For address fields, cross-check with extraction
-          if (args.field_to_change === "pickup" || args.field_to_change === "destination") {
-            const extractedValue = args.field_to_change === "pickup" 
-              ? extractedModification.pickup 
-              : extractedModification.destination;
-            
-            if (extractedValue && extractedModification.confidence === "high") {
-              const adaNorm = normalizeForCompare(args.new_value);
-              const extNorm = normalizeForCompare(extractedValue);
-              
-              // If AI found something different and has high confidence, use it
-              if (adaNorm !== extNorm) {
-                console.log(`[${sessionState.callId}] 🔄 Using AI-extracted value: "${extractedValue}" instead of Ada's "${args.new_value}"`);
-                finalNewValue = extractedValue;
-              }
-            }
-          }
-          
-          // For passengers/bags, use extraction if Ada didn't provide specific value
-          if (args.field_to_change === "passengers" && extractedModification.passengers) {
-            const adaNum = parseInt(args.new_value);
-            if (isNaN(adaNum) || adaNum < 1) {
-              finalNewValue = String(extractedModification.passengers);
-              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted passengers: ${finalNewValue}`);
-            }
-          }
-          if (args.field_to_change === "bags" && extractedModification.luggage !== undefined) {
-            const adaNum = parseInt(args.new_value);
-            if (isNaN(adaNum)) {
-              // Parse luggage string to number (e.g., "no baggage" -> 0, "2 bags" -> 2)
-              const luggageStr = String(extractedModification.luggage).toLowerCase();
-              if (luggageStr.includes('no') || luggageStr === '0') {
-                finalNewValue = "0";
-              } else {
-                const match = luggageStr.match(/(\d+)/);
-                finalNewValue = match ? match[1] : "0";
-              }
-              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted bags: ${finalNewValue} (from "${extractedModification.luggage}")`);
-            }
-          }
-          
-          const oldValue = finalFieldToChange === "pickup" ? sessionState.booking.pickup
-            : finalFieldToChange === "destination" ? sessionState.booking.destination
-            : finalFieldToChange === "passengers" ? sessionState.booking.passengers
-            : finalFieldToChange === "bags" ? sessionState.booking.bags
-            : null;
-          
-          // Apply the changes with final verified value
-          if (finalFieldToChange === "pickup") sessionState.booking.pickup = finalNewValue;
-          if (finalFieldToChange === "destination") sessionState.booking.destination = finalNewValue;
-          if (finalFieldToChange === "passengers") sessionState.booking.passengers = parseInt(finalNewValue);
-          if (finalFieldToChange === "bags") sessionState.booking.bags = parseInt(finalNewValue);
-          
-          // Also capture any other extracted details for potential use
-          if (extractedModification.vehicle_type && !sessionState.booking.vehicle_type) {
-            sessionState.booking.vehicle_type = extractedModification.vehicle_type;
-          }
-          
-          console.log(`[${sessionState.callId}] ✅ Applied modification: ${finalFieldToChange} = "${finalNewValue}" (was: "${oldValue}")`);
-          console.log(`[${sessionState.callId}] 📋 Updated booking state:`, sessionState.booking);
+          console.log(`[${sessionState.callId}] ✅ Applied modification. Updated booking:`, sessionState.booking);
           
           // Sync updated pickup/destination to live_calls for dashboard display
           await supabase.from("live_calls").update({
@@ -2889,16 +2777,16 @@ Do NOT say 'booked' until the tool returns success.]`
           
           result = { 
             success: true, 
-            modified: finalFieldToChange, 
+            modified: args.field_to_change, 
             old_value: oldValue,
-            new_value: finalNewValue,
+            new_value: args.new_value,
             current_booking: {
               pickup: sessionState.booking.pickup,
               destination: sessionState.booking.destination,
               passengers: sessionState.booking.passengers,
               bags: sessionState.booking.bags
             },
-            message: `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}". Now you MUST call book_taxi with confirmation_state: "request_quote" to get the updated fare and ETA for the new route.`
+            message: `Updated ${args.field_to_change} from "${oldValue}" to "${args.new_value}". Now you MUST call book_taxi with confirmation_state: "request_quote" to get the updated fare and ETA for the new route.`
           };
           
           // ✅ Inject system message to force Ada to call book_taxi with updated route
