@@ -719,6 +719,7 @@ interface SessionState {
     eta: string | null;
     pickup: string | null;
     destination: string | null;
+    callback_url: string | null;
     timestamp: number;
   } | null;
 
@@ -1473,6 +1474,13 @@ serve(async (req) => {
 
               console.log(`[${sessionState.callId}] ✅ Fare decision detected: ${nextState} (pickup="${pickup}", destination="${destination}")`);
 
+              // CRITICAL: Clear pendingQuote IMMEDIATELY to prevent duplicate ask_confirm broadcasts
+              // from being processed while we're waiting for Ada to call book_taxi
+              // (The pendingQuote will be temporarily restored by the book_taxi handler if needed)
+              const savedQuote = { ...pq };
+              // DON'T clear pendingQuote here - the book_taxi("confirmed") handler needs it!
+              // Instead, just log that we're processing the decision
+              
               // Cancel any in-flight assistant speech (prevents re-reading the quote)
               if (sessionState.openAiResponseActive) {
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -1488,7 +1496,7 @@ serve(async (req) => {
                     {
                       type: "input_text",
                       text:
-                        `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. After the tool succeeds, respond appropriately.]`,
+                        `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. Do NOT call book_taxi with "request_quote". After the tool succeeds, ask "Is there anything else I can help you with?"]`,
                     },
                   ],
                 },
@@ -1761,29 +1769,85 @@ serve(async (req) => {
             
             console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
             
+            // POST confirmation to callback_url if provided (tells C# to dispatch the driver)
+            if (pendingQuote.callback_url) {
+              try {
+                console.log(`[${sessionState.callId}] 📡 POSTing confirmation to callback_url: ${pendingQuote.callback_url}`);
+                const confirmPayload = {
+                  call_id: sessionState.callId,
+                  action: "confirmed",
+                  pickup: pendingQuote.pickup,
+                  destination: pendingQuote.destination,
+                  fare: pendingQuote.fare,
+                  eta: pendingQuote.eta,
+                  customer_name: sessionState.customerName,
+                  timestamp: new Date().toISOString()
+                };
+                
+                const confirmResp = await fetch(pendingQuote.callback_url, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(confirmPayload)
+                });
+                
+                console.log(`[${sessionState.callId}] 📬 Callback response: ${confirmResp.status}`);
+              } catch (callbackErr) {
+                console.error(`[${sessionState.callId}] ⚠️ Callback POST failed:`, callbackErr);
+              }
+            }
+            
             // Mark booking as confirmed
             sessionState.bookingConfirmedThisTurn = true;
             sessionState.lastBookTaxiSuccessAt = Date.now();
             sessionState.pendingQuote = null; // Clear pending quote
+            sessionState.lastQuotePromptAt = null; // Reset prompt tracking
+            sessionState.lastQuotePromptText = null;
             
             result = {
               success: true,
               confirmed: true,
               fare: pendingQuote.fare,
               eta_minutes: pendingQuote.eta,
-              message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}`
+              message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}. Now ask the customer: "Is there anything else I can help you with?"`
             };
             break;
           }
           
           // STATE: "rejected" - Customer said NO to fare quote
           if (confirmationState === "rejected") {
+            const pendingQuote = sessionState.pendingQuote;
             console.log(`[${sessionState.callId}] ❌ Customer REJECTED booking`);
+            
+            // POST rejection to callback_url if provided
+            if (pendingQuote?.callback_url) {
+              try {
+                console.log(`[${sessionState.callId}] 📡 POSTing rejection to callback_url: ${pendingQuote.callback_url}`);
+                const rejectPayload = {
+                  call_id: sessionState.callId,
+                  action: "rejected",
+                  pickup: pendingQuote.pickup,
+                  destination: pendingQuote.destination,
+                  timestamp: new Date().toISOString()
+                };
+                
+                await fetch(pendingQuote.callback_url, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(rejectPayload)
+                });
+              } catch (callbackErr) {
+                console.error(`[${sessionState.callId}] ⚠️ Rejection callback POST failed:`, callbackErr);
+              }
+            }
+            
             sessionState.pendingQuote = null; // Clear pending quote
+            sessionState.lastQuotePromptAt = null;
+            sessionState.lastQuotePromptText = null;
+            
             result = {
               success: true,
               rejected: true,
-              message: "Booking cancelled by customer."
+              message: "No problem, I've cancelled that. Now ask the customer: \"Is there anything else I can help you with?\""
             };
             break;
           }
@@ -2116,6 +2180,7 @@ serve(async (req) => {
                     eta: dispatchAskConfirm.eta || null,
                     pickup: args.pickup,
                     destination: args.destination,
+                    callback_url: dispatchAskConfirm.callback_url || null,
                     timestamp: Date.now()
                   };
 
@@ -3238,7 +3303,20 @@ serve(async (req) => {
             return;
           }
           
-          // GUARD: If there's already a pending quote, ignore duplicate ask_confirm
+          // GUARD 1: If booking was just confirmed this turn, IGNORE any new ask_confirm
+          // This prevents C# from retriggering the fare prompt after customer said YES
+          if (state?.bookingConfirmedThisTurn) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was already confirmed this turn`);
+            return;
+          }
+          
+          // GUARD 2: If booking was confirmed recently (within 30s), also ignore
+          if (state?.lastBookTaxiSuccessAt && Date.now() - state.lastBookTaxiSuccessAt < 30000) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was confirmed ${Date.now() - state.lastBookTaxiSuccessAt}ms ago`);
+            return;
+          }
+          
+          // GUARD 3: If there's already a pending quote, ignore duplicate ask_confirm
           if (state?.pendingQuote) {
             const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
             if (timeSinceLastAsk < 10000) { // Within 10 seconds = duplicate
@@ -3254,6 +3332,7 @@ serve(async (req) => {
               eta: eta || null,
               pickup: state.booking.pickup,
               destination: state.booking.destination,
+              callback_url: callback_url || null,
               timestamp: Date.now()
             };
 
