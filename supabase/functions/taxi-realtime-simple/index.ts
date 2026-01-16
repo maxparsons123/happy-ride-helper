@@ -1518,25 +1518,37 @@ serve(async (req) => {
                 });
               }
               
+              // Store fare/eta before clearing for use in confirmation message
+              const confirmedFare = sessionState.pendingFareConfirm.fare;
+              const confirmedEta = sessionState.pendingFareConfirm.eta;
+              
               // Clear pending fare confirm state
               sessionState.pendingFareConfirm = null;
               
               if (isYes) {
-                // User accepted fare - wait for dispatch to send confirm action
-                // Set awaiting_dispatch_confirm to block Ada from auto-confirming
-                sessionState.awaitingDispatchConfirm = true;
-                console.log(`[${sessionState.callId}] ⏳ Awaiting dispatch confirm action after user accepted fare`);
+                // User accepted fare - confirm immediately using fare/ETA from ask_confirm
+                // Mark booking as confirmed so Ada can speak the confirmation
+                sessionState.bookingConfirmedThisTurn = true;
+                console.log(`[${sessionState.callId}] ✅ Customer accepted fare - confirming immediately`);
                 
-                // Tell Ada to wait - don't let her confirm prematurely
+                // Build confirmation message with fare and ETA
+                const fareText = confirmedFare ? `£${confirmedFare}` : "";
+                const etaText = confirmedEta ? `${confirmedEta} minutes` : "a few minutes";
+                
+                // Determine language for confirmation
+                const langCode = sessionState.language || "en";
+                const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+                
+                // Tell Ada to confirm the booking with the actual fare and ETA
                 openaiWs?.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
                     type: "message",
                     role: "user",
-                    content: [{ type: "input_text", text: "[SYSTEM: Customer accepted the fare. Wait silently for dispatch to confirm the booking. Do NOT say the booking is confirmed yet.]" }]
+                    content: [{ type: "input_text", text: `[SYSTEM: Customer confirmed! The booking is complete. Speak in ${langName}. Say: "Brilliant! Your taxi is booked.${fareText ? ` Fare is ${fareText}.` : ""}${etaText ? ` Driver will be with you in about ${etaText}.` : ""} Is there anything else I can help you with?" Be natural and brief.]` }]
                   }
                 }));
-                // Don't trigger a response - just wait
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
               }
               
               // If NO, inject system message to tell Ada to apologize
