@@ -1027,6 +1027,13 @@ serve(async (req) => {
       case "response.created":
         // Start-of-response marker (used to avoid response.cancel_not_active)
         sessionState.openAiResponseActive = true;
+        
+        // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
+        // This prevents OpenAI's VAD from generating hallucinated responses after goodbye
+        if (sessionState.callEnded) {
+          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response after callEnded`);
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+        }
         break;
 
       case "response.done":
@@ -3060,12 +3067,14 @@ Do NOT say 'booked' until the tool returns success.]`
         `[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (pendingQuote=${!!sessionState.pendingQuote}, needs_fare_confirm=${result.needs_fare_confirm}, quote_ready=${result.quote_ready}, blocked=${result.blocked})`
       );
 
-      // If we have an ada_message and it's not blocked, inject it ONCE (prevents repeated fare prompts)
-      if (result.ada_message && !result.blocked) {
+      // ✅ CRITICAL: Do NOT inject fare prompt here - let dispatch broadcast handler do it!
+      // The dispatch_ask_confirm broadcast already handles fare prompt injection with proper timing.
+      // Only inject if there's NO pending quote (meaning dispatch hasn't sent ask_confirm yet).
+      // This prevents the triple prompt issue: tool handler + dispatch handler + OpenAI VAD
+      if (result.ada_message && !result.blocked && !sessionState.pendingQuote) {
         const now = Date.now();
         const isDuplicatePrompt =
           sessionState.lastQuotePromptAt !== null &&
-          sessionState.lastQuotePromptText === result.ada_message &&
           now - sessionState.lastQuotePromptAt < 8000;
 
         if (isDuplicatePrompt) {
@@ -3073,6 +3082,7 @@ Do NOT say 'booked' until the tool returns success.]`
           return;
         }
 
+        console.log(`[${sessionState.callId}] ⚠️ Injecting fare prompt from tool handler (no pendingQuote yet)`);
         sessionState.lastQuotePromptAt = now;
         sessionState.lastQuotePromptText = result.ada_message;
 
@@ -3104,6 +3114,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           })
         );
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
+      } else if (sessionState.pendingQuote) {
+        console.log(`[${sessionState.callId}] ⏳ Skipping tool handler fare prompt - dispatch broadcast will handle it`);
       }
 
       return;
