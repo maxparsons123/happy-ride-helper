@@ -723,6 +723,7 @@ interface SessionState {
     destination: string | null;
     callback_url: string | null;
     timestamp: number;
+    lastPrompt: string | null; // The fare prompt text to repeat if duplicate request_quote
   } | null;
 
   // Prevent repeated fare prompts (double response.create / duplicate dispatch events)
@@ -1973,6 +1974,22 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
           
+          // === PENDING QUOTE GUARD ===
+          // Prevent duplicate request_quote calls while a quote is already pending
+          if (sessionState.pendingQuote && Date.now() - sessionState.pendingQuote.timestamp < 30000) {
+            console.log(`[${sessionState.callId}] ⏸️ Ignoring duplicate request_quote - quote already pending for this trip`);
+            result = {
+              success: true,
+              blocked: true,
+              needs_fare_confirm: true,
+              ada_message: sessionState.pendingQuote.lastPrompt || `The fare is ${sessionState.pendingQuote.fare} and your driver will be ${sessionState.pendingQuote.eta}. Would you like me to book that?`,
+              fare: sessionState.pendingQuote.fare,
+              eta: sessionState.pendingQuote.eta,
+              message: "Quote already pending - waiting for customer confirmation"
+            };
+            break;
+          }
+          
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison (normalizeForComparison is defined above)
           
@@ -2389,7 +2406,8 @@ Do NOT say 'booked' until the tool returns success.]`
                     pickup: finalPickup,
                     destination: finalDestination,
                     callback_url: dispatchAskConfirm.callback_url || null,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    lastPrompt: dispatchAskConfirm.text || null
                   };
 
                   dispatchResult = {
@@ -3158,7 +3176,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // BARGE-IN (only in full-duplex mode): If Ada is currently speaking and we detect real user energy,
           // cancel the current AI response immediately so Ada can hear the caller.
           // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
-          if (!state.halfDuplex && state.isAdaSpeaking && state.openAiResponseActive) {
+          // SKIP barge-in when a pending quote is active - we want Ada to finish speaking the fare
+          // and let the user's "yes/no" be processed naturally by OpenAI's VAD.
+          const pendingQuoteActive = state.pendingQuote && Date.now() - state.pendingQuote.timestamp < 15000;
+          
+          if (!state.halfDuplex && state.isAdaSpeaking && state.openAiResponseActive && !pendingQuoteActive) {
             // Skip barge-in check during initial echo guard, but DON'T drop audio
             const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
             
@@ -3187,6 +3209,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
                 socket.send(JSON.stringify({ type: "ai_interrupted" }));
               }
               // If not real barge-in, we just skip cancellation but STILL forward audio below
+            }
+          } else if (pendingQuoteActive && state.isAdaSpeaking) {
+            // Log that we're skipping barge-in during fare confirmation window
+            // (only log occasionally to avoid spam)
+            if (Math.random() < 0.01) {
+              console.log(`[${state.callId}] ⏸️ Barge-in disabled during fare confirmation window`);
             }
           }
 
@@ -3513,7 +3541,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               pickup: state.booking.pickup,
               destination: state.booking.destination,
               callback_url: callback_url || null,
-              timestamp: Date.now()
+              timestamp: Date.now(),
+              lastPrompt: message || null
             };
 
             // Mark that we are actively prompting the fare question (prevents tool handler duplicating it)
