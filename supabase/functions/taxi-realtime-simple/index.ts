@@ -749,6 +749,9 @@ interface SessionState {
   // True only after a successful book_taxi tool result for the CURRENT booking.
   // Used to prevent Ada from saying "Booked!" without actually placing the booking.
   bookingConfirmedThisTurn: boolean;
+  // Persistent flag: Once a booking is fully confirmed (webhook sent), Ada can speak freely
+  // This is NOT reset per turn - once confirmed, enforcement is disabled for the rest of the call
+  bookingFullyConfirmed: boolean;
   lastBookTaxiSuccessAt: number | null;
   lastConfirmedTripKey: string | null;
   
@@ -1451,7 +1454,8 @@ serve(async (req) => {
             : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention));
 
            // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
-           if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
+           // EXCEPTION: If bookingFullyConfirmed is true, Ada can speak freely (post-confirmation phase)
+           if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn && !sessionState.bookingFullyConfirmed) {
              console.log(
                `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
              );
@@ -3267,9 +3271,10 @@ Do NOT say 'booked' until the tool returns success.]`
           // ✅ BOOKING ENFORCEMENT: Mark that book_taxi succeeded this turn
           // This allows Ada to say "Booked!" without being cancelled
           sessionState.bookingConfirmedThisTurn = true;
+          sessionState.bookingFullyConfirmed = true; // ✅ PERSISTENT: Booking is complete, Ada can speak freely now
           sessionState.lastBookTaxiSuccessAt = Date.now();
           sessionState.lastConfirmedTripKey = makeTripKey(args.pickup, args.destination);
-          console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
+          console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now speak freely (bookingFullyConfirmed=true)`);
           
           // RELEASE BUFFERED AUDIO: Now that booking is confirmed, flush any pending audio
           sessionState.audioVerified = true;
@@ -3944,6 +3949,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
           bookingConfirmedThisTurn: false,
+          bookingFullyConfirmed: false,
           lastBookTaxiSuccessAt: null,
           lastConfirmedTripKey: null,
            audioVerified: true, // Start verified - only buffer after user confirms addresses
@@ -4041,6 +4047,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
+            bookingFullyConfirmed: false,
             lastBookTaxiSuccessAt: null,
             lastConfirmedTripKey: null,
              audioVerified: true, // Start verified - only buffer after user confirms addresses
