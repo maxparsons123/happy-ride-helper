@@ -1455,10 +1455,53 @@ serve(async (req) => {
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
           sessionState.bookingConfirmedThisTurn = false;
+
+          const lowerUserText = userText.toLowerCase();
+
+          // === FARE YES/NO HANDOFF (CRITICAL) ===
+          // If dispatch already gave us a fare quote (pendingQuote), we must turn the caller's yes/no
+          // into an explicit book_taxi tool call with confirmation_state confirmed/rejected.
+          if (sessionState.pendingQuote && openaiWs && openaiConnected) {
+            const isYesToFare = /\b(yes|yeah|yep|go ahead|book it|do it|please do|sure|okay|ok|alright|sounds good|ja|jawel|doe maar|prima|akkoord|oui|d'accord|sí|claro|vale)\b/i.test(lowerUserText);
+            const isNoToFare = /\b(no|nope|don't|do not|dont|cancel|stop|never mind|nevermind|not now|nah|nee|niet|annuleer|non)\b/i.test(lowerUserText);
+
+            if (isYesToFare || isNoToFare) {
+              const pq = sessionState.pendingQuote;
+              const pickup = pq.pickup || sessionState.booking.pickup;
+              const destination = pq.destination || sessionState.booking.destination;
+              const nextState = isYesToFare ? "confirmed" : "rejected";
+
+              console.log(`[${sessionState.callId}] ✅ Fare decision detected: ${nextState} (pickup="${pickup}", destination="${destination}")`);
+
+              // Cancel any in-flight assistant speech (prevents re-reading the quote)
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text:
+                        `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. After the tool succeeds, respond appropriately.]`,
+                    },
+                  ],
+                },
+              }));
+
+              // Trigger immediate tool-driven response (we intentionally override the normal "VAD only" rule here)
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+              break;
+            }
+          }
           
           // Detect if user just confirmed addresses - start audio buffering
           // This catches "yes", "yeah", "that's correct" etc. that trigger book_taxi
-          const lowerUserText = userText.toLowerCase();
           const isConfirmationPhrase = /\b(yes|yeah|yep|correct|that's right|that's correct|right|go ahead|sure|ok|okay|please|ja|jawel|prima|goed|akkoord|doe maar|naturlich|klar|genau|oui|d'accord|sí|claro|correcto)\b/i.test(lowerUserText);
           
           // If user just confirmed and we don't have a confirmed booking yet, start buffering
@@ -1479,21 +1522,26 @@ serve(async (req) => {
             const pickupHint = (m?.[1] || "").trim();
             const destHint = (m?.[2] || "").trim();
 
-            openaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{
-                  type: "input_text",
-                  text: `[SYSTEM: The caller is requesting a BOOKING CHANGE using a full route statement. Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}". Do NOT treat the destination as a pickup. Ask them to confirm the full updated route, then call modify_booking for the field(s) that changed.]`
-                }]
-              }
-            }));
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE using a full route statement. Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}". Do NOT treat the destination as a pickup. Ask them to confirm the full updated route, then call modify_booking for the field(s) that changed.]`,
+                    },
+                  ],
+                },
+              })
+            );
           }
           
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
           // User says YES/NO after hearing fare → Ada calls book_taxi with "confirmed" or "rejected"
+
         }
         break;
       }
