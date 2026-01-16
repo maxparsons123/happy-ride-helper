@@ -1330,11 +1330,22 @@ serve(async (req) => {
           // We treat any currency amount that doesn't match pendingQuote.fare as a hallucination and cancel fast.
           let hasFareMismatch = false;
           if (hasPendingQuote && sessionState.pendingQuote?.fare) {
-            const pendingFareNum = Number(String(sessionState.pendingQuote.fare).replace(/[^0-9.]/g, ""));
-            const spokenFareMatch = currentText.match(/(?:£|€|\$)\s*(\d+(?:\.\d{1,2})?)/);
-            const spokenFareNum = spokenFareMatch ? Number(spokenFareMatch[1]) : NaN;
+            const pendingFareRaw = String(sessionState.pendingQuote.fare).replace(/[^0-9.]/g, "");
+            const pendingFareNum = Number(pendingFareRaw);
 
-            if (Number.isFinite(pendingFareNum) && Number.isFinite(spokenFareNum)) {
+            const spokenFareMatch = currentText.match(/(?:£|€|\$)\s*(\d+(?:\.\d{1,2})?)/);
+            const spokenFareRaw = spokenFareMatch ? String(spokenFareMatch[1]) : "";
+            const spokenFareNum = spokenFareRaw ? Number(spokenFareRaw) : NaN;
+
+            // IMPORTANT: Don't treat partial streaming transcripts as a mismatch.
+            // Example: pending=7066.20, streaming transcript may momentarily contain "£706" before "6.20" arrives.
+            const isPrefixOfPending =
+              !!spokenFareRaw &&
+              !!pendingFareRaw &&
+              pendingFareRaw.startsWith(spokenFareRaw) &&
+              spokenFareRaw.length < pendingFareRaw.length;
+
+            if (Number.isFinite(pendingFareNum) && Number.isFinite(spokenFareNum) && !isPrefixOfPending) {
               hasFareMismatch = Math.abs(spokenFareNum - pendingFareNum) > 0.01;
               if (hasFareMismatch) {
                 console.log(`[${sessionState.callId}] 🚨 Fare mismatch while pendingQuote: expected=${pendingFareNum} got=${spokenFareNum}`);
