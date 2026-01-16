@@ -2931,16 +2931,16 @@ serve(async (req) => {
 
     // === CRITICAL: Only trigger response.create if we want Ada to respond ===
     // If we're awaiting a fare yes/no (pendingQuote / needs_fare_confirm), Ada must WAIT.
+    // NOTE: already_confirmed is NOT a wait condition - Ada should speak "Is there anything else?"
     const shouldWaitForCustomer =
       !!sessionState.pendingQuote ||
       result.needs_fare_confirm ||
       result.quote_ready ||
-      result.blocked ||
-      result.already_confirmed;
+      result.blocked;
     
     if (shouldWaitForCustomer) {
       console.log(
-        `[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (pendingQuote=${!!sessionState.pendingQuote}, needs_fare_confirm=${result.needs_fare_confirm}, quote_ready=${result.quote_ready}, blocked=${result.blocked}, already_confirmed=${result.already_confirmed})`
+        `[${sessionState.callId}] ⏸️ NOT triggering response.create - waiting for customer input (pendingQuote=${!!sessionState.pendingQuote}, needs_fare_confirm=${result.needs_fare_confirm}, quote_ready=${result.quote_ready}, blocked=${result.blocked})`
       );
 
       // If we have an ada_message and it's not blocked, inject it ONCE (prevents repeated fare prompts)
