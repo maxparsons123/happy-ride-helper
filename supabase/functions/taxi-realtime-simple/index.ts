@@ -205,10 +205,9 @@ BOOKING FLOW:
    - If all fields are complete, proceed to step 4.
 4. READ BACK THE ADDRESSES FOR CONFIRMATION:
    - Say: "Just to confirm, picking up from [FULL PICKUP ADDRESS] going to [FULL DESTINATION]. Is that correct?"
-   - WAIT for user to say "yes", "yeah", "correct", "that's right" before calling book_taxi.
-   - Do NOT call book_taxi until user explicitly confirms.
+   - WAIT for user to say "yes", "yeah", "correct", "that's right" before proceeding.
    - If user says "no" or corrects an address, update it and confirm again.
-5. Once user CONFIRMS the addresses → IMMEDIATELY CALL book_taxi function with the confirmed addresses.
+5. Once user CONFIRMS → CALL book_taxi with confirmation_state: "request_quote" to get fare/ETA.
 6. ONLY ask about passengers if verify_booking shows it in missing_fields OR user mentions multiple people.
 7. ONLY ask about bags if verify_booking shows "luggage" in missing_fields (usually for airport/station trips).
 
@@ -221,20 +220,33 @@ ADDRESS ACCURACY - CRITICAL:
 - If unsure about a number, ask: "Just to check, was that [NUMBER] or did I mishear?"
 - NEVER guess or auto-correct house numbers.
 
-CRITICAL TOOL USAGE - YOU MUST ACTUALLY INVOKE FUNCTIONS:
-- When user CONFIRMS addresses (says "yes", "yeah", "correct", "that's right") → YOU MUST CALL the book_taxi function.
-- DO NOT just say "Let me book that" or "I'll confirm that" - YOU MUST ACTUALLY INVOKE the book_taxi function tool.
-- Speaking about booking is NOT the same as calling the function. You MUST generate a function call.
-- The book_taxi function triggers the dispatch webhook and returns fare/ETA. WAIT for the result.
-- If the result contains "ada_message" → SPEAK THAT MESSAGE EXACTLY to the customer.
-- If the result contains "needs_clarification: true" → Ask the customer the question in ada_message.
-- If the result contains "rejected: true" → Tell the customer we cannot process their booking using ada_message.
-- If the result contains "hangup: true" → Say the ada_message EXACTLY then IMMEDIATELY call end_call.
-- If the result contains "success: true" → Confirm using the REAL fare + ETA from the tool result. NEVER say placeholder instructions like "[use actual …]" / "[gebruik daadwerkelijk …]" and NEVER invent numbers.
-- DO NOT make up fares or ETAs. ONLY use values returned by book_taxi.
-- If user says "cancel" → CALL cancel_booking function FIRST, then respond.
-- If user corrects name → CALL save_customer_name function immediately.
-- Call end_call function after saying "Safe travels!".
+🚨 CRITICAL: FARE CONFIRMATION STATE MACHINE 🚨
+You MUST follow this exact 3-step flow:
+
+STEP 1 - REQUEST QUOTE:
+- After user confirms addresses → CALL book_taxi with confirmation_state: "request_quote"
+- This returns fare and ETA from dispatch (e.g., fare: "£15.00", eta: "7 minutes")
+- READ the fare and ETA to the customer: "The price is £15.00 and your driver is 7 minutes away. Would you like me to book that?"
+- WAIT for customer response. Do NOT call any tool yet.
+
+STEP 2 - CUSTOMER RESPONDS YES:
+- If customer says "yes", "yeah", "go ahead", "book it" → CALL book_taxi with confirmation_state: "confirmed" (same pickup/destination)
+- This confirms the booking with dispatch
+- Then say: "Booked! Your driver is on the way. Is there anything else?"
+
+STEP 3 - CUSTOMER RESPONDS NO:
+- If customer says "no", "cancel", "never mind" → CALL book_taxi with confirmation_state: "rejected"
+- Then say: "No problem, I've cancelled that. Is there anything else I can help with?"
+
+🚫 FORBIDDEN - NEVER DO THESE:
+- NEVER say fare/price before receiving it from book_taxi result
+- NEVER say "Booked!" before calling book_taxi with confirmation_state: "confirmed"
+- NEVER skip the quote step - ALWAYS call with "request_quote" first
+- NEVER invent or guess fare amounts
+
+If user says "cancel" → CALL cancel_booking function FIRST, then respond.
+If user corrects name → CALL save_customer_name function immediately.
+Call end_call function after saying "Safe travels!".
 
 🚫 ABSOLUTELY FORBIDDEN - YOU WILL BE CANCELLED IF YOU DO THESE:
 - NEVER say "Booked!", "Your taxi is confirmed", "taxi is on its way", "driver is on the way" unless book_taxi succeeded.
@@ -339,18 +351,23 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book taxi when you have pickup and destination. CALL THIS to get fare/ETA from dispatch. If passengers not specified, default to 1. Include 'bags' ONLY for airport trips.",
+    description: "Book taxi with a state machine. First call with 'request_quote' to get fare/ETA. After reading fare to customer and they say YES, call again with 'confirmed'. If they say NO, call with 'rejected'.",
     parameters: {
       type: "object",
       properties: {
         pickup: { type: "string", description: "Pickup address" },
         destination: { type: "string", description: "Destination address" },
+        confirmation_state: { 
+          type: "string", 
+          enum: ["request_quote", "confirmed", "rejected"],
+          description: "Use 'request_quote' first to get fare. After customer hears fare: 'confirmed' if YES, 'rejected' if NO."
+        },
         passengers: { type: "integer", minimum: 1, default: 1, description: "Number of passengers (default 1 if not specified)" },
         bags: { type: "integer", minimum: 0, description: "Number of bags (only ask for airport/station trips)" },
         pickup_time: { type: "string", description: "ISO timestamp or 'now'" },
         vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] }
       },
-      required: ["pickup", "destination"]
+      required: ["pickup", "destination", "confirmation_state"]
     }
   },
   {
@@ -696,22 +713,14 @@ interface SessionState {
   audioVerified: boolean;
   pendingAudioBuffer: string[]; // Base64-encoded audio chunks waiting for transcript verification
 
-  // Pending fare confirmation from dispatch (ask_confirm action)
-  pendingFareConfirm: {
-    active: boolean;
-    message: string | null;
+  // Fare quote state - stores fare/ETA from request_quote until confirmed/rejected
+  pendingQuote: {
     fare: string | null;
     eta: string | null;
-    callbackUrl: string | null;
-    askedAt: number | null;
+    pickup: string | null;
+    destination: string | null;
+    timestamp: number;
   } | null;
-  
-  // Fare confirmation flow complete - customer said "yes" to ask_confirm
-  // Prevents duplicate book_taxi calls after fare is confirmed
-  fareConfirmationComplete: boolean;
-  
-  // Awaiting dispatch confirm action after user accepted fare
-  awaitingDispatchConfirm: boolean;
 
   // Dispatch events that arrive while OpenAI isn't ready / while a response is active
   pendingDispatchEvents: { event: string; payload: any; receivedAt: number }[];
@@ -1272,24 +1281,23 @@ serve(async (req) => {
             /(?:^|\s)\d+\s*(?:euro|pond|pound)/i.test(currentText); // "163 euro"
 
           const hasBookingConfirmationPhrase = BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
-          const isFareConfirmationPending = !!sessionState.pendingFareConfirm?.active;
+          const hasPendingQuote = !!sessionState.pendingQuote;
 
-          // During fare-confirmation, dispatch intentionally gives us fare/ETA to read out.
-          // Allow price/currency mentions ONLY while pendingFareConfirm is active.
+          // During quote-pending state, Ada should be reading fare/ETA to customer.
+          // Allow price/currency mentions ONLY while pendingQuote exists.
           // Still block: booking confirmations ("booked", "confirmed"), and placeholder leaks.
           const isDisallowedConfirmationPhrase =
             hasBookingConfirmationPhrase ||
             hasPlaceholderInstruction ||
-            (!isFareConfirmationPending && hasPriceOrCurrencyMention);
+            (!hasPendingQuote && hasPriceOrCurrencyMention);
 
           // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
-          // Also block if awaiting dispatch confirm (user said yes, waiting for dispatch to confirm)
-          if (isDisallowedConfirmationPhrase && (!sessionState.bookingConfirmedThisTurn || sessionState.awaitingDispatchConfirm)) {
+          if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
             console.log(
-              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without ${sessionState.awaitingDispatchConfirm ? 'dispatch confirm' : 'calling book_taxi'}! Cancelling response.`
+              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
             );
             console.log(
-              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction}, awaitingDispatch=${sessionState.awaitingDispatchConfirm})`
+              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
             );
 
             // DISCARD buffered audio - don't let the confirmation be heard
@@ -1312,10 +1320,8 @@ serve(async (req) => {
               sessionState.assistantTranscriptIndex = null;
             }
 
-            // Inject a system message - different for awaiting dispatch vs. no tool call
-            const systemErrorText = sessionState.awaitingDispatchConfirm
-              ? "[SYSTEM: You are currently waiting for dispatch confirmation. Stay silent and wait. The dispatch system will provide the confirmation details. Do NOT confirm the booking yourself.]"
-              : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]";
+            // Inject a system message to force tool call
+            const systemErrorText = "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
             
             openaiWs?.send(
               JSON.stringify({
@@ -1333,10 +1339,7 @@ serve(async (req) => {
               })
             );
 
-            // Only trigger new response if not awaiting dispatch (we want silence while waiting)
-            if (!sessionState.awaitingDispatchConfirm) {
-              openaiWs?.send(JSON.stringify({ type: "response.create" }));
-            }
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
           } else if (!sessionState.bookingConfirmedThisTurn && sessionState.pendingAudioBuffer.length > 0) {
             // Transcript so far doesn't contain confirmation phrases - it's safe to flush buffered audio
             // This releases audio incrementally as we verify each chunk of transcript
@@ -1481,103 +1484,8 @@ serve(async (req) => {
             }));
           }
           
-          // --- Check for pending fare confirmation response ---
-          if (sessionState.pendingFareConfirm?.active) {
-            const lowerText = userText.toLowerCase();
-            // Multilingual yes/no detection (EN, NL, DE, FR, ES, IT, PL)
-            const isYes = /\b(yes|yeah|yep|sure|okay|ok|go ahead|book it|please|that's fine|fine|correct|right|ja|jawel|jazeker|prima|goed|akkoord|oké|in orde|doe maar|graag|naturlich|natürlich|klar|genau|richtig|sicher|bitte|oui|d'accord|bien sûr|certainement|parfait|sí|si|claro|vale|por supuesto|correcto|certo|va bene|perfetto|esatto|tak|dobrze|zgadza się|w porządku)\b/i.test(lowerText);
-            const isNo = /\b(no|nope|nah|cancel|too much|expensive|forget it|never mind|don't|stop|nee|neen|niet|annuleren|te duur|laat maar|vergeet het|stoppen|nein|nicht|abbrechen|zu teuer|vergiss es|non|annuler|trop cher|laisse tomber|oublie|demasiado caro|cancela|olvídalo|troppo caro|annulla|lascia perdere|nie|anuluj|za drogo|zapomnij)\b/i.test(lowerText);
-            
-            if (isYes || isNo) {
-              console.log(`[${sessionState.callId}] 💰 Fare confirm response: ${isYes ? 'YES' : 'NO'}`);
-              
-              const responsePayload = {
-                call_id: sessionState.callId,
-                response: isYes ? "confirmed" : "cancelled",
-                fare: sessionState.pendingFareConfirm.fare,
-                eta: sessionState.pendingFareConfirm.eta,
-                customer_response: userText,
-                responded_at: new Date().toISOString()
-              };
-              
-              // Always store in database for polling
-              supabase.from("live_calls")
-                .update({
-                  clarification_attempts: {
-                    fare_confirm_response: responsePayload.response,
-                    fare: responsePayload.fare,
-                    eta: responsePayload.eta,
-                    customer_said: userText,
-                    responded_at: responsePayload.responded_at
-                  },
-                  updated_at: new Date().toISOString()
-                })
-                .eq("call_id", sessionState.callId)
-                .then(() => console.log(`[${sessionState.callId}] 💾 Fare response saved to DB`));
-              
-              // Also send callback if URL provided
-              if (sessionState.pendingFareConfirm.callbackUrl) {
-                fetch(sessionState.pendingFareConfirm.callbackUrl, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(responsePayload)
-                }).then(res => {
-                  console.log(`[${sessionState.callId}] 📤 Fare callback sent: ${res.status}`);
-                }).catch(err => {
-                  console.error(`[${sessionState.callId}] ❌ Fare callback failed:`, err);
-                });
-              }
-              
-              // Store fare/eta before clearing for use in confirmation message
-              const confirmedFare = sessionState.pendingFareConfirm.fare;
-              const confirmedEta = sessionState.pendingFareConfirm.eta;
-              
-              // Clear pending fare confirm state
-              sessionState.pendingFareConfirm = null;
-              
-              if (isYes) {
-                // User accepted fare - confirm immediately using fare/ETA from ask_confirm
-                // Mark booking as confirmed so Ada can speak the confirmation
-                sessionState.bookingConfirmedThisTurn = true;
-                sessionState.fareConfirmationComplete = true; // 🔥 CRITICAL: Prevent duplicate book_taxi calls
-                sessionState.lastBookTaxiSuccessAt = Date.now(); // Mark as if book_taxi just succeeded
-                console.log(`[${sessionState.callId}] ✅ Customer accepted fare - booking complete (fareConfirmationComplete=true)`);
-                
-                // Build confirmation message with fare and ETA
-                const fareText = confirmedFare ? `£${confirmedFare}` : "";
-                const etaText = confirmedEta ? `${confirmedEta} minutes` : "a few minutes";
-                
-                // Determine language for confirmation
-                const langCode = sessionState.language || "en";
-                const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
-                
-                // Tell Ada to confirm the booking with the actual fare and ETA
-                // CRITICAL: Explicitly tell Ada NOT to call book_taxi - it's already done!
-                openaiWs?.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: `[SYSTEM: Booking already confirmed by dispatch - DO NOT call book_taxi again! Just speak the confirmation. Speak in ${langName}. Say: "Brilliant! Your taxi is booked.${fareText ? ` Fare is ${fareText}.` : ""}${etaText ? ` Driver will be with you in about ${etaText}.` : ""} Is there anything else I can help you with?" Be natural and brief. DO NOT CALL ANY TOOLS.]` }]
-                  }
-                }));
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              }
-              
-              // If NO, inject system message to tell Ada to apologize
-              if (isNo) {
-                openaiWs?.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: "[SYSTEM: Customer declined the fare. Apologize briefly and ask if they'd like to try a different time, location, or if there's anything else you can help with.]" }]
-                  }
-                }));
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              }
-            }
-          }
+          // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
+          // User says YES/NO after hearing fare → Ada calls book_taxi with "confirmed" or "rejected"
         }
         break;
       }
@@ -1777,30 +1685,54 @@ serve(async (req) => {
         case "book_taxi": {
           console.log(`[${sessionState.callId}] 🚕 Booking request from Ada:`, args);
           
-          // === GUARD 1: Prevent duplicate book_taxi calls while fare confirmation is pending ===
-          if (sessionState.pendingFareConfirm?.active) {
-            const timeSinceAsk = Date.now() - (sessionState.pendingFareConfirm.askedAt || 0);
-            console.log(`[${sessionState.callId}] ⚠️ BLOCKED: book_taxi called while fare confirmation pending (${timeSinceAsk}ms ago)`);
+          const confirmationState = args.confirmation_state || "request_quote";
+          console.log(`[${sessionState.callId}] 📋 confirmation_state: "${confirmationState}"`);
+          
+          // === HANDLE CONFIRMATION STATES ===
+          
+          // STATE: "confirmed" - Customer said YES to fare quote
+          if (confirmationState === "confirmed") {
+            const pendingQuote = sessionState.pendingQuote;
+            if (!pendingQuote) {
+              console.log(`[${sessionState.callId}] ⚠️ Cannot confirm - no pending quote`);
+              result = {
+                success: false,
+                error: "no_pending_quote",
+                message: "No fare quote to confirm. Call with confirmation_state: 'request_quote' first."
+              };
+              break;
+            }
+            
+            console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
+            
+            // Mark booking as confirmed
+            sessionState.bookingConfirmedThisTurn = true;
+            sessionState.lastBookTaxiSuccessAt = Date.now();
+            sessionState.pendingQuote = null; // Clear pending quote
+            
             result = {
-              success: false,
-              blocked: true,
-              message: "Fare confirmation already in progress. Wait for customer response.",
-              needs_fare_confirm: true
+              success: true,
+              confirmed: true,
+              fare: pendingQuote.fare,
+              eta_minutes: pendingQuote.eta,
+              message: `Booking confirmed! Fare: ${pendingQuote.fare}, ETA: ${pendingQuote.eta}`
             };
             break;
           }
           
-          // === GUARD 2: Prevent book_taxi after customer already confirmed fare ===
-          if (sessionState.fareConfirmationComplete) {
-            const timeSinceConfirm = Date.now() - (sessionState.lastBookTaxiSuccessAt || 0);
-            console.log(`[${sessionState.callId}] ⚠️ BLOCKED: book_taxi called after fare confirmation complete (${timeSinceConfirm}ms ago)`);
+          // STATE: "rejected" - Customer said NO to fare quote
+          if (confirmationState === "rejected") {
+            console.log(`[${sessionState.callId}] ❌ Customer REJECTED booking`);
+            sessionState.pendingQuote = null; // Clear pending quote
             result = {
               success: true,
-              already_confirmed: true,
-              message: "Booking already confirmed. No action needed."
+              rejected: true,
+              message: "Booking cancelled by customer."
             };
             break;
           }
+          
+          // STATE: "request_quote" - Get fare/ETA from dispatch (default)
           
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
           // 1. Normalize addresses for comparison
@@ -2122,19 +2054,20 @@ serve(async (req) => {
                 if (dispatchAskConfirm) {
                   console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}"`);
 
-                  // Store pending fare confirmation state
-                  sessionState.pendingFareConfirm = {
-                    active: true,
-                    message: dispatchAskConfirm.text,
+                  // Store pending quote state for confirmation_state flow
+                  sessionState.pendingQuote = {
                     fare: dispatchAskConfirm.fare || null,
                     eta: dispatchAskConfirm.eta || null,
-                    callbackUrl: dispatchAskConfirm.callback_url || null,
-                    askedAt: Date.now()
+                    pickup: args.pickup,
+                    destination: args.destination,
+                    timestamp: Date.now()
                   };
 
                   dispatchResult = {
                     ada_message: dispatchAskConfirm.text,
-                    needs_fare_confirm: true
+                    fare: dispatchAskConfirm.fare || null,
+                    eta: dispatchAskConfirm.eta || null,
+                    quote_ready: true
                   };
                   break;
                 }
@@ -3048,9 +2981,7 @@ serve(async (req) => {
           lastBookTaxiSuccessAt: null,
           audioVerified: true, // Start verified - only buffer after user confirms addresses
           pendingAudioBuffer: [],
-          pendingFareConfirm: null,
-          fareConfirmationComplete: false,
-          awaitingDispatchConfirm: false,
+          pendingQuote: null,
           pendingDispatchEvents: [],
           sttMetrics: {
             totalTranscripts: 0,
@@ -3137,9 +3068,7 @@ serve(async (req) => {
             lastBookTaxiSuccessAt: null,
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
-            pendingFareConfirm: null,
-            fareConfirmationComplete: false,
-            awaitingDispatchConfirm: false,
+            pendingQuote: null,
             pendingDispatchEvents: [],
             sttMetrics: {
               totalTranscripts: 0,
@@ -3219,24 +3148,23 @@ serve(async (req) => {
             return;
           }
           
-          // GUARD: If there's already a pending fare confirmation, ignore this one (prevents duplicates)
-          if (state?.pendingFareConfirm?.active) {
-            const timeSinceLastAsk = Date.now() - (state.pendingFareConfirm.askedAt || 0);
+          // GUARD: If there's already a pending quote, ignore duplicate ask_confirm
+          if (state?.pendingQuote) {
+            const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
             if (timeSinceLastAsk < 10000) { // Within 10 seconds = duplicate
               console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm (previous one sent ${timeSinceLastAsk}ms ago)`);
               return;
             }
           }
           
-          // Set pending fare confirm state
+          // Store pending quote state
           if (state) {
-            state.pendingFareConfirm = {
-              active: true,
-              message,
+            state.pendingQuote = {
               fare: fare || null,
               eta: eta || null,
-              callbackUrl: callback_url || null,
-              askedAt: Date.now()
+              pickup: state.booking.pickup,
+              destination: state.booking.destination,
+              timestamp: Date.now()
             };
           }
           
@@ -3324,10 +3252,10 @@ serve(async (req) => {
             return;
           }
           
-          // Clear the awaiting dispatch confirm state
+          // Set booking confirmed state
           if (state) {
-            state.awaitingDispatchConfirm = false;
             state.bookingConfirmedThisTurn = true;
+            state.pendingQuote = null; // Clear quote
           }
           
           // Build the confirmation message for Ada to speak
