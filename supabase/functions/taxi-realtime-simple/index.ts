@@ -790,6 +790,7 @@ interface SessionState {
     totalChars: number;
     correctedTranscripts: number;
     filteredHallucinations: number;
+    duplicateFarePrompts: number; // Count of ignored duplicate ask_confirm broadcasts
     avgTranscriptDelayMs: number;
     transcriptDelays: number[];
     avgSpeechDurationMs: number;
@@ -3467,6 +3468,7 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           console.log(`[${sessionState.callId}]   Total characters:       ${m.totalChars}`);
           console.log(`[${sessionState.callId}]   Corrected transcripts:  ${m.correctedTranscripts} (${correctionRate}%)`);
           console.log(`[${sessionState.callId}]   Filtered hallucinations: ${m.filteredHallucinations} (${hallucinationRate}%)`);
+          console.log(`[${sessionState.callId}]   Duplicate fare prompts: ${m.duplicateFarePrompts}`);
           console.log(`[${sessionState.callId}]   Avg transcript delay:   ${m.avgTranscriptDelayMs.toFixed(0)}ms`);
           console.log(`[${sessionState.callId}]   Avg speech duration:    ${m.avgSpeechDurationMs.toFixed(0)}ms`);
           console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
@@ -3838,6 +3840,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             totalChars: 0,
             correctedTranscripts: 0,
             filteredHallucinations: 0,
+            duplicateFarePrompts: 0,
             avgTranscriptDelayMs: 0,
             transcriptDelays: [],
             avgSpeechDurationMs: 0,
@@ -3933,6 +3936,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               totalChars: 0,
               correctedTranscripts: 0,
               filteredHallucinations: 0,
+              duplicateFarePrompts: 0,
               avgTranscriptDelayMs: 0,
               transcriptDelays: [],
               avgSpeechDurationMs: 0,
@@ -4111,6 +4115,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
             if (timeSinceLastAsk < 10000 && isTrueDuplicate) { // Within 10 seconds and same fare/eta = duplicate
               console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - same fare/eta (${timeSinceLastAsk}ms ago)`);
+              // ✅ Track duplicate fare prompts in STT metrics
+              if (state) state.sttMetrics.duplicateFarePrompts++;
               return;
             }
 
@@ -4124,6 +4130,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             const isSamePrompt = (state.lastQuotePromptText || "") === (spokenMessage || "");
             if (isSamePrompt) {
               console.log(`[${callId}] ⚠️ Ignoring ask_confirm - identical fare prompt already injected ${Date.now() - state.lastQuotePromptAt}ms ago`);
+              // ✅ Track duplicate fare prompts in STT metrics
+              if (state) state.sttMetrics.duplicateFarePrompts++;
               return;
             }
             console.log(`[${callId}] ✅ Allowing ask_confirm within 3s because prompt changed`);
