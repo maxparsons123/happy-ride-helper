@@ -1396,6 +1396,30 @@ serve(async (req) => {
             sessionState.audioVerified = false;
             sessionState.pendingAudioBuffer = [];
           }
+
+          // If caller describes a change using a FULL ROUTE ("from A going to B"),
+          // inject a hard correction so the model doesn't treat B as a pickup.
+          const isRouteStyleChange =
+            /\bchange\b/i.test(lowerUserText) &&
+            /\bfrom\b.+\b(?:going to|to)\b.+/i.test(lowerUserText);
+
+          if (isRouteStyleChange && openaiWs && openaiConnected) {
+            const m = userText.match(/from\s+(.+?)\s+(?:going to|to)\s+(.+)/i);
+            const pickupHint = (m?.[1] || "").trim();
+            const destHint = (m?.[2] || "").trim();
+
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: The caller is requesting a BOOKING CHANGE using a full route statement. Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}". Do NOT treat the destination as a pickup. Ask them to confirm the full updated route, then call modify_booking for the field(s) that changed.]`
+                }]
+              }
+            }));
+          }
           
           // --- Check for pending fare confirmation response ---
           if (sessionState.pendingFareConfirm?.active) {
@@ -2189,14 +2213,19 @@ serve(async (req) => {
         case "modify_booking": {
           console.log(`[${sessionState.callId}] ✏️ Modify request from Ada:`, args);
           
-          // === GUARD: Only allow modify_booking if booking was already confirmed ===
-          // If no confirmed booking exists (version = 0 or booking incomplete), reject
-          if (!sessionState.bookingConfirmedThisTurn && sessionState.booking.version === 0) {
-            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: No confirmed booking exists yet (version=0)`);
+          // === GUARD: Allow modify_booking only if there's an existing active booking OR a booking was confirmed ===
+          // Active bookings loaded from DB are modifiable even if bookingConfirmedThisTurn is false.
+          const hasModifiableBooking =
+            sessionState.hasActiveBooking ||
+            sessionState.booking.version > 0 ||
+            sessionState.lastBookTaxiSuccessAt !== null;
+
+          if (!hasModifiableBooking) {
+            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: No modifiable booking exists yet (hasActiveBooking=${sessionState.hasActiveBooking}, version=${sessionState.booking.version})`);
             result = {
               success: false,
               error: "no_confirmed_booking",
-              message: "There is no confirmed booking to modify. Please complete the booking first using book_taxi."
+              message: "There is no active booking to modify yet. Please complete a booking first."
             };
             break;
           }
@@ -2314,24 +2343,24 @@ serve(async (req) => {
             }
           }
           
-          const oldValue = args.field_to_change === "pickup" ? sessionState.booking.pickup
-            : args.field_to_change === "destination" ? sessionState.booking.destination
-            : args.field_to_change === "passengers" ? sessionState.booking.passengers
-            : args.field_to_change === "bags" ? sessionState.booking.bags
+          const oldValue = finalFieldToChange === "pickup" ? sessionState.booking.pickup
+            : finalFieldToChange === "destination" ? sessionState.booking.destination
+            : finalFieldToChange === "passengers" ? sessionState.booking.passengers
+            : finalFieldToChange === "bags" ? sessionState.booking.bags
             : null;
           
           // Apply the changes with final verified value
-          if (args.field_to_change === "pickup") sessionState.booking.pickup = finalNewValue;
-          if (args.field_to_change === "destination") sessionState.booking.destination = finalNewValue;
-          if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(finalNewValue);
-          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(finalNewValue);
+          if (finalFieldToChange === "pickup") sessionState.booking.pickup = finalNewValue;
+          if (finalFieldToChange === "destination") sessionState.booking.destination = finalNewValue;
+          if (finalFieldToChange === "passengers") sessionState.booking.passengers = parseInt(finalNewValue);
+          if (finalFieldToChange === "bags") sessionState.booking.bags = parseInt(finalNewValue);
           
           // Also capture any other extracted details for potential use
           if (extractedModification.vehicle_type && !sessionState.booking.vehicle_type) {
             sessionState.booking.vehicle_type = extractedModification.vehicle_type;
           }
           
-          console.log(`[${sessionState.callId}] ✅ Applied modification: ${args.field_to_change} = "${finalNewValue}" (was: "${oldValue}")`);
+          console.log(`[${sessionState.callId}] ✅ Applied modification: ${finalFieldToChange} = "${finalNewValue}" (was: "${oldValue}")`);
           console.log(`[${sessionState.callId}] 📋 Updated booking state:`, sessionState.booking);
           
           // Send webhook with modification details and poll for updated fare
@@ -2416,7 +2445,7 @@ serve(async (req) => {
           
           result = { 
             success: true, 
-            modified: args.field_to_change, 
+            modified: finalFieldToChange, 
             old_value: oldValue,
             new_value: finalNewValue,
             current_booking: {
@@ -2428,8 +2457,8 @@ serve(async (req) => {
             ...(updatedFare && { fare: updatedFare }),
             ...(updatedEta && { eta: updatedEta }),
             message: updatedFare 
-              ? `Updated ${args.field_to_change} from "${oldValue}" to "${finalNewValue}". New fare: ${updatedFare}`
-              : `Updated ${args.field_to_change} from "${oldValue}" to "${finalNewValue}"`
+              ? `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}". New fare: ${updatedFare}`
+              : `Updated ${finalFieldToChange} from "${oldValue}" to "${finalNewValue}"`
           };
           break;
         }
@@ -3083,6 +3112,8 @@ serve(async (req) => {
                 state.booking.pickup = bookingData.pickup;
                 state.booking.destination = bookingData.destination;
                 state.booking.passengers = bookingData.passengers;
+                // Mark as modifiable (this came from an existing booking)
+                state.booking.version = Math.max(state.booking.version || 0, 1);
 
                 console.log(
                   `[${callId}] ✅ Active booking loaded: ${bookingData.pickup} -> ${bookingData.destination} (${bookingData.passengers})`
@@ -3258,6 +3289,8 @@ serve(async (req) => {
                   state.booking.pickup = bookingData.pickup;
                   state.booking.destination = bookingData.destination;
                   state.booking.passengers = bookingData.passengers;
+                  // Mark as modifiable (this came from an existing booking)
+                  state.booking.version = Math.max(state.booking.version || 0, 1);
                   
                   // Update name from booking if not set
                   if (!state.customerName && bookingData.caller_name) {
