@@ -1591,6 +1591,12 @@ Do NOT say 'booked' until the tool returns success.]`
             const pickupHint = (m?.[1] || "").trim();
             const destHint = (m?.[2] || "").trim();
 
+            // Cancel any active response before injecting system message
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
             openaiWs.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -1606,6 +1612,8 @@ Do NOT say 'booked' until the tool returns success.]`
                 },
               })
             );
+            
+            openaiWs.send(JSON.stringify({ type: "response.create" }));
           }
           
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
@@ -2153,6 +2161,12 @@ Do NOT say 'booked' until the tool returns success.]`
           // If we overrode Ada's stale route using extraction, inject a context correction.
           // This helps Ada stop "remembering" the old active-booking destination in later turns.
           if (sourceDiscrepancy && openaiWs && openaiConnected) {
+            // Cancel any active response before injecting system message
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
             openaiWs.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -2439,6 +2453,12 @@ Do NOT say 'booked' until the tool returns success.]`
                 if (dispatchResult.hangup) {
                   console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
                   
+                  // Cancel any active response before injecting system message
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                  }
+                  openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                  
                   // Send the goodbye message to Ada to speak
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
@@ -2531,6 +2551,12 @@ Do NOT say 'booked' until the tool returns success.]`
                     const etaText = etaMinutes ? `arriving in about ${etaMinutes} minutes` : "";
                     const detailsText = [fareText, etaText].filter(Boolean).join(", ");
                     const bookingDetails = detailsText ? ` ${detailsText}.` : "";
+                    
+                    // Cancel any active response before injecting system message
+                    if (sessionState.openAiResponseActive) {
+                      openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                    }
+                    openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
                     
                     // Send system message so Ada speaks the dispatch confirmation + details + follow-up question
                     openaiWs?.send(JSON.stringify({
@@ -3119,6 +3145,12 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // Mark call as ending (but not ended yet - let goodbye play)
           sessionState.callEnded = true;
+          
+          // Cancel any active response before injecting goodbye
+          if (sessionState.openAiResponseActive) {
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          }
+          openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Inject goodbye instruction so Ada says farewell
           openaiWs?.send(JSON.stringify({
@@ -3710,6 +3742,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             return;
           }
           
+          // Cancel any active response before injecting dispatch say message
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          }
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          
           // Make Ada say the message
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
@@ -3769,6 +3807,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           // Determine language instruction based on session
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+          
+          // Cancel any active response before injecting confirmation
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          }
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Inject the confirmation for Ada to speak
           openaiWs.send(JSON.stringify({
@@ -4015,6 +4059,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     const customerGreeting = state.customerName 
                       ? `The caller is ${state.customerName}.` 
                       : "";
+                    
+                    // Cancel any active response before injecting booking context
+                    if (state.openAiResponseActive) {
+                      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                    }
+                    openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
                     
                     openaiWs.send(JSON.stringify({
                       type: "conversation.item.create",
