@@ -655,6 +655,7 @@ interface SessionState {
   language: string; // Language code for Whisper STT (e.g., "en", "es", "fr")
   customerName: string | null;
   hasActiveBooking: boolean;
+  activeBookingCallId: string | null; // Original call_id of the active booking (for updates when resuming)
   booking: {
     pickup: string | null;
     destination: string | null;
@@ -1292,12 +1293,26 @@ serve(async (req) => {
           const hasPendingQuote = !!sessionState.pendingQuote;
 
           // During quote-pending state, Ada should be reading fare/ETA to customer.
-          // Allow price/currency mentions ONLY while pendingQuote exists.
-          // Still block: booking confirmations ("booked", "confirmed"), and placeholder leaks.
-          const isDisallowedConfirmationPhrase =
-            hasBookingConfirmationPhrase ||
-            hasPlaceholderInstruction ||
-            (!hasPendingQuote && hasPriceOrCurrencyMention);
+          // Allow ALL fare/price/ETA mentions while pendingQuote exists - she's just reading dispatch's message.
+          // Only block: actual booking confirmations ("booked", "confirmed", "taxi is on its way") and placeholder leaks.
+          const HARD_BLOCK_PHRASES = [
+            "booked!", "booked.", "booked for you", "that's booked", "all booked",
+            "your taxi is confirmed", "your taxi is booked", "your booking is confirmed",
+            "i've booked", "i have booked", "booking confirmed", "booking complete", "booking is done",
+            "taxi is on its way", "taxi is on the way", "cab is on", "car is on",
+            "safe travels", "have a good", "enjoy your", "see you",
+            "geboekt!", "geboekt.", "uw taxi is bevestigd", "taxi is onderweg",
+            "gebucht", "buchung bestätigt", "taxi ist unterwegs", "gute fahrt",
+            "réservé", "confirmé", "taxi en route", "bonne route", "bon voyage",
+            "reservado", "confirmado", "taxi en camino", "buen viaje"
+          ];
+          const hasHardBlockPhrase = HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
+
+          // If pendingQuote is active, ONLY block hard confirmation phrases - allow fare/ETA reading
+          // If no pendingQuote, block all confirmation + fare phrases (original behavior)
+          const isDisallowedConfirmationPhrase = hasPendingQuote
+            ? (hasHardBlockPhrase || hasPlaceholderInstruction)
+            : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention);
 
           // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
           if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
@@ -1329,10 +1344,10 @@ serve(async (req) => {
             }
 
             // Inject a system message to recover safely
-            // - If we are awaiting fare approval (pendingQuote), DO NOT force another request_quote (that causes loops)
+            // - If we are awaiting fare approval (pendingQuote), guide Ada to proper yes/no handling
             // - Otherwise, force the tool call to obtain the fare
             const systemErrorText = hasPendingQuote
-              ? "[SYSTEM ERROR: You are awaiting the customer's yes/no on the fare quote. Do NOT say 'booked' or confirm. Ask ONLY: \"Would you like me to book that?\" Then WAIT silently for their reply. Do NOT call any tools.]"
+              ? "[SYSTEM ERROR: A fare quote has already been given and you are awaiting the customer's YES or NO. Do NOT request a new quote. If the customer says YES, call book_taxi with confirmation_state: 'confirmed'. If the customer says NO, call book_taxi with confirmation_state: 'rejected'. If unclear, ask ONLY: \"Would you like me to book that?\" Then WAIT silently. Do NOT say 'booked' or 'confirmed' until the tool returns success.]"
               : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
             
             openaiWs?.send(
@@ -2742,19 +2757,51 @@ serve(async (req) => {
           }).eq("call_id", sessionState.callId);
           
           // ALSO update the bookings table with the modification
+          // Use activeBookingCallId if available (from resumption), otherwise current call_id, then phone fallback
           const callerPhoneNormMod = normalizePhone(sessionState.phone);
-          const { error: bookingUpdateError } = await supabase.from("bookings").update({
-            pickup: sessionState.booking.pickup,
-            destination: sessionState.booking.destination,
-            passengers: sessionState.booking.passengers || 1,
-            updated_at: new Date().toISOString()
-          }).eq("caller_phone", callerPhoneNormMod)
+          const bookingCallIdToUpdate = sessionState.activeBookingCallId || sessionState.callId;
+          let bookingUpdateError: any = null;
+          
+          // First try to update by the booking's call_id (most precise)
+          const { error: byCallIdError, count: callIdCount } = await supabase
+            .from("bookings")
+            .update({
+              pickup: sessionState.booking.pickup,
+              destination: sessionState.booking.destination,
+              passengers: sessionState.booking.passengers || 1,
+              updated_at: new Date().toISOString()
+            })
+            .eq("call_id", bookingCallIdToUpdate)
             .in("status", ["confirmed", "dispatched", "active", "pending"]);
+          
+          // If no rows matched by call_id, fall back to phone lookup (for resumption cases)
+          if (!byCallIdError && (callIdCount === 0 || callIdCount === null)) {
+            const { error: byPhoneError } = await supabase
+              .from("bookings")
+              .update({
+                pickup: sessionState.booking.pickup,
+                destination: sessionState.booking.destination,
+                passengers: sessionState.booking.passengers || 1,
+                updated_at: new Date().toISOString()
+              })
+              .eq("caller_phone", callerPhoneNormMod)
+              .in("status", ["confirmed", "dispatched", "active", "pending"])
+              .order("booked_at", { ascending: false })
+              .limit(1);
+            
+            bookingUpdateError = byPhoneError;
+            if (!byPhoneError) {
+              console.log(`[${sessionState.callId}] ✅ Bookings table updated (by phone): ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
+            }
+          } else {
+            bookingUpdateError = byCallIdError;
+            if (!byCallIdError) {
+              console.log(`[${sessionState.callId}] ✅ Bookings table updated (call_id=${bookingCallIdToUpdate}): ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
+            }
+          }
           
           if (bookingUpdateError) {
             console.error(`[${sessionState.callId}] Failed to update bookings table:`, bookingUpdateError);
-          } else {
-            console.log(`[${sessionState.callId}] ✅ Bookings table updated: ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
           }
           
           // Send webhook with modification details and poll for updated fare
@@ -3265,6 +3312,7 @@ serve(async (req) => {
           language: finalLanguage,
           customerName: null,
           hasActiveBooking: false,
+          activeBookingCallId: null,
           booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
           transcripts: [],
           callerLastPickup: null,
@@ -3355,6 +3403,7 @@ serve(async (req) => {
             language: finalLanguage,
             customerName: message.customer_name || null,
             hasActiveBooking: message.has_active_booking || false,
+            activeBookingCallId: null,
             booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
             transcripts: [],
             callerLastPickup: null,
@@ -3829,7 +3878,7 @@ serve(async (req) => {
                 // Try both phone formats (normalized digits-only + legacy no-plus)
                 const { data: bookingData } = await supabase
                   .from("bookings")
-                  .select("pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
+                  .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, caller_name")
                   .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
                   .in("status", ["confirmed", "dispatched", "active", "pending"])
                   .order("booked_at", { ascending: false })
@@ -3839,6 +3888,7 @@ serve(async (req) => {
                 if (bookingData && state) {
                   activeBooking = bookingData;
                   state.hasActiveBooking = true;
+                  state.activeBookingCallId = bookingData.call_id; // Store original booking's call_id for updates
                   state.booking.pickup = bookingData.pickup;
                   state.booking.destination = bookingData.destination;
                   state.booking.passengers = bookingData.passengers;
@@ -3850,7 +3900,7 @@ serve(async (req) => {
                     state.customerName = bookingData.caller_name;
                   }
                   
-                  console.log(`[${callId}] 📦 Found active booking: ${bookingData.pickup} → ${bookingData.destination}`);
+                  console.log(`[${callId}] 📦 Found active booking (${bookingData.call_id}): ${bookingData.pickup} → ${bookingData.destination}`);
                   
                   // Inject booking context for Ada
                   if (openaiWs && openaiConnected) {
