@@ -2072,15 +2072,19 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
 
             // Final route (prefer current tool args, fallback to pendingQuote/session)
-            const isGpsPickup = (value: unknown) =>
-              typeof value === "string" && value.trim().toLowerCase() === "by_gps";
+            // Check for invalid pickup values: by_gps, [REDACTED], empty strings
+            const isInvalidPickup = (value: unknown): boolean => {
+              if (typeof value !== "string") return true;
+              const v = value.trim().toLowerCase();
+              return !v || v === "by_gps" || v === "[redacted]" || v.startsWith("[");
+            };
 
-            const finalPickupCandidate =
-              args.pickup || pendingQuote.pickup || sessionState.booking.pickup;
+            // Build candidate list, skipping invalid values
+            const pickupCandidates = [args.pickup, pendingQuote.pickup, sessionState.booking.pickup];
+            const finalPickup = pickupCandidates.find(p => !isInvalidPickup(p)) || null;
+            
             const finalDestination =
               args.destination || pendingQuote.destination || sessionState.booking.destination;
-
-            const finalPickup = isGpsPickup(finalPickupCandidate) ? null : finalPickupCandidate;
 
             // Never allow GPS sentinel as a pickup address.
             // If we somehow reach confirmation with an invalid pickup, force the agent to collect a real address.
