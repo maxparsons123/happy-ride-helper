@@ -1787,6 +1787,21 @@ serve(async (req) => {
             }
             
             console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
+
+            // Final route (prefer current tool args, fallback to pendingQuote/session)
+            const finalPickup = args.pickup || pendingQuote.pickup || sessionState.booking.pickup;
+            const finalDestination = args.destination || pendingQuote.destination || sessionState.booking.destination;
+
+            // Persist latest route to session + dashboard (fixes cases where UI still shows the old destination)
+            if (finalPickup) sessionState.booking.pickup = finalPickup;
+            if (finalDestination) sessionState.booking.destination = finalDestination;
+
+            await supabase.from("live_calls").update({
+              pickup: finalPickup,
+              destination: finalDestination,
+              passengers: sessionState.booking.passengers || 1,
+              updated_at: new Date().toISOString(),
+            }).eq("call_id", sessionState.callId);
             
             // POST confirmation to callback_url if provided (tells C# to dispatch the driver)
             if (pendingQuote.callback_url) {
@@ -1795,8 +1810,8 @@ serve(async (req) => {
                 const confirmPayload = {
                   call_id: sessionState.callId,
                   action: "confirmed",
-                  pickup: pendingQuote.pickup,
-                  destination: pendingQuote.destination,
+                  pickup: finalPickup,
+                  destination: finalDestination,
                   fare: pendingQuote.fare,
                   eta: pendingQuote.eta,
                   customer_name: sessionState.customerName,
@@ -1818,7 +1833,7 @@ serve(async (req) => {
             // Mark booking as confirmed
             sessionState.bookingConfirmedThisTurn = true;
             sessionState.lastBookTaxiSuccessAt = Date.now();
-            sessionState.lastConfirmedTripKey = makeTripKey(pendingQuote.pickup, pendingQuote.destination);
+            sessionState.lastConfirmedTripKey = makeTripKey(finalPickup, finalDestination);
             sessionState.pendingQuote = null; // Clear pending quote
             sessionState.lastQuotePromptAt = null; // Reset prompt tracking
             sessionState.lastQuotePromptText = null;
