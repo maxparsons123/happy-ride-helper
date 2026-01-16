@@ -3931,19 +3931,50 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             console.log(`[${callId}] ✅ Allowing ask_confirm within 60s because trip changed (last=${state?.lastConfirmedTripKey}, now=${tripKeyNow})`);
           }
 
-          // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore duplicate
+          // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore true duplicates
+          // IMPORTANT: If fare/eta changed, treat it as an update (do NOT ignore), otherwise booking enforcement
+          // will see a mismatch and cancel Ada mid-sentence.
           if (state?.pendingQuote) {
             const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
-            if (timeSinceLastAsk < 10000) { // Within 10 seconds = duplicate
-              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - pendingQuote exists (${timeSinceLastAsk}ms ago)`);
+
+            const normNum = (v: unknown) => {
+              const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : NaN;
+            };
+
+            const existingFareNum = normNum(state.pendingQuote.fare);
+            const incomingFareNum = normNum(fare);
+            const existingEtaNum = Number(String(state.pendingQuote.eta ?? "").replace(/[^0-9]/g, ""));
+            const incomingEtaNum = Number(String((eta ?? eta_minutes) ?? "").replace(/[^0-9]/g, ""));
+
+            const fareSame = Number.isFinite(existingFareNum) && Number.isFinite(incomingFareNum)
+              ? Math.abs(existingFareNum - incomingFareNum) <= 0.01
+              : String(state.pendingQuote.fare ?? "") === String(fare ?? "");
+
+            const etaSame = Number.isFinite(existingEtaNum) && Number.isFinite(incomingEtaNum)
+              ? existingEtaNum === incomingEtaNum
+              : String(state.pendingQuote.eta ?? "") === String(eta ?? eta_minutes ?? "");
+
+            const isTrueDuplicate = fareSame && etaSame;
+
+            if (timeSinceLastAsk < 10000 && isTrueDuplicate) { // Within 10 seconds and same fare/eta = duplicate
+              console.log(`[${callId}] ⚠️ Ignoring duplicate ask_confirm - same fare/eta (${timeSinceLastAsk}ms ago)`);
               return;
+            }
+
+            if (!isTrueDuplicate) {
+              console.log(`[${callId}] ✅ ask_confirm update detected (fare/eta changed) - will re-prompt despite ${timeSinceLastAsk}ms window`);
             }
           }
 
-          // GUARD 4: If tool handler already injected a fare prompt very recently (within 3s), skip
+          // GUARD 4: If tool handler already injected a fare prompt very recently (within 3s), skip ONLY if identical
           if (state?.lastQuotePromptAt && Date.now() - state.lastQuotePromptAt < 3000) {
-            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - fare prompt already injected ${Date.now() - state.lastQuotePromptAt}ms ago by tool handler`);
-            return;
+            const isSamePrompt = (state.lastQuotePromptText || "") === (spokenMessage || "");
+            if (isSamePrompt) {
+              console.log(`[${callId}] ⚠️ Ignoring ask_confirm - identical fare prompt already injected ${Date.now() - state.lastQuotePromptAt}ms ago`);
+              return;
+            }
+            console.log(`[${callId}] ✅ Allowing ask_confirm within 3s because prompt changed`);
           }
 
           // Store pending quote state
@@ -3969,7 +4000,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
           // HARD BLOCK: even if book_taxi succeeded earlier, do NOT allow Ada to confirm a booking
           // during fare confirmation. She must wait for the customer's yes/no.
-          if (state) state.bookingConfirmedThisTurn = false;
+          // Also force audio buffering for this injected prompt so we never play partial fare sentences.
+          if (state) {
+            state.bookingConfirmedThisTurn = false;
+            state.audioVerified = false;
+            state.pendingAudioBuffer = [];
+          }
 
           // Wait longer for any in-flight response to complete before cancelling
           await new Promise(resolve => setTimeout(resolve, 400));
