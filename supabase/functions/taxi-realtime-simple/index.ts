@@ -1884,6 +1884,9 @@ Do NOT say 'booked' until the tool returns success.]`
           // STATE: "confirmed" - Customer said YES to fare quote
           if (confirmationState === "confirmed") {
             const pendingQuote = sessionState.pendingQuote;
+            // ✅ FIX #2: CLEAR pendingQuote IMMEDIATELY to prevent stale broadcasts from re-triggering
+            sessionState.pendingQuote = null;
+            
             if (!pendingQuote) {
               console.log(`[${sessionState.callId}] ⚠️ Cannot confirm - no pending quote`);
               result = {
@@ -1996,6 +1999,17 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
+          
+          // === FIX #1: BLOCK request_quote if a booking was recently confirmed ===
+          if (sessionState.lastBookTaxiSuccessAt && Date.now() - sessionState.lastBookTaxiSuccessAt < 60000) {
+            console.log(`[${sessionState.callId}] 🔁 Ignoring request_quote within 60s of successful booking (${Date.now() - sessionState.lastBookTaxiSuccessAt}ms ago)`);
+            result = {
+              success: true,
+              already_confirmed: true,
+              message: "Booking already confirmed. Ask: 'Is there anything else I can help you with?'"
+            };
+            break;
+          }
           
           // === EARLY EXIT: Prevent duplicate request_quote while pending ===
           if (sessionState.pendingQuote) {
@@ -3570,8 +3584,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
-          // GUARD 2: If booking was confirmed recently (within 30s), also ignore
-          if (state?.lastBookTaxiSuccessAt && Date.now() - state.lastBookTaxiSuccessAt < 30000) {
+          // GUARD 2: If booking was confirmed recently (within 60s), also ignore
+          // Extended from 30s to 60s to match the book_taxi("request_quote") guard
+          if (state?.lastBookTaxiSuccessAt && Date.now() - state.lastBookTaxiSuccessAt < 60000) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was confirmed ${Date.now() - state.lastBookTaxiSuccessAt}ms ago`);
             return;
           }
