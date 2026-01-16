@@ -2271,6 +2271,8 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             // The tool result message alone is not enough - we need an explicit prompt.
             if (openaiWs && openaiConnected) {
               // Cancel-Clear-Inject protocol to avoid response collisions
+              // ✅ SET discardCurrentResponseAudio BEFORE cancelling to drop any late audio deltas
+              sessionState.discardCurrentResponseAudio = true;
               if (sessionState.openAiResponseActive) {
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               }
@@ -3041,6 +3043,9 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                     const etaText = etaMinutes ? `arriving in about ${etaMinutes} minutes` : "";
                     const detailsText = [fareText, etaText].filter(Boolean).join(", ");
                     const bookingDetails = detailsText ? ` ${detailsText}.` : "";
+                    
+                    // ✅ SET discardCurrentResponseAudio BEFORE cancelling to drop any late audio deltas
+                    sessionState.discardCurrentResponseAudio = true;
                     
                     // Cancel any active response before injecting system message
                     if (sessionState.openAiResponseActive) {
@@ -4276,6 +4281,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
           
+          // ✅ SET discardCurrentResponseAudio BEFORE cancelling to drop any late audio deltas (prevents "for you." fragments)
+          if (state) {
+            state.discardCurrentResponseAudio = true;
+          }
+          
           // Cancel any active response before injecting confirmation
           if (state?.openAiResponseActive) {
             openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -4559,12 +4569,24 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             }
 
             // Create/update live call record (non-blocking)
-            await supabase
+            // ✅ REUSE existing active call card for same phone to avoid creating duplicate cards
+            const phoneKey = normalizePhone(phone);
+            const { data: existingCall } = await supabase
               .from("live_calls")
-              .upsert(
-                {
+              .select("id, call_id")
+              .eq("caller_phone", phoneKey)
+              .eq("status", "active")
+              .order("started_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+
+            if (existingCall) {
+              // Update existing active call card with new call_id and reset data
+              console.log(`[${callId}] ♻️ Reusing existing live_call card for ${phoneKey} (old call_id: ${existingCall.call_id})`);
+              await supabase
+                .from("live_calls")
+                .update({
                   call_id: callId,
-                  caller_phone: phone,
                   caller_name: state?.customerName,
                   status: "active",
                   source: "simple",
@@ -4572,8 +4594,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                   gps_lat: state?.gpsLat,
                   gps_lon: state?.gpsLon,
                   gps_updated_at: state?.gpsLat ? new Date().toISOString() : null,
-
-                  // Optional context for the dashboard when an active booking exists
+                  started_at: new Date().toISOString(),
+                  ended_at: null,
                   pickup: activeBooking?.pickup ?? null,
                   destination: activeBooking?.destination ?? null,
                   passengers: activeBooking?.passengers ?? null,
@@ -4584,9 +4606,40 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     activeBooking?.status === "dispatched" ||
                     activeBooking?.status === "active" ||
                     false,
-                },
-                { onConflict: "call_id" }
-              );
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", existingCall.id);
+            } else {
+              // No existing active card - create new one
+              await supabase
+                .from("live_calls")
+                .upsert(
+                  {
+                    call_id: callId,
+                    caller_phone: phone,
+                    caller_name: state?.customerName,
+                    status: "active",
+                    source: "simple",
+                    transcripts: [],
+                    gps_lat: state?.gpsLat,
+                    gps_lon: state?.gpsLon,
+                    gps_updated_at: state?.gpsLat ? new Date().toISOString() : null,
+
+                    // Optional context for the dashboard when an active booking exists
+                    pickup: activeBooking?.pickup ?? null,
+                    destination: activeBooking?.destination ?? null,
+                    passengers: activeBooking?.passengers ?? null,
+                    fare: activeBooking?.fare ?? null,
+                    eta: activeBooking?.eta ?? null,
+                    booking_confirmed:
+                      activeBooking?.status === "confirmed" ||
+                      activeBooking?.status === "dispatched" ||
+                      activeBooking?.status === "active" ||
+                      false,
+                  },
+                  { onConflict: "call_id" }
+                );
+            }
           } catch (e) {
             console.error(`[${callId}] Background caller lookup failed:`, e);
           }
