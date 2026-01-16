@@ -1753,6 +1753,24 @@ serve(async (req) => {
           const confirmationState = args.confirmation_state || "request_quote";
           console.log(`[${sessionState.callId}] 📋 confirmation_state: "${confirmationState}"`);
           
+          // Normalize addresses for comparisons & dedupe keys (shared across all confirmation states)
+          const normalizeForComparison = (addr: string): string => {
+            if (!addr) return "";
+            return addr
+              .toLowerCase()
+              .replace(/[,.\-]/g, " ")
+              .replace(/\s+/g, " ")
+              .replace(/\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|court|ct|place|pl)\b/gi, "")
+              .replace(/\b(netherlands|uk|united kingdom|england|nederland|the netherlands)\b/gi, "")
+              .replace(/\b(in|naar|van|to|from)\b/gi, "")
+              .trim();
+          };
+
+          const makeTripKey = (
+            pickup: string | null | undefined,
+            destination: string | null | undefined,
+          ) => `${normalizeForComparison(pickup || "")}|||${normalizeForComparison(destination || "")}`;
+          
           // === HANDLE CONFIRMATION STATES ===
           
           // STATE: "confirmed" - Customer said YES to fare quote
@@ -1800,7 +1818,7 @@ serve(async (req) => {
             // Mark booking as confirmed
             sessionState.bookingConfirmedThisTurn = true;
             sessionState.lastBookTaxiSuccessAt = Date.now();
-            sessionState.lastConfirmedTripKey = `${pendingQuote.pickup || ""}|||${pendingQuote.destination || ""}`;
+            sessionState.lastConfirmedTripKey = makeTripKey(pendingQuote.pickup, pendingQuote.destination);
             sessionState.pendingQuote = null; // Clear pending quote
             sessionState.lastQuotePromptAt = null; // Reset prompt tracking
             sessionState.lastQuotePromptText = null;
@@ -1857,18 +1875,7 @@ serve(async (req) => {
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
           
           // === DUAL-SOURCE EXTRACTION & VALIDATION ===
-          // 1. Normalize addresses for comparison
-          const normalizeForComparison = (addr: string): string => {
-            if (!addr) return "";
-            return addr
-              .toLowerCase()
-              .replace(/[,.\-]/g, " ")
-              .replace(/\s+/g, " ")
-              .replace(/\b(street|st|road|rd|avenue|ave|lane|ln|drive|dr|court|ct|place|pl)\b/gi, "")
-              .replace(/\b(netherlands|uk|united kingdom|england|nederland|the netherlands)\b/gi, "")
-              .replace(/\b(in|naar|van|to|from)\b/gi, "")
-              .trim();
-          };
+          // 1. Normalize addresses for comparison (normalizeForComparison is defined above)
           
           // 2. Run AI extraction on conversation (both user + assistant turns)
           const conversationForExtraction = sessionState.transcripts
@@ -2040,7 +2047,7 @@ serve(async (req) => {
           
           // Guard against accidental duplicate re-booking loops right after a successful confirmation.
           // (This can happen if Ada gets pulled into an unrelated chat turn and then calls book_taxi again.)
-          const currentTripKey = `${args.pickup || ""}|||${args.destination || ""}`;
+          const currentTripKey = makeTripKey(args.pickup, args.destination);
           const isDuplicateRecentTrip =
             !!sessionState.lastConfirmedTripKey &&
             sessionState.lastConfirmedTripKey === currentTripKey &&
@@ -2458,7 +2465,7 @@ serve(async (req) => {
           // This allows Ada to say "Booked!" without being cancelled
           sessionState.bookingConfirmedThisTurn = true;
           sessionState.lastBookTaxiSuccessAt = Date.now();
-          sessionState.lastConfirmedTripKey = `${args.pickup || ""}|||${args.destination || ""}`;
+          sessionState.lastConfirmedTripKey = makeTripKey(args.pickup, args.destination);
           console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
           
           // RELEASE BUFFERED AUDIO: Now that booking is confirmed, flush any pending audio
