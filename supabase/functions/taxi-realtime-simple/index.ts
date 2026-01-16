@@ -2059,7 +2059,21 @@ serve(async (req) => {
           
           // 6. Enrich booking with extracted details
           const finalPassengers = args.passengers || extractedBooking.passengers || 1;
-          const finalBags = args.bags ?? extractedBooking.luggage ?? 0;
+          
+          // Parse bags - extractedBooking.luggage may be a string like "no baggage" or "2 bags"
+          let finalBags = 0;
+          if (typeof args.bags === 'number') {
+            finalBags = args.bags;
+          } else if (extractedBooking.luggage) {
+            const luggageStr = String(extractedBooking.luggage).toLowerCase();
+            if (luggageStr.includes('no') || luggageStr === '0') {
+              finalBags = 0;
+            } else {
+              const match = luggageStr.match(/(\d+)/);
+              finalBags = match ? parseInt(match[1], 10) : 0;
+            }
+          }
+          
           const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || "saloon";
           const finalPickupTime = args.pickup_time || extractedBooking.pickup_time || "now";
           
@@ -2685,8 +2699,15 @@ serve(async (req) => {
           if (args.field_to_change === "bags" && extractedModification.luggage !== undefined) {
             const adaNum = parseInt(args.new_value);
             if (isNaN(adaNum)) {
-              finalNewValue = String(extractedModification.luggage);
-              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted bags: ${finalNewValue}`);
+              // Parse luggage string to number (e.g., "no baggage" -> 0, "2 bags" -> 2)
+              const luggageStr = String(extractedModification.luggage).toLowerCase();
+              if (luggageStr.includes('no') || luggageStr === '0') {
+                finalNewValue = "0";
+              } else {
+                const match = luggageStr.match(/(\d+)/);
+                finalNewValue = match ? match[1] : "0";
+              }
+              console.log(`[${sessionState.callId}] 🔄 Using AI-extracted bags: ${finalNewValue} (from "${extractedModification.luggage}")`);
             }
           }
           
