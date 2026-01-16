@@ -742,6 +742,9 @@ interface SessionState {
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
+  // Allow exactly one final assistant response (the goodbye) after callEnded=true.
+  // Without this, the response.created handler will immediately cancel the goodbye.
+  finalGoodbyePending: boolean;
 
   // Half-duplex mode: when enabled, user audio is buffered while Ada speaks and only forwarded after
   halfDuplex: boolean;
@@ -1094,12 +1097,17 @@ serve(async (req) => {
       case "response.created":
         // Start-of-response marker (used to avoid response.cancel_not_active)
         sessionState.openAiResponseActive = true;
-        
+
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
-        // This prevents OpenAI's VAD from generating hallucinated responses after goodbye
+        // EXCEPT for the single final goodbye response we intentionally trigger.
         if (sessionState.callEnded) {
-          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response after callEnded`);
-          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          if (sessionState.finalGoodbyePending) {
+            // This is the goodbye we just initiated; allow it to play.
+            sessionState.finalGoodbyePending = false;
+          } else {
+            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response after callEnded`);
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          }
         }
         break;
 
@@ -1692,6 +1700,12 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
+            // Allow exactly one final goodbye response to play even though callEnded=true
+            sessionState.finalGoodbyePending = true;
+            sessionState.discardCurrentResponseAudio = false;
+            sessionState.audioVerified = true;
+            sessionState.pendingAudioBuffer = [];
+
             openaiWs.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -1740,6 +1754,12 @@ Do NOT say 'booked' until the tool returns success.]`
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             }
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+            // Allow exactly one final goodbye response to play even though callEnded=true
+            sessionState.finalGoodbyePending = true;
+            sessionState.discardCurrentResponseAudio = false;
+            sessionState.audioVerified = true;
+            sessionState.pendingAudioBuffer = [];
 
             openaiWs.send(
               JSON.stringify({
@@ -3819,6 +3839,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
+          finalGoodbyePending: false,
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
@@ -3912,10 +3933,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             bargeInIgnoreUntil: 0,
             openAiResponseActive: false,
             deferredResponseCreate: false,
-            speechStartTime: null,
-            speechStopTime: null,
-            callEnded: false,
-            useRasaAudioProcessing: message.rasa_audio_processing ?? false,
+             speechStartTime: null,
+             speechStopTime: null,
+             callEnded: false,
+             finalGoodbyePending: false,
+             useRasaAudioProcessing: message.rasa_audio_processing ?? false,
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
