@@ -2330,7 +2330,35 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
                 success: true,
                 already_confirmed: true,
                 message: "Booking already confirmed. Ask: 'Is there anything else I can help you with?'",
+                suppress_response_create: true, // Prevent Ada from speaking on her own
               };
+              
+              // ✅ INJECT SYSTEM MESSAGE to guide Ada's response and prevent stutter loop
+              if (openaiWs && openaiConnected) {
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                }
+
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+                  setTimeout(() => {
+                    openaiWs?.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{
+                          type: "input_text",
+                          text: `[SYSTEM: The booking is already confirmed. Do NOT say "booked" again. Simply ask: "Is there anything else I can help you with?" Then WAIT for their response.]`,
+                        }],
+                      },
+                    }));
+
+                    safeResponseCreate(sessionState, "post-already-confirmed");
+                  }, 350);
+                }, 400);
+              }
               break;
             }
 
