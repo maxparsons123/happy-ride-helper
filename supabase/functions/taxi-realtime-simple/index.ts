@@ -1722,12 +1722,12 @@ Do NOT say 'booked' until the tool returns success.]`
                       role: "user",
                       content: [
                         {
-                          type: "input_text",
-                          text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
+                      type: "input_text",
+                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
 Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}".
 Do NOT treat the destination as a pickup.
-DO NOT ask another confirmation question.
-CALL modify_booking immediately for any fields that changed (pickup and/or destination). If both changed, call modify_booking twice.
+Ask ONE short confirmation question only: "Just to confirm, change the pickup to ${pickupHint || "(pickup)"} and the destination to ${destHint || "(destination)"}, yeah?" Then WAIT.
+If the caller confirms, CALL modify_booking immediately for any fields that changed (pickup and/or destination). If both changed, call modify_booking twice.
 Then CALL book_taxi with confirmation_state: "request_quote" to get the updated fare. Speak only after the tools return.]`,
                         },
                       ],
