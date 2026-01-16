@@ -1343,11 +1343,15 @@ serve(async (req) => {
               sessionState.assistantTranscriptIndex = null;
             }
 
-            // Inject a system message to recover safely
+          // Inject a system message to recover safely
             // - If we are awaiting fare approval (pendingQuote), guide Ada to proper yes/no handling
             // - Otherwise, force the tool call to obtain the fare
             const systemErrorText = hasPendingQuote
-              ? "[SYSTEM ERROR: A fare quote has already been given and you are awaiting the customer's YES or NO. Do NOT request a new quote. If the customer says YES, call book_taxi with confirmation_state: 'confirmed'. If the customer says NO, call book_taxi with confirmation_state: 'rejected'. If unclear, ask ONLY: \"Would you like me to book that?\" Then WAIT silently. Do NOT say 'booked' or 'confirmed' until the tool returns success.]"
+              ? `[SYSTEM ERROR: You said a booking confirmation phrase before the book_taxi tool succeeded. The fare quote (${sessionState.pendingQuote?.fare || 'pending'}) was already given. NOW YOU MUST:
+- If the customer said YES/yeah/go ahead → CALL book_taxi NOW with confirmation_state: "confirmed", pickup: "${sessionState.pendingQuote?.pickup || sessionState.booking?.pickup || ''}", destination: "${sessionState.pendingQuote?.destination || sessionState.booking?.destination || ''}"
+- If the customer said NO/cancel → CALL book_taxi with confirmation_state: "rejected"
+- If you haven't heard their response yet → Ask: "Would you like me to book that?" and WAIT.
+Do NOT say 'booked' until the tool returns success.]`
               : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with confirmation_state: 'request_quote' to get the fare first. Do NOT speak about booking confirmation until you receive the tool result.]";
             
             openaiWs?.send(
@@ -3112,6 +3116,18 @@ serve(async (req) => {
         sessionState.lastQuotePromptAt = now;
         sessionState.lastQuotePromptText = result.ada_message;
 
+        // CRITICAL: Include explicit YES/NO handling instructions with the fare prompt
+        const farePromptWithInstructions = `[SYSTEM: Read this fare quote to the customer: "${result.ada_message}"
+
+After reading it, WAIT SILENTLY for their response.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES, yeah, go ahead, book it, please → CALL book_taxi with confirmation_state: "confirmed" (use same pickup/destination)
+- If they say NO, never mind, cancel, too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask: "Would you like me to book that?"
+
+DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_state: "confirmed" returns success.]`;
+
         openaiWs?.send(
           JSON.stringify({
             type: "conversation.item.create",
@@ -3121,7 +3137,7 @@ serve(async (req) => {
               content: [
                 {
                   type: "input_text",
-                  text: `[SYSTEM: Speak this fare/ETA confirmation to the customer and then WAIT for their response. Do NOT call any tools. Just say: "${result.ada_message}"]`,
+                  text: farePromptWithInstructions,
                 },
               ],
             },
@@ -3570,7 +3586,18 @@ serve(async (req) => {
           // Wait longer for cancel to take effect
           await new Promise(resolve => setTimeout(resolve, 300));
 
-          // Inject the fare question into Ada's conversation
+          // Inject the fare question into Ada's conversation with explicit YES/NO handling
+          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION]: Say this message to the customer IN ${langName.toUpperCase()}: "${message}"
+
+After saying this, WAIT SILENTLY for their response. Do NOT confirm the booking yet.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES, yeah, go ahead, book it, please → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
+- If they say NO, never mind, cancel, too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask: "Would you like me to book that?"
+
+DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "confirmed" returns success.`;
+
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
@@ -3578,7 +3605,7 @@ serve(async (req) => {
               role: "user",
               content: [{
                 type: "input_text",
-                text: `[DISPATCH FARE CONFIRMATION]: Translate and say this message to the customer IN ${langName.toUpperCase()}: "${message}"\n\nCRITICAL RULES: Ask the question ONLY. Do NOT confirm the booking yet. Do NOT say 'booked' or 'confirmed'. Then wait for their yes/no response.`
+                text: farePromptWithInstructions
               }]
             }
           }));
@@ -3588,7 +3615,7 @@ serve(async (req) => {
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `IMPORTANT: You are ONLY asking for fare approval. Speak in ${langName}. Translate and say: "${message}" Then STOP and wait silently for yes/no. Do NOT confirm or book anything yet. Do NOT say booked/confirmed.`
+              instructions: `IMPORTANT: You are ONLY asking for fare approval. Speak in ${langName}. Say: "${message}" Then STOP and wait silently for yes/no. After they respond, if YES call book_taxi with confirmation_state: "confirmed". Do NOT say booked/confirmed until the tool succeeds.`
             }
           }));
         });
