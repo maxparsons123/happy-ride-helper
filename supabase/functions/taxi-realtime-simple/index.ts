@@ -4439,12 +4439,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Inject the confirmation for Ada to speak
+          // Script: "That's on the way" + "Is there anything else I can help you with?"
+          const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
+          
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this to the customer IN ${langName.toUpperCase()}: "${messageToSpeak}. Is there anything else I can help you with?" Be natural and brief.` }]
+              content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.` }]
             }
           }));
           
@@ -4453,7 +4456,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say: "${messageToSpeak}. Is there anything else I can help you with?" Do not add extra details.`
+              instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say EXACTLY: "${confirmationScript}" Do not add extra details.`
             }
           }));
         });
