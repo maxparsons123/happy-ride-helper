@@ -677,6 +677,11 @@ interface SessionState {
   // Used to prevent Ada from saying "Booked!" without actually placing the booking.
   bookingConfirmedThisTurn: boolean;
   lastBookTaxiSuccessAt: number | null;
+  
+  // Audio buffering for confirmation enforcement
+  // When true, audio is forwarded immediately; when false, audio is buffered until transcript verification
+  audioVerified: boolean;
+  pendingAudioBuffer: string[]; // Base64-encoded audio chunks waiting for transcript verification
 
   // Pending fare confirmation from dispatch (ask_confirm action)
   pendingFareConfirm: {
@@ -962,11 +967,34 @@ serve(async (req) => {
           const ignoreMs = sessionState.useRasaAudioProcessing ? 900 : 600;
           sessionState.bargeInIgnoreUntil = Date.now() + ignoreMs;
         }
-        // Forward audio to bridge
-        socket.send(JSON.stringify({
-          type: "audio",
-          audio: message.delta
-        }));
+        
+        // === BOOKING CONFIRMATION GUARD ===
+        // If booking hasn't been confirmed this turn AND we haven't verified the transcript yet,
+        // buffer audio to prevent confirmation phrases from being heard
+        if (!sessionState.bookingConfirmedThisTurn && !sessionState.audioVerified) {
+          // Buffer audio - will be flushed after transcript verification
+          if (!sessionState.pendingAudioBuffer) {
+            sessionState.pendingAudioBuffer = [];
+          }
+          sessionState.pendingAudioBuffer.push(message.delta);
+          
+          // Safety flush: If we've buffered more than 2 seconds of audio (~50 chunks at 40ms each),
+          // release it to prevent long silences (assumes transcript verification failed or was slow)
+          if (sessionState.pendingAudioBuffer.length > 50) {
+            console.log(`[${sessionState.callId}] ⚠️ Audio buffer safety flush (${sessionState.pendingAudioBuffer.length} chunks)`);
+            for (const audioChunk of sessionState.pendingAudioBuffer) {
+              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            }
+            sessionState.pendingAudioBuffer = [];
+            sessionState.audioVerified = true; // Stop buffering
+          }
+        } else {
+          // Forward audio to bridge immediately
+          socket.send(JSON.stringify({
+            type: "audio",
+            audio: message.delta
+          }));
+        }
         break;
 
       case "response.audio.done":
@@ -1196,6 +1224,12 @@ serve(async (req) => {
               `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
             );
 
+            // DISCARD buffered audio - don't let the confirmation be heard
+            if (sessionState.pendingAudioBuffer.length > 0) {
+              console.log(`[${sessionState.callId}] 🗑️ Discarding ${sessionState.pendingAudioBuffer.length} buffered audio chunks`);
+              sessionState.pendingAudioBuffer = [];
+            }
+
             // Cancel the current response
             if (sessionState.openAiResponseActive) {
               openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
@@ -1230,6 +1264,13 @@ serve(async (req) => {
 
             // Trigger a new response
             openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          } else if (!sessionState.bookingConfirmedThisTurn && sessionState.pendingAudioBuffer.length > 0) {
+            // Transcript so far doesn't contain confirmation phrases - it's safe to flush buffered audio
+            // This releases audio incrementally as we verify each chunk of transcript
+            const chunksToFlush = sessionState.pendingAudioBuffer.splice(0, sessionState.pendingAudioBuffer.length);
+            for (const audioChunk of chunksToFlush) {
+              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            }
           }
         }
         break;
@@ -1330,6 +1371,18 @@ serve(async (req) => {
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
           sessionState.bookingConfirmedThisTurn = false;
+          
+          // Detect if user just confirmed addresses - start audio buffering
+          // This catches "yes", "yeah", "that's correct" etc. that trigger book_taxi
+          const lowerUserText = userText.toLowerCase();
+          const isConfirmationPhrase = /\b(yes|yeah|yep|correct|that's right|that's correct|right|go ahead|sure|ok|okay|please|ja|jawel|prima|goed|akkoord|doe maar|naturlich|klar|genau|oui|d'accord|sí|claro|correcto)\b/i.test(lowerUserText);
+          
+          // If user just confirmed and we don't have a confirmed booking yet, start buffering
+          if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn && sessionState.booking.version === 0) {
+            console.log(`[${sessionState.callId}] 🔒 User confirmed - starting audio buffering until book_taxi succeeds`);
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+          }
           
           // --- Check for pending fare confirmation response ---
           if (sessionState.pendingFareConfirm?.active) {
@@ -2101,7 +2154,16 @@ serve(async (req) => {
           sessionState.lastBookTaxiSuccessAt = Date.now();
           console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now confirm`);
           
-          break;
+          // RELEASE BUFFERED AUDIO: Now that booking is confirmed, flush any pending audio
+          sessionState.audioVerified = true;
+          if (sessionState.pendingAudioBuffer.length > 0) {
+            console.log(`[${sessionState.callId}] 🔊 Releasing ${sessionState.pendingAudioBuffer.length} buffered audio chunks after book_taxi success`);
+            for (const audioChunk of sessionState.pendingAudioBuffer) {
+              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+            }
+            sessionState.pendingAudioBuffer = [];
+          }
+          
         }
 
         case "cancel_booking":
@@ -2737,9 +2799,11 @@ serve(async (req) => {
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
-          bookingConfirmedThisTurn: false,
-          lastBookTaxiSuccessAt: null,
-          pendingFareConfirm: null,
+            bookingConfirmedThisTurn: false,
+            lastBookTaxiSuccessAt: null,
+            audioVerified: true, // Start verified - only buffer after user confirms addresses
+            pendingAudioBuffer: [],
+            pendingFareConfirm: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -2823,6 +2887,8 @@ serve(async (req) => {
             halfDuplexBuffer: [],
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
+            audioVerified: true, // Start verified - only buffer after user confirms addresses
+            pendingAudioBuffer: [],
             pendingFareConfirm: null,
             sttMetrics: {
               totalTranscripts: 0,
