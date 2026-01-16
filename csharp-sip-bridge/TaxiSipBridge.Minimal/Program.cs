@@ -39,6 +39,10 @@ public class SipAdaBridge : IDisposable
     // This allows Ada's full greeting to be buffered without dropping
     private const int MaxOutboundFrames = 250;
 
+    // Audio fade-in state to smooth response boundaries and prevent "pop" glitches
+    private bool _needsFadeIn = true;
+    private const int FadeInSamples = 48; // 2ms at 24kHz - short enough to be inaudible
+
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
     public event Action<string, string>? OnCallStarted;
@@ -274,6 +278,11 @@ public class SipAdaBridge : IDisposable
                             Log($"📝 [{callId}] {text}");
                         }
                     }
+                    // Reset fade-in flag when a new response starts (prevents glitch at word boundaries)
+                    else if (typeStr == "response.created" || typeStr == "response.audio.started")
+                    {
+                        _needsFadeIn = true;
+                    }
                 }
                 Log($"🔚 [{callId}] WS read loop ended");
             });
@@ -369,6 +378,19 @@ public class SipAdaBridge : IDisposable
     {
         // Bytes → shorts (PCM16)
         var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
+        
+        // Apply fade-in on first chunk of each response to prevent "pop" glitches from DC offset
+        if (_needsFadeIn && pcm24.Length > 0)
+        {
+            int fadeLen = Math.Min(FadeInSamples, pcm24.Length);
+            for (int i = 0; i < fadeLen; i++)
+            {
+                float gain = (float)i / fadeLen; // Linear ramp from 0 to 1
+                pcm24[i] = (short)(pcm24[i] * gain);
+            }
+            _needsFadeIn = false;
+        }
+        
         // 24kHz → 8kHz downsample
         var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
         // PCM16 8kHz → µ-law
