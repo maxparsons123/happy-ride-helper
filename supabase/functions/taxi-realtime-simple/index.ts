@@ -3453,14 +3453,17 @@ serve(async (req) => {
           // during fare confirmation. She must wait for the customer's yes/no.
           if (state) state.bookingConfirmedThisTurn = false;
 
-          // Wait a bit for any in-flight response to complete before cancelling
-          await new Promise(resolve => setTimeout(resolve, 200));
+          // Wait longer for any in-flight response to complete before cancelling
+          await new Promise(resolve => setTimeout(resolve, 400));
 
           // Cancel any active response first to avoid "conversation_already_has_active_response" error
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          
+          // Also clear input audio buffer to prevent VAD from triggering new responses
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-          // Wait for cancel to take effect
-          await new Promise(resolve => setTimeout(resolve, 150));
+          // Wait longer for cancel to take effect
+          await new Promise(resolve => setTimeout(resolve, 300));
 
           // Inject the fare question into Ada's conversation
           openaiWs.send(JSON.stringify({
