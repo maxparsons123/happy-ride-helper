@@ -1669,16 +1669,29 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.pendingAudioBuffer = [];
           }
 
-          // If caller describes a change using a FULL ROUTE ("from A going to B"),
-          // inject a hard correction so the model doesn't treat B as a pickup.
-          const isRouteStyleChange =
-            /\bchange\b/i.test(lowerUserText) &&
-            /\bfrom\b.+\b(?:going to|to)\b.+/i.test(lowerUserText);
+          // If caller describes a change using a FULL ROUTE (e.g. "picked up at A going to B"),
+          // inject a hard correction so the model doesn't treat B as a pickup and doesn't stall.
+          // This also forces the Modification-First policy.
+          const routeMatch =
+            userText.match(/from\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i) ||
+            userText.match(/pick(?:ed)?\s*up\s*(?:from|at|on)\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i) ||
+            userText.match(/pick\s*up\s*(?:from|at|on)\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i);
 
-          if (isRouteStyleChange && openaiWs && openaiConnected) {
-            const m = userText.match(/from\s+(.+?)\s+(?:going to|to)\s+(.+)/i);
-            const pickupHint = (m?.[1] || "").trim();
-            const destHint = (m?.[2] || "").trim();
+          const hasExistingBookingContext =
+            sessionState.hasActiveBooking || sessionState.booking.version > 0 || !!sessionState.lastBookTaxiSuccessAt;
+
+          const isBookingChangeUtterance =
+            hasExistingBookingContext &&
+            /\b(change|update|modify)\b/i.test(lowerUserText) &&
+            !!routeMatch;
+
+          if (isBookingChangeUtterance && openaiWs && openaiConnected) {
+            const pickupHint = (routeMatch?.[1] || "").trim();
+            const destHint = (routeMatch?.[2] || "").trim();
+
+            console.log(
+              `[${sessionState.callId}] 🧭 Route-style change detected → pickup="${pickupHint}", destination="${destHint}"`
+            );
 
             // Cancel any active response before injecting system message
             if (sessionState.openAiResponseActive) {
@@ -1695,13 +1708,18 @@ Do NOT say 'booked' until the tool returns success.]`
                   content: [
                     {
                       type: "input_text",
-                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE using a full route statement. Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}". Do NOT treat the destination as a pickup. Ask them to confirm the full updated route, then call modify_booking for the field(s) that changed.]`,
+                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
+Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}".
+Do NOT treat the destination as a pickup.
+DO NOT ask another confirmation question.
+CALL modify_booking immediately for any fields that changed (pickup and/or destination). If both changed, call modify_booking twice.
+Then CALL book_taxi with confirmation_state: "request_quote" to get the updated fare. Speak only after the tools return.]`,
                     },
                   ],
                 },
               })
             );
-            
+
             openaiWs.send(JSON.stringify({ type: "response.create" }));
           }
           
