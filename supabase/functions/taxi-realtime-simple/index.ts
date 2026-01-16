@@ -1869,11 +1869,14 @@ serve(async (req) => {
           console.log(`[${sessionState.callId}] 🔗 DISPATCH_WEBHOOK_URL configured: ${DISPATCH_WEBHOOK_URL ? 'YES' : 'NO'}`);
           
           let dispatchConfirmationSent = false;
+          let dispatchPostOk = false;
+          let dispatchPostStatus: number | null = null;
           
           if (DISPATCH_WEBHOOK_URL) {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
               console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
+
               // Get recent user transcripts as structured array for comparison
               const userTranscripts = sessionState.transcripts
                 .filter(t => t.role === "user")
@@ -1912,12 +1915,31 @@ serve(async (req) => {
                 timestamp: new Date().toISOString()
               };
               
-              // Fire-and-forget POST to dispatch webhook (acknowledges with OK/200)
-              fetch(DISPATCH_WEBHOOK_URL, {
+              // POST to dispatch webhook and require a 2xx ack.
+              // (If this fails, we must NOT let Ada confirm the booking.)
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+              const postResp = await fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(webhookPayload),
-              }).catch(err => console.error(`[${sessionState.callId}] Webhook POST failed:`, err));
+                signal: controller.signal,
+              });
+
+              clearTimeout(timeoutId);
+              dispatchPostStatus = postResp.status;
+              dispatchPostOk = postResp.ok;
+
+              const respBody = await postResp.text().catch(() => "");
+              console.log(
+                `[${sessionState.callId}] 📬 Dispatch webhook response: ${postResp.status} ${postResp.statusText}` +
+                (respBody ? ` - ${respBody.slice(0, 300)}` : "")
+              );
+
+              if (!postResp.ok) {
+                throw new Error(`Dispatch webhook POST failed with status ${postResp.status}`);
+              }
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
@@ -1932,10 +1954,13 @@ serve(async (req) => {
                 // Check live_calls for dispatch response
                 const { data: callData } = await supabase
                   .from("live_calls")
-                  .select("fare, eta, status, transcripts")
+                  .select("fare, eta, status, transcripts, updated_at")
                   .eq("call_id", sessionState.callId)
                   .single();
                 
+                const updatedAtMs = callData?.updated_at ? new Date(callData.updated_at).getTime() : 0;
+                const hasFreshUpdate = updatedAtMs > pollStart;
+
                 // Check for dispatch_confirm transcript with the confirmation message
                 const transcripts = callData?.transcripts as any[] || [];
                 const dispatchConfirm = transcripts.find(t => 
@@ -1956,10 +1981,10 @@ serve(async (req) => {
                   break;
                 }
                 
-                // Fallback: Check if dispatch set fare OR eta OR status changed to dispatched
-                const hasConfirmation = callData?.fare || callData?.eta || callData?.status === "dispatched";
+                // Fallback: ONLY treat fare/eta/status as confirmation if they were updated AFTER we sent this booking
+                const hasConfirmation = hasFreshUpdate && (callData?.fare || callData?.eta || callData?.status === "dispatched");
                 if (hasConfirmation) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (no message): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
+                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed (fresh update, no message): fare=${callData?.fare}, eta=${callData?.eta}, status=${callData?.status}`);
                   dispatchResult = {
                     fare: callData?.fare || null,
                     eta_minutes: parseInt(callData?.eta) || 8,
@@ -2143,10 +2168,26 @@ serve(async (req) => {
                   }
                 }
               } else {
-                console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using defaults`);
+                console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - NOT confirming booking`);
+
+                // If dispatch is enabled, we must NOT allow a confirmation without a fresh callback.
+                result = {
+                  success: false,
+                  needs_clarification: true,
+                  ada_message: "Sorry, I'm having trouble confirming that with dispatch right now. Can you try again in a moment?",
+                  message: "Dispatch callback timeout"
+                };
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
+
+              // If we can't even POST (or we error polling), do not let Ada confirm.
+              result = {
+                success: false,
+                needs_clarification: true,
+                ada_message: "Sorry, I'm having trouble sending that booking through right now. Can you try again?",
+                message: "Dispatch webhook error"
+              };
             }
           }
           
