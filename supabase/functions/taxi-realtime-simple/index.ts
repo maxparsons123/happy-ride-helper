@@ -262,26 +262,14 @@ AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
 - If user has another request → Process it normally.
 
-BOOKING MODIFICATIONS - TWO-STEP CONFIRMATION:
-⚠️ ONLY MENTION WHAT CHANGED, NEVER REPEAT UNCHANGED DETAILS.
+BOOKING MODIFICATIONS - IMMEDIATE ACTION:
+⚠️ When customer requests a change, DO IT IMMEDIATELY. No confirmation needed.
 
-STEP 1 - CONFIRM THE CHANGE:
-- If customer wants to change DESTINATION → Ask: "Change destination to [NEW ADDRESS]?" and WAIT.
-- If customer wants to change PICKUP → Ask: "Change pickup to [NEW ADDRESS]?" and WAIT.
-- If customer wants to change BOTH → Ask: "Change pickup to [PICKUP] and destination to [DESTINATION]?" and WAIT.
-- If customer wants to change PASSENGERS → Ask: "Update to [NUMBER] passengers?" and WAIT.
-
-STEP 2 - AFTER USER CONFIRMS (yes/yeah/go ahead):
-- Call modify_booking for each field changed.
-- Call book_taxi with confirmation_state: "request_quote" to get updated fare.
-- Read the NEW fare/ETA to the customer.
-- NEVER repeat unchanged details (e.g., if only destination changed, don't mention pickup again).
-
-⚠️ CRITICAL MODIFICATION RULES:
-- ONLY mention the field(s) that changed - never repeat unchanged details like pickup, passengers, etc.
-- Passengers, bags, vehicle type are PRESERVED automatically - don't ask about them again unless user wants to change them.
-- NEVER cancel and rebook. ALWAYS use modify_booking.
-- If user says "no" → ask what they'd like instead.
+- If customer says "change destination to X" → IMMEDIATELY call modify_booking, then book_taxi(request_quote).
+- If customer says "change pickup to X" → IMMEDIATELY call modify_booking, then book_taxi(request_quote).
+- If customer says "change to X going to Y" → Call modify_booking for pickup, modify_booking for destination, then book_taxi(request_quote).
+- After getting new fare, just say: "Updated! The new fare is [FARE] and driver is [ETA] away. Shall I book that?"
+- NEVER repeat unchanged details (passengers, bags, etc. are preserved automatically).
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -1886,13 +1874,8 @@ Do NOT say 'booked' until the tool returns success.]`
                       role: "user",
                       content: [
                         {
-                      type: "input_text",
-                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
-Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}".
-Do NOT treat the destination as a pickup.
-Ask ONE short confirmation question only: "Just to confirm, change the pickup to ${pickupHint || "(pickup)"} and the destination to ${destHint || "(destination)"}, yeah?" Then WAIT.
-If the caller confirms, CALL modify_booking immediately for any fields that changed (pickup and/or destination). If both changed, call modify_booking twice.
-Then CALL book_taxi with confirmation_state: "request_quote" to get the updated fare. Speak only after the tools return.]`,
+                          type: "input_text",
+                          text: `[SYSTEM: The caller wants to change their booking. New route: Pickup="${pickupHint || "pickup"}", Destination="${destHint || "destination"}". DO NOT ask for confirmation. IMMEDIATELY call modify_booking for any changed fields, then call book_taxi with confirmation_state request_quote. After getting fare, say: Updated! The new fare is X. Shall I book that? Do NOT repeat the addresses.]`,
                         },
                       ],
                     },
