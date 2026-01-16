@@ -1271,14 +1271,20 @@ serve(async (req) => {
             /^\d+\.\s*$/.test(currentText.trim()) ||      // "163." standalone
             /(?:^|\s)\d+\s*(?:euro|pond|pound)/i.test(currentText); // "163 euro"
 
-          const isConfirmationPhrase =
-            BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase)) ||
-            hasPlaceholderInstruction ||
-            hasPriceOrCurrencyMention;
+          const hasBookingConfirmationPhrase = BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+          const isFareConfirmationPending = !!sessionState.pendingFareConfirm?.active;
 
-          // If Ada says a confirmation phrase but book_taxi wasn't called this turn, CANCEL!
+          // During fare-confirmation, dispatch intentionally gives us fare/ETA to read out.
+          // Allow price/currency mentions ONLY while pendingFareConfirm is active.
+          // Still block: booking confirmations ("booked", "confirmed"), and placeholder leaks.
+          const isDisallowedConfirmationPhrase =
+            hasBookingConfirmationPhrase ||
+            hasPlaceholderInstruction ||
+            (!isFareConfirmationPending && hasPriceOrCurrencyMention);
+
+          // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
           // Also block if awaiting dispatch confirm (user said yes, waiting for dispatch to confirm)
-          if (isConfirmationPhrase && (!sessionState.bookingConfirmedThisTurn || sessionState.awaitingDispatchConfirm)) {
+          if (isDisallowedConfirmationPhrase && (!sessionState.bookingConfirmedThisTurn || sessionState.awaitingDispatchConfirm)) {
             console.log(
               `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without ${sessionState.awaitingDispatchConfirm ? 'dispatch confirm' : 'calling book_taxi'}! Cancelling response.`
             );
