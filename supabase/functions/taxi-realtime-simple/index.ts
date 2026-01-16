@@ -714,6 +714,8 @@ interface SessionState {
   // When true, audio is forwarded immediately; when false, audio is buffered until transcript verification
   audioVerified: boolean;
   pendingAudioBuffer: string[]; // Base64-encoded audio chunks waiting for transcript verification
+  // When true, drop assistant audio deltas for the current response (used after response.cancel to avoid partial leaks)
+  discardCurrentResponseAudio: boolean;
 
   // Fare quote state - stores fare/ETA from request_quote until confirmed/rejected
   pendingQuote: {
@@ -1056,15 +1058,16 @@ serve(async (req) => {
         }
         break;
 
-      case "response.done":
-        sessionState.openAiResponseActive = false;
+       case "response.done":
+         sessionState.openAiResponseActive = false;
+         sessionState.discardCurrentResponseAudio = false;
 
-        // If we tried to speak while a response was in-flight, do it now.
-        if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
-          sessionState.deferredResponseCreate = false;
-          safeResponseCreate(sessionState, "deferred-after-response.done");
-        }
-        break;
+         // If we tried to speak while a response was in-flight, do it now.
+         if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
+           sessionState.deferredResponseCreate = false;
+           safeResponseCreate(sessionState, "deferred-after-response.done");
+         }
+         break;
 
       case "response.audio.delta":
         // Mark Ada as speaking (echo guard)
@@ -1079,6 +1082,11 @@ serve(async (req) => {
           sessionState.bargeInIgnoreUntil = Date.now() + ignoreMs;
         }
         
+        // If we cancelled a response, drop any late audio deltas to avoid leaking partial phrases.
+        if (sessionState.discardCurrentResponseAudio) {
+          break;
+        }
+
         // === BOOKING CONFIRMATION GUARD ===
         // If booking hasn't been confirmed this turn AND we haven't verified the transcript yet,
         // buffer audio to prevent confirmation phrases from being heard
@@ -1384,38 +1392,42 @@ serve(async (req) => {
             ? (hasHardBlockPhrase || hasPlaceholderInstruction || hasFareMismatch)
             : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention);
 
-          // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
-          if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
-            console.log(
-              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
-            );
-            console.log(
-              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
-            );
+           // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
+           if (isDisallowedConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
+             console.log(
+               `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
+             );
+             console.log(
+               `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
+             );
 
-            // DISCARD buffered audio - don't let the confirmation be heard
-            if (sessionState.pendingAudioBuffer.length > 0) {
-              console.log(`[${sessionState.callId}] 🗑️ Discarding ${sessionState.pendingAudioBuffer.length} buffered audio chunks`);
-              sessionState.pendingAudioBuffer = [];
-            }
+             // Drop any further audio deltas from this (now-cancelled) response.
+             // This prevents partial phrase leaks like "for you." after we cancel.
+             sessionState.discardCurrentResponseAudio = true;
 
-            // Cancel the current response
-            if (sessionState.openAiResponseActive) {
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            }
+             // DISCARD buffered audio - don't let the confirmation be heard
+             if (sessionState.pendingAudioBuffer.length > 0) {
+               console.log(`[${sessionState.callId}] 🗑️ Discarding ${sessionState.pendingAudioBuffer.length} buffered audio chunks`);
+               sessionState.pendingAudioBuffer = [];
+             }
 
-            // Clear the audio buffer to stop any pending audio
-            openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+             // Cancel the current response
+             if (sessionState.openAiResponseActive) {
+               openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+             }
 
-            // Remove the hallucinated transcript
-            if (sessionState.assistantTranscriptIndex !== null) {
-              sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
-              sessionState.assistantTranscriptIndex = null;
-            }
+             // Clear the audio buffer to stop any pending audio
+             openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-            // IMPORTANT: Reset audio buffering so recovery response is also checked
-            sessionState.audioVerified = false;
-            sessionState.pendingAudioBuffer = [];
+             // Remove the hallucinated transcript
+             if (sessionState.assistantTranscriptIndex !== null) {
+               sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+               sessionState.assistantTranscriptIndex = null;
+             }
+
+             // IMPORTANT: Reset audio buffering so recovery response is also checked
+             sessionState.audioVerified = false;
+             sessionState.pendingAudioBuffer = [];
 
           // Inject a system message to recover safely
             // - If we are awaiting fare approval (pendingQuote), guide Ada to proper yes/no handling
@@ -1471,17 +1483,26 @@ Do NOT say 'booked' until the tool returns success.]`
         // Mark assistant transcript as finalized for next turn
         sessionState.assistantTranscriptIndex = null;
         
-        // FINAL FLUSH: Release any remaining buffered audio now that transcript is complete
-        // This ensures we don't hold audio forever waiting for sentence completion
-        if (sessionState.pendingAudioBuffer.length > 0) {
-          console.log(`[${sessionState.callId}] 🔊 Final flush: ${sessionState.pendingAudioBuffer.length} buffered audio chunks on transcript.done`);
-          for (const audioChunk of sessionState.pendingAudioBuffer) {
-            socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
-          }
-          sessionState.pendingAudioBuffer = [];
-          sessionState.audioVerified = true;
-        }
-        break;
+         // FINAL FLUSH: Release any remaining buffered audio now that transcript is complete
+         // This ensures we don't hold audio forever waiting for sentence completion
+         if (sessionState.pendingAudioBuffer.length > 0) {
+           if (sessionState.discardCurrentResponseAudio) {
+             console.log(
+               `[${sessionState.callId}] 🗑️ Discarding ${sessionState.pendingAudioBuffer.length} buffered audio chunks after cancel`
+             );
+             sessionState.pendingAudioBuffer = [];
+             sessionState.audioVerified = true;
+             break;
+           }
+
+           console.log(`[${sessionState.callId}] 🔊 Final flush: ${sessionState.pendingAudioBuffer.length} buffered audio chunks on transcript.done`);
+           for (const audioChunk of sessionState.pendingAudioBuffer) {
+             socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+           }
+           sessionState.pendingAudioBuffer = [];
+           sessionState.audioVerified = true;
+         }
+         break;
       }
 
       case "input_audio_buffer.speech_started": {
@@ -1724,38 +1745,34 @@ Do NOT say 'booked' until the tool returns success.]`
               // DON'T clear pendingQuote here - the book_taxi("confirmed") handler needs it!
               // Instead, just log that we're processing the decision
               
-              // Cancel any in-flight assistant speech (prevents re-reading the quote)
-              // Use Cancel-Clear-Inject sequencing to avoid response collisions.
-              if (sessionState.openAiResponseActive) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-              }
+               // Prevent any auto-VAD response from leaking partial speech while we force the tool call.
+               sessionState.discardCurrentResponseAudio = true;
+               sessionState.audioVerified = false;
+               sessionState.pendingAudioBuffer = [];
 
-              setTimeout(() => {
-                // Clear input buffer to prevent VAD-triggered competing responses
-                openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+               // Cancel anything already in-flight and clear audio to avoid competing responses.
+               // (Even if no response is active, cancel is safe and keeps the flow deterministic.)
+               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-                setTimeout(() => {
-                  openaiWs?.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [
-                        {
-                          type: "input_text",
-                          text:
-                            `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. Do NOT call book_taxi with "request_quote". After the tool succeeds, ask "Is there anything else I can help you with?"]`,
-                        },
-                      ],
-                    },
-                  }));
+               openaiWs.send(JSON.stringify({
+                 type: "conversation.item.create",
+                 item: {
+                   type: "message",
+                   role: "user",
+                   content: [
+                     {
+                       type: "input_text",
+                       text:
+                         `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". DO NOT say "booked" or confirm anything out loud. Do NOT re-read the fare. After the tool succeeds, ask "Is there anything else I can help you with?" and then WAIT.]`,
+                     },
+                   ],
+                 },
+               }));
 
-                  // Trigger immediate tool-driven response (we intentionally override the normal "VAD only" rule here)
-                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
-                }, 350);
-              }, 350);
+               safeResponseCreate(sessionState, "fare-decision-handoff");
 
-              break;
+               break;
             }
           }
           
@@ -3757,9 +3774,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           bookingConfirmedThisTurn: false,
           lastBookTaxiSuccessAt: null,
           lastConfirmedTripKey: null,
-          audioVerified: true, // Start verified - only buffer after user confirms addresses
-          pendingAudioBuffer: [],
-          pendingQuote: null,
+           audioVerified: true, // Start verified - only buffer after user confirms addresses
+           pendingAudioBuffer: [],
+           discardCurrentResponseAudio: false,
+           pendingQuote: null,
           quoteRequestedAt: null,
           quoteTripKey: null,
           lastQuotePromptAt: null,
@@ -3851,9 +3869,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             bookingConfirmedThisTurn: false,
             lastBookTaxiSuccessAt: null,
             lastConfirmedTripKey: null,
-            audioVerified: true, // Start verified - only buffer after user confirms addresses
-            pendingAudioBuffer: [],
-            pendingQuote: null,
+             audioVerified: true, // Start verified - only buffer after user confirms addresses
+             pendingAudioBuffer: [],
+             discardCurrentResponseAudio: false,
+             pendingQuote: null,
             quoteRequestedAt: null,
             quoteTripKey: null,
             lastQuotePromptAt: null,
