@@ -565,6 +565,10 @@ const HALLUCINATION_PATTERNS = [
   /^how are you/i,
   /^good morning\.?$/i,
   /^good afternoon\.?$/i,
+  // SIP/HTTP protocol messages that leak through audio (e.g., TTS of system logs)
+  /^\d{3}\s*(ack|ok|ringing|trying|bye|cancel)/i, // 200 ack, 180 ringing, etc.
+  /^(ack|sip|rtp|sdp)\b/i, // Protocol keywords
+  /^(two hundred|one hundred|three hundred)\s*(ack|ok)/i, // Spoken versions
 ];
 
 // Whisper "phantom radio host" hallucinations - triggered by silence/static
