@@ -1300,9 +1300,25 @@ serve(async (req) => {
           const hasBookingConfirmationPhrase = BOOKING_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
           const hasPendingQuote = !!sessionState.pendingQuote;
 
+          // If pendingQuote is active, Ada is allowed to read fare/ETA *but must not invent different numbers*.
+          // We treat any currency amount that doesn't match pendingQuote.fare as a hallucination and cancel fast.
+          let hasFareMismatch = false;
+          if (hasPendingQuote && sessionState.pendingQuote?.fare) {
+            const pendingFareNum = Number(String(sessionState.pendingQuote.fare).replace(/[^0-9.]/g, ""));
+            const spokenFareMatch = currentText.match(/(?:£|€|\$)\s*(\d+(?:\.\d{1,2})?)/);
+            const spokenFareNum = spokenFareMatch ? Number(spokenFareMatch[1]) : NaN;
+
+            if (Number.isFinite(pendingFareNum) && Number.isFinite(spokenFareNum)) {
+              hasFareMismatch = Math.abs(spokenFareNum - pendingFareNum) > 0.01;
+              if (hasFareMismatch) {
+                console.log(`[${sessionState.callId}] 🚨 Fare mismatch while pendingQuote: expected=${pendingFareNum} got=${spokenFareNum}`);
+              }
+            }
+          }
+
           // During quote-pending state, Ada should be reading fare/ETA to customer.
-          // Allow ALL fare/price/ETA mentions while pendingQuote exists - she's just reading dispatch's message.
-          // Only block: actual booking confirmations ("booked", "confirmed", "taxi is on its way") and placeholder leaks.
+          // Allow fare/ETA mentions while pendingQuote exists, but ONLY if fare matches pendingQuote.
+          // Only block: booking confirmations ("booked"/"confirmed"), placeholder leaks, and fare mismatches.
           const HARD_BLOCK_PHRASES = [
             "booked!", "booked.", "booked for you", "that's booked", "all booked",
             "your taxi is confirmed", "your taxi is booked", "your booking is confirmed",
@@ -1316,10 +1332,10 @@ serve(async (req) => {
           ];
           const hasHardBlockPhrase = HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
 
-          // If pendingQuote is active, ONLY block hard confirmation phrases - allow fare/ETA reading
+          // If pendingQuote is active, ONLY block hard confirmation phrases, placeholder leaks, and fare mismatches.
           // If no pendingQuote, block all confirmation + fare phrases (original behavior)
           const isDisallowedConfirmationPhrase = hasPendingQuote
-            ? (hasHardBlockPhrase || hasPlaceholderInstruction)
+            ? (hasHardBlockPhrase || hasPlaceholderInstruction || hasFareMismatch)
             : (hasBookingConfirmationPhrase || hasPlaceholderInstruction || hasPriceOrCurrencyMention);
 
           // If Ada says a disallowed confirmation phrase but book_taxi wasn't called this turn, CANCEL!
@@ -1548,8 +1564,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // If dispatch already gave us a fare quote (pendingQuote), we must turn the caller's yes/no
           // into an explicit book_taxi tool call with confirmation_state confirmed/rejected.
           if (sessionState.pendingQuote && openaiWs && openaiConnected) {
-            const isYesToFare = /\b(yes|yeah|yep|go ahead|book it|do it|please do|sure|okay|ok|alright|sounds good|ja|jawel|doe maar|prima|akkoord|oui|d'accord|sí|claro|vale)\b/i.test(lowerUserText);
-            const isNoToFare = /\b(no|nope|don't|do not|dont|cancel|stop|never mind|nevermind|not now|nah|nee|niet|annuleer|non)\b/i.test(lowerUserText);
+            const isYesToFare = /\b(yes|yeah|yep|yup|go ahead|book it|do it|please do|sure|okay|ok|alright|sounds good|correct|that's right|thats right|that's correct|thats correct|right|confirm|confirmed|i confirm|i'll confirm|ill confirm|please|proceed|do it then|go on then|ja|jawel|doe maar|prima|akkoord|oui|d'accord|si|sí|claro|vale)\b/i.test(lowerUserText);
+            const isNoToFare = /\b(no|nope|don't|do not|dont|cancel|stop|never mind|nevermind|not now|nah|too expensive|nee|niet|annuleer|non)\b/i.test(lowerUserText);
 
             if (isYesToFare || isNoToFare) {
               const pq = sessionState.pendingQuote;
@@ -2401,30 +2417,45 @@ Do NOT say 'booked' until the tool returns success.]`
                   new Date(t.timestamp).getTime() > pollStart
                 );
 
-                if (dispatchAskConfirm) {
-                  console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}"`);
+                 if (dispatchAskConfirm) {
+                   console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}" (fare=${dispatchAskConfirm.fare}, eta=${dispatchAskConfirm.eta})`);
 
-                  // Store pending quote state for confirmation_state flow
-                  sessionState.pendingQuote = {
-                    fare: dispatchAskConfirm.fare || null,
-                    eta: dispatchAskConfirm.eta || null,
-                    pickup: finalPickup,
-                    destination: finalDestination,
-                    callback_url: dispatchAskConfirm.callback_url || null,
-                    timestamp: Date.now(),
-                    lastPrompt: dispatchAskConfirm.text || null
-                  };
+                   // Build a deterministic prompt so Ada repeats the *exact* fare/ETA (no hallucinated numbers)
+                   const fareNum = Number(String(dispatchAskConfirm.fare ?? "").replace(/[^0-9.]/g, ""));
+                   const fareText = Number.isFinite(fareNum) && fareNum > 0
+                     ? `£${fareNum.toFixed(2)}`
+                     : (dispatchAskConfirm.fare ? String(dispatchAskConfirm.fare) : "");
 
-                  dispatchResult = {
-                    needs_fare_confirm: true,
-                    ada_message: dispatchAskConfirm.text,
-                    fare: dispatchAskConfirm.fare || null,
-                    eta: dispatchAskConfirm.eta || null,
-                    quote_ready: true,
-                  };
-                  break;
-                }
+                   const etaRaw = dispatchAskConfirm.eta ?? callData?.eta;
+                   const etaNum = Number(String(etaRaw ?? "").replace(/[^0-9]/g, ""));
+                   const etaText = etaRaw
+                     ? String(etaRaw)
+                     : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
+                   const spokenMessage = (fareText && etaText)
+                     ? `Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
+                     : (dispatchAskConfirm.text || "");
+
+                   // Store pending quote state for confirmation_state flow
+                   sessionState.pendingQuote = {
+                     fare: dispatchAskConfirm.fare || null,
+                     eta: dispatchAskConfirm.eta || null,
+                     pickup: finalPickup,
+                     destination: finalDestination,
+                     callback_url: dispatchAskConfirm.callback_url || null,
+                     timestamp: Date.now(),
+                     lastPrompt: spokenMessage || null
+                   };
+
+                   dispatchResult = {
+                     needs_fare_confirm: true,
+                     ada_message: spokenMessage,
+                     fare: dispatchAskConfirm.fare || null,
+                     eta: dispatchAskConfirm.eta || null,
+                     quote_ready: true,
+                   };
+                   break;
+                 }
                 // Check for hangup instruction
                 const dispatchHangup = transcripts.find(t =>
                   t.role === "dispatch_hangup" &&
@@ -3507,27 +3538,44 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         const dispatchChannel = supabase.channel(`dispatch_${callId}`);
         
         dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
-          const { message, fare, eta, callback_url } = payload.payload || {};
-          console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}"`);
-          
-          if (!message || !openaiWs || !openaiConnected) {
+          const { message, fare, eta, eta_minutes, callback_url } = payload.payload || {};
+
+          // Build a deterministic prompt so Ada repeats the *exact* fare/ETA (no hallucinated numbers)
+          const fareNum = Number(String(fare ?? "").replace(/[^0-9.]/g, ""));
+          const fareText = Number.isFinite(fareNum) && fareNum > 0
+            ? `£${fareNum.toFixed(2)}`
+            : (fare ? String(fare) : "");
+
+          const etaRaw = eta ?? eta_minutes;
+          const etaNum = Number(String(etaRaw ?? "").replace(/[^0-9]/g, ""));
+          const etaText = etaRaw
+            ? String(etaRaw)
+            : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
+
+          const spokenMessage = (fareText && etaText)
+            ? `Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
+            : (message ? String(message) : "");
+
+          console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
+
+          if (!spokenMessage || !openaiWs || !openaiConnected) {
             console.log(`[${callId}] ⚠️ Cannot process ask_confirm - no message or OpenAI not connected`);
             return;
           }
-          
+
           // GUARD 1: If booking was just confirmed this turn, IGNORE any new ask_confirm
           // This prevents C# from retriggering the fare prompt after customer said YES
           if (state?.bookingConfirmedThisTurn) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was already confirmed this turn`);
             return;
           }
-          
+
           // GUARD 2: If booking was confirmed recently (within 30s), also ignore
           if (state?.lastBookTaxiSuccessAt && Date.now() - state.lastBookTaxiSuccessAt < 30000) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - booking was confirmed ${Date.now() - state.lastBookTaxiSuccessAt}ms ago`);
             return;
           }
-          
+
           // GUARD 3: If there's already a pending quote OR a recent prompt was injected, ignore duplicate
           if (state?.pendingQuote) {
             const timeSinceLastAsk = Date.now() - (state.pendingQuote.timestamp || 0);
@@ -3536,13 +3584,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               return;
             }
           }
-          
+
           // GUARD 4: If tool handler already injected a fare prompt very recently (within 3s), skip
           if (state?.lastQuotePromptAt && Date.now() - state.lastQuotePromptAt < 3000) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - fare prompt already injected ${Date.now() - state.lastQuotePromptAt}ms ago by tool handler`);
             return;
           }
-          
+
           // Store pending quote state
           if (state) {
             state.pendingQuote = {
@@ -3552,14 +3600,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               destination: state.booking.destination,
               callback_url: callback_url || null,
               timestamp: Date.now(),
-              lastPrompt: message || null
+              lastPrompt: spokenMessage || null
             };
 
             // Mark that we are actively prompting the fare question (prevents tool handler duplicating it)
             state.lastQuotePromptAt = Date.now();
-            state.lastQuotePromptText = message;
+            state.lastQuotePromptText = spokenMessage;
           }
-          
+
           // Determine language instruction based on session
           const langCode = state?.language || "en";
           const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
@@ -3573,7 +3621,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
           // Cancel any active response first to avoid "conversation_already_has_active_response" error
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          
+
           // Also clear input audio buffer to prevent VAD from triggering new responses
           openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
@@ -3581,13 +3629,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           await new Promise(resolve => setTimeout(resolve, 300));
 
           // Inject the fare question into Ada's conversation with explicit YES/NO handling
-          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION]: Say this message to the customer IN ${langName.toUpperCase()}: "${message}"
+          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION]: You MUST repeat the following sentence EXACTLY, including all numbers and currency, IN ${langName.toUpperCase()}:
+"${spokenMessage}"
 
-After saying this, WAIT SILENTLY for their response. Do NOT confirm the booking yet.
+After saying it, WAIT SILENTLY for their response. Do NOT confirm the booking yet.
 
 WHEN CUSTOMER RESPONDS:
-- If they say YES, yeah, go ahead, book it, please → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
-- If they say NO, never mind, cancel, too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If they say YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
+- If they say NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
 - If unclear, ask: "Would you like me to book that?"
 
 DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "confirmed" returns success.`;
@@ -3609,7 +3658,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `IMPORTANT: You are ONLY asking for fare approval. Speak in ${langName}. Say: "${message}" Then STOP and wait silently for yes/no. After they respond, if YES call book_taxi with confirmation_state: "confirmed". Do NOT say booked/confirmed until the tool succeeds.`
+              instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
             }
           }));
         });
