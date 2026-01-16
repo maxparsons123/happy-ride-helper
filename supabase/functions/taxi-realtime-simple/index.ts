@@ -2054,6 +2054,26 @@ serve(async (req) => {
             try {
               console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
               console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
+              
+              // === MAKE ADA SAY "PLEASE WAIT" BEFORE DISPATCH ===
+              // Cancel any in-flight response first
+              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              
+              // Inject system message to make Ada speak the "please wait" message
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: "[SYSTEM: Say EXACTLY: 'Please wait while I process your booking.' - nothing more, then wait silently for the fare and ETA.]" }]
+                }
+              }));
+              
+              // Trigger Ada to speak
+              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              
+              // Brief pause to let Ada start speaking before we hit the dispatch webhook
+              await new Promise(resolve => setTimeout(resolve, 300));
 
               // Get recent user transcripts as structured array for comparison
               const userTranscripts = sessionState.transcripts
