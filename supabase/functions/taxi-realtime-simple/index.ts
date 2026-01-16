@@ -726,6 +726,10 @@ interface SessionState {
     lastPrompt: string | null; // The fare prompt text to repeat if duplicate request_quote
   } | null;
 
+  // Track the MOST RECENT quote request we initiated (used to ignore stale dispatch_ask_confirm)
+  quoteRequestedAt: number | null;
+  quoteTripKey: string | null;
+
   // Prevent repeated fare prompts (double response.create / duplicate dispatch events)
   lastQuotePromptAt: number | null;
   lastQuotePromptText: string | null;
@@ -1632,28 +1636,36 @@ Do NOT say 'booked' until the tool returns success.]`
               // Instead, just log that we're processing the decision
               
               // Cancel any in-flight assistant speech (prevents re-reading the quote)
+              // Use Cancel-Clear-Inject sequencing to avoid response collisions.
               if (sessionState.openAiResponseActive) {
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               }
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [
-                    {
-                      type: "input_text",
-                      text:
-                        `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. Do NOT call book_taxi with "request_quote". After the tool succeeds, ask "Is there anything else I can help you with?"]`,
+              setTimeout(() => {
+                // Clear input buffer to prevent VAD-triggered competing responses
+                openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text:
+                            `[SYSTEM: The customer has answered the fare question. You MUST call book_taxi NOW with confirmation_state: "${nextState}" using pickup: "${pickup}" and destination: "${destination}". Do NOT re-read the fare. Do NOT call book_taxi with "request_quote". After the tool succeeds, ask "Is there anything else I can help you with?"]`,
+                        },
+                      ],
                     },
-                  ],
-                },
-              }));
+                  }));
 
-              // Trigger immediate tool-driven response (we intentionally override the normal "VAD only" rule here)
-              openaiWs.send(JSON.stringify({ type: "response.create" }));
+                  // Trigger immediate tool-driven response (we intentionally override the normal "VAD only" rule here)
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 350);
+              }, 350);
+
               break;
             }
           }
@@ -1693,34 +1705,39 @@ Do NOT say 'booked' until the tool returns success.]`
               `[${sessionState.callId}] 🧭 Route-style change detected → pickup="${pickupHint}", destination="${destHint}"`
             );
 
-            // Cancel any active response before injecting system message
+            // Cancel-Clear-Inject protocol to avoid response collisions and stalling
             if (sessionState.openAiResponseActive) {
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             }
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-            openaiWs.send(
-              JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [
-                    {
-                      type: "input_text",
-                      text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
+            setTimeout(() => {
+              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+              setTimeout(() => {
+                openaiWs?.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: `[SYSTEM: The caller is requesting a BOOKING CHANGE and provided the full updated route.
 Interpret it as Pickup="${pickupHint || "(pickup)"}" and Destination="${destHint || "(destination)"}".
 Do NOT treat the destination as a pickup.
 DO NOT ask another confirmation question.
 CALL modify_booking immediately for any fields that changed (pickup and/or destination). If both changed, call modify_booking twice.
 Then CALL book_taxi with confirmation_state: "request_quote" to get the updated fare. Speak only after the tools return.]`,
+                        },
+                      ],
                     },
-                  ],
-                },
-              })
-            );
+                  })
+                );
 
-            openaiWs.send(JSON.stringify({ type: "response.create" }));
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              }, 350);
+            }, 350);
           }
           
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
@@ -2013,6 +2030,8 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             sessionState.lastBookTaxiSuccessAt = Date.now();
             sessionState.lastConfirmedTripKey = makeTripKey(finalPickup, finalDestination);
             sessionState.pendingQuote = null; // Clear pending quote
+            sessionState.quoteRequestedAt = null;
+            sessionState.quoteTripKey = null;
             sessionState.lastQuotePromptAt = null; // Reset prompt tracking
             sessionState.lastQuotePromptText = null;
             
@@ -2054,6 +2073,8 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
             }
             
             sessionState.pendingQuote = null; // Clear pending quote
+            sessionState.quoteRequestedAt = null;
+            sessionState.quoteTripKey = null;
             sessionState.lastQuotePromptAt = null;
             sessionState.lastQuotePromptText = null;
             
@@ -2422,6 +2443,11 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
               
               // POST to dispatch webhook and require a 2xx ack.
               // (If this fails, we must NOT let Ada confirm the booking.)
+
+              // Mark the latest quote request so we can ignore stale ask_confirm broadcasts
+              sessionState.quoteRequestedAt = Date.now();
+              sessionState.quoteTripKey = currentTripKey;
+
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -2808,6 +2834,10 @@ Then CALL book_taxi with confirmation_state: "request_quote" to get the updated 
           sessionState.hasActiveBooking = false;
           sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
           sessionState.pendingQuote = null;
+          sessionState.quoteRequestedAt = null;
+          sessionState.quoteTripKey = null;
+          sessionState.lastQuotePromptAt = null;
+          sessionState.lastQuotePromptText = null;
           sessionState.lastConfirmedTripKey = null;
           result = { success: true };
           break;
@@ -3455,6 +3485,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           audioVerified: true, // Start verified - only buffer after user confirms addresses
           pendingAudioBuffer: [],
           pendingQuote: null,
+          quoteRequestedAt: null,
+          quoteTripKey: null,
           lastQuotePromptAt: null,
           lastQuotePromptText: null,
           pendingDispatchEvents: [],
@@ -3546,6 +3578,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingQuote: null,
+            quoteRequestedAt: null,
+            quoteTripKey: null,
             lastQuotePromptAt: null,
             lastQuotePromptText: null,
             pendingDispatchEvents: [],
@@ -3647,6 +3681,27 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // GUARD 0: If call is ending/ended, ignore ALL dispatch messages
           if (state?.callEnded) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - call is ended/ending`);
+            return;
+          }
+
+          // GUARD 0.5: Ignore stale ask_confirm messages unless we JUST requested a quote
+          // This blocks "wrong fare" caused by late/duplicated dispatch events.
+          const quoteMaxAgeMs = 45_000;
+          if (!state?.quoteRequestedAt || Date.now() - state.quoteRequestedAt > quoteMaxAgeMs) {
+            console.log(
+              `[${callId}] ⚠️ Ignoring ask_confirm - stale (quoteRequestedAt=${state?.quoteRequestedAt}, age=${state?.quoteRequestedAt ? Date.now() - state.quoteRequestedAt : 'n/a'}ms)`
+            );
+            return;
+          }
+
+          const makeTripKeyLocal = (p: string | null, d: string | null) =>
+            `${String(p || "").toLowerCase().replace(/\W/g, "")}|||${String(d || "").toLowerCase().replace(/\W/g, "")}`;
+
+          const tripKeyNow = makeTripKeyLocal(state?.booking?.pickup || null, state?.booking?.destination || null);
+          if (state?.quoteTripKey && tripKeyNow !== state.quoteTripKey) {
+            console.log(
+              `[${callId}] ⚠️ Ignoring ask_confirm - trip changed (quoteTripKey=${state.quoteTripKey}, now=${tripKeyNow})`
+            );
             return;
           }
 
@@ -4077,13 +4132,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     const customerGreeting = state.customerName 
                       ? `The caller is ${state.customerName}.` 
                       : "";
-                    
-                    // Cancel any active response before injecting booking context
+
+                    // Cancel-Clear-Inject protocol to avoid response collisions
                     if (state.openAiResponseActive) {
                       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                      await new Promise(resolve => setTimeout(resolve, 350));
                     }
+
                     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                    
+                    await new Promise(resolve => setTimeout(resolve, 350));
+
                     openaiWs.send(JSON.stringify({
                       type: "conversation.item.create",
                       item: {
@@ -4095,11 +4153,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                         }]
                       }
                     }));
-                    
+
                     // Trigger Ada to respond with this context
-                    openaiWs.send(JSON.stringify({
-                      type: "response.create"
-                    }));
+                    openaiWs.send(JSON.stringify({ type: "response.create" }));
                   }
                 }
               }
