@@ -705,6 +705,9 @@ interface SessionState {
     callbackUrl: string | null;
     askedAt: number | null;
   } | null;
+  
+  // Awaiting dispatch confirm action after user accepted fare
+  awaitingDispatchConfirm: boolean;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1229,12 +1232,13 @@ serve(async (req) => {
             hasPriceOrCurrencyMention;
 
           // If Ada says a confirmation phrase but book_taxi wasn't called this turn, CANCEL!
-          if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn) {
+          // Also block if awaiting dispatch confirm (user said yes, waiting for dispatch to confirm)
+          if (isConfirmationPhrase && (!sessionState.bookingConfirmedThisTurn || sessionState.awaitingDispatchConfirm)) {
             console.log(
-              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without calling book_taxi! Cancelling response.`
+              `[${sessionState.callId}] 🚨 BOOKING ENFORCEMENT: Ada tried to confirm without ${sessionState.awaitingDispatchConfirm ? 'dispatch confirm' : 'calling book_taxi'}! Cancelling response.`
             );
             console.log(
-              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction})`
+              `[${sessionState.callId}] 🚨 Detected in transcript: "${currentText}" (placeholderLeak=${hasPlaceholderInstruction}, awaitingDispatch=${sessionState.awaitingDispatchConfirm})`
             );
 
             // DISCARD buffered audio - don't let the confirmation be heard
@@ -1257,7 +1261,11 @@ serve(async (req) => {
               sessionState.assistantTranscriptIndex = null;
             }
 
-            // Inject a system message forcing Ada to actually call the tool
+            // Inject a system message - different for awaiting dispatch vs. no tool call
+            const systemErrorText = sessionState.awaitingDispatchConfirm
+              ? "[SYSTEM: You are currently waiting for dispatch confirmation. Stay silent and wait. The dispatch system will provide the confirmation details. Do NOT confirm the booking yourself.]"
+              : "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]";
+            
             openaiWs?.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -1267,16 +1275,17 @@ serve(async (req) => {
                   content: [
                     {
                       type: "input_text",
-                      text:
-                        "[SYSTEM ERROR: You attempted to confirm a booking without calling the book_taxi function. You MUST call the book_taxi function tool NOW with the pickup and destination addresses. Do NOT speak about booking confirmation until you receive the tool result. Call the tool immediately.]",
+                      text: systemErrorText,
                     },
                   ],
                 },
               })
             );
 
-            // Trigger a new response
-            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            // Only trigger new response if not awaiting dispatch (we want silence while waiting)
+            if (!sessionState.awaitingDispatchConfirm) {
+              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            }
           } else if (!sessionState.bookingConfirmedThisTurn && sessionState.pendingAudioBuffer.length > 0) {
             // Transcript so far doesn't contain confirmation phrases - it's safe to flush buffered audio
             // This releases audio incrementally as we verify each chunk of transcript
@@ -1468,8 +1477,26 @@ serve(async (req) => {
                 });
               }
               
-              // Clear pending state
+              // Clear pending fare confirm state
               sessionState.pendingFareConfirm = null;
+              
+              if (isYes) {
+                // User accepted fare - wait for dispatch to send confirm action
+                // Set awaiting_dispatch_confirm to block Ada from auto-confirming
+                sessionState.awaitingDispatchConfirm = true;
+                console.log(`[${sessionState.callId}] ⏳ Awaiting dispatch confirm action after user accepted fare`);
+                
+                // Tell Ada to wait - don't let her confirm prematurely
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: "[SYSTEM: Customer accepted the fare. Wait silently for dispatch to confirm the booking. Do NOT say the booking is confirmed yet.]" }]
+                  }
+                }));
+                // Don't trigger a response - just wait
+              }
               
               // If NO, inject system message to tell Ada to apologize
               if (isNo) {
@@ -2904,6 +2931,7 @@ serve(async (req) => {
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingFareConfirm: null,
+            awaitingDispatchConfirm: false,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -2990,6 +3018,7 @@ serve(async (req) => {
             audioVerified: true, // Start verified - only buffer after user confirms addresses
             pendingAudioBuffer: [],
             pendingFareConfirm: null,
+            awaitingDispatchConfirm: false,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -3136,6 +3165,61 @@ serve(async (req) => {
           console.log(`[${callId}] 📥 DISPATCH hangup received`);
           if (state) state.callEnded = true;
           socket.send(JSON.stringify({ type: "hangup", reason: "dispatch_requested" }));
+        });
+        
+        // Handle dispatch confirmation after user accepted fare
+        dispatchChannel.on("broadcast", { event: "dispatch_confirm" }, async (payload: any) => {
+          const { confirmation_message, fare, eta, eta_minutes, booking_ref, driver_name, vehicle_reg, status } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH confirm received: "${confirmation_message}"`);
+          
+          if (!openaiWs || !openaiConnected) {
+            console.log(`[${callId}] ⚠️ Cannot process confirm - OpenAI not connected`);
+            return;
+          }
+          
+          // Clear the awaiting dispatch confirm state
+          if (state) {
+            state.awaitingDispatchConfirm = false;
+            state.bookingConfirmedThisTurn = true;
+          }
+          
+          // Build the confirmation message for Ada to speak
+          let messageToSpeak = confirmation_message || "Your booking is confirmed!";
+          
+          // Add fare and ETA if provided
+          if (fare || eta || eta_minutes) {
+            const fareText = fare ? `Fare is £${fare}` : "";
+            const etaText = eta_minutes ? `arriving in about ${eta_minutes} minutes` : (eta ? `arriving in about ${eta}` : "");
+            const driverText = driver_name ? `Your driver is ${driver_name}` : "";
+            const vehicleText = vehicle_reg ? `in a ${vehicle_reg}` : "";
+            const details = [fareText, etaText, driverText, vehicleText].filter(Boolean).join(", ");
+            if (details && !confirmation_message?.includes(fare)) {
+              messageToSpeak += `. ${details}`;
+            }
+          }
+          
+          // Determine language instruction based on session
+          const langCode = state?.language || "en";
+          const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+          
+          // Inject the confirmation for Ada to speak
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this to the customer IN ${langName.toUpperCase()}: "${messageToSpeak}. Is there anything else I can help you with?" Be natural and brief.` }]
+            }
+          }));
+          
+          // Trigger Ada to speak
+          openaiWs.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say: "${messageToSpeak}. Is there anything else I can help you with?" Do not add extra details.`
+            }
+          }));
         });
         
         dispatchChannel.subscribe((status) => {
