@@ -2308,6 +2308,7 @@ serve(async (req) => {
           };
           
           let finalNewValue = args.new_value;
+          const finalFieldToChange = args.field_to_change;
           
           // For address fields, cross-check with extraction
           if (args.field_to_change === "pickup" || args.field_to_change === "destination") {
