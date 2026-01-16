@@ -914,21 +914,59 @@ serve(async (req) => {
     console.log(`[${sessionState.callId}] 📝 Session updated + greeting triggered`);
   };
 
-  // Fire-and-forget DB flush - never await, never block voice flow
+  // Fire-and-forget DB flush - merges dispatch entries to prevent overwrites
   const flushTranscriptsToDb = (sessionState: SessionState) => {
     // Clone transcripts to avoid mutation issues
-    const transcriptsCopy = [...sessionState.transcripts];
+    const localTranscripts = [...sessionState.transcripts];
+    const callId = sessionState.callId;
     
-    // Fire and forget - do NOT await
+    // Fire and forget - do NOT await, but merge dispatch entries first
     supabase
       .from("live_calls")
-      .update({
-        transcripts: transcriptsCopy,
-        updated_at: new Date().toISOString(),
+      .select("transcripts")
+      .eq("call_id", callId)
+      .single()
+      .then(({ data, error: fetchError }) => {
+        if (fetchError) {
+          console.error(`[${callId}] DB fetch for merge failed:`, fetchError);
+          // Fall back to overwrite if fetch fails
+          return supabase
+            .from("live_calls")
+            .update({ transcripts: localTranscripts, updated_at: new Date().toISOString() })
+            .eq("call_id", callId);
+        }
+        
+        const dbTranscripts = (data?.transcripts as any[]) || [];
+        
+        // Find dispatch entries in DB that aren't in our local state (by timestamp + role)
+        const dispatchRoles = ["dispatch", "dispatch_confirm", "dispatch_ask_confirm", "dispatch_say"];
+        const localTimestamps = new Set(localTranscripts.map((t: any) => `${t.role}:${t.timestamp}`));
+        
+        const missingDispatchEntries = dbTranscripts.filter((t: any) => 
+          dispatchRoles.includes(t.role) && !localTimestamps.has(`${t.role}:${t.timestamp}`)
+        );
+        
+        if (missingDispatchEntries.length > 0) {
+          console.log(`[${callId}] 🔀 Merging ${missingDispatchEntries.length} dispatch entries from DB`);
+          // Add missing dispatch entries to local state so they persist
+          sessionState.transcripts.push(...missingDispatchEntries);
+        }
+        
+        // Merge: local transcripts + any dispatch entries we didn't have
+        const mergedTranscripts = [...localTranscripts, ...missingDispatchEntries];
+        
+        // Sort by timestamp to maintain chronological order
+        mergedTranscripts.sort((a: any, b: any) => 
+          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        
+        return supabase
+          .from("live_calls")
+          .update({ transcripts: mergedTranscripts, updated_at: new Date().toISOString() })
+          .eq("call_id", callId);
       })
-      .eq("call_id", sessionState.callId)
-      .then(({ error }) => {
-        if (error) console.error(`[${sessionState.callId}] DB flush error:`, error);
+      .then((result: any) => {
+        if (result?.error) console.error(`[${callId}] DB flush error:`, result.error);
       });
   };
 
