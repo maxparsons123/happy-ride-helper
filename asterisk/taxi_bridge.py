@@ -561,22 +561,21 @@ class TaxiBridgeV6:
                             print(f"[{self.call_id}] 🔇 Speech ended ({speech_duration:.1f}s)", flush=True)
                             self.speech_start_time = None
 
-                    # Send real audio when speaking (or raw voice detected), silence otherwise
-                    # This ensures OpenAI gets continuous audio stream
-                    if self.is_speaking or raw_has_voice:
+                    # IMPORTANT: Never replace "non-speech" with synthetic silence.
+                    # Bridge-side VAD can misclassify quiet/soft speech (house numbers, street names)
+                    # and accidentally mute the caller. We keep VAD ONLY for logging/telemetry,
+                    # but we ALWAYS forward the cleaned audio to the AI.
+                    voice_frame = bool(cleaned) and (self.is_speaking or raw_has_voice)
+                    if voice_frame:
                         self.frames_sent += 1
-                        if SEND_NATIVE_ULAW:
-                            audio_to_send = lin2ulaw(cleaned)
-                        else:
-                            audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
                     else:
                         self.frames_skipped += 1
-                        if SEND_NATIVE_ULAW:
-                            ulaw_len = len(payload) if self.ast_codec == "ulaw" else (len(linear16) // 2)
-                            audio_to_send = (b"\xFF" * ulaw_len)  # ulaw silence
-                        else:
-                            silence_8k = b"\x00" * len(linear16)
-                            audio_to_send = resample_audio(silence_8k, AST_RATE, AI_RATE)
+
+                    if SEND_NATIVE_ULAW:
+                        audio_to_send = lin2ulaw(cleaned)
+                    else:
+                        audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
+
 
                     if self.ws_connected and self.ws:
                         try:
