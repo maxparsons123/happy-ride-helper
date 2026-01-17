@@ -2682,7 +2682,9 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
           // IMPORTANT: Require stronger modification signals to avoid false positives from common words
-          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not|from\s+\w+\s+to\s+\w+)\b/i.test(lowerUserText);
+          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not)\b/i.test(lowerUserText);
+          // Match "from X to Y" pattern with any number of words between (not just one word)
+          const hasFromToPattern = /\bfrom\s+.{2,}\s+to\s+/i.test(lowerUserText);
           const hasAddressWithDirection = /\b(going\s+to|pick\s*up\s+from|destination|drop\s*off)\b/i.test(lowerUserText) && 
             (lowerUserText.length > 20); // Must be substantial to include an address
           const hasPassengerChange = /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText);
@@ -2691,10 +2693,10 @@ Do NOT say 'booked' until the tool returns success.]`
             !isConfirmationPhrase &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
-            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange);
+            (hasModificationKeyword || hasFromToPattern || hasAddressWithDirection || hasPassengerChange);
           
           if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange})`);
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, fromTo=${hasFromToPattern}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange})`);
             console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
