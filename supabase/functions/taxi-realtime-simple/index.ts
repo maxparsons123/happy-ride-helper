@@ -1498,7 +1498,7 @@ serve(async (req) => {
           prefix_padding_ms: sessionState.useRasaAudioProcessing ? 250 : 500,
           silence_duration_ms: sessionState.useRasaAudioProcessing ? 800 : 1800,
         },
-        temperature: 0.4, // Lowered from 0.6 for more consistent responses
+        temperature: 0.6, // OpenAI Realtime API minimum is 0.6
         tools: TOOLS,
         tool_choice: "auto"
       }
@@ -5312,29 +5312,61 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
 
-        // === FAST CALLER LOOKUP (before greeting) ===
-        // This is a quick lookup to get the caller's name BEFORE we greet them
-        // Full booking/GPS lookup still happens in background
-        if (phone && phone !== "unknown" && !state!.customerName) {
+        // === FAST CALLER + BOOKING LOOKUP (before greeting) ===
+        // Query BOTH caller info AND active bookings in parallel so Ada knows the context before greeting
+        if (phone && phone !== "unknown") {
           try {
             const phoneKey = normalizePhone(phone);
+            // Also try with + prefix stripped (some old records)
+            const altPhone = phone.replace(/^\+/, '');
             console.log(`[${callId}] 🔍 Fast caller lookup for: raw=${phone}, normalized=${phoneKey}`);
-            const { data: callerData } = await supabase
-              .from("callers")
-              .select("name, last_pickup, last_destination, total_bookings")
-              .eq("phone_number", phoneKey)
-              .maybeSingle();
             
-            if (callerData) {
-              state!.customerName = callerData.name || null;
-              state!.callerLastPickup = callerData.last_pickup || null;
-              state!.callerLastDestination = callerData.last_destination || null;
-              state!.callerTotalBookings = callerData.total_bookings || 0;
-              console.log(`[${callId}] 👤 Fast lookup found: ${callerData.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
+            // Run both queries in parallel for speed
+            const [callerResult, bookingResult] = await Promise.all([
+              // Query 1: Caller info
+              supabase
+                .from("callers")
+                .select("name, last_pickup, last_destination, total_bookings")
+                .eq("phone_number", phoneKey)
+                .maybeSingle(),
+              // Query 2: Active booking
+              supabase
+                .from("bookings")
+                .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, updated_at, caller_name")
+                .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
+                .in("status", ["confirmed", "dispatched", "active", "pending"])
+                .order("updated_at", { ascending: false })
+                .limit(1)
+                .maybeSingle()
+            ]);
+            
+            // Process caller data
+            if (callerResult.data) {
+              state!.customerName = callerResult.data.name || null;
+              state!.callerLastPickup = callerResult.data.last_pickup || null;
+              state!.callerLastDestination = callerResult.data.last_destination || null;
+              state!.callerTotalBookings = callerResult.data.total_bookings || 0;
+              console.log(`[${callId}] 👤 Fast lookup found: ${callerResult.data.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
+            }
+            
+            // Process active booking - THIS MUST HAPPEN BEFORE GREETING
+            if (bookingResult.data) {
+              state!.hasActiveBooking = true;
+              state!.activeBookingCallId = bookingResult.data.call_id;
+              state!.booking.pickup = bookingResult.data.pickup;
+              state!.booking.destination = bookingResult.data.destination;
+              state!.booking.passengers = bookingResult.data.passengers;
+              state!.booking.version = Math.max(state!.booking.version || 0, 1);
+              
+              if (!state!.customerName && bookingResult.data.caller_name) {
+                state!.customerName = bookingResult.data.caller_name;
+              }
+              
+              console.log(`[${callId}] 📦 ACTIVE BOOKING FOUND (before greeting): ${bookingResult.data.pickup} → ${bookingResult.data.destination}`);
             }
           } catch (e) {
-            console.error(`[${callId}] Fast caller lookup failed:`, e);
-            // Continue without name - will ask for it
+            console.error(`[${callId}] Fast caller/booking lookup failed:`, e);
+            // Continue without - will ask for info
           }
         }
 
