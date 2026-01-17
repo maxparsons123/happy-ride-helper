@@ -54,8 +54,8 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 AST_RATE = 8000   # Asterisk telephony
 AI_RATE = 24000   # OpenAI TTS
 
-# Send clean 24kHz PCM16 to edge function (better STT quality)
-SEND_NATIVE_ULAW = False
+# Send native 8kHz µ-law to edge function (faster, lower latency)
+SEND_NATIVE_ULAW = True
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 3
@@ -174,28 +174,30 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
 
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """High-quality resampling using scipy.signal.resample_poly.
+    """Fast resampling using simple averaging/repetition for telephony.
     
-    Uses fixed 3:1 ratio for 8kHz<->24kHz conversions (proven to work in v5).
+    Uses integer factor resampling for speed (3:1 ratio for 8kHz<->24kHz).
     """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
     
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
     if audio_np.size == 0:
         return b""
     
-    # Fixed ratio for telephony <-> AI audio (same as v5 which works)
-    RESAMPLE_RATIO = 3  # 24000 / 8000 = 3
-    
     if to_rate > from_rate:
-        # Upsampling: 8kHz -> 24kHz
-        resampled = resample_poly(audio_np, up=RESAMPLE_RATIO, down=1)
+        # Upsampling: 8kHz -> 24kHz (repeat each sample 3x)
+        factor = to_rate // from_rate  # 3
+        resampled = np.repeat(audio_np, factor)
     else:
-        # Downsampling: 24kHz -> 8kHz
-        resampled = resample_poly(audio_np, up=1, down=RESAMPLE_RATIO)
+        # Downsampling: 24kHz -> 8kHz (average every 3 samples)
+        factor = from_rate // to_rate  # 3
+        # Trim to exact multiple
+        trim_len = (len(audio_np) // factor) * factor
+        audio_np = audio_np[:trim_len]
+        # Reshape and average
+        resampled = audio_np.reshape(-1, factor).mean(axis=1).astype(np.int16)
     
-    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
     return resampled.tobytes()
 
 
