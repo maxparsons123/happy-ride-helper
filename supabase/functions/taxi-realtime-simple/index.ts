@@ -3837,6 +3837,20 @@ Do NOT say 'booked' until the tool returns success.]`
             break;
           }
 
+          // === HARD GUARD: Block request_quote until user confirms summary (DEMO_SIMPLE_MODE) ===
+          // In demo mode, Ada must summarize booking and wait for "yes/correct" before sending webhook
+          if (DEMO_SIMPLE_MODE && sessionState.newBookingPromptPending) {
+            console.log(`[${sessionState.callId}] ⛔ DEMO MODE: Blocking request_quote - waiting for user to confirm summary`);
+            result = {
+              success: false,
+              error: "summary_not_confirmed",
+              needs_clarification: true,
+              suppress_response_create: true, // Don't let Ada speak
+              ada_message: "Please wait for the customer to confirm the booking details before checking the price.",
+            };
+            break;
+          }
+
           // === EARLY EXIT: Prevent duplicate request_quote while pending ===
           if (sessionState.pendingQuote) {
             const timeSinceLast = Date.now() - sessionState.pendingQuote.timestamp;
@@ -4851,6 +4865,14 @@ Do NOT say 'booked' until the tool returns success.]`
               ? `Missing information: ${missingFields.join(", ")}. Please ask the customer for these details.`
               : `All booking details verified. Pickup: "${verifiedBooking.pickup}", Destination: "${verifiedBooking.destination}", ${pax} passenger(s), Vehicle: ${recommendedVehicle}. Proceed to confirm with customer.`
           };
+          
+          // ✅ DEMO_SIMPLE_MODE: Set newBookingPromptPending when Ada is about to summarize
+          // This blocks request_quote until user explicitly confirms "yes/correct"
+          if (DEMO_SIMPLE_MODE && missingFields.length === 0) {
+            sessionState.newBookingPromptPending = true;
+            sessionState.lastNewBookingPromptAt = Date.now();
+            console.log(`[${sessionState.callId}] 🎭 DEMO MODE: Set newBookingPromptPending=true - waiting for user to confirm summary`);
+          }
           
           console.log(`[${sessionState.callId}] ✅ Verification result: ${missingFields.length} missing fields`);
           break;
