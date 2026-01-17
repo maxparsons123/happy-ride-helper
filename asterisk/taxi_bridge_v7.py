@@ -51,8 +51,9 @@ AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
 # Audio rates
-AST_RATE = 8000   # Asterisk telephony
-AI_RATE = 24000   # OpenAI TTS
+ULAW_RATE = 8000    # µ-law telephony (8kHz)
+SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
+AI_RATE = 24000     # OpenAI TTS
 
 # Send native 8kHz µ-law to edge function (faster, lower latency)
 SEND_NATIVE_ULAW = True
@@ -174,30 +175,40 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
 
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Fast resampling using simple averaging/repetition for telephony.
+    """Resample audio between sample rates using GCD-based polyphase method.
     
-    Uses integer factor resampling for speed (3:1 ratio for 8kHz<->24kHz).
+    Handles common telephony conversions:
+    - 8kHz <-> 24kHz (ratio 3:1)
+    - 16kHz <-> 24kHz (ratio 3:2)
     """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
     
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
         return b""
     
-    if to_rate > from_rate:
-        # Upsampling: 8kHz -> 24kHz (repeat each sample 3x)
-        factor = to_rate // from_rate  # 3
-        resampled = np.repeat(audio_np, factor)
-    else:
-        # Downsampling: 24kHz -> 8kHz (average every 3 samples)
-        factor = from_rate // to_rate  # 3
-        # Trim to exact multiple
-        trim_len = (len(audio_np) // factor) * factor
-        audio_np = audio_np[:trim_len]
-        # Reshape and average
-        resampled = audio_np.reshape(-1, factor).mean(axis=1).astype(np.int16)
+    # Find GCD for polyphase resampling
+    from math import gcd
+    g = gcd(from_rate, to_rate)
+    up = to_rate // g
+    down = from_rate // g
     
+    # Use scipy for non-integer ratios, simple method for integer
+    if up == 1:
+        # Pure downsampling by integer factor
+        trim_len = (len(audio_np) // down) * down
+        audio_np = audio_np[:trim_len]
+        resampled = audio_np.reshape(-1, down).mean(axis=1)
+    elif down == 1:
+        # Pure upsampling by integer factor
+        resampled = np.repeat(audio_np, up)
+    else:
+        # Non-integer ratio (e.g., 24kHz <-> 16kHz = 3:2)
+        # Use scipy polyphase for quality
+        resampled = resample_poly(audio_np, up, down)
+    
+    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
     return resampled.tobytes()
 
 
@@ -227,6 +238,7 @@ class CallState:
     call_id: str
     phone: str = "Unknown"
     ast_codec: str = "ulaw"
+    ast_rate: int = 8000  # Sample rate for current codec
     ast_frame_bytes: int = 160  # 160 bytes = 20ms at 8k µ-law
     
     # Processing state
@@ -262,17 +274,35 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     def _detect_format(self, frame_len: int) -> None:
-        """Detect Asterisk audio format from frame size."""
+        """Detect Asterisk audio format from frame size.
+        
+        Frame sizes for 20ms:
+        - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
+        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
+        - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
+        """
         if frame_len == 160:
-            self.state.ast_codec, self.state.ast_frame_bytes = "ulaw", 160
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = 160
+        elif frame_len == 640:
+            # slin16 = 16kHz signed linear
+            self.state.ast_codec = "slin16"
+            self.state.ast_rate = SLIN16_RATE
+            self.state.ast_frame_bytes = 640
         elif frame_len == 320:
-            self.state.ast_codec, self.state.ast_frame_bytes = "slin16", 320
+            # slin = 8kHz signed linear (not slin16!)
+            self.state.ast_codec = "slin"
+            self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = 320
         else:
             # Fallback: assume µ-law
-            self.state.ast_codec, self.state.ast_frame_bytes = "ulaw", frame_len
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = frame_len
 
-        logger.info("[%s] 🔎 Detected: %s (%d bytes)", 
-                   self.state.call_id, self.state.ast_codec, frame_len)
+        logger.info("[%s] 🔎 Detected: %s @ %dHz (%d bytes)", 
+                   self.state.call_id, self.state.ast_codec, self.state.ast_rate, frame_len)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
@@ -508,11 +538,12 @@ class TaxiBridgeV7:
                         linear, self.state.last_gain
                     )
 
-                    # Prepare for sending
-                    if SEND_NATIVE_ULAW:
+                    # Prepare for sending to AI
+                    if SEND_NATIVE_ULAW and self.state.ast_codec == "ulaw":
                         audio_to_send = lin2ulaw(cleaned)
                     else:
-                        audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
+                        # Resample from Asterisk rate to AI rate (24kHz)
+                        audio_to_send = resample_audio(cleaned, self.state.ast_rate, AI_RATE)
 
                     # Send to AI
                     if self.state.ws_connected and self.ws:
@@ -555,10 +586,10 @@ class TaxiBridgeV7:
             async for message in self.ws:
                 self.state.last_ws_activity = time.time()
 
-                # Binary audio (TTS from AI - use quality-preserving downsample)
+                # Binary audio (TTS from AI - resample to Asterisk rate)
                 if isinstance(message, bytes):
-                    pcm_8k = resample_audio(message, AI_RATE, AST_RATE)
-                    out = lin2ulaw(pcm_8k) if self.state.ast_codec == "ulaw" else pcm_8k
+                    pcm_ast = resample_audio(message, AI_RATE, self.state.ast_rate)
+                    out = lin2ulaw(pcm_ast) if self.state.ast_codec == "ulaw" else pcm_ast
                     self.audio_queue.append(out)
                     audio_count += 1
                     continue
@@ -568,10 +599,10 @@ class TaxiBridgeV7:
                 msg_type = data.get("type")
 
                 if msg_type in ("audio", "address_tts"):
-                    # TTS audio - use quality-preserving downsample
+                    # TTS audio - resample to Asterisk rate
                     raw_24k = base64.b64decode(data["audio"])
-                    pcm_8k = resample_audio(raw_24k, AI_RATE, AST_RATE)
-                    out = lin2ulaw(pcm_8k) if self.state.ast_codec == "ulaw" else pcm_8k
+                    pcm_ast = resample_audio(raw_24k, AI_RATE, self.state.ast_rate)
+                    out = lin2ulaw(pcm_ast) if self.state.ast_codec == "ulaw" else pcm_ast
                     self.audio_queue.append(out)
                     audio_count += 1
 
@@ -628,7 +659,7 @@ class TaxiBridgeV7:
         bytes_played = 0
         buffer = bytearray()
 
-        bytes_per_sec = AST_RATE * (1 if self.state.ast_codec == "ulaw" else 2)
+        bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
 
         while self.running:
             # Drain queue to buffer
