@@ -5079,6 +5079,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             // Mark that we are actively prompting the fare question (prevents tool handler duplicating it)
             state.lastQuotePromptAt = Date.now();
             state.lastQuotePromptText = spokenMessage;
+            
+            // ✅ CRITICAL: Clear pendingModification when fare arrives - we've moved past the modification stage
+            // The modification has already been applied, now we're awaiting fare confirmation
+            if (state.pendingModification) {
+              console.log(`[${callId}] 🧹 Clearing pendingModification - fare quote received, modification flow complete`);
+              state.pendingModification = null;
+            }
           }
 
           // Determine language instruction based on session
