@@ -1030,6 +1030,16 @@ const Ada = {
     } => {
       const lower = text.toLowerCase().trim();
       
+      // SPECIAL CASE: "change it from X going to Y" or "change from X to Y"
+      // This mentions BOTH pickup and destination - extract destination (the new part after "to/going to")
+      const fromToMatch = text.match(/(?:change\s+(?:it\s+)?)?from\s+[\w\s]+?\s+(?:going\s+)?to\s+(.+)/i);
+      if (fromToMatch && fromToMatch[1]) {
+        const value = fromToMatch[1].replace(/\.+$/g, "").trim();
+        if (value.length > 2) {
+          return { field: "destination", value, isModification: true };
+        }
+      }
+      
       // PICKUP changes
       // "change pickup to X", "pickup is X", "pick me up from X instead", "actually from X"
       const pickupPatterns = [
@@ -1044,7 +1054,10 @@ const Ada = {
       for (const pattern of pickupPatterns) {
         const match = text.match(pattern);
         if (match && match[1]) {
-          const value = match[1].replace(/(?:\s+please|\s+thanks?|\s+instead)$/i, "").trim();
+          let value = match[1]
+            .replace(/(?:\s+please|\s+thanks?|\s+instead|\s+now)$/i, "")
+            .replace(/\.+$/g, "") // Remove trailing periods
+            .trim();
           if (value.length > 2) {
             return { field: "pickup", value, isModification: true };
           }
@@ -1066,7 +1079,12 @@ const Ada = {
       for (const pattern of destPatterns) {
         const match = text.match(pattern);
         if (match && match[1]) {
-          const value = match[1].replace(/(?:\s+please|\s+thanks?|\s+instead)$/i, "").trim();
+          // Clean extracted value - remove trailing noise and strip leading context phrases
+          let value = match[1]
+            .replace(/(?:\s+please|\s+thanks?|\s+instead|\s+now)$/i, "")
+            .replace(/^(?:change\s+it\s+)?(?:from\s+[\w\s]+?\s+)?(?:going\s+to\s+|to\s+)/i, "") // Strip "from X going to" or "from X to"
+            .replace(/\.+$/g, "") // Remove trailing periods
+            .trim();
           if (value.length > 2) {
             return { field: "destination", value, isModification: true };
           }
