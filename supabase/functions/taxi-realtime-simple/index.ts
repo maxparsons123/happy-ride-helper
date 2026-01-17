@@ -4816,6 +4816,22 @@ Do NOT say 'booked' until the tool returns success.]`
             .update({ status: "completed", ended_at: new Date().toISOString() })
             .eq("call_id", sessionState.callId);
           
+          // Save preferred_language to callers table if we have a phone number
+          // This ensures the language is remembered for the next call
+          if (sessionState.phone && sessionState.language) {
+            const phoneKey = normalizePhone(sessionState.phone);
+            try {
+              await supabase.from("callers").upsert({
+                phone_number: phoneKey,
+                preferred_language: sessionState.language,
+                updated_at: new Date().toISOString()
+              }, { onConflict: "phone_number" });
+              console.log(`[${sessionState.callId}] 🌐 Saved preferred language: ${sessionState.language}`);
+            } catch (e) {
+              console.error(`[${sessionState.callId}] Failed to save preferred language:`, e);
+            }
+          }
+          
           // Mark call as ending (but not ended yet - let goodbye play)
           sessionState.callEnded = true;
           
@@ -5338,10 +5354,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             
             // Run both queries in parallel for speed
             const [callerResult, bookingResult] = await Promise.all([
-              // Query 1: Caller info
+              // Query 1: Caller info (including preferred_language)
               supabase
                 .from("callers")
-                .select("name, last_pickup, last_destination, total_bookings")
+                .select("name, last_pickup, last_destination, total_bookings, preferred_language")
                 .eq("phone_number", phoneKey)
                 .maybeSingle(),
               // Query 2: Active booking
@@ -5361,6 +5377,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               state!.callerLastPickup = callerResult.data.last_pickup || null;
               state!.callerLastDestination = callerResult.data.last_destination || null;
               state!.callerTotalBookings = callerResult.data.total_bookings || 0;
+              
+              // Use preferred_language from DB if available (overrides phone-based detection)
+              if (callerResult.data.preferred_language) {
+                state!.language = callerResult.data.preferred_language;
+                console.log(`[${callId}] 🌐 Using saved preferred language: ${callerResult.data.preferred_language}`);
+              }
+              
               console.log(`[${callId}] 👤 Fast lookup found: ${callerResult.data.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
             }
             
@@ -6119,7 +6142,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               const phoneKey = normalizePhone(phone);
               const { data: callerData } = await supabase
                 .from("callers")
-                .select("name, last_pickup, last_destination, total_bookings")
+                .select("name, last_pickup, last_destination, total_bookings, preferred_language")
                 .eq("phone_number", phoneKey)
                 .maybeSingle();
               
@@ -6129,6 +6152,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                 state.callerTotalBookings = callerData.total_bookings || 0;
                 if (!state.customerName && callerData.name) {
                   state.customerName = callerData.name;
+                }
+                // Use preferred_language from DB if available
+                if (callerData.preferred_language && state.language !== callerData.preferred_language) {
+                  state.language = callerData.preferred_language;
+                  console.log(`[${state.callId}] 🌐 Late lookup: using saved language ${callerData.preferred_language}`);
                 }
                 console.log(`[${state.callId}] 👤 Late caller lookup: ${state.callerTotalBookings} bookings`);
               }
@@ -6268,11 +6296,26 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = async () => {
     console.log(`[${state?.callId || "unknown"}] Client disconnected`);
     // Final flush on disconnect to capture any remaining transcripts
     if (state) {
       immediateFlush(state);
+      
+      // Save preferred_language on disconnect if we have phone and language
+      if (state.phone && state.language) {
+        const phoneKey = normalizePhone(state.phone);
+        try {
+          await supabase.from("callers").upsert({
+            phone_number: phoneKey,
+            preferred_language: state.language,
+            updated_at: new Date().toISOString()
+          }, { onConflict: "phone_number" });
+          console.log(`[${state.callId}] 🌐 Saved preferred language on disconnect: ${state.language}`);
+        } catch (e) {
+          console.error(`[${state.callId}] Failed to save language on disconnect:`, e);
+        }
+      }
     }
     openaiWs?.close();
   };
