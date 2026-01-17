@@ -12,6 +12,7 @@ import struct
 import base64
 import time
 import logging
+import os
 import numpy as np
 import websockets
 from typing import Optional
@@ -20,7 +21,18 @@ from collections import deque
 # --- Configuration ---
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
-WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-passthrough-ws"
+
+# Load WS_URL from bridge-config.json (look in same directory as script)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "..", "bridge-config.json")
+DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-passthrough-ws"
+
+try:
+    with open(CONFIG_PATH, "r") as f:
+        config = json.load(f)
+        WS_URL = config.get("taxi_passthrough_ws", DEFAULT_WS_URL)
+except (FileNotFoundError, json.JSONDecodeError):
+    WS_URL = os.environ.get("WS_URL", DEFAULT_WS_URL)
 
 # Audio Settings
 AST_RATE = 8000   # Asterisk standard
