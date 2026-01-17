@@ -1452,12 +1452,13 @@ serve(async (req) => {
         },
         turn_detection: {
           type: "server_vad",
-          // Increased silence_duration_ms (1800ms) to let users finish speaking full sentences.
+          // Increased silence_duration_ms (2500ms) to let users finish speaking full sentences.
+          // Prevents Ada from "racing through" booking and cutting users off.
           // Higher prefix_padding (500ms) captures more context at the start of speech.
           // Lower threshold (0.4) is more sensitive to softer speech on noisy lines.
           threshold: sessionState.useRasaAudioProcessing ? 0.7 : 0.4,
           prefix_padding_ms: sessionState.useRasaAudioProcessing ? 250 : 500,
-          silence_duration_ms: sessionState.useRasaAudioProcessing ? 800 : 1800,
+          silence_duration_ms: sessionState.useRasaAudioProcessing ? 800 : 2500,
         },
         temperature: 0.6, // OpenAI Realtime API minimum is 0.6
         tools: TOOLS,
