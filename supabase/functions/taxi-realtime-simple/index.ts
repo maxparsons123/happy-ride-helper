@@ -315,11 +315,13 @@ RULES:
 5. If "usual trip" → summarize last trip, ask "Shall I book that again?" → wait for YES.
 6. DO NOT ask about bags for cities. Only ask for airports or train stations.
 
-⚠️ NO REPETITION RULE:
+⚠️ NO REPETITION RULE - CRITICAL:
 - NEVER say the same thing twice in a row or within the same turn.
-- If you've already acknowledged a change once, do NOT acknowledge it again.
+- If you've already acknowledged a change once, do NOT acknowledge it again - even rephrased.
 - If you've already announced a fare, do NOT announce it again.
-- If you've already asked "Is that correct?", do NOT ask again.
+- If you've already asked "Is that correct?", do NOT ask again or rephrase it.
+- If user changes addresses WHILE you're confirming, just say the NEW confirmation ONCE. Don't repeat the old one.
+- After saying a confirmation, STOP and wait silently. Do not continue talking.
 - Keep responses brief and move forward - don't loop or repeat yourself.
 
 ⚠️ CRITICAL ADDRESS PARSING - READ CAREFULLY:
@@ -1277,6 +1279,9 @@ interface SessionState {
   lastModificationPromptKey: string | null;
   // Allow exactly one assistant response after we inject a modification prompt.
   modificationPromptPending: boolean;
+  // Track last spoken confirmation to detect and prevent repetition
+  lastSpokenConfirmation: string | null;
+  lastSpokenConfirmationAt: number | null;
 
   // Pending NEW booking awaiting user confirmation before fare quote is requested
   pendingNewBooking: {
@@ -1791,10 +1796,61 @@ serve(async (req) => {
           // Schedule batched flush (5s debounce)
           scheduleTranscriptFlush(sessionState);
           
-          // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
-          // Check if Ada is trying to confirm a booking without having called book_taxi
+          // --- REPETITION DETECTION: Prevent Ada from repeating confirmations ---
+          // If Ada just spoke a confirmation and is now saying something similar, cancel it
           const currentText = sessionState.transcripts[sessionState.assistantTranscriptIndex!]?.text || "";
           const lowerText = currentText.toLowerCase();
+          
+          // Check for repetition within 10 seconds of last spoken confirmation
+          const recentConfirmationWindow = 10000; // 10 seconds
+          const isWithinRepetitionWindow = sessionState.lastSpokenConfirmationAt && 
+            (Date.now() - sessionState.lastSpokenConfirmationAt < recentConfirmationWindow);
+          
+          if (isWithinRepetitionWindow && sessionState.lastSpokenConfirmation && currentText.length > 20) {
+            // Normalize for comparison - extract key address phrases
+            const normalizeForComparison = (text: string) => 
+              text.toLowerCase()
+                .replace(/[.,!?'"]/g, '')
+                .replace(/\s+/g, ' ')
+                .replace(/\b(so|got it|okay|right|that's|thats|from|to|going|picking up|is that correct|correct|happy with that)\b/g, '')
+                .trim();
+            
+            const lastNormalized = normalizeForComparison(sessionState.lastSpokenConfirmation);
+            const currentNormalized = normalizeForComparison(currentText);
+            
+            // Check if current text is substantially similar to what was just said
+            // Either contains same addresses or is a rephrased version
+            const wordsFromLast = lastNormalized.split(' ').filter(w => w.length > 3);
+            const matchingWords = wordsFromLast.filter(w => currentNormalized.includes(w));
+            const similarityRatio = wordsFromLast.length > 0 ? matchingWords.length / wordsFromLast.length : 0;
+            
+            if (similarityRatio > 0.5 && currentText.length > 30) {
+              console.log(`[${sessionState.callId}] 🔁 REPETITION DETECTED: Ada is repeating confirmation (${(similarityRatio * 100).toFixed(0)}% similar) - cancelling`);
+              console.log(`[${sessionState.callId}] 🔁 Last: "${sessionState.lastSpokenConfirmation.substring(0, 50)}..."`);
+              console.log(`[${sessionState.callId}] 🔁 Current: "${currentText.substring(0, 50)}..."`);
+              
+              // Cancel the response
+              sessionState.discardCurrentResponseAudio = true;
+              if (sessionState.pendingAudioBuffer.length > 0) {
+                sessionState.pendingAudioBuffer = [];
+              }
+              
+              if (sessionState.openAiResponseActive) {
+                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              
+              // Remove the repetitive transcript
+              if (sessionState.assistantTranscriptIndex !== null) {
+                sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+                sessionState.assistantTranscriptIndex = null;
+              }
+              
+              break;
+            }
+          }
+
+          // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
+          // Check if Ada is trying to confirm a booking without having called book_taxi
 
           // Phrases that indicate a booking confirmation (multi-language)
           // NOTE: This runs on streaming transcript deltas to cancel fast.
@@ -2592,6 +2648,10 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.lastNewBookingPromptAt = nowMs;
               
               // === ASK USER TO CONFIRM THE NEW BOOKING ===
+              // Track what we're about to say to detect repetition
+              sessionState.lastSpokenConfirmation = confirmationMessage;
+              sessionState.lastSpokenConfirmationAt = nowMs;
+              
               setTimeout(() => {
                 // CRITICAL: Only inject ONE instruction source to prevent Ada from repeating
                 // Use conversation.item.create ONLY - do NOT add duplicate instructions in response.create
@@ -2602,7 +2662,7 @@ Do NOT say 'booked' until the tool returns success.]`
                     role: "user",
                     content: [{
                       type: "input_text",
-                      text: `[SYSTEM: NEW BOOKING DETECTED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call book_taxi yet. DO NOT continue speaking. DO NOT repeat any addresses. Just wait for yes/no.]`,
+                      text: `[SYSTEM: NEW BOOKING DETECTED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call book_taxi yet. DO NOT continue speaking. DO NOT repeat any addresses. DO NOT rephrase. Just wait for yes/no.]`,
                     }],
                   },
                 }));
@@ -2819,6 +2879,10 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.lastModificationPromptAt = nowMs;
               
               // === ASK USER TO CONFIRM THE CHANGE ===
+              // Track what we're about to say to detect repetition
+              sessionState.lastSpokenConfirmation = confirmationMessage;
+              sessionState.lastSpokenConfirmationAt = nowMs;
+              
               setTimeout(() => {
                 // CRITICAL: Only inject ONE instruction source to prevent Ada from repeating
                 // Use conversation.item.create ONLY - do NOT add duplicate instructions in response.create
@@ -2829,7 +2893,7 @@ Do NOT say 'booked' until the tool returns success.]`
                     role: "user",
                     content: [{
                       type: "input_text",
-                      text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. DO NOT repeat any addresses. Just wait.]`,
+                      text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. DO NOT repeat any addresses. DO NOT rephrase or summarize again. Just wait for yes/no.]`,
                     }],
                   },
                 }));
@@ -5101,6 +5165,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            lastModificationPromptAt: null,
            lastModificationPromptKey: null,
            modificationPromptPending: false,
+           lastSpokenConfirmation: null,
+           lastSpokenConfirmationAt: null,
            pendingNewBooking: null,
            newBookingPromptPending: false,
            lastNewBookingPromptAt: null,
@@ -5211,6 +5277,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              lastModificationPromptAt: null,
              lastModificationPromptKey: null,
              modificationPromptPending: false,
+             lastSpokenConfirmation: null,
+             lastSpokenConfirmationAt: null,
              pendingNewBooking: null,
              newBookingPromptPending: false,
              lastNewBookingPromptAt: null,
