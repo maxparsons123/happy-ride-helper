@@ -1265,6 +1265,19 @@ interface SessionState {
   // Allow exactly one assistant response after we inject a modification prompt.
   modificationPromptPending: boolean;
 
+  // Pending NEW booking awaiting user confirmation before fare quote is requested
+  pendingNewBooking: {
+    pickup: string;
+    destination: string;
+    passengers: number;
+    bags: number;
+    timestamp: number;
+  } | null;
+  
+  // Track if we're waiting for new booking confirmation
+  newBookingPromptPending: boolean;
+  lastNewBookingPromptAt: number | null;
+
   // Active booking acknowledgement - user must say "keep", "yes", etc. before rebooking
   activeBookingAcknowledged: boolean;
 
@@ -2396,6 +2409,200 @@ Do NOT say 'booked' until the tool returns success.]`
           const hasExistingBookingContext =
             sessionState.hasActiveBooking || sessionState.booking.version > 0 || !!sessionState.lastBookTaxiSuccessAt;
 
+          // === NEW BOOKING AUTO-DETECTION (AI-BASED) ===
+          // When there's NO existing booking and user provides what sounds like pickup AND destination,
+          // extract and ask for confirmation before getting fare quote
+          
+          // Quick check: does this look like a new booking with both addresses?
+          const hasPickupPhrase = /\b(from|pick\s*up|pickup|at|outside|near)\b/i.test(lowerUserText);
+          const hasDestinationPhrase = /\b(to|going\s+to|destination|drop\s*off|dropoff)\b/i.test(lowerUserText);
+          const isSubstantialMessage = lowerUserText.length > 15; // Must be substantial enough to contain addresses
+          
+          const mightBeNewBooking = !hasExistingBookingContext && 
+            !isConfirmationPhrase &&
+            !sessionState.newBookingPromptPending &&
+            !sessionState.extractionInProgress &&
+            !sessionState.pendingQuote &&
+            isSubstantialMessage &&
+            (hasPickupPhrase || hasDestinationPhrase);
+          
+          if (mightBeNewBooking && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 🆕 Potential NEW booking detected: "${userText.substring(0, 50)}..." (pickup=${hasPickupPhrase}, dest=${hasDestinationPhrase})`);
+            console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction for new booking...`);
+            
+            // === CRITICAL: BLOCK ADA FROM RESPONDING ===
+            sessionState.extractionInProgress = true;
+            
+            // Cancel any in-flight response so Ada doesn't speak with incomplete data
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              sessionState.discardCurrentResponseAudio = true;
+              console.log(`[${sessionState.callId}] ⏸️ Cancelled in-flight response for new booking extraction`);
+            }
+            
+            // Clear audio buffer to prevent stale responses
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            // Build conversation history for AI from transcripts
+            const conversationForNewBooking = sessionState.transcripts
+              .slice(-10)
+              .map((turn: TranscriptItem) => ({
+                role: turn.role as "user" | "assistant",
+                text: turn.text
+              }));
+            
+            conversationForNewBooking.push({ role: "user" as const, text: userText });
+            
+            // Call AI extraction
+            fetch(
+              `${Deno.env.get("SUPABASE_URL")}/functions/v1/taxi-extract-unified`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                },
+                body: JSON.stringify({
+                  conversation: conversationForNewBooking,
+                  current_booking: null, // No existing booking
+                  caller_phone: sessionState.phone,
+                  is_modification: false,
+                }),
+              }
+            ).then(async (extractResponse) => {
+              if (!extractResponse.ok) {
+                console.error(`[${sessionState.callId}] ❌ New booking AI extraction failed: ${extractResponse.status}`);
+                sessionState.extractionInProgress = false;
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                return;
+              }
+              
+              const extracted = await extractResponse.json();
+              console.log(`[${sessionState.callId}] 🤖 New booking AI extraction result:`, extracted);
+              
+              const extractedPickup = extracted.pickup || "";
+              const extractedDestination = extracted.destination || "";
+              const extractedPassengers = extracted.passengers || 1;
+              const extractedBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : 0;
+              
+              // Only proceed if we have BOTH pickup AND destination
+              if (!extractedPickup || !extractedDestination) {
+                console.log(`[${sessionState.callId}] AI extraction incomplete - pickup="${extractedPickup}", dest="${extractedDestination}". Letting Ada ask for missing info.`);
+                sessionState.extractionInProgress = false;
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                return;
+              }
+              
+              // Check if pickup === destination (invalid)
+              const normalizeAddr = (s: string) => s.toLowerCase().replace(/[.,\s]+/g, " ").trim();
+              if (normalizeAddr(extractedPickup) === normalizeAddr(extractedDestination)) {
+                console.log(`[${sessionState.callId}] ❌ AI extraction returned pickup === destination. Asking for clarification.`);
+                sessionState.extractionInProgress = false;
+                
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: The pickup and destination appear to be the same. Ask the customer: "I just need to check - where would you like to be picked up from, and where are you going to?"]`,
+                      }],
+                    },
+                  }));
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 300);
+                return;
+              }
+              
+              console.log(`[${sessionState.callId}] ✅ Valid new booking extracted: pickup="${extractedPickup}", dest="${extractedDestination}"`);
+              
+              // Update sessionState.booking with extracted values
+              sessionState.booking.pickup = extractedPickup;
+              sessionState.booking.destination = extractedDestination;
+              sessionState.booking.passengers = extractedPassengers;
+              sessionState.booking.bags = extractedBags;
+              
+              // Mark new booking as pending confirmation
+              sessionState.pendingNewBooking = {
+                pickup: extractedPickup,
+                destination: extractedDestination,
+                passengers: extractedPassengers,
+                bags: extractedBags,
+                timestamp: Date.now()
+              };
+              
+              // Sync to live_calls
+              supabase.from("live_calls").update({
+                pickup: extractedPickup,
+                destination: extractedDestination,
+                passengers: extractedPassengers,
+                updated_at: new Date().toISOString()
+              }).eq("call_id", sessionState.callId).then(() => {
+                console.log(`[${sessionState.callId}] ✅ live_calls updated with new booking extraction`);
+              });
+              
+              // Cancel any in-flight response
+              if (sessionState.openAiResponseActive) {
+                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // Build confirmation message
+              const passengersText = extractedPassengers > 1 ? ` for ${extractedPassengers} passengers` : "";
+              const confirmationMessage = `So that's picking up from ${extractedPickup}, going to ${extractedDestination}${passengersText}. Is that correct?`;
+              
+              // Deduplicate: don't announce same confirmation multiple times
+              const promptKey = `new|${extractedPickup}|${extractedDestination}|${extractedPassengers}`.toLowerCase();
+              const nowMs = Date.now();
+              if (
+                sessionState.lastNewBookingPromptAt &&
+                nowMs - sessionState.lastNewBookingPromptAt < 15000
+              ) {
+                console.log(`[${sessionState.callId}] 🔁 Skipping duplicate new booking prompt`);
+                sessionState.extractionInProgress = false;
+                return;
+              }
+              sessionState.lastNewBookingPromptAt = nowMs;
+              
+              // === ASK USER TO CONFIRM THE NEW BOOKING ===
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: NEW BOOKING DETECTED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call book_taxi yet. DO NOT continue speaking. Just wait for yes/no.]`,
+                    }],
+                  },
+                }));
+                
+                sessionState.newBookingPromptPending = true;
+
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
+                  }
+                }));
+                
+                // Clear extraction flag AFTER we've injected the response
+                sessionState.extractionInProgress = false;
+              }, 300);
+              
+            }).catch((extractError) => {
+              console.error(`[${sessionState.callId}] ❌ New booking AI extraction error:`, extractError);
+              sessionState.extractionInProgress = false;
+              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            });
+            
+            // Don't break - let normal processing continue while AI extraction runs in background
+          }
+
           // NOTE: Legacy routeMatch-based modification injection was removed.
           // It conflicted with the new pendingModification flow and could cause Ada to repeat or use stale addresses.
           // All modification/correction handling is now done by the block below (AUTO-DETECTION + pendingModification).
@@ -2698,6 +2905,80 @@ Do NOT say 'booked' until the tool returns success.]`
                     content: [{
                       type: "input_text",
                       text: `[SYSTEM: Customer rejected the modification. Ask: "Sorry about that. What would you like to change it to?"]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              }, 300);
+              
+              break;
+            }
+          }
+          
+          // === PENDING NEW BOOKING CONFIRMATION ===
+          // If user says "yes" after Ada read back the addresses for a NEW booking, trigger fare quote
+          const hasNewBookingPending = sessionState.newBookingPromptPending && 
+              sessionState.lastNewBookingPromptAt && 
+              Date.now() - sessionState.lastNewBookingPromptAt < 60000;
+          
+          if (hasNewBookingPending && !sessionState.pendingQuote &&
+              openaiWs && openaiConnected && !sessionState.callEnded) {
+            
+            const isConfirmingNewBooking = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure|please)\b/i.test(lowerUserText);
+            const isRejectingNewBooking = /\b(no|nope|wrong|change|not right|incorrect|actually)\b/i.test(lowerUserText);
+            
+            if (isConfirmingNewBooking) {
+              console.log(`[${sessionState.callId}] ✅ User confirmed new booking - NOW sending webhook for fare`);
+              
+              // Clear the flag
+              sessionState.newBookingPromptPending = false;
+              
+              // Cancel any in-flight response
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // NOW trigger book_taxi to send webhook and get fare
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: Customer CONFIRMED the booking details. NOW call book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}", passengers: ${sessionState.booking.passengers || 1} to get the fare. Do NOT speak until you receive the fare from dispatch.]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions: `Call book_taxi with confirmation_state: "request_quote" now. Wait for fare before speaking.`
+                  }
+                }));
+              }, 300);
+              
+              break;
+            } else if (isRejectingNewBooking) {
+              console.log(`[${sessionState.callId}] ❌ User rejected new booking details - asking what they want instead`);
+              
+              // Clear the flag
+              sessionState.newBookingPromptPending = false;
+              
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: Customer rejected the booking details. Ask: "Sorry about that. What would you like to change?"]`,
                     }],
                   },
                 }));
@@ -4799,6 +5080,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            lastModificationPromptAt: null,
            lastModificationPromptKey: null,
            modificationPromptPending: false,
+           pendingNewBooking: null,
+           newBookingPromptPending: false,
+           lastNewBookingPromptAt: null,
            activeBookingAcknowledged: false,
            askedAnythingElse: false,
            sttMetrics: {
@@ -4904,6 +5188,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              lastModificationPromptAt: null,
              lastModificationPromptKey: null,
              modificationPromptPending: false,
+             pendingNewBooking: null,
+             newBookingPromptPending: false,
+             lastNewBookingPromptAt: null,
              activeBookingAcknowledged: false,
              askedAnythingElse: false,
              sttMetrics: {
