@@ -3106,44 +3106,38 @@ Do NOT say 'booked' until the tool returns success.]`
             
             // ✅ INJECT SYSTEM MESSAGE so Ada says "Is there anything else I can help you with?"
             // The tool result message alone is not enough - we need an explicit prompt.
+            // STREAMLINED: Ada can speak immediately after webhook - no delays needed
             if (openaiWs && openaiConnected) {
-              // Cancel-Clear-Inject protocol to avoid response collisions
-              // ✅ SET discardCurrentResponseAudio BEFORE cancelling to drop any late audio deltas
-              sessionState.discardCurrentResponseAudio = true;
+              // Cancel any in-flight response to avoid overlap
               if (sessionState.openAiResponseActive) {
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // ✅ CRITICAL: Enable audio immediately - booking is fully confirmed
+              sessionState.discardCurrentResponseAudio = false;
+              sessionState.audioVerified = true;
+              sessionState.askedAnythingElse = true;
+              
+              console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message immediately: "That's booked for you. Is there anything else..."`);
+              
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{
+                    type: "input_text",
+                    text: `[SYSTEM: Booking confirmed successfully! Say EXACTLY: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response. Do NOT say Safe travels yet.]`,
+                  }],
+                },
+              }));
 
-              setTimeout(() => {
-                openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-
-                setTimeout(() => {
-                  console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message: "Is there anything else..."`);
-                  
-                  // ✅ CRITICAL: Mark that Ada is asking "anything else?" so goodbye detection works properly
-                  sessionState.askedAnythingElse = true;
-                  openaiWs?.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{
-                        type: "input_text",
-                        text: `[SYSTEM: Booking confirmed successfully! Say to the customer: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response.]`,
-                      }],
-                    },
-                  }));
-
-                  // Force response.create directly instead of using safeResponseCreate
-                  // to ensure it's not blocked by any guards
-                  if (openaiWs && openaiConnected && !sessionState.callEnded) {
-                    openaiWs.send(JSON.stringify({ type: "response.create" }));
-                    console.log(`[${sessionState.callId}] ✅ Triggered response.create for post-confirm followup`);
-                  } else {
-                    console.log(`[${sessionState.callId}] ⚠️ Cannot trigger response.create: ws=${!!openaiWs}, connected=${openaiConnected}, ended=${sessionState.callEnded}`);
-                  }
-                }, 350);
-              }, 400);
+              // Trigger response immediately - no delays
+              if (!sessionState.callEnded) {
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+                console.log(`[${sessionState.callId}] ✅ Triggered immediate response.create for post-confirm followup`);
+              }
             }
             
             break;
