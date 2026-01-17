@@ -291,17 +291,17 @@ AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - If user has another request → Process it normally.
 
 BOOKING MODIFICATIONS - AUTOMATIC PROCESSING:
-⚠️ When customer requests a change, the system AUTOMATICALLY detects and applies it.
-You will receive a [SYSTEM: MODIFICATION APPLIED] message when a change is processed.
+⚠️ When customer requests a change, the system AUTOMATICALLY detects and applies it internally.
+You will receive a [SYSTEM: MODIFICATION APPLIED] message with the new booking details.
 
-AFTER RECEIVING MODIFICATION APPLIED MESSAGE:
-- The system has already updated the booking and sent it to dispatch.
-- You will receive the new fare from dispatch.
-- Simply announce: "The fare is [FARE]. Shall I book that?"
-- Wait for yes/no response.
+WHEN YOU RECEIVE [SYSTEM: MODIFICATION APPLIED]:
+1. Say EXACTLY the message provided (e.g., "Your booking has been updated. Picking up from X going to Y. Are you happy with that?")
+2. WAIT for customer to say "yes/happy/correct"
+3. ONLY AFTER they confirm, call book_taxi with confirmation_state: "request_quote" to get the new fare
+4. When fare arrives, announce: "The fare is [FARE]. Shall I book that?"
+5. Wait for final yes/no
 
-DO NOT ask "Is that correct?" for modifications - the system handles validation.
-DO NOT repeat the changed address - just announce the new fare when it arrives.
+DO NOT skip asking "Are you happy with that?" - always confirm the change before getting fare.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -1226,6 +1226,14 @@ interface SessionState {
 
   // Dispatch events that arrive while OpenAI isn't ready / while a response is active
   pendingDispatchEvents: { event: string; payload: any; receivedAt: number }[];
+
+  // Pending modification awaiting user confirmation before webhook is sent
+  pendingModification: {
+    field: string;
+    oldValue: string;
+    newValue: string;
+    timestamp: number;
+  } | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -2360,8 +2368,8 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           // === BOOKING MODIFICATION AUTO-DETECTION ===
-          // Detect modification intent from user speech and automatically apply changes
-          // This provides ONE confirmation (fare) instead of two (change + fare)
+          // Detect modification intent from user speech and update internally
+          // Ada confirms the change, THEN sends webhook only after user approves
           const modificationDetection = Ada.Detection.detectBookingModification(userText);
           
           // Also catch address corrections like "No, the pickup is X"
@@ -2377,10 +2385,13 @@ Do NOT say 'booked' until the tool returns success.]`
             const fieldToChange = modificationDetection.field || correctionDetection.field;
             const newValue = modificationDetection.value || correctionDetection.value;
             
-            console.log(`[${sessionState.callId}] 🔧 AUTO-MODIFICATION: ${fieldToChange}="${newValue}" detected from: "${userText}"`);
+            // Get old values for the confirmation message
+            const oldPickup = sessionState.booking.pickup || "unknown";
+            const oldDestination = sessionState.booking.destination || "unknown";
             
-            // === AUTO-APPLY THE MODIFICATION ===
-            // Apply the change directly to session state (no confirmation needed)
+            console.log(`[${sessionState.callId}] 🔧 MODIFICATION DETECTED: ${fieldToChange}="${newValue}" from: "${userText}"`);
+            
+            // === APPLY THE MODIFICATION INTERNALLY ===
             if (fieldToChange === "pickup") {
               sessionState.booking.pickup = newValue;
             } else if (fieldToChange === "destination") {
@@ -2391,20 +2402,29 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.booking.bags = parseInt(newValue || "0", 10);
             }
             
-            // Increment version and update database
+            // Increment version
             sessionState.booking.version = (sessionState.booking.version || 1) + 1;
             
-            // Sync to live_calls (fire-and-forget, don't block)
+            // Mark that we have a pending modification awaiting user confirmation
+            // The webhook will only be sent AFTER user says "yes"
+            sessionState.pendingModification = {
+              field: fieldToChange!,
+              oldValue: fieldToChange === "pickup" ? oldPickup : oldDestination,
+              newValue: newValue!,
+              timestamp: Date.now()
+            };
+            
+            // Sync to live_calls (fire-and-forget)
             supabase.from("live_calls").update({
               pickup: sessionState.booking.pickup,
               destination: sessionState.booking.destination,
               passengers: sessionState.booking.passengers || 1,
               updated_at: new Date().toISOString()
             }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ live_calls updated with modification`);
+              console.log(`[${sessionState.callId}] ✅ live_calls updated with pending modification`);
             });
             
-            console.log(`[${sessionState.callId}] ✅ Modification auto-applied: ${fieldToChange} → "${newValue}"`);
+            console.log(`[${sessionState.callId}] ✅ Modification applied internally, awaiting user confirmation`);
             
             // Cancel any in-flight response
             if (sessionState.openAiResponseActive) {
@@ -2412,12 +2432,15 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             
-            // Clear any pending quote (we'll get a new one)
+            // Clear any pending quote (we'll get a new one after confirmation)
             sessionState.pendingQuote = null;
             
-            // === TRIGGER FARE QUOTE AUTOMATICALLY ===
-            // Inject a message telling Ada to call book_taxi with request_quote
-            // Ada will only confirm ONCE with the new fare
+            // Build the confirmation message based on field changed
+            const confirmationMessage = fieldToChange === "pickup" || fieldToChange === "destination"
+              ? `Your booking has been updated. Picking up from ${sessionState.booking.pickup} going to ${sessionState.booking.destination}. Are you happy with that?`
+              : `Updated to ${newValue} ${fieldToChange}. Are you happy with that?`;
+            
+            // === ASK USER TO CONFIRM THE CHANGE ===
             setTimeout(() => {
               openaiWs?.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -2426,22 +2449,95 @@ Do NOT say 'booked' until the tool returns success.]`
                   role: "user",
                   content: [{
                     type: "input_text",
-                    text: `[SYSTEM: MODIFICATION APPLIED - The ${fieldToChange} has been updated to "${newValue}". The booking is now: Pickup="${sessionState.booking.pickup}", Destination="${sessionState.booking.destination}". NOW CALL book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" to get the updated fare. DO NOT say "Is that correct?" - just get the fare and announce it.]`,
+                    text: `[SYSTEM: MODIFICATION APPLIED INTERNALLY - The ${fieldToChange} has been updated to "${newValue}". Say EXACTLY: "${confirmationMessage}" Then WAIT for the customer to confirm (yes/yeah/happy). ONLY AFTER they confirm, call book_taxi with confirmation_state: "request_quote" to get the new fare.]`,
                   }],
                 },
               }));
               
-              // Force Ada to call the tool
               openaiWs?.send(JSON.stringify({
                 type: "response.create",
                 response: {
                   modalities: ["audio", "text"],
-                  instructions: `The booking was just modified. Call book_taxi with confirmation_state: "request_quote" to get the new fare. Do not speak until you have the fare.`
+                  instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP and wait for yes/no.`
                 }
               }));
             }, 300);
             
             break; // Don't process further - modification is being handled
+          }
+          
+          // === PENDING MODIFICATION CONFIRMATION ===
+          // If user says "yes" after a modification was applied, NOW send the webhook
+          if (sessionState.pendingModification && 
+              Date.now() - sessionState.pendingModification.timestamp < 60000 &&
+              openaiWs && openaiConnected && !sessionState.callEnded) {
+            
+            const isConfirmingModification = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure)\b/i.test(lowerUserText);
+            const isRejectingModification = /\b(no|nope|wrong|change|not right|incorrect)\b/i.test(lowerUserText);
+            
+            if (isConfirmingModification) {
+              console.log(`[${sessionState.callId}] ✅ User confirmed modification - NOW sending webhook for fare`);
+              
+              // Clear the pending modification
+              const pendingMod = sessionState.pendingModification;
+              sessionState.pendingModification = null;
+              
+              // Cancel any in-flight response
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // NOW trigger book_taxi to send webhook and get fare
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: Customer CONFIRMED the modification. NOW call book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" to get the updated fare. Do NOT speak until you receive the fare from dispatch.]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions: `Call book_taxi with confirmation_state: "request_quote" now. Wait for fare before speaking.`
+                  }
+                }));
+              }, 300);
+              
+              break;
+            } else if (isRejectingModification) {
+              console.log(`[${sessionState.callId}] ❌ User rejected modification - asking what they want instead`);
+              
+              // Clear the pending modification
+              sessionState.pendingModification = null;
+              
+              // Revert the change (restore old values would require storing them)
+              // For now, just ask what they want
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: Customer rejected the modification. Ask: "Sorry about that. What would you like to change it to?"]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              }, 300);
+              
+              break;
+            }
           }
           // === POST-BOOKING RESPONSE HELPER ===
           // If booking was confirmed and user says something positive (not goodbye/thanks),
@@ -4445,6 +4541,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastQuotePromptAt: null,
           lastQuotePromptText: null,
           pendingDispatchEvents: [],
+          pendingModification: null,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -4543,6 +4640,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastQuotePromptAt: null,
             lastQuotePromptText: null,
             pendingDispatchEvents: [],
+            pendingModification: null,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
