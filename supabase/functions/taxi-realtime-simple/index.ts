@@ -3918,18 +3918,45 @@ Do NOT say 'booked' until the tool returns success.]`
           console.log(`[${sessionState.callId}]   Ada pickup: "${adaPickup}" | Extracted: "${extractedPickup}" | Match: ${Math.round(pickupSourceMatch * 100)}%`);
           console.log(`[${sessionState.callId}]   Ada dest: "${adaDestination}" | Extracted: "${extractedDestination}" | Match: ${Math.round(destSourceMatch * 100)}%`);
           
-          // 4. Determine final addresses
-          let finalPickup = adaPickup;
-          let finalDestination = adaDestination;
+          // 4. Determine final addresses - PREFER AI EXTRACTION as primary source
+          // AI extraction (Gemini) analyzes the full conversation including Ada's spoken corrections,
+          // making it more accurate than Ada's raw tool arguments which may contain STT errors.
+          let finalPickup: string;
+          let finalDestination: string;
           let sourceDiscrepancy = false;
           
-          // If Ada's pickup = destination (common error), prefer extraction
-          if (adaPickupNorm && adaDestNorm && adaPickupNorm === adaDestNorm) {
-            console.log(`[${sessionState.callId}] ⚠️ Ada's pickup = destination, checking extraction...`);
-            if (extPickupNorm && extDestNorm && extPickupNorm !== extDestNorm) {
-              console.log(`[${sessionState.callId}] ✅ Using extracted addresses (distinct)`);
-              finalPickup = extractedPickup;
-              finalDestination = extractedDestination;
+          // Use extraction as primary source if available, fall back to Ada's corrected args
+          if (extractedPickup && extractedPickup.length > 2) {
+            finalPickup = extractedPickup;
+            if (extractedPickup !== adaPickup) {
+              console.log(`[${sessionState.callId}] 🧠 Using AI-extracted pickup: "${extractedPickup}" (Ada had: "${adaPickup}")`);
+            }
+          } else {
+            finalPickup = adaPickup;
+            console.log(`[${sessionState.callId}] 📝 Using Ada's pickup (no extraction): "${adaPickup}"`);
+          }
+          
+          if (extractedDestination && extractedDestination.length > 2) {
+            finalDestination = extractedDestination;
+            if (extractedDestination !== adaDestination) {
+              console.log(`[${sessionState.callId}] 🧠 Using AI-extracted destination: "${extractedDestination}" (Ada had: "${adaDestination}")`);
+            }
+          } else {
+            finalDestination = adaDestination;
+            console.log(`[${sessionState.callId}] 📝 Using Ada's destination (no extraction): "${adaDestination}"`);
+          }
+          
+          // Check for same pickup/destination error
+          const finalPickupNormCheck = normalizeForComparison(finalPickup);
+          const finalDestNormCheck = normalizeForComparison(finalDestination);
+          
+          if (finalPickupNormCheck && finalDestNormCheck && finalPickupNormCheck === finalDestNormCheck) {
+            console.log(`[${sessionState.callId}] ⚠️ Pickup = destination after extraction, checking Ada's args...`);
+            // Try Ada's args if extraction gave same address
+            if (adaPickupNorm !== adaDestNorm) {
+              console.log(`[${sessionState.callId}] ✅ Falling back to Ada's distinct addresses`);
+              finalPickup = adaPickup;
+              finalDestination = adaDestination;
             } else {
               // Both sources agree they're the same - block booking
               console.log(`[${sessionState.callId}] ❌ BLOCKED: Both sources show same address`);
@@ -3944,56 +3971,12 @@ Do NOT say 'booked' until the tool returns success.]`
             }
           }
           
-          // If sources disagree significantly (< 50% match), flag for clarification
+          // Log if there was a significant source discrepancy (for monitoring)
           if (extractedPickup && pickupSourceMatch < 0.5) {
-            console.log(`[${sessionState.callId}] ⚠️ Pickup discrepancy detected`);
-            sourceDiscrepancy = true;
+            console.log(`[${sessionState.callId}] 📊 Note: Pickup sources differed significantly (${Math.round(pickupSourceMatch * 100)}% match) - using extraction`);
           }
           if (extractedDestination && destSourceMatch < 0.5) {
-            console.log(`[${sessionState.callId}] ⚠️ Destination discrepancy detected`);
-            sourceDiscrepancy = true;
-          }
-          
-          // === MODIFICATION GUARD ===
-          // If Ada passed the SAME destination as the existing active booking (stale value),
-          // but extraction found a DIFFERENT destination with medium+ confidence, prefer extraction.
-          // This catches cases where Ada forgets to update destination in modify flows.
-          const activeBookingDest = sessionState.booking?.destination;
-          const adaUsedStaleDestination =
-            activeBookingDest &&
-            normalizeForComparison(adaDestination) === normalizeForComparison(activeBookingDest) &&
-            extDestNorm &&
-            extDestNorm !== normalizeForComparison(activeBookingDest);
-
-          if (adaUsedStaleDestination) {
-            console.log(
-              `[${sessionState.callId}] 🔄 MODIFICATION GUARD: Ada used stale destination "${adaDestination}" (same as active booking). Extraction found "${extractedDestination}". Overriding.`
-            );
-            finalDestination = extractedDestination;
-            sourceDiscrepancy = true;
-          }
-          
-          // Same guard for pickup (less common but possible)
-          const activeBookingPickup = sessionState.booking?.pickup;
-          const adaUsedStalePickup =
-            activeBookingPickup &&
-            normalizeForComparison(adaPickup) === normalizeForComparison(activeBookingPickup) &&
-            extPickupNorm &&
-            extPickupNorm !== normalizeForComparison(activeBookingPickup);
-
-          if (adaUsedStalePickup) {
-            console.log(
-              `[${sessionState.callId}] 🔄 MODIFICATION GUARD: Ada used stale pickup "${adaPickup}" (same as active booking). Extraction found "${extractedPickup}". Overriding.`
-            );
-            finalPickup = extractedPickup;
-            sourceDiscrepancy = true;
-          }
-          
-          // If major discrepancy, prefer extracted (from conversation) over Ada's interpretation
-          if (sourceDiscrepancy && (extractedBooking.confidence === "high" || extractedBooking.confidence === "medium")) {
-            console.log(`[${sessionState.callId}] 🔄 Using extracted addresses due to discrepancy (confidence: ${extractedBooking.confidence})`);
-            if (extractedPickup && !adaUsedStalePickup) finalPickup = extractedPickup;
-            if (extractedDestination && !adaUsedStaleDestination) finalDestination = extractedDestination;
+            console.log(`[${sessionState.callId}] 📊 Note: Destination sources differed significantly (${Math.round(destSourceMatch * 100)}% match) - using extraction`);
           }
           
           // 5. Final validation - ensure pickup != destination
