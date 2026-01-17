@@ -1,1 +1,4 @@
 project_id = "oerketnvlmptpfvttysy"
+
+[functions.taxi-realtime-v2]
+verify_jwt = false
