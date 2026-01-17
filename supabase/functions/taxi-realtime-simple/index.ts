@@ -1273,6 +1273,9 @@ interface SessionState {
 
   // AI extraction in progress - blocks Ada from responding until complete
   extractionInProgress: boolean;
+  
+  // Awaiting dispatch callback - blocks VAD responses while polling for fare quote
+  awaitingDispatchCallback: boolean;
 
   // Prevent repeating the same modification summary (duplicate transcripts / VAD noise)
   lastModificationPromptAt: number | null;
@@ -1640,6 +1643,15 @@ serve(async (req) => {
             sessionState.discardCurrentResponseAudio = true;
             break;
           }
+        }
+        
+        // ✅ AWAITING DISPATCH GUARD: Block VAD responses while waiting for dispatch fare callback
+        // This prevents Ada from hallucinating fare amounts before dispatch responds
+        if (sessionState.awaitingDispatchCallback) {
+          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting dispatch callback`);
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          sessionState.discardCurrentResponseAudio = true;
+          break;
         }
 
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
@@ -4152,6 +4164,9 @@ Do NOT say 'booked' until the tool returns success.]`
               const pollStart = Date.now();
               let dispatchResult: any = null;
               
+              // Block VAD responses while waiting for dispatch
+              sessionState.awaitingDispatchCallback = true;
+              
               console.log(`[${sessionState.callId}] 🔄 Polling for dispatch callback response (${pollTimeout/1000}s timeout)...`);
               
               while (Date.now() - pollStart < pollTimeout) {
@@ -4286,6 +4301,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 // Wait before next poll
                 await new Promise(resolve => setTimeout(resolve, pollInterval));
               }
+              
+              // Dispatch polling complete - allow VAD responses again
+              sessionState.awaitingDispatchCallback = false;
               
               if (dispatchResult) {
                 // Check if dispatch requested hangup - immediately end call
@@ -4427,6 +4445,9 @@ Do NOT say 'booked' until the tool returns success.]`
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
+              
+              // Clear the dispatch guard on error
+              sessionState.awaitingDispatchCallback = false;
 
               // Dispatch failed - tell customer to ring back later
               result = {
@@ -5185,6 +5206,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            pendingDispatchEvents: [],
            pendingModification: null,
            extractionInProgress: false,
+           awaitingDispatchCallback: false,
            lastModificationPromptAt: null,
            lastModificationPromptKey: null,
            modificationPromptPending: false,
@@ -5297,6 +5319,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              pendingDispatchEvents: [],
              pendingModification: null,
              extractionInProgress: false,
+             awaitingDispatchCallback: false,
              lastModificationPromptAt: null,
              lastModificationPromptKey: null,
              modificationPromptPending: false,
