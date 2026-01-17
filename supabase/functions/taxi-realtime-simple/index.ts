@@ -1255,6 +1255,12 @@ interface SessionState {
   // AI extraction in progress - blocks Ada from responding until complete
   extractionInProgress: boolean;
 
+  // Prevent repeating the same modification summary (duplicate transcripts / VAD noise)
+  lastModificationPromptAt: number | null;
+  lastModificationPromptKey: string | null;
+  // Allow exactly one assistant response after we inject a modification prompt.
+  modificationPromptPending: boolean;
+
   // Active booking acknowledgement - user must say "keep", "yes", etc. before rebooking
   activeBookingAcknowledged: boolean;
 
@@ -1577,6 +1583,20 @@ serve(async (req) => {
           openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
           sessionState.discardCurrentResponseAudio = true;
           break;
+        }
+
+        // ✅ PENDING MODIFICATION GUARD: While waiting for the caller to confirm an update,
+        // do NOT allow VAD/noise to trigger extra assistant turns (this causes repeated summaries).
+        // We allow exactly ONE response right after we inject the modification prompt.
+        if (sessionState.pendingModification) {
+          if (sessionState.modificationPromptPending) {
+            sessionState.modificationPromptPending = false;
+          } else {
+            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting modification confirmation`);
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.discardCurrentResponseAudio = true;
+            break;
+          }
         }
 
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
@@ -2362,6 +2382,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
           const mightBeModification = hasExistingBookingContext && 
             !isConfirmationPhrase &&
+            !sessionState.pendingModification &&
+            !sessionState.extractionInProgress &&
             (/\b(change|going to|from|to|pick up|pickup|destination|instead|actually|no|wrong|correct)\b/i.test(lowerUserText) ||
              /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText));
           
@@ -2517,6 +2539,22 @@ Do NOT say 'booked' until the tool returns success.]`
               
               const changesSummary = changes.join(" and ");
               const confirmationMessage = `Got it, ${changesSummary}. So that's from ${pickup} to ${destination}${passengers > 1 ? ` for ${passengers} passengers` : ""}. Is that correct?`;
+
+              // Deduplicate: don't announce the same modification multiple times.
+              // (Duplicate STT events or background extraction retries can otherwise re-inject this prompt.)
+              const promptKey = `${changesSummary}|${pickup}|${destination}|${passengers}|${newBags}`.toLowerCase();
+              const nowMs = Date.now();
+              if (
+                sessionState.lastModificationPromptKey === promptKey &&
+                sessionState.lastModificationPromptAt &&
+                nowMs - sessionState.lastModificationPromptAt < 15000
+              ) {
+                console.log(`[${sessionState.callId}] 🔁 Skipping duplicate modification prompt (already announced)`);
+                sessionState.extractionInProgress = false;
+                return;
+              }
+              sessionState.lastModificationPromptKey = promptKey;
+              sessionState.lastModificationPromptAt = nowMs;
               
               // === ASK USER TO CONFIRM THE CHANGE ===
               setTimeout(() => {
@@ -2532,6 +2570,8 @@ Do NOT say 'booked' until the tool returns success.]`
                   },
                 }));
                 
+                sessionState.modificationPromptPending = true;
+
                 openaiWs?.send(JSON.stringify({
                   type: "response.create",
                   response: {
@@ -4691,12 +4731,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           quoteRequestedAt: null,
           quoteTripKey: null,
           lastQuotePromptAt: null,
-          lastQuotePromptText: null,
-          pendingDispatchEvents: [],
-          pendingModification: null,
-          extractionInProgress: false,
-          activeBookingAcknowledged: false,
-          sttMetrics: {
+           lastQuotePromptText: null,
+           pendingDispatchEvents: [],
+           pendingModification: null,
+           extractionInProgress: false,
+           lastModificationPromptAt: null,
+           lastModificationPromptKey: null,
+           modificationPromptPending: false,
+           activeBookingAcknowledged: false,
+           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
             totalChars: 0,
@@ -4792,12 +4835,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             quoteRequestedAt: null,
             quoteTripKey: null,
             lastQuotePromptAt: null,
-            lastQuotePromptText: null,
-            pendingDispatchEvents: [],
-            pendingModification: null,
-            extractionInProgress: false,
-            activeBookingAcknowledged: false,
-            sttMetrics: {
+             lastQuotePromptText: null,
+             pendingDispatchEvents: [],
+             pendingModification: null,
+             extractionInProgress: false,
+             lastModificationPromptAt: null,
+             lastModificationPromptKey: null,
+             modificationPromptPending: false,
+             activeBookingAcknowledged: false,
+             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
               totalChars: 0,
