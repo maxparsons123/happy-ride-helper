@@ -60,8 +60,8 @@ except (FileNotFoundError, json.JSONDecodeError) as e:
 AST_RATE = 8000   # Asterisk telephony rate (native µ-law)
 AI_RATE = 24000   # AI TTS output rate
 
-# Send native 8kHz µ-law to edge function (optimized for OpenAI Whisper)
-SEND_NATIVE_ULAW = True
+# Send PCM 24kHz directly to edge function (OpenAI Realtime native format)
+SEND_NATIVE_ULAW = False
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 3
@@ -86,7 +86,7 @@ MIN_GAIN = 0.8
 GAIN_SMOOTHING_FACTOR = 0.2
 
 # VAD (Voice Activity Detection) settings
-MIN_RMS_FOR_PROCESSING = 80      # Skip frames below this RMS (silence/noise floor)
+MIN_RMS_FOR_PROCESSING = 100     # Skip frames below this RMS (early exit before processing)
 VAD_RMS_THRESHOLD = 150          # RMS threshold for voice activity
 VAD_PEAK_THRESHOLD = 500         # Peak amplitude threshold for speech detection
 VAD_MIN_PEAKS = 2                # Minimum speech-like peaks in a frame
@@ -148,10 +148,14 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
     return ulaw.astype(np.uint8).tobytes()
 
 
-def is_voice_activity(audio_bytes: bytes) -> bool:
+def is_voice_activity(audio_bytes: bytes, threshold: int = None) -> bool:
     """
     Detect if audio contains actual speech vs background noise.
     Uses RMS energy + peak detection for accuracy.
+    
+    Args:
+        audio_bytes: 16-bit PCM audio data
+        threshold: Optional RMS threshold override (uses VAD_RMS_THRESHOLD if not provided)
     """
     if not audio_bytes or len(audio_bytes) < 4:
         return False
@@ -160,9 +164,12 @@ def is_voice_activity(audio_bytes: bytes) -> bool:
     if audio_np.size == 0:
         return False
     
+    # Use provided threshold or default
+    rms_threshold = threshold if threshold is not None else VAD_RMS_THRESHOLD
+    
     # Check RMS energy
     rms = np.sqrt(np.mean(audio_np ** 2))
-    if rms < VAD_RMS_THRESHOLD:
+    if rms < rms_threshold:
         return False
     
     # Check for speech-like peaks (not just constant noise)
