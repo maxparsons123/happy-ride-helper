@@ -2346,7 +2346,9 @@ Do NOT say 'booked' until the tool returns success.]`
           // Otherwise, "no thanks" might mean rejecting a fare quote, not ending the call.
           // IMPORTANT: Enforce 3-second grace period after "anything else?" to let users actually respond
           const isHardGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText);
-          const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText);
+          const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText) ||
+            // Special case: just "no" or "no." when asked "anything else?" - user is declining
+            (sessionState.askedAnythingElse && /^no\.?$/i.test(lowerUserText.trim()));
           
           // Check if grace period has passed since "anything else?" was asked
           // Uses configurable goodbyeGraceMs from agent settings (default 3000ms)
