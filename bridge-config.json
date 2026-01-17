@@ -5,10 +5,10 @@
     "anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU"
   },
   "edge_functions": {
-    "taxi_realtime_ws": "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime",
-    "taxi_realtime_simple_ws": "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-simple",
-    "taxi_realtime_v2_ws": "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-v2",
-    "taxi_webhook_test": "https://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-webhook-test"
+    "taxi_realtime_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime",
+    "taxi_realtime_simple_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple",
+    "taxi_realtime_v2_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-v2",
+    "taxi_webhook_test": "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-webhook-test"
   },
   "_instructions": "Update project_id and regenerate URLs when creating a new instance. The anon_key is the VITE_SUPABASE_PUBLISHABLE_KEY from your .env file."
 }

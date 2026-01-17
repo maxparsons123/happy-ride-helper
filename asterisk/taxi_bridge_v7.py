@@ -88,6 +88,7 @@ ULAW_CLIP = 32635
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    force=True,
 )
 logger = logging.getLogger("TaxiBridgeV7")
 
@@ -666,9 +667,15 @@ async def main() -> None:
         AUDIOSOCKET_HOST,
         AUDIOSOCKET_PORT,
     )
-    logger.info("🚀 Taxi Bridge v7.0 - instant greeting ready")
-    logger.info("   Listening on %s:%d", AUDIOSOCKET_HOST, AUDIOSOCKET_PORT)
-    logger.info("   Connecting to: %s", WS_URL)
+
+    startup_lines = [
+        "🚀 Taxi Bridge v7.0 - instant greeting ready",
+        f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
+        f"   Connecting to: {WS_URL}",
+    ]
+    for line in startup_lines:
+        print(line, flush=True)
+        logger.info(line)
 
     async with server:
         await server.serve_forever()
