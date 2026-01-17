@@ -2,3 +2,6 @@ project_id = "oerketnvlmptpfvttysy"
 
 [functions.taxi-realtime-v2]
 verify_jwt = false
+
+[functions.taxi-realtime-openai]
+verify_jwt = false
