@@ -4499,8 +4499,67 @@ Do NOT say 'booked' until the tool returns success.]`
           
         }
 
-        case "cancel_booking":
+        case "cancel_booking": {
           console.log(`[${sessionState.callId}] 🚫 Cancelling booking`);
+          
+          // Send cancellation webhook to dispatch
+          const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+          if (DISPATCH_WEBHOOK_URL && (sessionState.hasActiveBooking || sessionState.booking.pickup)) {
+            try {
+              console.log(`[${sessionState.callId}] 📡 Sending cancellation webhook`);
+              
+              // Format phone number for WhatsApp
+              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
+              if (formattedPhone.startsWith('0')) {
+                formattedPhone = formattedPhone.slice(1);
+              }
+              
+              const cancelPayload = {
+                call_id: sessionState.callId,
+                caller_phone: formattedPhone,
+                caller_name: sessionState.customerName,
+                action: "cancel",
+                cancelled_pickup: sessionState.booking.pickup,
+                cancelled_destination: sessionState.booking.destination,
+                cancellation_reason: "customer_request",
+                timestamp: new Date().toISOString()
+              };
+              
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 3000);
+              
+              const cancelResp = await fetch(DISPATCH_WEBHOOK_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(cancelPayload),
+                signal: controller.signal,
+              });
+              
+              clearTimeout(timeoutId);
+              console.log(`[${sessionState.callId}] 📬 Cancellation webhook response: ${cancelResp.status}`);
+            } catch (cancelErr) {
+              console.error(`[${sessionState.callId}] ⚠️ Cancellation webhook failed:`, cancelErr);
+              // Continue with local cancellation even if webhook fails
+            }
+          }
+          
+          // Delete the booking from database using call_id
+          try {
+            const { error: deleteError } = await supabase
+              .from("bookings")
+              .delete()
+              .eq("call_id", sessionState.callId);
+            
+            if (deleteError) {
+              console.error(`[${sessionState.callId}] ⚠️ Failed to delete booking from DB:`, deleteError);
+            } else {
+              console.log(`[${sessionState.callId}] 🗑️ Booking deleted from database for call: ${sessionState.callId}`);
+            }
+          } catch (dbErr) {
+            console.error(`[${sessionState.callId}] ⚠️ DB delete error:`, dbErr);
+          }
+          
+          // Clear session state
           sessionState.hasActiveBooking = false;
           sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
           sessionState.pendingQuote = null;
@@ -4509,8 +4568,9 @@ Do NOT say 'booked' until the tool returns success.]`
           sessionState.lastQuotePromptAt = null;
           sessionState.lastQuotePromptText = null;
           sessionState.lastConfirmedTripKey = null;
-          result = { success: true };
+          result = { success: true, message: "Booking cancelled and removed" };
           break;
+        }
 
         case "modify_booking": {
           console.log(`[${sessionState.callId}] ✏️ Modify request from Ada:`, args);

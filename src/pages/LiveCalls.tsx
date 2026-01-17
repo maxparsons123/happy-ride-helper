@@ -362,14 +362,18 @@ export default function LiveCalls() {
       console.log("[LiveCalls] Cleaned up stale calls");
     };
 
-    // Fetch initial calls on mount
+    // Fetch initial calls on mount (only last 15 minutes)
     const fetchCalls = async () => {
       await cleanupStaleCalls();
+
+      // Only fetch calls from the last 15 minutes
+      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
       const { data, error } = await supabase
         .from("live_calls")
         .select("*")
         .in("status", ["active", "completed", "ended", "disconnected"])
+        .gte("started_at", fifteenMinutesAgo)
         .order("started_at", { ascending: false })
         .limit(20);
 
