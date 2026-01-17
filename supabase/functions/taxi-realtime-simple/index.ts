@@ -260,35 +260,39 @@ STEP 1 - REQUEST QUOTE:
 STEP 2 - CUSTOMER RESPONDS YES:
 - If customer says "yes", "yeah", "go ahead", "book it" → CALL book_taxi with confirmation_state: "confirmed" (same pickup/destination)
 - This confirms the booking with dispatch
-- Then say: "That's booked for you. Is there anything else I can help you with?"
+- Then say EXACTLY: "That's booked for you. Is there anything else I can help you with?"
+- 🚨 MANDATORY: You MUST ask "Is there anything else I can help you with?" - do NOT skip to "Safe travels!"
 
 STEP 3 - CUSTOMER RESPONDS NO:
 - If customer says "no", "cancel", "never mind" → CALL book_taxi with confirmation_state: "rejected"
-- Then say: "No problem, I've cancelled that. Is there anything else I can help you with?"
+- Then say EXACTLY: "No problem, I've cancelled that. Is there anything else I can help you with?"
+- 🚨 MANDATORY: You MUST ask "Is there anything else I can help you with?" - do NOT skip to "Safe travels!"
 
 🚫 FORBIDDEN - NEVER DO THESE:
 - NEVER say fare/price before receiving it from book_taxi result
 - NEVER say "Booked!" before calling book_taxi with confirmation_state: "confirmed"
 - NEVER skip the quote step - ALWAYS call with "request_quote" first
 - NEVER invent or guess fare amounts
+- NEVER say "Safe travels!" immediately after booking - you MUST ask "Is there anything else?" first
 
 If user says "cancel" → CALL cancel_booking function FIRST, then respond.
 If user corrects name → CALL save_customer_name function immediately.
-Call end_call function after saying "Safe travels!".
+
+🚨 STRICT CALL ENDING PROTOCOL - MUST FOLLOW IN ORDER:
+1. After ANY booking action (confirm/reject/cancel), you MUST say: "Is there anything else I can help you with?"
+2. WAIT for the customer to respond
+3. ONLY if customer says "no", "nothing else", "that's all", "bye", etc. → Say "Safe travels!" and call end_call
+4. If customer has another request → Process it normally
+5. NEVER skip step 1 - the "Is there anything else?" question is MANDATORY
 
 🚫 ABSOLUTELY FORBIDDEN - YOU WILL BE CANCELLED IF YOU DO THESE:
 - NEVER say "Booked!", "Your taxi is confirmed", "taxi is on its way", "driver is on the way" unless book_taxi succeeded.
 - NEVER mention a fare amount (£15, €20, $25) unless book_taxi returned that exact value.
 - NEVER mention an ETA (5 minutes, arriving in 8 minutes) unless book_taxi returned that exact value.
-- NEVER say "safe travels" or "have a good trip" until AFTER book_taxi succeeded AND user confirms they're done.
+- NEVER say "safe travels" or "have a good trip" until AFTER book_taxi succeeded AND you asked "Is there anything else?" AND user confirmed they're done.
+- NEVER skip asking "Is there anything else I can help you with?" after a booking action.
 - You CANNOT confirm a booking by speaking. You MUST call the book_taxi function tool FIRST.
 - If you try to confirm without calling book_taxi, your response will be CANCELLED and you'll be forced to call the tool.
-
-AFTER DISPATCH CONFIRMATION (WhatsApp message):
-- When you receive confirmation that the booking is complete and WhatsApp message will be sent, ALWAYS ask: "Is there anything else I can help you with?"
-- Wait for user response before ending the call.
-- If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
-- If user has another request → Process it normally.
 
 BOOKING MODIFICATIONS - AUTOMATIC PROCESSING:
 ⚠️ When customer requests a change, the system AUTOMATICALLY detects and applies it internally.
@@ -1264,6 +1268,10 @@ interface SessionState {
   // Active booking acknowledgement - user must say "keep", "yes", etc. before rebooking
   activeBookingAcknowledged: boolean;
 
+  // "Anything else?" guard - set to true ONLY after Ada asks "Is there anything else I can help you with?"
+  // Until this is true, phrases like "no thanks" should NOT trigger goodbye (user might be rejecting fare)
+  askedAnythingElse: boolean;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -2205,9 +2213,16 @@ Do NOT say 'booked' until the tool returns success.]`
           // === EXPLICIT BYE/GOODBYE DETECTION (HIGHEST PRIORITY) ===
           // If user says "bye" (even multiple times), they want to end the call immediately.
           // This takes priority over fare confirmation, booking prompts, etc.
-          // Also triggers on "no thank you" / "no thanks" which typically follows "anything else?"
-          const isExplicitGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call|no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText) &&
-            // Exclude "bye" in compound phrases like "good bye sweet spot" (unlikely but guard against)
+          // 
+          // IMPORTANT: "No thanks" / "nothing else" phrases should ONLY trigger goodbye
+          // AFTER Ada has asked "Is there anything else I can help you with?" (askedAnythingElse=true).
+          // Otherwise, "no thanks" might mean rejecting a fare quote, not ending the call.
+          const isHardGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText);
+          const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText);
+          
+          // Hard goodbye always works. Soft goodbye only works AFTER Ada asked "anything else?"
+          const isExplicitGoodbye = (isHardGoodbye || (isSoftGoodbye && sessionState.askedAnythingElse)) &&
+            // Exclude "bye" in compound phrases like "going to the airport" (unlikely but guard against)
             !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
           
           if (isExplicitGoodbye && openaiWs && openaiConnected && !sessionState.callEnded) {
@@ -3102,6 +3117,8 @@ Do NOT say 'booked' until the tool returns success.]`
                 setTimeout(() => {
                   console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message: "Is there anything else..."`);
                   
+                  // ✅ CRITICAL: Mark that Ada is asking "anything else?" so goodbye detection works properly
+                  sessionState.askedAnythingElse = true;
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
                     item: {
@@ -3182,6 +3199,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
                 setTimeout(() => {
+                  // ✅ CRITICAL: Mark that Ada is asking "anything else?" so goodbye detection works properly
+                  sessionState.askedAnythingElse = true;
+                  
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
                     item: {
@@ -4776,6 +4796,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            lastModificationPromptKey: null,
            modificationPromptPending: false,
            activeBookingAcknowledged: false,
+           askedAnythingElse: false,
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -4880,6 +4901,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              lastModificationPromptKey: null,
              modificationPromptPending: false,
              activeBookingAcknowledged: false,
+             askedAnythingElse: false,
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
