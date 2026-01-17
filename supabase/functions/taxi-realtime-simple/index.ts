@@ -1378,7 +1378,7 @@ serve(async (req) => {
         bookingContext += `\n\nIMPORTANT RULES (ACTIVE BOOKING):`;
         bookingContext += `\n- Ask ONLY: "Do you want to keep it, change it, or cancel it?"`;
         bookingContext += `\n- Do NOT suggest any new pickup/destination yourself.`;
-        bookingContext += `\n- If caller says a DIFFERENT address, treat it as a change request: ask for confirmation, then call modify_booking.`;
+        bookingContext += `\n- If caller says a DIFFERENT address, treat it as a change request but DO NOT restate the old booking. Wait for the system's modification prompt ("Updated. From A to B. Happy with that?") and follow it exactly.`;
         bookingContext += `\n- Do NOT make up or guess addresses.`;
         prompt += `\n\nCURRENT BOOKING:\n${bookingContext}`;
       } else {
@@ -2313,59 +2313,14 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.pendingAudioBuffer = [];
           }
 
-          // If caller describes a change using a FULL ROUTE (e.g. "picked up at A going to B"),
-          // inject a hard correction so the model doesn't treat B as a pickup and doesn't stall.
-          // This also forces the Modification-First policy.
-          const routeMatch =
-            userText.match(/from\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i) ||
-            userText.match(/pick(?:ed)?\s*up\s*(?:from|at|on)\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i) ||
-            userText.match(/pick\s*up\s*(?:from|at|on)\s+(.+?)\s+(?:going to|go to|to)\s+(.+)/i);
-
+          // Existing booking context for modification logic
           const hasExistingBookingContext =
             sessionState.hasActiveBooking || sessionState.booking.version > 0 || !!sessionState.lastBookTaxiSuccessAt;
 
-          const isBookingChangeUtterance =
-            hasExistingBookingContext &&
-            /\b(change|update|modify)\b/i.test(lowerUserText) &&
-            !!routeMatch;
+          // NOTE: Legacy routeMatch-based modification injection was removed.
+          // It conflicted with the new pendingModification flow and could cause Ada to repeat or use stale addresses.
+          // All modification/correction handling is now done by the block below (AUTO-DETECTION + pendingModification).
 
-          if (isBookingChangeUtterance && openaiWs && openaiConnected) {
-            const pickupHint = (routeMatch?.[1] || "").trim();
-            const destHint = (routeMatch?.[2] || "").trim();
-
-            console.log(
-              `[${sessionState.callId}] 🧭 Route-style change detected → pickup="${pickupHint}", destination="${destHint}"`
-            );
-
-            // Cancel-Clear-Inject protocol to avoid response collisions and stalling
-            if (sessionState.openAiResponseActive) {
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            }
-
-            setTimeout(() => {
-              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-
-              setTimeout(() => {
-                openaiWs?.send(
-                  JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [
-                        {
-                          type: "input_text",
-                          text: `[SYSTEM: The caller wants to change their booking. New route: Pickup="${pickupHint || "pickup"}", Destination="${destHint || "destination"}". Say: "Got it, changing to pickup from ${pickupHint || "pickup"} going to ${destHint || "destination"}. Is that right?" Then WAIT for confirmation. Only after they say yes/yeah, call modify_booking and book_taxi.]`,
-                        },
-                      ],
-                    },
-                  })
-                );
-
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              }, 350);
-            }, 350);
-          }
           
           // === BOOKING MODIFICATION AUTO-DETECTION ===
           // Detect modification intent from user speech and update internally
@@ -3049,7 +3004,27 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
-          
+
+          // If this is a re-quote in an existing booking context, prefer the server-side booking state.
+          // This prevents Ada/tool calls from using stale pickup/destination after a modification.
+          const hasModifiableBookingContext =
+            sessionState.hasActiveBooking || sessionState.booking.version > 0 || !!sessionState.lastBookTaxiSuccessAt;
+          if (hasModifiableBookingContext && sessionState.booking.pickup && sessionState.booking.destination) {
+            const argsPickupNorm = normalizeForComparison(String(args.pickup || ""));
+            const argsDestNorm = normalizeForComparison(String(args.destination || ""));
+            const sessPickupNorm = normalizeForComparison(sessionState.booking.pickup);
+            const sessDestNorm = normalizeForComparison(sessionState.booking.destination);
+
+            if (argsPickupNorm && sessPickupNorm && argsPickupNorm !== sessPickupNorm) {
+              console.log(`[${sessionState.callId}] 🔁 Overriding stale args.pickup ("${args.pickup}") with session pickup ("${sessionState.booking.pickup}")`);
+              args.pickup = sessionState.booking.pickup;
+            }
+            if (argsDestNorm && sessDestNorm && argsDestNorm !== sessDestNorm) {
+              console.log(`[${sessionState.callId}] 🔁 Overriding stale args.destination ("${args.destination}") with session destination ("${sessionState.booking.destination}")`);
+              args.destination = sessionState.booking.destination;
+            }
+          }
+
           // === FIX #1: BLOCK request_quote shortly after a successful booking ONLY if it's the same trip ===
           // We must allow an immediate re-quote if the caller just changed the route.
           if (sessionState.lastBookTaxiSuccessAt && Date.now() - sessionState.lastBookTaxiSuccessAt < 60000) {
@@ -3071,7 +3046,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 message: "Booking already confirmed. Ask: 'Is there anything else I can help you with?'",
                 suppress_response_create: true, // Prevent Ada from speaking on her own
               };
-              
+
               // ✅ INJECT SYSTEM MESSAGE to guide Ada's response and prevent stutter loop
               if (openaiWs && openaiConnected) {
                 if (sessionState.openAiResponseActive) {
@@ -3106,6 +3081,18 @@ Do NOT say 'booked' until the tool returns success.]`
             );
           }
           
+          // === HARD GUARD: Block request_quote while a modification is awaiting approval ===
+          if (sessionState.pendingModification) {
+            console.log(`[${sessionState.callId}] ⛔ Blocking request_quote - pending modification awaiting caller approval`);
+            result = {
+              success: false,
+              error: "pending_modification",
+              needs_clarification: true,
+              ada_message: "Just checking that change first — are you happy with the update?",
+            };
+            break;
+          }
+
           // === EARLY EXIT: Prevent duplicate request_quote while pending ===
           if (sessionState.pendingQuote) {
             const timeSinceLast = Date.now() - sessionState.pendingQuote.timestamp;
