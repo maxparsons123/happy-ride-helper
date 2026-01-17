@@ -1256,6 +1256,9 @@ interface SessionState {
   // AI extraction in progress - blocks Ada from responding until complete
   extractionInProgress: boolean;
 
+  // Active booking acknowledgement - user must say "keep", "yes", etc. before rebooking
+  activeBookingAcknowledged: boolean;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -3135,6 +3138,38 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // STATE: "request_quote" - Get fare/ETA from dispatch (default)
 
+          // === ACTIVE BOOKING GUARD ===
+          // Block request_quote when there's an active booking that hasn't been addressed
+          // User must explicitly say "keep", "yes", "book", "same" etc. before we can rebook
+          if (sessionState.hasActiveBooking && !sessionState.activeBookingAcknowledged) {
+            // Check if user has said something indicating they want to keep/rebook
+            const recentUserTranscripts = sessionState.transcripts
+              .filter(t => t.role === "user")
+              .slice(-3)
+              .map(t => (t.text || "").toLowerCase())
+              .join(" ");
+            
+            const userWantsToKeep = /\b(keep|yes|yeah|book|same|rebook|confirm|that'?s? ?(right|correct|fine|good))\b/i.test(recentUserTranscripts);
+            const userWantsToChange = /\b(change|modify|update|different|new|cancel)\b/i.test(recentUserTranscripts);
+            
+            if (!userWantsToKeep && !userWantsToChange) {
+              console.log(`[${sessionState.callId}] ⛔ BLOCKING request_quote - active booking not yet addressed by user`);
+              result = {
+                success: false,
+                error: "active_booking_not_addressed",
+                needs_clarification: true,
+                ada_message: "You have an active booking. Do you want to keep it, change it, or cancel it?",
+              };
+              break;
+            }
+            
+            // Mark that user has acknowledged the active booking
+            if (userWantsToKeep) {
+              sessionState.activeBookingAcknowledged = true;
+              console.log(`[${sessionState.callId}] ✅ User acknowledged active booking (wants to keep)`);
+            }
+          }
+
           // If this is a re-quote in an existing booking context, prefer the server-side booking state.
           // This prevents Ada/tool calls from using stale pickup/destination after a modification.
           const hasModifiableBookingContext =
@@ -4662,6 +4697,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           pendingDispatchEvents: [],
           pendingModification: null,
           extractionInProgress: false,
+          activeBookingAcknowledged: false,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -4762,6 +4798,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             pendingDispatchEvents: [],
             pendingModification: null,
             extractionInProgress: false,
+            activeBookingAcknowledged: false,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
