@@ -2676,27 +2676,19 @@ Do NOT say 'booked' until the tool returns success.]`
 
           
           // === BOOKING MODIFICATION AUTO-DETECTION (AI-BASED) ===
-          // Use AI extraction instead of regex for reliable modification detection
-          // When there's an existing booking and user says something that sounds like a change,
-          // call taxi-extract-unified to properly decode what they want
+          // When there's an existing booking context and user says something that isn't a simple confirmation,
+          // ALWAYS use AI extraction to properly decode what they want.
+          // This replaces fragile regex patterns that missed valid modifications like "from X to Y".
           
-          // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
-          // IMPORTANT: Require stronger modification signals to avoid false positives from common words
-          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not)\b/i.test(lowerUserText);
-          // Match "from X to Y" pattern with any number of words between (not just one word)
-          const hasFromToPattern = /\bfrom\s+.{2,}\s+to\s+/i.test(lowerUserText);
-          const hasAddressWithDirection = /\b(going\s+to|pick\s*up\s+from|destination|drop\s*off)\b/i.test(lowerUserText) && 
-            (lowerUserText.length > 20); // Must be substantial to include an address
-          const hasPassengerChange = /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText);
-          
-          const mightBeModification = hasExistingBookingContext && 
+          // Only skip AI extraction for clear confirmation phrases (yes/no/correct/etc.)
+          const shouldUseAiExtraction = hasExistingBookingContext && 
             !isConfirmationPhrase &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
-            (hasModificationKeyword || hasFromToPattern || hasAddressWithDirection || hasPassengerChange);
+            lowerUserText.length > 5; // Skip very short utterances like "um", "okay"
           
-          if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, fromTo=${hasFromToPattern}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange})`);
+          if (shouldUseAiExtraction && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 🤖 Active booking context - using AI extraction for: "${userText.substring(0, 60)}..."`);
             console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
