@@ -5265,7 +5265,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
         // === FAST CALLER + BOOKING LOOKUP (before greeting) ===
         // Query BOTH caller info AND active bookings in parallel so Ada knows the context before greeting
-        if (phone && phone !== "unknown") {
+        // DEMO MODE: Skip entirely - force static greeting with no personalization
+        if (!DEMO_SIMPLE_MODE && phone && phone !== "unknown") {
           try {
             const phoneKey = normalizePhone(phone);
             // Also try with + prefix stripped (some old records)
@@ -5319,6 +5320,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             console.error(`[${callId}] Fast caller/booking lookup failed:`, e);
             // Continue without - will ask for info
           }
+        } else if (DEMO_SIMPLE_MODE) {
+          console.log(`[${callId}] 🎭 Demo mode: skipping fast caller/booking lookup - static greeting only`);
         }
 
         // If pre-connected, OpenAI is already ready - just send session update + greeting
@@ -5693,7 +5696,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             // NOTE: Use a loose type here to avoid Deno edge type inference issues.
             let activeBooking: any = null;
 
-            if (state?.hasActiveBooking && phone && phone !== "unknown") {
+            // DEMO MODE: Skip ALL active booking lookups to force static demo greeting
+            if (!DEMO_SIMPLE_MODE && state?.hasActiveBooking && phone && phone !== "unknown") {
               const { data: bookingData, error: bookingError } = await supabase
                 .from("bookings")
                 .select("pickup, destination, passengers, fare, eta, status, booked_at, updated_at")
@@ -5741,6 +5745,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                   );
                 }
               }
+            } else if (DEMO_SIMPLE_MODE) {
+              console.log(`[${callId}] 🎭 Demo mode: skipping early active booking lookup`);
             }
 
             // Lookup GPS first - this determines if we can proceed
