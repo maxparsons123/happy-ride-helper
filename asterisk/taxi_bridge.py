@@ -60,8 +60,8 @@ except (FileNotFoundError, json.JSONDecodeError) as e:
 AST_RATE = 8000   # Asterisk telephony rate (native µ-law)
 AI_RATE = 24000   # AI TTS output rate
 
-# Send PCM 24kHz directly to edge function (OpenAI Realtime native format)
-SEND_NATIVE_ULAW = False
+# Send native 8kHz µ-law to edge function (edge function auto-decodes + resamples)
+SEND_NATIVE_ULAW = True
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 3
