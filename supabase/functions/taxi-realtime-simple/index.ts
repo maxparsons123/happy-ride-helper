@@ -11,6 +11,9 @@ const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// DEMO MODE: force the simple demo script every call (ignore caller history, active bookings, and modifications)
+const DEMO_SIMPLE_MODE = true;
+
 const DEFAULT_COMPANY = "247 Radio Carz";
 const DEFAULT_AGENT = "Ada";
 const DEFAULT_VOICE = "shimmer";
@@ -208,19 +211,11 @@ PERSONALITY: Warm, patient, professional. Speak in 1–2 short sentences. Ask ON
 - Each response = ONE question max, then SILENCE.
 
 =====================================================
-FIRST-TIME CALLER WELCOME:
+DEMO WELCOME (ALWAYS):
 =====================================================
-For ALL first-time callers, say this EXACT welcome:
+ALWAYS start EVERY call with this EXACT welcome message (ignore caller history; NEVER say "welcome back"):
 
 "Hello, and welcome to the Taxibot demo. I'm {{agent_name}}, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. You can switch languages at any time, just say the language you prefer, and we'll remember it for your next booking. So, let's get started. Where would you like to be picked up?"
-
-[WAIT for answer]
-
-=====================================================
-RETURNING CALLER GREETING:
-=====================================================
-For returning callers with known name:
-"Hello [NAME]! Welcome back. Where can I take you today?"
 
 [WAIT for answer]
 
@@ -1365,7 +1360,7 @@ serve(async (req) => {
       .replace(/\{\{company_name\}\}/g, sessionState.companyName)
       .replace(/\{\{language_instruction\}\}/g, languageInstruction);
 
-    if (sessionState.customerName) {
+    if (!DEMO_SIMPLE_MODE && sessionState.customerName) {
       if (sessionState.hasActiveBooking) {
         // Include full active booking details so Ada doesn't hallucinate
         let bookingContext = `Caller is ${sessionState.customerName} with an ACTIVE BOOKING.`;
@@ -1395,7 +1390,7 @@ serve(async (req) => {
         prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
       }
     }
-    
+
     // Inject recent transcripts so Ada only responds to what was actually said
     if (sessionState.transcripts && sessionState.transcripts.length > 0) {
       const recentTranscripts = sessionState.transcripts.slice(-5); // Last 5 turns
@@ -2917,86 +2912,90 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           // === PENDING MODIFICATION CONFIRMATION ===
-          // If user says "yes" after a modification was applied, NOW send the webhook
-          // Check BOTH pendingModification AND modificationPromptPending (fallback for when AI didn't detect changes)
-          const hasPendingMod = sessionState.pendingModification && 
-              Date.now() - sessionState.pendingModification.timestamp < 60000;
-          const hasModPromptPending = sessionState.modificationPromptPending && 
-              sessionState.lastModificationPromptAt && 
-              Date.now() - sessionState.lastModificationPromptAt < 60000;
-          
-          if ((hasPendingMod || hasModPromptPending) &&
-              openaiWs && openaiConnected && !sessionState.callEnded) {
-            
-            const isConfirmingModification = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure|please)\b/i.test(lowerUserText);
-            const isRejectingModification = /\b(no|nope|wrong|change|not right|incorrect)\b/i.test(lowerUserText);
-            
-            if (isConfirmingModification) {
-              console.log(`[${sessionState.callId}] ✅ User confirmed modification - NOW sending webhook for fare (pendingMod=${hasPendingMod}, promptPending=${hasModPromptPending})`);
-              
-              // Clear both flags
-              sessionState.pendingModification = null;
-              sessionState.modificationPromptPending = false;
-              
-              // Cancel any in-flight response
-              if (sessionState.openAiResponseActive) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          // === PENDING MODIFICATION CONFIRMATION ===
+          // Demo mode should NOT do any modification / update flow.
+          if (!DEMO_SIMPLE_MODE) {
+            // If user says "yes" after a modification was applied, NOW send the webhook
+            // Check BOTH pendingModification AND modificationPromptPending (fallback for when AI didn't detect changes)
+            const hasPendingMod = sessionState.pendingModification &&
+                Date.now() - sessionState.pendingModification.timestamp < 60000;
+            const hasModPromptPending = sessionState.modificationPromptPending &&
+                sessionState.lastModificationPromptAt &&
+                Date.now() - sessionState.lastModificationPromptAt < 60000;
+
+            if ((hasPendingMod || hasModPromptPending) &&
+                openaiWs && openaiConnected && !sessionState.callEnded) {
+
+              const isConfirmingModification = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure|please)\b/i.test(lowerUserText);
+              const isRejectingModification = /\b(no|nope|wrong|change|not right|incorrect)\b/i.test(lowerUserText);
+
+              if (isConfirmingModification) {
+                console.log(`[${sessionState.callId}] ✅ User confirmed modification - NOW sending webhook for fare (pendingMod=${hasPendingMod}, promptPending=${hasModPromptPending})`);
+
+                // Clear both flags
+                sessionState.pendingModification = null;
+                sessionState.modificationPromptPending = false;
+
+                // Cancel any in-flight response
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                }
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+                // NOW trigger book_taxi to send webhook and get fare
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: Customer CONFIRMED the modification. NOW call book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" to get the updated fare. Do NOT speak until you receive the fare from dispatch.]`,
+                      }],
+                    },
+                  }));
+
+                  openaiWs?.send(JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio", "text"],
+                      instructions: `Call book_taxi with confirmation_state: "request_quote" now. Wait for fare before speaking.`
+                    }
+                  }));
+                }, 300);
+
+                break;
+              } else if (isRejectingModification) {
+                console.log(`[${sessionState.callId}] ❌ User rejected modification - asking what they want instead`);
+
+                // Clear both flags
+                sessionState.pendingModification = null;
+                sessionState.modificationPromptPending = false;
+
+                // Revert the change (restore old values would require storing them)
+                // For now, just ask what they want
+                setTimeout(() => {
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: Customer rejected the modification. Ask: "Sorry about that. What would you like to change it to?"]`,
+                      }],
+                    },
+                  }));
+
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 300);
+
+                break;
               }
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-              
-              // NOW trigger book_taxi to send webhook and get fare
-              setTimeout(() => {
-                openaiWs?.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_text",
-                      text: `[SYSTEM: Customer CONFIRMED the modification. NOW call book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" to get the updated fare. Do NOT speak until you receive the fare from dispatch.]`,
-                    }],
-                  },
-                }));
-                
-                openaiWs?.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio", "text"],
-                    instructions: `Call book_taxi with confirmation_state: "request_quote" now. Wait for fare before speaking.`
-                  }
-                }));
-              }, 300);
-              
-              break;
-            } else if (isRejectingModification) {
-              console.log(`[${sessionState.callId}] ❌ User rejected modification - asking what they want instead`);
-              
-              // Clear both flags
-              sessionState.pendingModification = null;
-              sessionState.modificationPromptPending = false;
-              
-              // Revert the change (restore old values would require storing them)
-              // For now, just ask what they want
-              setTimeout(() => {
-                openaiWs?.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_text",
-                      text: `[SYSTEM: Customer rejected the modification. Ask: "Sorry about that. What would you like to change it to?"]`,
-                    }],
-                  },
-                }));
-                
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              }, 300);
-              
-              break;
             }
           }
-          
+
           // === PENDING NEW BOOKING CONFIRMATION ===
           // If user says "yes" after Ada read back the addresses for a NEW booking, trigger fare quote
           const hasNewBookingPending = sessionState.newBookingPromptPending && 
@@ -4593,155 +4592,13 @@ Do NOT say 'booked' until the tool returns success.]`
         }
 
         case "modify_booking": {
-          console.log(`[${sessionState.callId}] ✏️ Modify request from Ada:`, args);
-          
-          // === GUARD: Allow modify_booking only if there's an existing active booking OR a booking was confirmed ===
-          // Active bookings loaded from DB are modifiable even if bookingConfirmedThisTurn is false.
-          const hasModifiableBooking =
-            sessionState.hasActiveBooking ||
-            sessionState.booking.version > 0 ||
-            sessionState.lastBookTaxiSuccessAt !== null;
-
-          if (!hasModifiableBooking) {
-            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: No modifiable booking exists yet (hasActiveBooking=${sessionState.hasActiveBooking}, version=${sessionState.booking.version})`);
-            result = {
-              success: false,
-              error: "no_confirmed_booking",
-              message: "There is no active booking to modify yet. Please complete a booking first."
-            };
-            break;
-          }
-          
-          // If booking state is incomplete (missing pickup or destination), reject modification
-          if (!sessionState.booking.pickup || !sessionState.booking.destination) {
-            console.log(`[${sessionState.callId}] ⚠️ MODIFY BLOCKED: Booking incomplete - pickup: "${sessionState.booking.pickup}", dest: "${sessionState.booking.destination}"`);
-            result = {
-              success: false,
-              error: "incomplete_booking",
-              message: "Please confirm the complete booking with book_taxi before making modifications."
-            };
-            break;
-          }
-          
-          // Capture previous value BEFORE making changes
-          const oldValue = 
-            args.field_to_change === "pickup" ? sessionState.booking.pickup :
-            args.field_to_change === "destination" ? sessionState.booking.destination :
-            args.field_to_change === "passengers" ? sessionState.booking.passengers :
-            args.field_to_change === "bags" ? sessionState.booking.bags :
-            null;
-          
-          console.log(`[${sessionState.callId}] 📋 Modifying ${args.field_to_change}: "${oldValue}" → "${args.new_value}"`);
-          
-          // Apply change to session state IMMEDIATELY (no AI extraction here - book_taxi will validate)
-          if (args.field_to_change === "pickup") sessionState.booking.pickup = args.new_value;
-          if (args.field_to_change === "destination") sessionState.booking.destination = args.new_value;
-          if (args.field_to_change === "passengers") sessionState.booking.passengers = parseInt(args.new_value) || 1;
-          if (args.field_to_change === "bags") sessionState.booking.bags = parseInt(args.new_value) || 0;
-          
-          console.log(`[${sessionState.callId}] ✅ Applied modification. Updated booking:`, sessionState.booking);
-          
-          // Sync updated pickup/destination to live_calls for dashboard display
-          await supabase.from("live_calls").update({
-            pickup: sessionState.booking.pickup,
-            destination: sessionState.booking.destination,
-            passengers: sessionState.booking.passengers || 1,
-            updated_at: new Date().toISOString()
-          }).eq("call_id", sessionState.callId);
-          
-          // ALSO update the bookings table with the modification
-          // Use activeBookingCallId if available (from resumption), otherwise current call_id, then phone fallback
-          const callerPhoneNormMod = normalizePhone(sessionState.phone);
-          const bookingCallIdToUpdate = sessionState.activeBookingCallId || sessionState.callId;
-          let bookingUpdateError: any = null;
-          
-          // First try to update by the booking's call_id (most precise)
-          const { error: byCallIdError, count: callIdCount } = await supabase
-            .from("bookings")
-            .update({
-              pickup: sessionState.booking.pickup,
-              destination: sessionState.booking.destination,
-              passengers: sessionState.booking.passengers || 1,
-              updated_at: new Date().toISOString()
-            })
-            .eq("call_id", bookingCallIdToUpdate)
-            .in("status", ["confirmed", "dispatched", "active", "pending"]);
-          
-          // If no rows matched by call_id, fall back to phone lookup (for resumption cases)
-          if (!byCallIdError && (callIdCount === 0 || callIdCount === null)) {
-            const { error: byPhoneError } = await supabase
-              .from("bookings")
-              .update({
-                pickup: sessionState.booking.pickup,
-                destination: sessionState.booking.destination,
-                passengers: sessionState.booking.passengers || 1,
-                updated_at: new Date().toISOString()
-              })
-              .eq("caller_phone", callerPhoneNormMod)
-              .in("status", ["confirmed", "dispatched", "active", "pending"])
-              .order("booked_at", { ascending: false })
-              .limit(1);
-            
-            bookingUpdateError = byPhoneError;
-            if (!byPhoneError) {
-              console.log(`[${sessionState.callId}] ✅ Bookings table updated (by phone): ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
-            }
-          } else {
-            bookingUpdateError = byCallIdError;
-            if (!byCallIdError) {
-              console.log(`[${sessionState.callId}] ✅ Bookings table updated (call_id=${bookingCallIdToUpdate}): ${sessionState.booking.pickup} → ${sessionState.booking.destination}`);
-            }
-          }
-          
-          if (bookingUpdateError) {
-            console.error(`[${sessionState.callId}] Failed to update bookings table:`, bookingUpdateError);
-          }
-          
-          // ✅ CRITICAL: DO NOT CALL DISPATCH WEBHOOK HERE
-          // Instead, force Ada to call book_taxi which sends one clean, up-to-date webhook.
-          // This eliminates the double-webhook race condition.
-          
-          // Increment booking version for each modification
-          sessionState.booking.version = (sessionState.booking.version || 1) + 1;
-          
-          console.log(`[${sessionState.callId}] ✅ Modification applied locally. Ada must now call book_taxi to send webhook.`);
-          
-          result = { 
-            success: true, 
-            modified: args.field_to_change, 
-            old_value: oldValue,
-            new_value: args.new_value,
-            current_booking: {
-              pickup: sessionState.booking.pickup,
-              destination: sessionState.booking.destination,
-              passengers: sessionState.booking.passengers,
-              bags: sessionState.booking.bags
-            },
-            message: `Updated ${args.field_to_change} from "${oldValue}" to "${args.new_value}". Now you MUST call book_taxi with confirmation_state: "request_quote" to get the updated fare and ETA for the new route.`
+          // Demo mode: booking modifications are intentionally disabled.
+          console.log(`[${sessionState.callId}] 🧪 modify_booking called but disabled (DEMO_SIMPLE_MODE=true)`);
+          result = {
+            success: false,
+            error: "disabled_in_demo",
+            message: "Booking updates are disabled for the demo. Please start a new booking instead."
           };
-          
-          // ✅ Inject system message to force Ada to call book_taxi with updated route
-          if (openaiWs) {
-            // Cancel any in-flight response before injecting
-            if (sessionState.openAiResponseActive) {
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            }
-            await new Promise(resolve => setTimeout(resolve, 300));
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            
-            openaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{
-                  type: "input_text",
-                  text: `[SYSTEM: You just modified the booking. The updated route is Pickup="${sessionState.booking.pickup}" Destination="${sessionState.booking.destination}". NOW YOU MUST CALL book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" TO GET THE UPDATED FARE AND ETA. Do NOT confirm anything until you call this tool and receive the fare from dispatch.]`
-                }]
-              }
-            }));
-          }
-          
           break;
         }
 
@@ -5997,87 +5854,97 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
 
             if (phone && phone !== "unknown") {
               const phoneKey = normalizePhone(phone);
-              const altPhone = String(phone || "").replace(/^\+/, "");
+              if (!DEMO_SIMPLE_MODE) {
+                const altPhone = String(phone || "").replace(/^\+/, "");
 
-              const { data: callerData } = await supabase
-                .from("callers")
-                .select("name, last_pickup, last_destination, total_bookings")
-                .eq("phone_number", phoneKey)
-                .maybeSingle();
-
-              if (callerData && state) {
-                state.callerLastPickup = callerData.last_pickup || null;
-                state.callerLastDestination = callerData.last_destination || null;
-                state.callerTotalBookings = callerData.total_bookings || 0;
-                if (!state.customerName && callerData.name) {
-                  state.customerName = callerData.name;
-                }
-                console.log(`[${callId}] 👤 Loaded caller: ${callerData.name || 'no name'}, ${state.callerTotalBookings} bookings`);
-              }
-              
-              // Check for active bookings if not already loaded
-              if (!activeBooking) {
-                // Try both phone formats (normalized digits-only + legacy no-plus)
-                const { data: bookingData } = await supabase
-                  .from("bookings")
-                  .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, updated_at, caller_name")
-                  .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
-                  .in("status", ["confirmed", "dispatched", "active", "pending"])
-                  .order("updated_at", { ascending: false })
-                  .order("booked_at", { ascending: false })
-                  .limit(1)
+                const { data: callerData } = await supabase
+                  .from("callers")
+                  .select("name, last_pickup, last_destination, total_bookings")
+                  .eq("phone_number", phoneKey)
                   .maybeSingle();
-                
-                if (bookingData && state) {
-                  activeBooking = bookingData;
-                  state.hasActiveBooking = true;
-                  state.activeBookingCallId = bookingData.call_id; // Store original booking's call_id for updates
-                  state.booking.pickup = bookingData.pickup;
-                  state.booking.destination = bookingData.destination;
-                  state.booking.passengers = bookingData.passengers;
-                  // Mark as modifiable (this came from an existing booking)
-                  state.booking.version = Math.max(state.booking.version || 0, 1);
-                  
-                  // Update name from booking if not set
-                  if (!state.customerName && bookingData.caller_name) {
-                    state.customerName = bookingData.caller_name;
-                  }
-                  
-                  console.log(`[${callId}] 📦 Found active booking (${bookingData.call_id}): ${bookingData.pickup} → ${bookingData.destination}`);
-                  
-                  // Inject booking context for Ada
-                  if (openaiWs && openaiConnected) {
-                    const customerGreeting = state.customerName 
-                      ? `The caller is ${state.customerName}.` 
-                      : "";
 
-                    // Cancel-Clear-Inject protocol to avoid response collisions
-                    if (state.openAiResponseActive) {
-                      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                      await new Promise(resolve => setTimeout(resolve, 350));
+                if (callerData && state) {
+                  state.callerLastPickup = callerData.last_pickup || null;
+                  state.callerLastDestination = callerData.last_destination || null;
+                  state.callerTotalBookings = callerData.total_bookings || 0;
+                  if (!state.customerName && callerData.name) {
+                    state.customerName = callerData.name;
+                  }
+                  console.log(`[${callId}] 👤 Loaded caller: ${callerData.name || "no name"}, ${state.callerTotalBookings} bookings`);
+                }
+
+                // Check for active bookings if not already loaded
+                if (!activeBooking) {
+                  // Try both phone formats (normalized digits-only + legacy no-plus)
+                  const { data: bookingData } = await supabase
+                    .from("bookings")
+                    .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, updated_at, caller_name")
+                    .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
+                    .in("status", ["confirmed", "dispatched", "active", "pending"])
+                    .order("updated_at", { ascending: false })
+                    .order("booked_at", { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
+
+                  if (bookingData && state) {
+                    activeBooking = bookingData;
+                    state.hasActiveBooking = true;
+                    state.activeBookingCallId = bookingData.call_id; // Store original booking's call_id for updates
+                    state.booking.pickup = bookingData.pickup;
+                    state.booking.destination = bookingData.destination;
+                    state.booking.passengers = bookingData.passengers;
+                    // Mark as modifiable (this came from an existing booking)
+                    state.booking.version = Math.max(state.booking.version || 0, 1);
+
+                    // Update name from booking if not set
+                    if (!state.customerName && bookingData.caller_name) {
+                      state.customerName = bookingData.caller_name;
                     }
 
-                    openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                    await new Promise(resolve => setTimeout(resolve, 350));
+                    console.log(`[${callId}] 📦 Found active booking (${bookingData.call_id}): ${bookingData.pickup} → ${bookingData.destination}`);
 
-                    openaiWs.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{
-                          type: "input_text",
-                          text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask ONLY if they want to keep it, change it, or cancel it. Do NOT suggest a new pickup/destination yourself. If they choose change, ask what they want to change and wait for their answer.]`
-                        }]
+                    // Inject booking context for Ada
+                    if (openaiWs && openaiConnected) {
+                      const customerGreeting = state.customerName
+                        ? `The caller is ${state.customerName}.`
+                        : "";
+
+                      // Cancel-Clear-Inject protocol to avoid response collisions
+                      if (state.openAiResponseActive) {
+                        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                        await new Promise(resolve => setTimeout(resolve, 350));
                       }
-                    }));
 
-                    // Trigger Ada to respond with this context
-                    openaiWs.send(JSON.stringify({ type: "response.create" }));
+                      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                      await new Promise(resolve => setTimeout(resolve, 350));
+
+                      openaiWs.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "user",
+                          content: [{
+                            type: "input_text",
+                            text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask ONLY if they want to keep it, change it, or cancel it. Do NOT suggest a new pickup/destination yourself. If they choose change, ask what they want to change and wait for their answer.]`
+                          }]
+                        }
+                      }));
+
+                      // Trigger Ada to respond with this context
+                      openaiWs.send(JSON.stringify({ type: "response.create" }));
+                    }
                   }
                 }
+              } else {
+                console.log(`[${callId}] 🎭 Demo mode: skipping caller + active booking lookup`);
+                // Ensure we don't accidentally treat the caller as returning / active booking
+                if (state) {
+                  state.customerName = null;
+                  state.hasActiveBooking = false;
+                  state.activeBookingCallId = null;
+                }
+                activeBooking = null;
               }
-            }
 
             // Create/update live call record (non-blocking)
             // ✅ REUSE existing active call card for same phone to avoid creating duplicate cards
