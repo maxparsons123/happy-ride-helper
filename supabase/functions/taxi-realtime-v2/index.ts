@@ -143,20 +143,28 @@ interface SessionState {
 
 // --- Main Handler ---
 serve(async (req) => {
-  // Health check
-  if (req.method === "GET") {
-    return new Response("Taxi Realtime V2 OK", { status: 200 });
-  }
-
-  // WebSocket upgrade
   const upgrade = req.headers.get("upgrade") || "";
-  if (upgrade.toLowerCase() !== "websocket") {
+  const isWebSocket = upgrade.toLowerCase() === "websocket";
+
+  // Only return health responses when this is NOT a WebSocket upgrade.
+  // (WebSocket handshakes are GET requests too.)
+  if (!isWebSocket) {
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204 });
+    }
+
+    if (req.method === "GET") {
+      return new Response("Taxi Realtime V2 OK", { status: 200 });
+    }
+
     return new Response("Expected WebSocket", { status: 426 });
   }
 
   const url = new URL(req.url);
-  const callId = url.searchParams.get("call_id") || `call-${Date.now()}`;
-  const callerPhone = url.searchParams.get("caller_phone") || "";
+
+  // Defaults (will be overridden by the bridge's init message)
+  let callId = url.searchParams.get("call_id") || `call-${Date.now()}`;
+  let callerPhone = url.searchParams.get("caller_phone") || "";
   const agentSlug = url.searchParams.get("agent") || "ada";
 
   const { socket, response } = Deno.upgradeWebSocket(req);
@@ -164,7 +172,7 @@ serve(async (req) => {
   // Initialize Supabase
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // Session state
+  // Session state (call_id/phone will be updated on init)
   const sessionState: SessionState = {
     callId,
     phone: callerPhone,
@@ -177,16 +185,22 @@ serve(async (req) => {
       passengers: 1,
       fare: null,
       eta: null,
-      status: "collecting"
+      status: "collecting",
     },
-    transcripts: []
+    transcripts: [],
   };
 
   let openaiWs: WebSocket | null = null;
 
   // --- Socket Handlers ---
-  socket.onopen = async () => {
-    console.log(`[${callId}] 📞 Call started from ${callerPhone}`);
+  let started = false;
+  let inboundFormat: "ulaw8k" | "pcm16_24k" | null = null;
+
+  const startCallIfNeeded = async () => {
+    if (started) return;
+    started = true;
+
+    console.log(`[${callId}] 📞 Starting call (phone=${callerPhone || "unknown"})`);
 
     // Load agent config
     try {
@@ -202,23 +216,28 @@ serve(async (req) => {
         sessionState.companyName = agent.company_name;
         sessionState.voice = agent.voice || DEFAULT_VOICE;
       }
-    } catch (e) {
+    } catch {
       console.log(`[${callId}] Using default agent config`);
     }
 
-    // Create live_calls record
-    await supabase.from("live_calls").upsert({
-      call_id: callId,
-      caller_phone: callerPhone,
-      status: "active",
-      source: "realtime-v2",
-      started_at: new Date().toISOString(),
-      transcripts: []
-    }, { onConflict: "call_id" });
+    // Create/Update live_calls record
+    await supabase
+      .from("live_calls")
+      .upsert(
+        {
+          call_id: callId,
+          caller_phone: callerPhone,
+          status: "active",
+          source: "realtime-v2",
+          started_at: new Date().toISOString(),
+          transcripts: [],
+        },
+        { onConflict: "call_id" }
+      );
 
     // Connect to OpenAI
     openaiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17",
+      "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17",
       ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]
     );
 
@@ -230,77 +249,82 @@ serve(async (req) => {
       const data = JSON.parse(event.data);
 
       switch (data.type) {
-        // --- Session Ready ---
-        case "session.created":
+        case "session.created": {
           console.log(`[${callId}] ✅ Session created, configuring...`);
-          
+
           const prompt = SYSTEM_PROMPT
             .replace(/\{\{agent_name\}\}/g, sessionState.agentName)
             .replace(/\{\{company_name\}\}/g, sessionState.companyName);
 
-          openaiWs!.send(JSON.stringify({
-            type: "session.update",
-            session: {
-              modalities: ["text", "audio"],
-              instructions: prompt,
-              voice: sessionState.voice,
-              input_audio_format: "pcm16",
-              output_audio_format: "pcm16",
-              input_audio_transcription: { model: "whisper-1" },
-              turn_detection: {
-                type: "server_vad",
-                threshold: 0.4,
-                prefix_padding_ms: 500,
-                silence_duration_ms: 2500  // Wait 2.5s for user to finish speaking
+          openaiWs!.send(
+            JSON.stringify({
+              type: "session.update",
+              session: {
+                modalities: ["text", "audio"],
+                instructions: prompt,
+                voice: sessionState.voice,
+                input_audio_format: "pcm16",
+                output_audio_format: "pcm16",
+                input_audio_transcription: { model: "whisper-1" },
+                turn_detection: {
+                  type: "server_vad",
+                  threshold: 0.4,
+                  prefix_padding_ms: 500,
+                  silence_duration_ms: 2500,
+                },
+                temperature: 0.7,
+                tools: TOOLS,
+                tool_choice: "auto",
               },
-              temperature: 0.7,
-              tools: TOOLS,
-              tool_choice: "auto"
-            }
-          }));
+            })
+          );
           break;
+        }
 
         case "session.updated":
-          console.log(`[${callId}] 📝 Session configured, sending greeting`);
+          console.log(`[${callId}] 📝 Session configured, triggering greeting`);
           openaiWs!.send(JSON.stringify({ type: "response.create" }));
           break;
 
-        // --- Audio Output ---
         case "response.audio.delta":
           if (data.delta) {
-            const audioBytes = Uint8Array.from(atob(data.delta), c => c.charCodeAt(0));
+            const audioBytes = Uint8Array.from(atob(data.delta), (c) => c.charCodeAt(0));
+            // Bridge supports binary PCM16@24kHz messages
             socket.send(audioBytes);
           }
           break;
 
-        // --- Transcripts ---
-        case "conversation.item.input_audio_transcription.completed":
+        case "conversation.item.input_audio_transcription.completed": {
           const userText = data.transcript?.trim();
           if (userText) {
             console.log(`[${callId}] 👤 User: ${userText}`);
             sessionState.transcripts.push({
               role: "user",
               content: userText,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
             });
+            // Also send transcript to the bridge for logging
+            socket.send(JSON.stringify({ type: "transcript", role: "user", text: userText }));
             flushTranscripts(supabase, sessionState);
           }
           break;
+        }
 
-        case "response.audio_transcript.done":
+        case "response.audio_transcript.done": {
           const assistantText = data.transcript?.trim();
           if (assistantText) {
             console.log(`[${callId}] 🤖 Ada: ${assistantText}`);
             sessionState.transcripts.push({
               role: "assistant",
               content: assistantText,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
             });
+            socket.send(JSON.stringify({ type: "transcript", role: "assistant", text: assistantText }));
             flushTranscripts(supabase, sessionState);
           }
           break;
+        }
 
-        // --- Tool Calls ---
         case "response.function_call_arguments.done":
           await handleToolCall(
             data.name,
@@ -328,17 +352,68 @@ serve(async (req) => {
     };
   };
 
-  // Handle incoming audio from SIP bridge
-  socket.onmessage = (event) => {
-    if (event.data instanceof ArrayBuffer && openaiWs?.readyState === WebSocket.OPEN) {
-      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(event.data)));
-      openaiWs.send(JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: base64Audio
-      }));
-    }
+  socket.onopen = () => {
+    console.log(`[${callId}] 🔌 Bridge WebSocket connected (awaiting init...)`);
   };
 
+  // Handle incoming messages from Asterisk bridge:
+  // - string JSON (init)
+  // - binary audio frames (u-law@8k or PCM16@24k)
+  socket.onmessage = async (event) => {
+    try {
+      if (typeof event.data === "string") {
+        const msg = JSON.parse(event.data);
+        if (msg?.type === "init") {
+          // The bridge is authoritative for call_id + phone
+          callId = String(msg.call_id || callId);
+          callerPhone = String(msg.phone || msg.user_phone || callerPhone || "");
+          sessionState.callId = callId;
+          sessionState.phone = callerPhone;
+
+          console.log(`[${callId}] ✅ Init received (phone=${callerPhone || "unknown"})`);
+          socket.send(JSON.stringify({ type: "init_ack", call_id: callId }));
+
+          await startCallIfNeeded();
+          return;
+        }
+
+        // Ignore other JSON messages for now
+        return;
+      }
+
+      if (!(event.data instanceof ArrayBuffer)) return;
+      if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+
+      const incoming = new Uint8Array(event.data);
+
+      // Detect format once (Asterisk bridge default sends 160-byte u-law frames)
+      if (!inboundFormat) {
+        inboundFormat = incoming.byteLength <= 400 ? "ulaw8k" : "pcm16_24k";
+        console.log(`[${callId}] 🎧 Inbound audio format detected: ${inboundFormat} (bytes=${incoming.byteLength})`);
+      }
+
+      let pcm24kBytes: Uint8Array;
+
+      if (inboundFormat === "ulaw8k") {
+        const pcm8k = ulawToPcm16(incoming);
+        const pcm24k = upsamplePcm16(pcm8k, 8000, 24000);
+        pcm24kBytes = int16ToBytesLE(pcm24k);
+      } else {
+        // Assume already PCM16@24k
+        pcm24kBytes = incoming;
+      }
+
+      const base64Audio = bytesToBase64(pcm24kBytes);
+      openaiWs.send(
+        JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: base64Audio,
+        })
+      );
+    } catch (e) {
+      console.error(`[${callId}] ❌ socket.onmessage error:`, e);
+    }
+  };
   socket.onclose = async () => {
     console.log(`[${callId}] 📴 Call ended`);
     openaiWs?.close();
@@ -460,13 +535,74 @@ async function handleToolCall(
 
 // --- Flush transcripts to DB ---
 function flushTranscripts(supabase: any, state: SessionState) {
-  supabase.from("live_calls").update({
-    transcripts: state.transcripts,
-    pickup: state.booking.pickup,
-    destination: state.booking.destination,
-    passengers: state.booking.passengers,
-    fare: state.booking.fare,
-    eta: state.booking.eta,
-    updated_at: new Date().toISOString()
-  }).eq("call_id", state.callId).then(() => {});
+  supabase
+    .from("live_calls")
+    .update({
+      transcripts: state.transcripts,
+      pickup: state.booking.pickup,
+      destination: state.booking.destination,
+      passengers: state.booking.passengers,
+      fare: state.booking.fare,
+      eta: state.booking.eta,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("call_id", state.callId)
+    .then(() => {});
 }
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function int16ToBytesLE(samples: Int16Array): Uint8Array {
+  const out = new Uint8Array(samples.length * 2);
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    out[i * 2] = v & 0xff;
+    out[i * 2 + 1] = (v >> 8) & 0xff;
+  }
+  return out;
+}
+
+// μ-law (G.711) → PCM16
+function ulawToPcm16(ulaw: Uint8Array): Int16Array {
+  const out = new Int16Array(ulaw.length);
+  for (let i = 0; i < ulaw.length; i++) {
+    let u = (~ulaw[i]) & 0xff;
+    const sign = u & 0x80;
+    const exponent = (u >> 4) & 0x07;
+    const mantissa = u & 0x0f;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+    out[i] = sign ? -sample : sample;
+  }
+  return out;
+}
+
+// Simple linear-resample for PCM16 (sufficient for upsample 8k → 24k)
+function upsamplePcm16(input: Int16Array, fromRate: number, toRate: number): Int16Array {
+  if (fromRate === toRate) return input;
+
+  const ratio = toRate / fromRate;
+  const outLen = Math.max(1, Math.floor(input.length * ratio));
+  const out = new Int16Array(outLen);
+
+  for (let i = 0; i < outLen; i++) {
+    const pos = i / ratio;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+
+    const s0 = input[Math.min(idx, input.length - 1)];
+    const s1 = input[Math.min(idx + 1, input.length - 1)];
+    out[i] = (s0 + (s1 - s0) * frac) as unknown as number;
+  }
+
+  return out;
+}
+
