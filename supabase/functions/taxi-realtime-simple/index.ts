@@ -532,6 +532,7 @@ const STT_CORRECTIONS: Record<string, string> = {
   "david rose": "David Road",
   "davie road": "David Road",
   "davey road": "David Road",
+  "davery road": "David Road",
   "david wrote": "David Road",
   "high street": "High Street",
   "hi street": "High Street",
@@ -3879,8 +3880,19 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           // 3. Compare Ada's interpretation vs AI extraction
-          const adaPickup = args.pickup || "";
-          const adaDestination = args.destination || "";
+          // IMPORTANT: Apply STT corrections to Ada's addresses too (she may have used raw STT)
+          const adaPickupRaw = args.pickup || "";
+          const adaDestinationRaw = args.destination || "";
+          const adaPickup = correctTranscript(adaPickupRaw);
+          const adaDestination = correctTranscript(adaDestinationRaw);
+          
+          if (adaPickup !== adaPickupRaw) {
+            console.log(`[${sessionState.callId}] 🔧 STT correction on Ada pickup: "${adaPickupRaw}" → "${adaPickup}"`);
+          }
+          if (adaDestination !== adaDestinationRaw) {
+            console.log(`[${sessionState.callId}] 🔧 STT correction on Ada destination: "${adaDestinationRaw}" → "${adaDestination}"`);
+          }
+          
           const extractedPickup = extractedBooking.pickup || "";
           const extractedDestination = extractedBooking.destination || "";
           
