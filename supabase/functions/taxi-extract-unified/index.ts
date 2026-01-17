@@ -65,40 +65,49 @@ ${aliasInstruction}
 EXTRACTION RULES (NEW BOOKING)
 ==================================================
 1. **QUESTION-ANSWER FLOW (HIGHEST PRIORITY)**:
-   - When ADA asks "where would you like to be picked up?" → the CUSTOMER's next response is the PICKUP
-   - When ADA asks "what is your destination?" or "where are you going?" → the CUSTOMER's next response is the DESTINATION
-   - When ADA asks "how many passengers/people?" → the CUSTOMER's next response is PASSENGERS
-   - The Q&A flow OVERRIDES keyword detection. If Ada asks for pickup and user says "18 Exmoor Road", that IS the pickup even without "from" keyword.
+   - The transcript includes [CONTEXT: Ada asked: "..."] before each customer response
+   - ALWAYS use this context to determine what field the customer is answering
+   - When Ada asks "where would you like to be picked up?" → customer's response is PICKUP
+   - When Ada asks "what is your destination?" or "where are you going?" → customer's response is DESTINATION
+   - When Ada asks "how many passengers/people?" → customer's response is PASSENGERS
+   - When Ada repeats a question (e.g., "Sorry, what is your destination again?") → this is a CORRECTION, update that field
+   - The Q&A flow OVERRIDES keyword detection. If Ada asks for pickup and user says "18 Exmoor Road", that IS the pickup.
 
-2. **Location Detection (Secondary - use when no clear Q&A context)**:
+2. **CORRECTIONS (CRITICAL)**:
+   - If a customer gives an address after Ada summarizes/confirms → check which field Ada is confirming
+   - If customer says "no, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
+   - If customer corrects after "Is that correct?" → update the corrected field
+   - LATEST customer response for a field ALWAYS wins over earlier responses
+
+3. **Location Detection (Secondary - use when no Q&A context)**:
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
    - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
-   - 'nearest X' or 'closest X' for PICKUP (e.g., 'from the nearest tube station') → set nearest_pickup = 'tube station', leave pickup_location EMPTY
-   - 'nearest X' or 'closest X' for DROPOFF (e.g., 'take me to the nearest hospital') → set nearest_dropoff = 'hospital', leave dropoff_location EMPTY
+   - 'nearest X' or 'closest X' for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY
+   - 'nearest X' or 'closest X' for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY
    - 'as directed' or no destination → dropoff_location = 'as directed'
 
-3. **Address Preservation - CRITICAL**:
+4. **Address Preservation - CRITICAL**:
    - Return EXACT text the user typed
    - DO NOT guess, correct spelling, add/remove postcodes, or change punctuation
    - Preserve house numbers with letters: "52A", "1214B", "7b"
 
-4. **Time Handling**:
+5. **Time Handling**:
    - Convert to 'YYYY-MM-DD HH:MM' (24-hour)
    - 'now', 'asap' → 'ASAP'
    - 'in X minutes' → calculate from current time
    - Time in past → assume tomorrow
 
-5. **Passengers vs Luggage**:
+6. **Passengers vs Luggage**:
    - "two passengers" → passengers = 2
    - "two bags/suitcases" → luggage = "2 bags"
    - Context matters: answer to "how many passengers?" → passengers
 
-6. **Vehicle Types**:
+7. **Vehicle Types**:
    - saloon, estate, MPV, minibus, 6-seater, 8-seater
    - Only set if explicitly requested
 
-7. **Special Requests**:
+8. **Special Requests**:
    - "ring when outside", "wheelchair access", "child seat", driver requests
    - Do NOT include phone numbers
 
@@ -457,11 +466,29 @@ serve(async (req) => {
       is_modification
     );
 
-    // Format conversation for the AI
-    let conversationText = "=== CONVERSATION TRANSCRIPT ===\n";
-    for (const msg of conversation) {
+    // Format conversation with explicit Q&A pairing for better extraction
+    // Each customer message is paired with the preceding Ada question
+    let conversationText = "=== CONVERSATION TRANSCRIPT (Q&A PAIRS) ===\n";
+    let lastAdaQuestion: string | null = null;
+    
+    for (let i = 0; i < conversation.length; i++) {
+      const msg = conversation[i];
       const role = msg.role === "user" ? "CUSTOMER" : msg.role === "assistant" ? "ADA" : "SYSTEM";
-      conversationText += `${role}: ${msg.text}\n`;
+      
+      if (msg.role === "assistant") {
+        // Track Ada's last question for context
+        lastAdaQuestion = msg.text;
+        conversationText += `ADA: ${msg.text}\n`;
+      } else if (msg.role === "user") {
+        // Include the preceding Ada question context for each customer response
+        if (lastAdaQuestion) {
+          conversationText += `[CONTEXT: Ada asked: "${lastAdaQuestion}"]\n`;
+        }
+        conversationText += `CUSTOMER RESPONSE: ${msg.text}\n`;
+        conversationText += `---\n`;
+      } else {
+        conversationText += `SYSTEM: ${msg.text}\n`;
+      }
     }
 
     console.log(`[taxi-extract-unified] Processing ${conversation.length} messages, is_modification=${is_modification}`);
