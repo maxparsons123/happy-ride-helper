@@ -4192,9 +4192,11 @@ Do NOT say 'booked' until the tool returns success.]`
                      lastPrompt: spokenMessage || null
                    };
 
-                   // ✅ Mark that we're about to prompt the fare - prevents broadcast handler from duplicating
-                   sessionState.lastQuotePromptAt = Date.now();
-                   sessionState.lastQuotePromptText = spokenMessage;
+                   // ⚠️ DO NOT set lastQuotePromptAt here! Let the broadcast handler set it AFTER
+                   // actually injecting the speech. Otherwise the broadcast handler will think
+                   // Ada already spoke and skip the actual speech.
+                   // sessionState.lastQuotePromptAt = Date.now();
+                   // sessionState.lastQuotePromptText = spokenMessage;
                    
                    // ✅ CRITICAL: Clear pendingModification when fare arrives - we've moved past the modification stage
                    if (sessionState.pendingModification) {
