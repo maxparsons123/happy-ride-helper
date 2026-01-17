@@ -2697,19 +2697,24 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
           // IMPORTANT: Require stronger modification signals to avoid false positives from common words
-          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not|from\s+\w+\s+to\s+\w+)\b/i.test(lowerUserText);
+          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not)\b/i.test(lowerUserText);
           const hasAddressWithDirection = /\b(going\s+to|pick\s*up\s+from|destination|drop\s*off)\b/i.test(lowerUserText) && 
             (lowerUserText.length > 20); // Must be substantial to include an address
           const hasPassengerChange = /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText);
+          // NEW: Detect when user mentions "booking" with addresses - likely restating or modifying their trip
+          const hasBookingWithAddresses = /\b(booking|book|taxi|cab)\b/i.test(lowerUserText) &&
+            /\b(from|to|going)\b/i.test(lowerUserText) &&
+            (lowerUserText.length > 25);
           
           const mightBeModification = hasExistingBookingContext && 
             !isConfirmationPhrase &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
-            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange);
+            !sessionState.pendingQuote &&
+            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange || hasBookingWithAddresses);
           
           if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange})`);
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange}, bookingReq=${hasBookingWithAddresses})`);
             console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
@@ -2790,11 +2795,29 @@ Do NOT say 'booked' until the tool returns success.]`
               const hasChanges = pickupChanged || destinationChanged || passengersChanged || bagsChanged;
               
               if (!hasChanges) {
-                console.log(`[${sessionState.callId}] AI extraction found no changes from current booking`);
-                // Clear extraction flag - no changes, let Ada respond normally
+                console.log(`[${sessionState.callId}] 🔄 AI extraction found SAME addresses as current booking - user is restating their trip`);
                 sessionState.extractionInProgress = false;
-                // Trigger a response since we blocked VAD earlier
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                
+                // User restated the same trip they already have booked
+                // Inject a system message to remind Ada to acknowledge this
+                setTimeout(() => {
+                  const pickup = sessionState.booking.pickup || "pickup";
+                  const destination = sessionState.booking.destination || "destination";
+                  
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: The customer mentioned the same trip they already have booked (${pickup} to ${destination}). Acknowledge their existing booking and ask: "You already have that booking. Would you like me to keep it, change it, or cancel it?"]`,
+                      }],
+                    },
+                  }));
+                  
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                }, 300);
                 return;
               }
               
