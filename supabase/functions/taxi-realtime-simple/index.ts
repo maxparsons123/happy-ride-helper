@@ -3165,10 +3165,16 @@ Do NOT say 'booked' until the tool returns success.]`
 
           // === SAFETY: Clear pre-emptive extraction guard if no AI extraction was triggered ===
           // The pre-emptive guard in speech_stopped blocks Ada for users with active bookings.
-          // If we processed the transcript and didn't need extraction, clear the guard.
+          // If we processed the transcript and didn't need extraction, clear the guard AND trigger response.
           if (sessionState.extractionInProgress && !mightBeModification) {
-            console.log(`[${sessionState.callId}] 🔓 Clearing pre-emptive extraction guard (no modification/extraction needed)`);
+            console.log(`[${sessionState.callId}] 🔓 Clearing pre-emptive extraction guard (no modification/extraction needed) - triggering response`);
             sessionState.extractionInProgress = false;
+            
+            // CRITICAL: The VAD response was cancelled, so we must manually trigger a response
+            // Otherwise Ada stays silent after user spoke
+            if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
           }
         }
         break;
