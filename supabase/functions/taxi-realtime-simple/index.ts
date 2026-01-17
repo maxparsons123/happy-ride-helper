@@ -2748,16 +2748,21 @@ Do NOT say 'booked' until the tool returns success.]`
           const hasBookingWithAddresses = /\b(booking|book|taxi|cab)\b/i.test(lowerUserText) &&
             /\b(from|to|going)\b/i.test(lowerUserText) &&
             (lowerUserText.length > 25);
+          // NEW: Detect simple "to [place]" patterns when user has active booking - they're giving a new destination
+          // E.g., "to Wolverhampton", "to Manchester", "now to the airport"
+          const hasSimpleToDestination = /\b(to|now\s+to)\s+\w+/i.test(lowerUserText) && 
+            lowerUserText.length >= 10 && lowerUserText.length <= 50 &&
+            !isConfirmationPhrase;
           
           const mightBeModification = hasExistingBookingContext && 
             !isConfirmationPhrase &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
             !sessionState.pendingQuote &&
-            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange || hasBookingWithAddresses);
+            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange || hasBookingWithAddresses || hasSimpleToDestination);
           
           if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange}, bookingReq=${hasBookingWithAddresses})`);
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange}, bookingReq=${hasBookingWithAddresses}, simpleTo=${hasSimpleToDestination})`);
             console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
