@@ -1294,7 +1294,9 @@ serve(async (req) => {
     return new Response("Expected WebSocket", { status: 426, headers: corsHeaders });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
+  // Increase idle timeout to reduce abrupt disconnects while waiting for dispatch callbacks
+  // (Deno will manage protocol-level ping/pong internally based on this timeout.)
+  const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 120_000 });
   
   let openaiWs: WebSocket | null = null;
   let state: SessionState | null = null;
