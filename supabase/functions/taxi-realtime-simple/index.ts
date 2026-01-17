@@ -3281,6 +3281,17 @@ Do NOT say 'booked' until the tool returns success.]`
         case "save_location": {
           console.log(`[${sessionState.callId}] 📍 Saving location: ${args.location}`);
           
+          // DEMO_SIMPLE_MODE: Skip geocoding, desktop app will handle address verification
+          if (DEMO_SIMPLE_MODE) {
+            console.log(`[${sessionState.callId}] 🎭 DEMO MODE: Skipping geocode, desktop will verify`);
+            result = { 
+              success: true, 
+              message: `Location noted: ${args.location}. Desktop app will handle address verification.`,
+              location_raw: args.location
+            };
+            break;
+          }
+          
           try {
             // Call geocode function to convert location to coordinates
             const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -3863,10 +3874,14 @@ Do NOT say 'booked' until the tool returns success.]`
             nearest_dropoff?: string;
           } = {};
           
-          // ALWAYS run AI extraction for accurate address capture
-          // AI extraction (Gemini) analyzes the full conversation and produces cleaner addresses
-          // than Ada's raw tool arguments which may contain STT errors
-          if (conversationForExtraction.length > 0) {
+          // DEMO_SIMPLE_MODE: Skip AI extraction, desktop app will handle address verification
+          if (DEMO_SIMPLE_MODE) {
+            console.log(`[${sessionState.callId}] 🎭 DEMO MODE: Skipping AI extraction for quote, using Ada's args. Desktop will verify addresses.`);
+            // Just use Ada's STT-corrected args directly
+          } else if (conversationForExtraction.length > 0) {
+            // ALWAYS run AI extraction for accurate address capture
+            // AI extraction (Gemini) analyzes the full conversation and produces cleaner addresses
+            // than Ada's raw tool arguments which may contain STT errors
             try {
               console.log(`[${sessionState.callId}] 🧠 Running AI extraction for accurate addresses...`);
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
@@ -4720,11 +4735,7 @@ Do NOT say 'booked' until the tool returns success.]`
         case "verify_booking": {
           console.log(`[${sessionState.callId}] 🔍 Pre-confirmation booking verification...`);
           
-          // Run AI extraction on full conversation to get all booking components
-          const conversationForVerification = sessionState.transcripts
-            .filter(t => t.role === "user" || t.role === "assistant")
-            .slice(-15); // More context for thorough extraction
-          
+          // DEMO_SIMPLE_MODE: Skip AI extraction, use session state directly (desktop will verify)
           let verifiedBooking: {
             pickup?: string | null;
             destination?: string | null;
@@ -4738,43 +4749,63 @@ Do NOT say 'booked' until the tool returns success.]`
             extraction_notes?: string;
           } = {};
           
-          if (conversationForVerification.length > 0) {
-            try {
-              // Determine if this is a travel hub trip (needs luggage)
-              const recentText = conversationForVerification
-                .map(t => t.text.toLowerCase())
-                .join(" ");
-              const isTravelHub = /airport|station|terminal|heathrow|gatwick|stansted|luton|birmingham|manchester|king'?s cross|st pancras|euston|paddington|victoria|coach station/i.test(recentText);
-              
-              console.log(`[${sessionState.callId}] 🔍 Travel hub trip: ${isTravelHub}, phone: ${sessionState.phone}`);
-              
-              const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-                },
-                body: JSON.stringify({
-                  conversation: conversationForVerification,
-                  caller_name: sessionState.customerName,
-                  caller_phone: normalizePhone(sessionState.phone), // For alias lookup
-                  is_travel_hub_trip: isTravelHub,
-                  is_modification: false,
-                  current_booking: sessionState.booking.pickup ? {
-                    pickup: sessionState.booking.pickup,
-                    destination: sessionState.booking.destination,
-                    passengers: sessionState.booking.passengers,
-                    luggage: sessionState.booking.bags
-                  } : undefined
-                })
-              });
-              
-              if (extractionResponse.ok) {
-                verifiedBooking = await extractionResponse.json();
-                console.log(`[${sessionState.callId}] 🔍 Verified booking:`, verifiedBooking);
+          if (DEMO_SIMPLE_MODE) {
+            console.log(`[${sessionState.callId}] 🎭 DEMO MODE: Skipping AI extraction, using session state. Desktop will verify addresses.`);
+            verifiedBooking = {
+              pickup: sessionState.booking.pickup || null,
+              destination: sessionState.booking.destination || null,
+              passengers: sessionState.booking.passengers || 1,
+              luggage: sessionState.booking.bags ? String(sessionState.booking.bags) : null,
+              vehicle_type: sessionState.booking.vehicle_type || "saloon",
+              pickup_time: "now",
+              missing_fields: [],
+              confidence: "high",
+              extraction_notes: "Demo mode - addresses not verified by AI"
+            };
+          } else {
+            // Run AI extraction on full conversation to get all booking components
+            const conversationForVerification = sessionState.transcripts
+              .filter(t => t.role === "user" || t.role === "assistant")
+              .slice(-15); // More context for thorough extraction
+            
+            if (conversationForVerification.length > 0) {
+              try {
+                // Determine if this is a travel hub trip (needs luggage)
+                const recentText = conversationForVerification
+                  .map(t => t.text.toLowerCase())
+                  .join(" ");
+                const isTravelHub = /airport|station|terminal|heathrow|gatwick|stansted|luton|birmingham|manchester|king'?s cross|st pancras|euston|paddington|victoria|coach station/i.test(recentText);
+                
+                console.log(`[${sessionState.callId}] 🔍 Travel hub trip: ${isTravelHub}, phone: ${sessionState.phone}`);
+                
+                const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+                  },
+                  body: JSON.stringify({
+                    conversation: conversationForVerification,
+                    caller_name: sessionState.customerName,
+                    caller_phone: normalizePhone(sessionState.phone), // For alias lookup
+                    is_travel_hub_trip: isTravelHub,
+                    is_modification: false,
+                    current_booking: sessionState.booking.pickup ? {
+                      pickup: sessionState.booking.pickup,
+                      destination: sessionState.booking.destination,
+                      passengers: sessionState.booking.passengers,
+                      luggage: sessionState.booking.bags
+                    } : undefined
+                  })
+                });
+                
+                if (extractionResponse.ok) {
+                  verifiedBooking = await extractionResponse.json();
+                  console.log(`[${sessionState.callId}] 🔍 Verified booking:`, verifiedBooking);
+                }
+              } catch (extractErr) {
+                console.error(`[${sessionState.callId}] Verification extraction failed:`, extractErr);
               }
-            } catch (extractErr) {
-              console.error(`[${sessionState.callId}] Verification extraction failed:`, extractErr);
             }
           }
           
