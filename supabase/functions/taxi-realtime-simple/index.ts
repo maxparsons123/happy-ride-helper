@@ -3826,31 +3826,12 @@ Do NOT say 'booked' until the tool returns success.]`
             missing_fields?: string[];
           } = {};
           
-          // Pre-check: Are Ada's pickup and destination the same? (common error that needs extraction)
-          const adaPickupPreCheck = normalizeForComparison(args.pickup || "");
-          const adaDestPreCheck = normalizeForComparison(args.destination || "");
-          const pickupEqualsDestination = adaPickupPreCheck && adaDestPreCheck && adaPickupPreCheck === adaDestPreCheck;
-          
-          // ALSO check if Ada might be using stale booking data (modification guard)
-          // This catches cases where Ada says "Sweet Spot" in conversation but passes "Liverpool" in args
-          const existingDest = sessionState.booking?.destination;
-          const existingPickup = sessionState.booking?.pickup;
-          const adaUsingStaleDest = existingDest && 
-            normalizeForComparison(args.destination || "") === normalizeForComparison(existingDest) &&
-            sessionState.hasActiveBooking;
-          const adaUsingStalePickup = existingPickup && 
-            normalizeForComparison(args.pickup || "") === normalizeForComparison(existingPickup) &&
-            sessionState.hasActiveBooking;
-          
-          // Run extraction if: pickup=destination OR Ada is reusing active booking addresses (possible stale data)
-          const needsExtractionValidation = pickupEqualsDestination || adaUsingStaleDest || adaUsingStalePickup;
-          
-          if (needsExtractionValidation && conversationForExtraction.length > 0) {
-            const reason = pickupEqualsDestination ? "pickup=destination" : 
-              adaUsingStaleDest ? "possible stale destination from active booking" :
-              "possible stale pickup from active booking";
+          // ALWAYS run AI extraction for accurate address capture
+          // AI extraction (Gemini) analyzes the full conversation and produces cleaner addresses
+          // than Ada's raw tool arguments which may contain STT errors
+          if (conversationForExtraction.length > 0) {
             try {
-              console.log(`[${sessionState.callId}] 🔍 Running AI extraction (${reason})...`);
+              console.log(`[${sessionState.callId}] 🧠 Running AI extraction for accurate addresses...`);
               const extractionResponse = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
                 method: "POST",
                 headers: {
@@ -3869,14 +3850,13 @@ Do NOT say 'booked' until the tool returns success.]`
               
               if (extractionResponse.ok) {
                 extractedBooking = await extractionResponse.json();
-                console.log(`[${sessionState.callId}] 🔍 AI Extraction result:`, extractedBooking);
+                console.log(`[${sessionState.callId}] 🧠 AI Extraction result:`, extractedBooking);
               }
             } catch (extractErr) {
-              console.error(`[${sessionState.callId}] AI extraction failed:`, extractErr);
+              console.error(`[${sessionState.callId}] AI extraction failed, using Ada's args:`, extractErr);
             }
-          } else if (conversationForExtraction.length > 0) {
-            // Skip extraction for normal bookings - log but don't wait
-            console.log(`[${sessionState.callId}] ⚡ Skipping AI extraction (addresses look valid, no active booking overlap)`);
+          } else {
+            console.log(`[${sessionState.callId}] ⚠️ No conversation history for extraction, using Ada's args`);
           }
           
           // 3. Compare Ada's interpretation vs AI extraction
