@@ -1264,6 +1264,8 @@ interface SessionState {
   askedAnythingElseAt: number | null;
   // Configurable grace period (from agent.goodbye_grace_ms) - how long to wait before accepting soft goodbyes
   goodbyeGraceMs: number;
+  // Flag to allow confirmation response through the "anything else" guard
+  confirmationResponsePending: boolean;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1615,7 +1617,8 @@ serve(async (req) => {
         // ✅ "ANYTHING ELSE" GUARD: After Ada asks "Is there anything else I can help with?",
         // block VAD-triggered responses during the grace period to let the user respond.
         // This prevents Ada from hallucinating cancellations or other statements.
-        if (sessionState.askedAnythingElse && sessionState.askedAnythingElseAt) {
+        // BUT: Allow the confirmation response itself through (confirmationResponsePending flag)
+        if (sessionState.askedAnythingElse && sessionState.askedAnythingElseAt && !sessionState.confirmationResponsePending) {
           const msSinceAsked = Date.now() - sessionState.askedAnythingElseAt;
           const waitPeriodMs = sessionState.goodbyeGraceMs || 3000;
           
@@ -1626,6 +1629,12 @@ serve(async (req) => {
             sessionState.discardCurrentResponseAudio = true;
             break;
           }
+        }
+        
+        // Clear confirmationResponsePending after allowing one response through
+        if (sessionState.confirmationResponsePending) {
+          console.log(`[${sessionState.callId}] ✅ Allowing confirmation response through guard`);
+          sessionState.confirmationResponsePending = false;
         }
 
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
@@ -1644,6 +1653,13 @@ serve(async (req) => {
        case "response.done":
          sessionState.openAiResponseActive = false;
          sessionState.discardCurrentResponseAudio = false;
+
+         // ✅ If we just finished speaking the confirmation message, NOW set the askedAnythingElseAt timestamp
+         // This ensures the grace period starts AFTER Ada finishes speaking, not when we sent the response.create
+         if (sessionState.askedAnythingElse && !sessionState.askedAnythingElseAt) {
+           sessionState.askedAnythingElseAt = Date.now();
+           console.log(`[${sessionState.callId}] ⏱️ Started "anything else" grace period (${sessionState.goodbyeGraceMs || 3000}ms)`);
+         }
 
          // If we tried to speak while a response was in-flight, do it now.
          if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
@@ -5225,6 +5241,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            askedAnythingElse: false,
            askedAnythingElseAt: null,
            goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
+           confirmationResponsePending: false,
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -5338,6 +5355,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              askedAnythingElse: false,
              askedAnythingElseAt: null,
              goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
+             confirmationResponsePending: false,
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -5738,8 +5756,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             state.bookingConfirmedThisTurn = true;
             state.pendingQuote = null; // Clear quote
             // ✅ CRITICAL: Set askedAnythingElse so goodbye enforcement waits for user response
+            // BUT don't set askedAnythingElseAt yet - that should happen AFTER Ada finishes speaking
             state.askedAnythingElse = true;
-            state.askedAnythingElseAt = Date.now();
+            // Mark that we're about to send the confirmation response (bypass the guard)
+            state.confirmationResponsePending = true;
           }
           
           // Build the confirmation message for Ada to speak
