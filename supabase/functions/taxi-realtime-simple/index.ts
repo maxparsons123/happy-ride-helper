@@ -1287,6 +1287,8 @@ serve(async (req) => {
   let openaiConnected = false;
   let preConnected = false; // Track if we pre-connected before init
   let pendingGreeting = false; // Track if greeting should fire when OpenAI ready
+  let dispatchChannel: ReturnType<typeof supabase.channel> | null = null; // Track for cleanup
+  let isConnectionClosed = false; // Prevent operations after cleanup
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   // --- Connect to OpenAI (can be called early for pre-connection) ---
@@ -2156,9 +2158,13 @@ Do NOT say 'booked' until the tool returns success.]`
         console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait ${vadSilenceMs}ms before responding`);
         sessionState.speechStopTime = Date.now();
         
-        // Track speech duration for STT metrics
+        // Track speech duration for STT metrics (cap array to prevent memory leaks)
         if (speechDuration > 0) {
           sessionState.sttMetrics.speechDurations.push(speechDuration);
+          // Cap to last 100 entries to prevent unbounded growth
+          if (sessionState.sttMetrics.speechDurations.length > 100) {
+            sessionState.sttMetrics.speechDurations.shift();
+          }
           const durations = sessionState.sttMetrics.speechDurations;
           sessionState.sttMetrics.avgSpeechDurationMs = durations.reduce((a, b) => a + b, 0) / durations.length;
         }
@@ -2204,9 +2210,13 @@ Do NOT say 'booked' until the tool returns success.]`
           ? Date.now() - sessionState.speechStopTime 
           : 0;
         
-        // Track transcript delay for STT metrics
+        // Track transcript delay for STT metrics (cap array to prevent memory leaks)
         if (transcriptDelay > 0) {
           sessionState.sttMetrics.transcriptDelays.push(transcriptDelay);
+          // Cap to last 100 entries to prevent unbounded growth
+          if (sessionState.sttMetrics.transcriptDelays.length > 100) {
+            sessionState.sttMetrics.transcriptDelays.shift();
+          }
           const delays = sessionState.sttMetrics.transcriptDelays;
           sessionState.sttMetrics.avgTranscriptDelayMs = delays.reduce((a, b) => a + b, 0) / delays.length;
         }
@@ -5427,7 +5437,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         }));
 
         // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
-        const dispatchChannel = supabase.channel(`dispatch_${callId}`);
+        dispatchChannel = supabase.channel(`dispatch_${callId}`);
         
         dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
           const { message, fare, eta, eta_minutes, callback_url } = payload.payload || {};
@@ -5451,8 +5461,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
           console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
 
-          if (!spokenMessage || !openaiWs || !openaiConnected) {
-            console.log(`[${callId}] ⚠️ Cannot process ask_confirm - no message or OpenAI not connected`);
+          if (!spokenMessage || !openaiWs || !openaiConnected || isConnectionClosed) {
+            console.log(`[${callId}] ⚠️ Cannot process ask_confirm - no message, OpenAI not connected, or connection closed`);
             return;
           }
 
@@ -5664,8 +5674,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           const { message: sayMessage } = payload.payload || {};
           console.log(`[${callId}] 📥 DISPATCH say received: "${sayMessage}"`);
           
-          if (!sayMessage || !openaiWs || !openaiConnected) {
-            console.log(`[${callId}] ⚠️ Cannot process dispatch say - no message or OpenAI not connected`);
+          if (!sayMessage || !openaiWs || !openaiConnected || isConnectionClosed) {
+            console.log(`[${callId}] ⚠️ Cannot process dispatch say - no message, OpenAI not connected, or connection closed`);
             return;
           }
           
@@ -5696,6 +5706,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         
         dispatchChannel.on("broadcast", { event: "dispatch_hangup" }, async () => {
           console.log(`[${callId}] 📥 DISPATCH hangup received`);
+          if (isConnectionClosed) return;
           if (state) state.callEnded = true;
           socket.send(JSON.stringify({ type: "hangup", reason: "dispatch_requested" }));
         });
@@ -5705,8 +5716,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           const { confirmation_message, fare, eta, eta_minutes, booking_ref, driver_name, vehicle_reg, status } = payload.payload || {};
           console.log(`[${callId}] 📥 DISPATCH confirm received: "${confirmation_message}"`);
           
-          if (!openaiWs || !openaiConnected) {
-            console.log(`[${callId}] ⚠️ Cannot process confirm - OpenAI not connected`);
+          if (!openaiWs || !openaiConnected || isConnectionClosed) {
+            console.log(`[${callId}] ⚠️ Cannot process confirm - OpenAI not connected or connection closed`);
             return;
           }
           
@@ -5779,6 +5790,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         // Fire-and-forget: Lookup caller history, GPS, and update live_calls in background
         // This runs in parallel while Ada starts greeting
         (async () => {
+          if (isConnectionClosed) return; // Guard against operations after disconnect
           try {
             // If caller has an active booking, load the latest booking details ASAP (non-blocking)
             // This prevents the model from guessing / using caller history as the booking.
@@ -6138,6 +6150,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           
           // Fire-and-forget: Lookup caller history now that we have the phone
           (async () => {
+            if (isConnectionClosed) return; // Guard against operations after disconnect
             try {
               const phoneKey = normalizePhone(phone);
               const { data: callerData } = await supabase
@@ -6298,6 +6311,23 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
 
   socket.onclose = async () => {
     console.log(`[${state?.callId || "unknown"}] Client disconnected`);
+    
+    // Mark connection as closed to prevent further operations
+    isConnectionClosed = true;
+    
+    // Clear any pending flush timers to prevent memory leaks
+    if (state?.transcriptFlushTimer) {
+      clearTimeout(state.transcriptFlushTimer);
+      state.transcriptFlushTimer = null;
+    }
+    
+    // Clear audio buffers to free memory
+    if (state) {
+      state.pendingAudioBuffer = [];
+      state.halfDuplexBuffer = [];
+      state.pendingDispatchEvents = [];
+    }
+    
     // Final flush on disconnect to capture any remaining transcripts
     if (state) {
       immediateFlush(state);
@@ -6317,7 +6347,32 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         }
       }
     }
-    openaiWs?.close();
+    
+    // Unsubscribe and remove dispatch channel to prevent memory leaks
+    if (dispatchChannel) {
+      try {
+        await dispatchChannel.unsubscribe();
+        supabase.removeChannel(dispatchChannel);
+        console.log(`[${state?.callId || "unknown"}] 🧹 Dispatch channel cleaned up`);
+      } catch (e) {
+        console.error(`[${state?.callId || "unknown"}] Failed to cleanup dispatch channel:`, e);
+      }
+      dispatchChannel = null;
+    }
+    
+    // Close OpenAI WebSocket
+    if (openaiWs) {
+      try {
+        openaiWs.close();
+      } catch (e) {
+        // Ignore close errors
+      }
+      openaiWs = null;
+    }
+    openaiConnected = false;
+    
+    // Nullify state to allow garbage collection
+    state = null;
   };
 
   socket.onerror = (err) => {
