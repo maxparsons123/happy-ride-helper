@@ -54,8 +54,8 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 AST_RATE = 8000   # Asterisk telephony
 AI_RATE = 24000   # OpenAI TTS
 
-# Send native 8kHz µ-law to edge function (avoids resample artifacts)
-SEND_NATIVE_ULAW = True
+# Send clean 24kHz PCM16 to edge function (better STT quality)
+SEND_NATIVE_ULAW = False
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 3
