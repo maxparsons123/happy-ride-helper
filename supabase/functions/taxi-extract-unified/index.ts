@@ -64,7 +64,13 @@ ${aliasInstruction}
 ==================================================
 EXTRACTION RULES (NEW BOOKING)
 ==================================================
-1. **Location Detection**:
+1. **QUESTION-ANSWER FLOW (HIGHEST PRIORITY)**:
+   - When ADA asks "where would you like to be picked up?" → the CUSTOMER's next response is the PICKUP
+   - When ADA asks "what is your destination?" or "where are you going?" → the CUSTOMER's next response is the DESTINATION
+   - When ADA asks "how many passengers/people?" → the CUSTOMER's next response is PASSENGERS
+   - The Q&A flow OVERRIDES keyword detection. If Ada asks for pickup and user says "18 Exmoor Road", that IS the pickup even without "from" keyword.
+
+2. **Location Detection (Secondary - use when no clear Q&A context)**:
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
    - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
@@ -72,29 +78,30 @@ EXTRACTION RULES (NEW BOOKING)
    - 'nearest X' or 'closest X' for DROPOFF (e.g., 'take me to the nearest hospital') → set nearest_dropoff = 'hospital', leave dropoff_location EMPTY
    - 'as directed' or no destination → dropoff_location = 'as directed'
 
-2. **Address Preservation - CRITICAL**:
+3. **Address Preservation - CRITICAL**:
    - Return EXACT text the user typed
    - DO NOT guess, correct spelling, add/remove postcodes, or change punctuation
    - Preserve house numbers with letters: "52A", "1214B", "7b"
 
-3. **Time Handling**:
+4. **Time Handling**:
    - Convert to 'YYYY-MM-DD HH:MM' (24-hour)
    - 'now', 'asap' → 'ASAP'
    - 'in X minutes' → calculate from current time
    - Time in past → assume tomorrow
 
-4. **Passengers vs Luggage**:
+5. **Passengers vs Luggage**:
    - "two passengers" → passengers = 2
    - "two bags/suitcases" → luggage = "2 bags"
    - Context matters: answer to "how many passengers?" → passengers
 
-5. **Vehicle Types**:
+6. **Vehicle Types**:
    - saloon, estate, MPV, minibus, 6-seater, 8-seater
    - Only set if explicitly requested
 
-6. **Special Requests**:
+7. **Special Requests**:
    - "ring when outside", "wheelchair access", "child seat", driver requests
    - Do NOT include phone numbers
+
 `;
 };
 
