@@ -46,7 +46,7 @@ DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realt
 try:
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
-        WS_URL = config.get("taxi_realtime_simple_ws", DEFAULT_WS_URL)
+        WS_URL = config.get("edge_functions", {}).get("taxi_realtime_simple_ws", DEFAULT_WS_URL)
         logging.info(f"Loaded config from {CONFIG_PATH}")
 except (FileNotFoundError, json.JSONDecodeError) as e:
     WS_URL = os.environ.get("WS_URL", DEFAULT_WS_URL)
