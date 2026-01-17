@@ -2735,34 +2735,27 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // === BOOKING MODIFICATION AUTO-DETECTION (AI-BASED) ===
           // Use AI extraction instead of regex for reliable modification detection
-          // When there's an existing booking and user says something that sounds like a change,
+          // When there's an existing booking and user says something substantial,
           // call taxi-extract-unified to properly decode what they want
           
-          // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
-          // IMPORTANT: Require stronger modification signals to avoid false positives from common words
-          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not)\b/i.test(lowerUserText);
-          const hasAddressWithDirection = /\b(going\s+to|pick\s*up\s+from|destination|drop\s*off)\b/i.test(lowerUserText) && 
-            (lowerUserText.length > 20); // Must be substantial to include an address
-          const hasPassengerChange = /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText);
-          // NEW: Detect when user mentions "booking" with addresses - likely restating or modifying their trip
-          const hasBookingWithAddresses = /\b(booking|book|taxi|cab)\b/i.test(lowerUserText) &&
-            /\b(from|to|going)\b/i.test(lowerUserText) &&
-            (lowerUserText.length > 25);
-          // NEW: Detect simple "to [place]" patterns when user has active booking - they're giving a new destination
-          // E.g., "to Wolverhampton", "to Manchester", "now to the airport"
-          const hasSimpleToDestination = /\b(to|now\s+to)\s+\w+/i.test(lowerUserText) && 
-            lowerUserText.length >= 10 && lowerUserText.length <= 50 &&
-            !isConfirmationPhrase;
+          // Detect if this is a simple confirmation/rejection that should NOT trigger extraction
+          const isSimpleResponse = /^(yes|no|yeah|yep|nope|nah|okay|ok|sure|correct|right|that's right|that's correct|fine|good|perfect|great|lovely|cheers|thanks|thank you|bye|goodbye|ta)\.?$/i.test(lowerUserText.trim());
           
-          const mightBeModification = hasExistingBookingContext && 
-            !isConfirmationPhrase &&
+          // Detect if user is providing address-like content (anything substantial, not just small talk)
+          // Minimum 8 chars to filter out "hi", "hello", "yes", etc.
+          const isSubstantialInput = lowerUserText.length >= 8 && !isSimpleResponse && !isConfirmationPhrase;
+          
+          // AI-FIRST APPROACH: If user has active booking and says something substantial,
+          // use AI to extract and compare - no more relying on fragile regex patterns
+          const shouldUseAiExtraction = hasExistingBookingContext && 
+            isSubstantialInput &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
             !sessionState.pendingQuote &&
-            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange || hasBookingWithAddresses || hasSimpleToDestination);
+            !sessionState.callEnded;
           
-          if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange}, bookingReq=${hasBookingWithAddresses}, simpleTo=${hasSimpleToDestination})`);
+          if (shouldUseAiExtraction && openaiWs && openaiConnected) {
+            console.log(`[${sessionState.callId}] 🧠 AI-based modification check: "${userText.substring(0, 50)}..." (length=${lowerUserText.length}, substantial=${isSubstantialInput})`);
             console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
@@ -3173,7 +3166,7 @@ Do NOT say 'booked' until the tool returns success.]`
           // === SAFETY: Clear pre-emptive extraction guard if no AI extraction was triggered ===
           // The pre-emptive guard in speech_stopped blocks Ada for users with active bookings.
           // If we processed the transcript and didn't need extraction, clear the guard AND trigger response.
-          if (sessionState.extractionInProgress && !mightBeModification) {
+          if (sessionState.extractionInProgress && !shouldUseAiExtraction) {
             console.log(`[${sessionState.callId}] 🔓 Clearing pre-emptive extraction guard (no modification/extraction needed) - triggering response`);
             sessionState.extractionInProgress = false;
             
