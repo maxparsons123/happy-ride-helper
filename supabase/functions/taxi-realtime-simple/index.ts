@@ -926,7 +926,6 @@ const Ada = {
       const lower = addr.toLowerCase().trim();
       return lower === "" || 
              lower === "[redacted]" || 
-             lower === "by_gps" || 
              lower === "unknown" ||
              lower === "null";
     },
@@ -2897,11 +2896,11 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] ✅ Customer CONFIRMED booking: fare=${pendingQuote.fare}, eta=${pendingQuote.eta}`);
 
             // Final route (prefer current tool args, fallback to pendingQuote/session)
-            // Check for invalid pickup values: by_gps, [REDACTED], empty strings
+            // Check for invalid pickup values: [REDACTED], empty strings
             const isInvalidPickup = (value: unknown): boolean => {
               if (typeof value !== "string") return true;
               const v = value.trim().toLowerCase();
-              return !v || v === "by_gps" || v === "[redacted]" || v.startsWith("[");
+              return !v || v === "[redacted]" || v.startsWith("[");
             };
 
             // Build candidate list, skipping invalid values
@@ -2911,11 +2910,10 @@ Do NOT say 'booked' until the tool returns success.]`
             const finalDestination =
               args.destination || pendingQuote.destination || sessionState.booking.destination;
 
-            // Never allow GPS sentinel as a pickup address.
             // If we somehow reach confirmation with an invalid pickup, force the agent to collect a real address.
             if (!finalPickup) {
               console.log(
-                `[${sessionState.callId}] ❌ Confirm blocked: pickup is missing/invalid (by_gps)`
+                `[${sessionState.callId}] ❌ Confirm blocked: pickup is missing/invalid`
               );
               result = {
                 success: false,
