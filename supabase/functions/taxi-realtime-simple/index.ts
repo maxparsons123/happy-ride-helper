@@ -1284,6 +1284,8 @@ interface SessionState {
   // "Anything else?" guard - set to true ONLY after Ada asks "Is there anything else I can help you with?"
   // Until this is true, phrases like "no thanks" should NOT trigger goodbye (user might be rejecting fare)
   askedAnythingElse: boolean;
+  // Timestamp when "anything else?" was asked - used to enforce a 3-second grace period for user response
+  askedAnythingElseAt: number | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -2230,16 +2232,23 @@ Do NOT say 'booked' until the tool returns success.]`
           // IMPORTANT: "No thanks" / "nothing else" phrases should ONLY trigger goodbye
           // AFTER Ada has asked "Is there anything else I can help you with?" (askedAnythingElse=true).
           // Otherwise, "no thanks" might mean rejecting a fare quote, not ending the call.
+          // IMPORTANT: Enforce 3-second grace period after "anything else?" to let users actually respond
           const isHardGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText);
           const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText);
           
-          // Hard goodbye always works. Soft goodbye only works AFTER Ada asked "anything else?"
-          const isExplicitGoodbye = (isHardGoodbye || (isSoftGoodbye && sessionState.askedAnythingElse)) &&
+          // Check if 3 seconds have passed since "anything else?" was asked
+          const gracePeriodMs = 3000; // 3 seconds for user to respond
+          const enoughTimeElapsed = !sessionState.askedAnythingElseAt || 
+            (Date.now() - sessionState.askedAnythingElseAt > gracePeriodMs);
+          
+          // Hard goodbye always works (user explicitly wants to leave).
+          // Soft goodbye only works AFTER Ada asked "anything else?" AND 3 seconds have passed.
+          const isExplicitGoodbye = (isHardGoodbye || (isSoftGoodbye && sessionState.askedAnythingElse && enoughTimeElapsed)) &&
             // Exclude "bye" in compound phrases like "going to the airport" (unlikely but guard against)
             !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
           
           if (isExplicitGoodbye && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" - ending call immediately`);
+            console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" (hardGoodbye=${isHardGoodbye}, softGoodbye=${isSoftGoodbye}, gracePeriodPassed=${enoughTimeElapsed}) - ending call`);
             
             // ✅ CRITICAL: Mark call as ending IMMEDIATELY to block all further processing
             sessionState.callEnded = true;
@@ -3400,6 +3409,7 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.discardCurrentResponseAudio = false;
               sessionState.audioVerified = true;
               sessionState.askedAnythingElse = true;
+              sessionState.askedAnythingElseAt = Date.now(); // Track when we asked for 3-second grace period
               
               console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message immediately: "That's booked for you. Is there anything else..."`);
               
@@ -3480,6 +3490,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 setTimeout(() => {
                   // ✅ CRITICAL: Mark that Ada is asking "anything else?" so goodbye detection works properly
                   sessionState.askedAnythingElse = true;
+                  sessionState.askedAnythingElseAt = Date.now(); // Track when we asked for 3-second grace period
                   
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
@@ -5079,6 +5090,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            lastNewBookingPromptAt: null,
            activeBookingAcknowledged: false,
            askedAnythingElse: false,
+           askedAnythingElseAt: null,
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -5187,6 +5199,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              lastNewBookingPromptAt: null,
              activeBookingAcknowledged: false,
              askedAnythingElse: false,
+             askedAnythingElseAt: null,
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
