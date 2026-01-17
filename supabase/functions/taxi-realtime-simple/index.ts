@@ -1304,6 +1304,10 @@ interface SessionState {
   
   // Session start timestamp - used to filter out old transcripts from previous calls on reused live_calls records
   sessionStartedAt: number;
+  
+  // Pre-emptive VAD block for active bookings: set when speech stops, cleared when transcript is analyzed
+  // Prevents Ada from speaking with stale/hallucinated data before we can detect modifications
+  awaitingTranscriptForModification: boolean;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1630,6 +1634,15 @@ serve(async (req) => {
       case "response.created":
         // Start-of-response marker (used to avoid response.cancel_not_active)
         sessionState.openAiResponseActive = true;
+
+        // ✅ PRE-EMPTIVE MODIFICATION GUARD: If user has active booking and we're waiting
+        // for transcript analysis, block VAD responses to prevent hallucinated addresses
+        if (sessionState.awaitingTranscriptForModification) {
+          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting transcript for modification check`);
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          sessionState.discardCurrentResponseAudio = true;
+          break;
+        }
 
         // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
         // We'll trigger the correct response once extraction completes
@@ -2147,6 +2160,15 @@ Do NOT say 'booked' until the tool returns success.]`
           const durations = sessionState.sttMetrics.speechDurations;
           sessionState.sttMetrics.avgSpeechDurationMs = durations.reduce((a, b) => a + b, 0) / durations.length;
         }
+        
+        // ✅ PRE-EMPTIVE MODIFICATION GUARD: When there's an active booking, block VAD responses
+        // until the transcript arrives and we can analyze for modifications. This prevents Ada
+        // from responding with hallucinated/stale addresses before we detect a modification.
+        if (sessionState.hasActiveBooking && !sessionState.activeBookingAcknowledged) {
+          sessionState.awaitingTranscriptForModification = true;
+          console.log(`[${sessionState.callId}] ⏸️ Pre-emptive VAD block: awaiting transcript for active booking`);
+        }
+        
         // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
         break;
       }
@@ -2173,6 +2195,12 @@ Do NOT say 'booked' until the tool returns success.]`
         if (!rawText || isHallucination(rawText)) {
           sessionState.sttMetrics.filteredHallucinations++;
           console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}" (total filtered: ${sessionState.sttMetrics.filteredHallucinations})`);
+          
+          // Clear pre-emptive VAD block even for filtered transcripts - don't leave it stuck
+          if (sessionState.awaitingTranscriptForModification) {
+            console.log(`[${sessionState.callId}] ✅ Clearing VAD block after filtered hallucination`);
+            sessionState.awaitingTranscriptForModification = false;
+          }
           break;
         }
         
@@ -2672,6 +2700,8 @@ Do NOT say 'booked' until the tool returns success.]`
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
             // Set flag IMMEDIATELY to prevent OpenAI VAD from triggering a response
             sessionState.extractionInProgress = true;
+            // Clear the pre-emptive flag since extractionInProgress now takes over
+            sessionState.awaitingTranscriptForModification = false;
             
             // Cancel any in-flight response so Ada doesn't speak with old data
             if (sessionState.openAiResponseActive) {
@@ -3047,6 +3077,17 @@ Do NOT say 'booked' until the tool returns success.]`
             
             // Ensure OpenAI responds to this new request
             safeResponseCreate(sessionState, "post-booking-new-request");
+          }
+          
+          // ✅ CLEAR PRE-EMPTIVE VAD BLOCK: We've now analyzed the transcript
+          // If no modification was detected (extractionInProgress would be true if it was),
+          // clear the block and trigger a response since we cancelled the VAD-triggered one
+          if (sessionState.awaitingTranscriptForModification && !sessionState.extractionInProgress) {
+            console.log(`[${sessionState.callId}] ✅ Transcript analyzed, no modification - clearing VAD block and triggering response`);
+            sessionState.awaitingTranscriptForModification = false;
+            
+            // Trigger response now since we blocked the VAD one
+            safeResponseCreate(sessionState, "post-transcript-no-modification");
           }
           
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
@@ -5126,6 +5167,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            askedAnythingElseAt: null,
            goodbyeGraceMs: 3000, // Default, will be updated from agent config if available
            sessionStartedAt: Date.now(), // Track when this session started to filter old transcripts
+           awaitingTranscriptForModification: false, // Pre-emptive VAD block for active bookings
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -5237,6 +5279,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              askedAnythingElseAt: null,
              goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
              sessionStartedAt: Date.now(), // Track when this session started to filter old transcripts
+             awaitingTranscriptForModification: false, // Pre-emptive VAD block for active bookings
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
