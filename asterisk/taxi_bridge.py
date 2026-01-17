@@ -69,28 +69,36 @@ RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15
 
 # =============================================================================
-# AUDIO PROCESSING - TUNED FOR HALLUCINATION REDUCTION
+# AUDIO PROCESSING - DYNAMIC NOISE FLOOR + GENTLE AGC
 # =============================================================================
 
-# Noise gate - INCREASED from 25 to reduce background noise triggering Whisper
-NOISE_GATE_THRESHOLD = 50
+# Noise gate settings
 NOISE_GATE_SOFT_KNEE = True
 
-# High-pass filter to remove low-frequency hum/noise
-HIGH_PASS_CUTOFF = 80  # Increased from 60Hz
+# High-pass filter to remove low-frequency hum/noise (DC, rumble)
+HIGH_PASS_CUTOFF = 80
 
-# Gain normalization
+# Telephony low-pass to remove high-frequency hiss
+LOW_PASS_CUTOFF = 3400
+
+# Gain normalization - SOFTENED to avoid over-boosting noise
 TARGET_RMS = 2500
-MAX_GAIN = 3.0
+MAX_GAIN = 2.5   # Reduced from 3.0
 MIN_GAIN = 0.8
-GAIN_SMOOTHING_FACTOR = 0.2
+GAIN_SMOOTHING_FACTOR = 0.15  # Slower AGC response
+
+# Dynamic noise floor tracking
+NOISE_FLOOR_INIT = 50.0       # Initial RMS "noise floor" estimate
+NOISE_FLOOR_DECAY = 0.98      # How quickly noise floor tracks down (toward quieter frames)
+NOISE_FLOOR_GROW = 0.92       # How quickly noise floor tracks up (slower = more stable)
+SPEECH_NOISE_RATIO = 2.5      # RMS must be this many times above noise floor to be "speech"
+MAX_NOISE_ATTEN_DB = -18.0    # dB attenuation for pure noise frames
 
 # VAD (Voice Activity Detection) settings
-MIN_RMS_FOR_PROCESSING = 100     # Skip frames below this RMS (early exit before processing)
-VAD_RMS_THRESHOLD = 150          # RMS threshold for voice activity
-VAD_PEAK_THRESHOLD = 500         # Peak amplitude threshold for speech detection
-VAD_MIN_PEAKS = 2                # Minimum speech-like peaks in a frame
-VAD_CONSECUTIVE_SILENCE = 10     # Number of silent frames before stopping audio stream
+VAD_RMS_THRESHOLD = 120       # Lowered - dynamic floor handles noise now
+VAD_PEAK_THRESHOLD = 400      # Peak amplitude threshold for speech detection
+VAD_MIN_PEAKS = 2             # Minimum speech-like peaks in a frame
+VAD_CONSECUTIVE_SILENCE = 10  # Number of silent frames before stopping audio stream
 
 # =============================================================================
 # LOGGING - Force stdout/stderr for systemd
@@ -104,10 +112,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-print("🚀 Starting taxi_bridge.py v6.2...", flush=True)
+print("🚀 Starting taxi_bridge.py v6.3...", flush=True)
 
 # =============================================================================
-# AUDIO CODECS
+# AUDIO CODECS AND FILTERS
 # =============================================================================
 
 ULAW_BIAS = 0x84
@@ -118,6 +126,10 @@ MSG_UUID = 0x01
 MSG_AUDIO = 0x10
 
 _highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype='high', fs=AST_RATE, output='sos')
+_lowpass_sos = butter(2, LOW_PASS_CUTOFF, btype='low', fs=AST_RATE, output='sos')
+
+# Running noise floor (shared state for dynamic tracking)
+_running_noise_floor = NOISE_FLOOR_INIT
 
 
 def ulaw2lin(ulaw_bytes: bytes) -> bytes:
@@ -186,50 +198,77 @@ def is_voice_activity(audio_bytes: bytes, threshold: int = None) -> bool:
 
 def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> tuple:
     """
-    Apply noise reduction optimized for speech clarity and hallucination reduction.
-    Returns (processed_audio_bytes, new_gain) or (empty_bytes, gain) for silent frames.
-    """
-    if not audio_bytes or len(audio_bytes) < 4:
-        return b"", last_gain
+    Telephony-oriented frontend for Whisper:
+      - HPF + LPF (telephony band 80Hz-3.4kHz)
+      - Dynamic noise floor estimate
+      - Gentle AGC only when confident it's speech
+      - Aggressive attenuation on "pure noise" frames
     
+    Returns (processed_audio_bytes, new_gain).
+    Unlike before, this NEVER returns empty bytes - we always send something
+    so OpenAI's server VAD can detect speech boundaries.
+    """
+    global _running_noise_floor
+
+    if not audio_bytes or len(audio_bytes) < 4:
+        return audio_bytes, last_gain
+
     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
     if audio_np.size == 0:
-        return b"", last_gain
-    
-    # EARLY EXIT: Skip very quiet frames entirely (reduces Whisper hallucinations)
-    rms = np.sqrt(np.mean(audio_np ** 2))
-    if rms < MIN_RMS_FOR_PROCESSING:
-        return b"", last_gain
-    
-    # High-pass filter to remove low-frequency noise
+        return audio_bytes, last_gain
+
+    # 1) High-pass filter (kill DC, rumble)
     audio_np = sosfilt(_highpass_sos, audio_np)
-    
-    # Soft-knee noise gate
-    if NOISE_GATE_SOFT_KNEE:
-        abs_audio = np.abs(audio_np)
-        knee_low = NOISE_GATE_THRESHOLD
-        knee_high = NOISE_GATE_THRESHOLD * 3
-        gain_curve = np.clip((abs_audio - knee_low) / (knee_high - knee_low), 0, 1)
-        gain_curve = 0.15 + 0.85 * gain_curve
-        audio_np *= gain_curve
+
+    # 2) Low-pass filter (kill high-frequency hiss, ~3.4kHz telephony band)
+    audio_np = sosfilt(_lowpass_sos, audio_np)
+
+    # 3) Compute RMS for this frame
+    rms = float(np.sqrt(np.mean(audio_np ** 2))) + 1e-6  # avoid div/0
+
+    # 4) Update dynamic noise floor
+    if rms < _running_noise_floor * 1.1:
+        # Quieter than current floor -> probably noise, track down
+        _running_noise_floor = (
+            NOISE_FLOOR_DECAY * _running_noise_floor
+            + (1.0 - NOISE_FLOOR_DECAY) * rms
+        )
     else:
-        mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
-        audio_np[mask] *= 0.1
-    
-    # Recalculate RMS after filtering
-    rms = np.sqrt(np.mean(audio_np ** 2))
-    
-    # Skip if too quiet after filtering
-    if rms < MIN_RMS_FOR_PROCESSING / 2:
-        return b"", last_gain
-    
-    # Gain normalization
-    current_gain = last_gain
-    if rms > 30:
-        target_gain = np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN)
+        # Louder -> allow floor to slowly grow (prevents floor from getting stuck low)
+        _running_noise_floor = (
+            NOISE_FLOOR_GROW * _running_noise_floor
+            + (1.0 - NOISE_FLOOR_GROW) * rms
+        )
+
+    # 5) Decide if this frame looks like speech or noise
+    is_speech = rms > _running_noise_floor * SPEECH_NOISE_RATIO
+
+    if not is_speech:
+        # Pure noise / background -> attenuate hard and DON'T normalize
+        noise_gain = 10 ** (MAX_NOISE_ATTEN_DB / 20.0)  # dB to linear
+        audio_np *= noise_gain
+        current_gain = 1.0  # don't carry over AGC from noise frames
+    else:
+        # 6) Soft-knee noise gate around the dynamic noise floor
+        if NOISE_GATE_SOFT_KNEE:
+            abs_audio = np.abs(audio_np)
+            knee_low = _running_noise_floor * 0.8
+            knee_high = _running_noise_floor * 4.0
+            gain_curve = np.clip((abs_audio - knee_low) / (knee_high - knee_low), 0, 1)
+            # Don't completely kill low-level consonants
+            gain_curve = 0.25 + 0.75 * gain_curve
+            audio_np *= gain_curve
+        else:
+            mask = np.abs(audio_np) < _running_noise_floor
+            audio_np[mask] *= 0.1
+
+        # 7) Smoothed AGC aimed at slightly lower RMS (avoid over-boosting room noise)
+        target_rms = TARGET_RMS * 0.7
+        target_gain = np.clip(target_rms / rms, MIN_GAIN, MAX_GAIN)
         current_gain = last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - last_gain)
         audio_np *= current_gain
-    
+
+    # 8) Final clipping back to int16
     audio_np = np.clip(audio_np, -32768, 32767).astype(np.int16)
     return audio_np.tobytes(), current_gain
 
@@ -682,12 +721,13 @@ async def main():
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
 
-    print(f"🚀 Taxi Bridge v6.2 - VAD + HALLUCINATION REDUCTION", flush=True)
+    print(f"🚀 Taxi Bridge v6.3 - DYNAMIC NOISE FLOOR + GENTLE AGC", flush=True)
     print(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}", flush=True)
     print(f"   Config: {CONFIG_PATH}", flush=True)
     print(f"   WebSocket: {WS_URL}", flush=True)
     print(f"   VAD: RMS>{VAD_RMS_THRESHOLD}, Peaks>{VAD_PEAK_THRESHOLD}, Silence>{VAD_CONSECUTIVE_SILENCE} frames", flush=True)
-    print(f"   Noise Gate: {NOISE_GATE_THRESHOLD}, High-pass: {HIGH_PASS_CUTOFF}Hz", flush=True)
+    print(f"   Noise Floor: init={NOISE_FLOOR_INIT}, speech_ratio={SPEECH_NOISE_RATIO}, atten={MAX_NOISE_ATTEN_DB}dB", flush=True)
+    print(f"   Filters: HPF={HIGH_PASS_CUTOFF}Hz, LPF={LOW_PASS_CUTOFF}Hz", flush=True)
 
     async with server:
         await server.serve_forever()
