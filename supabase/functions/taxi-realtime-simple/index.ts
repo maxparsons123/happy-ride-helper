@@ -253,7 +253,8 @@ You MUST follow this exact 3-step flow:
 STEP 1 - REQUEST QUOTE:
 - After user confirms addresses → CALL book_taxi with confirmation_state: "request_quote"
 - This returns fare and ETA from dispatch (e.g., fare: "£15.00", eta: "7 minutes")
-- READ the fare and ETA to the customer: "The price is £15.00 and your driver is 7 minutes away. Would you like me to book that?"
+- READ ONLY the fare and ETA: "The price is £15.00 and your driver will be 7 minutes away. Shall I book that?"
+- DO NOT repeat the pickup or destination again - you already confirmed those.
 - WAIT for customer response. Do NOT call any tool yet.
 
 STEP 2 - CUSTOMER RESPONDS YES:
@@ -787,9 +788,9 @@ const Ada = {
     bookingConfirmed: (): string => 
       "That's on the way. Is there anything else I can help you with?",
     
-    /** Fare quote prompt */
+    /** Fare quote prompt - NO booking recap, just fare and ETA */
     fareQuote: (fare: string, eta: string): string => 
-      `Hi, your price for the journey is ${fare} and your driver will be ${eta}. Do you want me to go ahead and book that?`,
+      `The price is ${fare} and your driver will be ${eta}. Shall I book that?`,
     
     /** Goodbye message */
     goodbye: (): string => "Safe travels!",
@@ -4492,8 +4493,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             ? String(etaRaw)
             : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
+          // NO booking recap here - just price and ETA, then ask to book
           const spokenMessage = (fareText && etaText)
-            ? `Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
+            ? `The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
             : (message ? String(message) : "");
 
           console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
