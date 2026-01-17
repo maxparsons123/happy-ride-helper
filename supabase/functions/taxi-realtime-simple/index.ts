@@ -3084,6 +3084,7 @@ Do NOT say 'booked' until the tool returns success.]`
             
             // Mark booking as confirmed
             sessionState.bookingConfirmedThisTurn = true;
+            sessionState.bookingFullyConfirmed = true; // ✅ PERSISTENT: Booking is complete, Ada can speak freely now
             sessionState.lastBookTaxiSuccessAt = Date.now();
             sessionState.lastConfirmedTripKey = makeTripKey(finalPickup, finalDestination);
             sessionState.pendingQuote = null; // Clear pending quote
@@ -3091,6 +3092,8 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.quoteTripKey = null;
             sessionState.lastQuotePromptAt = null; // Reset prompt tracking
             sessionState.lastQuotePromptText = null;
+            
+            console.log(`[${sessionState.callId}] ✅ Booking enforcement: confirmed state succeeded, Ada may now speak freely (bookingFullyConfirmed=true)`);
             
             result = {
               success: true,
