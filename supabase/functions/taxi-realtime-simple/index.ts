@@ -3565,10 +3565,21 @@ Do NOT say 'booked' until the tool returns success.]`
                 },
               }));
 
-              // Trigger response immediately - no delays
-              if (!sessionState.callEnded) {
-                openaiWs.send(JSON.stringify({ type: "response.create" }));
-                console.log(`[${sessionState.callId}] ✅ Triggered immediate response.create for post-confirm followup`);
+              // Trigger response - wait for any active response to complete first
+              if (!sessionState.callEnded && openaiWs) {
+                // If OpenAI has an active response, wait for it to finish before creating new one
+                const waitForResponseClear = () => {
+                  if (sessionState.openAiResponseActive) {
+                    console.log(`[${sessionState.callId}] ⏳ Waiting for active response to finish before post-confirm message...`);
+                    setTimeout(waitForResponseClear, 100);
+                  } else if (!sessionState.callEnded && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                    openaiWs.send(JSON.stringify({ type: "response.create" }));
+                    console.log(`[${sessionState.callId}] ✅ Triggered response.create for post-confirm followup`);
+                  }
+                };
+                
+                // Small initial delay to let any in-flight response finish
+                setTimeout(waitForResponseClear, 150);
               }
             }
             
