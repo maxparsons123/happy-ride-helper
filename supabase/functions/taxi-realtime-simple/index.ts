@@ -2198,6 +2198,35 @@ Do NOT say 'booked' until the tool returns success.]`
           const durations = sessionState.sttMetrics.speechDurations;
           sessionState.sttMetrics.avgSpeechDurationMs = durations.reduce((a, b) => a + b, 0) / durations.length;
         }
+        
+        // === PRE-EMPTIVE EXTRACTION GUARD ===
+        // If user has an active booking AND spoke for a substantial duration (>1s),
+        // pre-emptively block VAD responses until transcript arrives and is processed.
+        // This prevents the race condition where Ada responds with stale data before
+        // the modification detection logic can run.
+        const hasActiveBookingContext = sessionState.hasActiveBooking || 
+          (sessionState.booking.pickup && sessionState.booking.destination);
+        const isSubstantialSpeech = speechDuration > 1000; // >1 second suggests address/modification
+        
+        if (hasActiveBookingContext && isSubstantialSpeech && 
+            !sessionState.extractionInProgress && 
+            !sessionState.pendingQuote &&
+            !sessionState.modificationPromptPending) {
+          console.log(`[${sessionState.callId}] 🛡️ PRE-EMPTIVE GUARD: Blocking VAD response until transcript processed (active booking + ${speechDuration}ms speech)`);
+          sessionState.extractionInProgress = true;
+          
+          // Safety timeout: clear the guard after 5s if transcript never arrives
+          // This prevents Ada from getting stuck silent
+          setTimeout(() => {
+            if (sessionState.extractionInProgress && 
+                sessionState.speechStopTime && 
+                Date.now() - sessionState.speechStopTime > 4500) {
+              console.log(`[${sessionState.callId}] ⏰ Pre-emptive guard timeout - clearing extractionInProgress`);
+              sessionState.extractionInProgress = false;
+            }
+          }, 5000);
+        }
+        
         // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
         break;
       }
@@ -3134,6 +3163,13 @@ Do NOT say 'booked' until the tool returns success.]`
           // --- Fare confirmation is now handled by confirmation_state in book_taxi ---
           // User says YES/NO after hearing fare → Ada calls book_taxi with "confirmed" or "rejected"
 
+          // === SAFETY: Clear pre-emptive extraction guard if no AI extraction was triggered ===
+          // The pre-emptive guard in speech_stopped blocks Ada for users with active bookings.
+          // If we processed the transcript and didn't need extraction, clear the guard.
+          if (sessionState.extractionInProgress && !mightBeModification) {
+            console.log(`[${sessionState.callId}] 🔓 Clearing pre-emptive extraction guard (no modification/extraction needed)`);
+            sessionState.extractionInProgress = false;
+          }
         }
         break;
       }
