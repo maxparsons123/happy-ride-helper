@@ -131,11 +131,27 @@ You MUST ALWAYS reply in English, even if the input is in another language.
 Try to put user message into structured format with good English.
 
 ==================================================
-CHANGE DETECTION RULES
+CHANGE DETECTION RULES (CRITICAL)
 ==================================================
+⚠️ AMBIGUITY ALERT: "change from X to Y" has TWO meanings:
+1. "change the route FROM X TO Y" → new pickup = X, new dropoff = Y
+2. "change [field] from X to Y" → changing a field's value FROM X TO Y
+
+DISAMBIGUATION:
+• If the user says "change it from X to Y" or "from X to Y please" → This is a ROUTE change:
+  - pickup_location = X (the origin)
+  - dropoff_location = Y (the destination)
+• If the user says "change the pickup from X to Y" → This changes the pickup field:
+  - pickup_location = Y (the new value)
+• If the user says "change destination from X to Y" → This changes the destination field:
+  - dropoff_location = Y (the new value)
+
+DEFAULT RULE: When "from X to Y" appears WITHOUT specifying a field to change, 
+treat it as a ROUTE definition: pickup = X, dropoff = Y.
+
+OTHER PATTERNS:
 • User says "change pickup to X" → pickup_location = X, keep all other existing values
 • User says "going to Y instead" → dropoff_location = Y, keep pickup and other values
-• User says "from X to Y" → update BOTH pickup and dropoff, keep passengers/luggage/time
 • User says "add 2 passengers" → number_of_passengers = existing + 2
 • User says "3 passengers" → number_of_passengers = 3
 
