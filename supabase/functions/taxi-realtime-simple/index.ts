@@ -5945,6 +5945,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                 }
                 activeBooking = null;
               }
+            }
 
             // Create/update live call record (non-blocking)
             // ✅ REUSE existing active call card for same phone to avoid creating duplicate cards
