@@ -408,16 +408,34 @@ export default function LiveCalls() {
             setCalls((prev) => [newCall, ...prev.slice(0, 19)]);
             setSelectedCall(newCall.call_id); // Auto-select new call
           } else if (payload.eventType === "UPDATE") {
-            setCalls((prev) =>
-              prev.map((call) =>
-                call.call_id === payload.new.call_id
-                  ? ({
-                      ...payload.new,
-                      transcripts: (payload.new.transcripts as unknown as Transcript[]) || [],
-                    } as LiveCall)
+            const updatedCall = {
+              ...payload.new,
+              transcripts: (payload.new.transcripts as unknown as Transcript[]) || [],
+            } as LiveCall;
+            
+            setCalls((prev) => {
+              // Check if the update changed the call_id (call reuse scenario)
+              const existingByUuid = prev.find((call) => call.id === payload.new.id);
+              const oldCallId = existingByUuid?.call_id;
+              
+              // If the call_id changed and we had the old one selected, update selection
+              if (oldCallId && oldCallId !== payload.new.call_id) {
+                console.log(`[LiveCalls] Call reuse detected: ${oldCallId} → ${payload.new.call_id}`);
+                // Update selected call to new call_id (done outside setCalls to avoid nested setState)
+                setTimeout(() => {
+                  if (selectedCallRef.current === oldCallId) {
+                    setSelectedCall(payload.new.call_id);
+                  }
+                }, 0);
+              }
+              
+              return prev.map((call) =>
+                // Match by UUID (id) for call reuse, or by call_id for normal updates
+                call.id === payload.new.id || call.call_id === payload.new.call_id
+                  ? updatedCall
                   : call
-              )
-            );
+              );
+            });
           } else if (payload.eventType === "DELETE") {
             setCalls((prev) => prev.filter((call) => call.id !== payload.old.id));
           }
