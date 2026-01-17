@@ -4527,8 +4527,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 formattedPhone = formattedPhone.slice(1);
               }
               
+              const bookingCallId = sessionState.activeBookingCallId || sessionState.callId;
               const cancelPayload = {
-                call_id: sessionState.callId,
+                call_id: bookingCallId,
                 caller_phone: formattedPhone,
                 caller_name: sessionState.customerName || "Unknown",
                 action: "cancelled",
@@ -4536,7 +4537,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 cancelled_pickup: sessionState.booking.pickup || "Not specified",
                 cancelled_destination: sessionState.booking.destination || "Not specified",
                 cancellation_reason: "customer_request",
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
               };
               
               console.log(`[${sessionState.callId}] 📤 Cancel payload:`, JSON.stringify(cancelPayload));
@@ -4562,20 +4563,45 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] ⚠️ No DISPATCH_WEBHOOK_URL configured - skipping webhook`);
           }
           
-          // Delete the booking from database using call_id
+          // Mark the active booking as cancelled so it won't load on the next call.
+          // IMPORTANT: use the ORIGINAL booking call_id (activeBookingCallId) when available.
           try {
-            const { error: deleteError } = await supabase
+            const bookingCallId = sessionState.activeBookingCallId || sessionState.callId;
+            const phoneKey = sessionState.phone ? normalizePhone(sessionState.phone) : null;
+            const altPhone = sessionState.phone?.replace(/^\+/, '') || null;
+
+            console.log(`[${sessionState.callId}] 🧾 Cancelling booking in DB (bookingCallId=${bookingCallId}, phoneKey=${phoneKey}, altPhone=${altPhone})`);
+
+            let q = supabase
               .from("bookings")
-              .delete()
-              .eq("call_id", sessionState.callId);
-            
-            if (deleteError) {
-              console.error(`[${sessionState.callId}] ⚠️ Failed to delete booking from DB:`, deleteError);
+              .update({
+                status: "cancelled",
+                cancelled_at: new Date().toISOString(),
+                cancellation_reason: "customer_request",
+                updated_at: new Date().toISOString(),
+              })
+              .in("status", ["confirmed", "dispatched", "active", "pending"]);
+
+            // Prefer exact match by booking call_id
+            q = q.eq("call_id", bookingCallId);
+
+            // Fallback by phone if we have it (covers call_id reuse changes)
+            if (phoneKey || altPhone) {
+              const phoneOr = [phoneKey ? `caller_phone.eq.${phoneKey}` : null, altPhone ? `caller_phone.eq.${altPhone}` : null]
+                .filter(Boolean)
+                .join(",");
+              if (phoneOr) q = q.or(phoneOr);
+            }
+
+            const { data: cancelledRows, error: cancelDbError } = await q.select("id, call_id, status");
+
+            if (cancelDbError) {
+              console.error(`[${sessionState.callId}] ⚠️ Failed to cancel booking in DB:`, cancelDbError);
             } else {
-              console.log(`[${sessionState.callId}] 🗑️ Booking deleted from database for call: ${sessionState.callId}`);
+              console.log(`[${sessionState.callId}] ✅ Cancelled bookings in DB: ${cancelledRows?.length || 0}`);
             }
           } catch (dbErr) {
-            console.error(`[${sessionState.callId}] ⚠️ DB delete error:`, dbErr);
+            console.error(`[${sessionState.callId}] ⚠️ DB cancel error:`, dbErr);
           }
           
           // Clear session state
