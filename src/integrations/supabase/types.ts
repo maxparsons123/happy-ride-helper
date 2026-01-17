@@ -314,6 +314,7 @@ export type Database = {
           name: string | null
           phone_number: string
           pickup_addresses: string[] | null
+          preferred_language: string | null
           total_bookings: number
           trusted_addresses: string[] | null
           updated_at: string
@@ -330,6 +331,7 @@ export type Database = {
           name?: string | null
           phone_number: string
           pickup_addresses?: string[] | null
+          preferred_language?: string | null
           total_bookings?: number
           trusted_addresses?: string[] | null
           updated_at?: string
@@ -346,6 +348,7 @@ export type Database = {
           name?: string | null
           phone_number?: string
           pickup_addresses?: string[] | null
+          preferred_language?: string | null
           total_bookings?: number
           trusted_addresses?: string[] | null
           updated_at?: string
