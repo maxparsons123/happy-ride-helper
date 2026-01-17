@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { TAXI_WEBHOOK_TEST_URL } from "@/config/supabase";
 import { 
   ArrowLeft, 
   Phone, 
@@ -59,9 +60,8 @@ export default function WebhookTest() {
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Get the test webhook URL
-  const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID || "isnqnuveumxiughjuccs";
-  const testWebhookUrl = `https://${projectId}.supabase.co/functions/v1/taxi-webhook-test`;
+  // Get the test webhook URL from config
+  const testWebhookUrl = TAXI_WEBHOOK_TEST_URL;
 
   // Subscribe to realtime updates from test webhook
   useEffect(() => {
