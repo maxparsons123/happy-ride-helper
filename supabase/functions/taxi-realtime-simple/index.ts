@@ -1267,6 +1267,11 @@ interface SessionState {
   // Flag to allow confirmation response through the "anything else" guard
   confirmationResponsePending: boolean;
 
+  // Track what Ada last asked about - used to detect question/answer misalignment
+  // e.g., user gives address when asked about passengers
+  lastQuestionType: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null;
+  lastQuestionAt: number | null;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -2188,6 +2193,34 @@ Do NOT say 'booked' until the tool returns success.]`
         // Mark assistant transcript as finalized for next turn
         sessionState.assistantTranscriptIndex = null;
         
+        // === TRACK WHAT ADA JUST ASKED ===
+        // Detect question type from Ada's completed transcript for question-answer alignment
+        const lastAssistantText = sessionState.transcripts
+          .filter(t => t.role === "assistant")
+          .slice(-1)[0]?.text?.toLowerCase() || "";
+        
+        if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lastAssistantText)) {
+          sessionState.lastQuestionType = "pickup";
+          sessionState.lastQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] 🎯 Ada asked about: PICKUP`);
+        } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lastAssistantText)) {
+          sessionState.lastQuestionType = "destination";
+          sessionState.lastQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] 🎯 Ada asked about: DESTINATION`);
+        } else if (/(?:how many|passengers|people|travell)/i.test(lastAssistantText)) {
+          sessionState.lastQuestionType = "passengers";
+          sessionState.lastQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] 🎯 Ada asked about: PASSENGERS`);
+        } else if (/(?:when|what time|timing|schedule)/i.test(lastAssistantText)) {
+          sessionState.lastQuestionType = "time";
+          sessionState.lastQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] 🎯 Ada asked about: TIME`);
+        } else if (/(?:is that correct|confirm|shall i book|book that|go ahead)/i.test(lastAssistantText)) {
+          sessionState.lastQuestionType = "confirmation";
+          sessionState.lastQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
+        }
+        
          // FINAL FLUSH: Release any remaining buffered audio now that transcript is complete
          // This ensures we don't hold audio forever waiting for sentence completion
          if (sessionState.pendingAudioBuffer.length > 0) {
@@ -2378,6 +2411,57 @@ Do NOT say 'booked' until the tool returns success.]`
           sessionState.bookingConfirmedThisTurn = false;
 
           const lowerUserText = userText.toLowerCase();
+
+          // === ADDRESS VS PASSENGER DETECTION ===
+          // Detect when user gives an address when Ada asked about passengers
+          // This happens when user mishears or answers out of order
+          const questionAge = sessionState.lastQuestionAt 
+            ? Date.now() - sessionState.lastQuestionAt 
+            : Infinity;
+          const isRecentQuestion = questionAge < 30000; // Within 30 seconds
+          
+          // Patterns that indicate an address (not a number)
+          const isAddressLike = /\b(street|road|avenue|lane|drive|close|way|place|court|crescent|terrace|park|square|row|gardens|grove|hill|view|rd|st|ave|ln|dr|cl|pl|ct)\b/i.test(lowerUserText) ||
+            /^\d+[a-z]?\s+[a-z]/i.test(lowerUserText.trim()) || // "52A David Road" pattern
+            /\b(near|opposite|outside|by the|next to|corner of|behind)\b/i.test(lowerUserText);
+          
+          // Patterns that indicate a passenger count
+          const isPassengerCount = /^(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\.?$/i.test(lowerUserText.trim()) ||
+            /\b(just me|myself|alone|one person|two people|three people|four people|us|passengers?)\b/i.test(lowerUserText);
+          
+          if (isRecentQuestion && sessionState.lastQuestionType === "passengers" && isAddressLike && !isPassengerCount) {
+            console.log(`[${sessionState.callId}] 🔄 ADDRESS-VS-PASSENGER MISMATCH: User gave address "${userText}" when asked about passengers`);
+            
+            // Store the address as potential destination correction
+            const mismatchedAddress = userText;
+            
+            // Cancel any in-flight response
+            if (sessionState.openAiResponseActive && openaiWs && openaiConnected) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            
+            // Inject system message to handle the mismatch gracefully
+            if (openaiWs && openaiConnected && !sessionState.callEnded) {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{
+                    type: "input_text",
+                    text: `[SYSTEM: The user said "${mismatchedAddress}" but you asked about passengers. This looks like an address - they may have meant it as their destination. Say: "I heard ${mismatchedAddress} - is that where you'd like to go? And how many people will be travelling?" Ask for BOTH the confirmation and passenger count in one question.]`
+                  }]
+                }
+              }));
+              
+              sessionState.lastQuestionType = "passengers"; // Still need passengers
+              safeResponseCreate(sessionState, "address-vs-passenger-mismatch");
+            }
+            
+            break; // Skip normal processing for this transcript
+          }
 
           // === EXPLICIT BYE/GOODBYE DETECTION (HIGHEST PRIORITY) ===
           // If user says "bye" (even multiple times), they want to end the call immediately.
@@ -5354,7 +5438,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             transcriptDelays: [],
             avgSpeechDurationMs: 0,
             speechDurations: [],
-          }
+          },
+          lastQuestionType: null,
+          lastQuestionAt: null,
         };
         
         preConnected = true;
@@ -5468,7 +5554,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               transcriptDelays: [],
               avgSpeechDurationMs: 0,
               speechDurations: [],
-            }
+            },
+            lastQuestionType: null,
+            lastQuestionAt: null,
           };
         }
         

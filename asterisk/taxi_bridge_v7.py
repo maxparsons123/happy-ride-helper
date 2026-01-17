@@ -594,6 +594,15 @@ class TaxiBridgeV7:
                     self.running = False
                     raise CallEndedException()
 
+                elif msg_type == "keepalive":
+                    # Respond to keepalive pings from edge function
+                    if self.ws and self.state.ws_connected:
+                        await self.ws.send(json.dumps({
+                            "type": "keepalive_ack",
+                            "timestamp": data.get("timestamp"),
+                            "call_id": self.state.call_id
+                        }))
+
                 elif msg_type == "error":
                     logger.error("[%s] 🧨 AI error: %s", 
                                 self.state.call_id, data.get("error"))
