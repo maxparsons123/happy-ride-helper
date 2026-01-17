@@ -621,7 +621,6 @@ const PHANTOM_PHRASES = [
   "invite",
   "bye bye",
   "ack",
-  "cancel",
   "register",
   "options",
   "sip",
