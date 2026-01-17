@@ -121,6 +121,11 @@ interface SessionState {
   sessionCreated: boolean;
   cleanedUp: boolean; // Prevent double cleanup
   timeoutId: number | null; // Session timeout
+  // Post-booking state
+  bookingConfirmed: boolean;
+  askedAnythingElse: boolean;
+  askedAnythingElseAt: number | null;
+  lastAssistantText: string; // Track Ada's last response for Q&A context
 }
 
 // Active sessions - with periodic cleanup
@@ -140,6 +145,53 @@ setInterval(() => {
   console.log(`📊 Active sessions: ${sessions.size}`);
 }, STALE_SESSION_CHECK_MS);
 
+// Build conversation with Q&A context pairing for extraction
+// This adds [CONTEXT: Ada asked: "..."] prefixes so extraction knows what field each answer belongs to
+function buildContextPairedConversation(
+  transcripts: Array<{ role: "user" | "assistant"; text: string }>
+): Array<{ role: "user" | "assistant"; text: string }> {
+  const result: Array<{ role: "user" | "assistant"; text: string }> = [];
+  let lastAdaQuestion: string | null = null;
+  
+  for (const turn of transcripts) {
+    if (turn.role === "assistant") {
+      // Track Ada's question for context pairing
+      const text = turn.text.toLowerCase();
+      if (text.includes("where would you like to be picked up") || 
+          text.includes("what's the pickup") ||
+          text.includes("pickup address")) {
+        lastAdaQuestion = "Where would you like to be picked up?";
+      } else if (text.includes("destination") || 
+                 text.includes("where are you going") ||
+                 text.includes("going to") ||
+                 text.includes("drop") ||
+                 text.includes("where to")) {
+        lastAdaQuestion = "What is your destination?";
+      } else if (text.includes("how many") && (text.includes("passenger") || text.includes("people") || text.includes("travelling"))) {
+        lastAdaQuestion = "How many passengers?";
+      } else if (text.includes("when") && (text.includes("taxi") || text.includes("need") || text.includes("pickup"))) {
+        lastAdaQuestion = "When do you need the taxi?";
+      } else if (text.includes("is that correct") || text.includes("is that right")) {
+        lastAdaQuestion = "Is that correct?";
+      }
+      result.push(turn);
+    } else if (turn.role === "user") {
+      // Add context prefix if we know what Ada just asked
+      if (lastAdaQuestion) {
+        result.push({
+          role: "user",
+          text: `[CONTEXT: Ada asked: "${lastAdaQuestion}"] ${turn.text}`
+        });
+      } else {
+        result.push(turn);
+      }
+      lastAdaQuestion = null; // Reset after user responds
+    }
+  }
+  
+  return result;
+}
+
 // Call taxi-extract-unified to extract booking details from conversation
 async function extractBookingDetails(
   conversation: Array<{ role: "user" | "assistant"; text: string }>,
@@ -153,6 +205,10 @@ async function extractBookingDetails(
   fields_changed: string[];
 }> {
   try {
+    // Build context-paired conversation for better extraction accuracy
+    const contextPairedConversation = buildContextPairedConversation(conversation);
+    console.log(`[extract] Context-paired conversation:`, JSON.stringify(contextPairedConversation.slice(-4)));
+    
     const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
       method: "POST",
       headers: {
@@ -160,7 +216,7 @@ async function extractBookingDetails(
         "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
       },
       body: JSON.stringify({
-        conversation: conversation,
+        conversation: contextPairedConversation,
         caller_phone: callerPhone,
         current_booking: {
           pickup: currentBooking.pickup,
@@ -278,6 +334,11 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
     sessionCreated: false,
     cleanedUp: false,
     timeoutId: null,
+    // Post-booking state
+    bookingConfirmed: false,
+    askedAnythingElse: false,
+    askedAnythingElseAt: null,
+    lastAssistantText: "",
   };
   sessions.set(callId, state);
 
@@ -365,6 +426,7 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
           if (message.transcript) {
             console.log(`🤖 [${callId}] ADA: ${message.transcript}`);
             state.transcripts.push({ role: "assistant", text: message.transcript });
+            state.lastAssistantText = message.transcript; // Track for Q&A context
             await updateLiveCall(callId, state);
           }
           break;
@@ -440,6 +502,10 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
                 };
               }
             } else if (toolArgs.confirmation_state === "confirmed") {
+              // Capture quote values BEFORE clearing
+              const confirmedFare = state.pendingQuote?.fare;
+              const confirmedEta = state.pendingQuote?.eta;
+              
               // Confirm booking
               const result = await sendDispatchWebhook("confirmed", {
                 call_id: callId,
@@ -448,14 +514,9 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
                 passengers,
                 pickup_time: pickupTime,
                 caller_phone: state.phone,
-                fare: state.pendingQuote?.fare,
-                eta: state.pendingQuote?.eta,
+                fare: confirmedFare,
+                eta: confirmedEta,
               });
-              
-              toolResult = {
-                success: true,
-                message: "Booking confirmed! Customer will receive updates via WhatsApp.",
-              };
               
               // Update DB with confirmed booking
               await supabase.from("bookings").insert({
@@ -465,10 +526,41 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
                 pickup,
                 destination,
                 passengers,
-                fare: state.pendingQuote?.fare,
-                eta: state.pendingQuote?.eta,
+                fare: confirmedFare,
+                eta: confirmedEta,
                 status: "confirmed",
               });
+              
+              // Mark booking as confirmed and clear quote
+              state.bookingConfirmed = true;
+              state.askedAnythingElse = true;
+              state.askedAnythingElseAt = Date.now();
+              state.pendingQuote = null;
+              
+              toolResult = {
+                success: true,
+                message: "Booking confirmed! Say: 'That's booked for you. Is there anything else I can help you with?' Then WAIT for their response.",
+              };
+              
+              console.log(`✅ [${callId}] Booking confirmed - injecting "anything else" prompt`);
+              
+              // After sending tool result, inject explicit system message for "anything else"
+              setTimeout(() => {
+                if (openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: Booking confirmed! Say EXACTLY: "That's booked for you. Is there anything else I can help you with?" Then WAIT for their response. Do NOT say goodbye yet.]`,
+                      }],
+                    },
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                }
+              }, 100);
             }
           } else if (toolName === "save_customer_name") {
             state.callerName = toolArgs.name;
