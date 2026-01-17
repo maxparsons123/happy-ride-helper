@@ -3783,6 +3783,10 @@ Do NOT say 'booked' until the tool returns success.]`
                      lastPrompt: spokenMessage || null
                    };
 
+                   // ✅ Mark that we're about to prompt the fare - prevents broadcast handler from duplicating
+                   sessionState.lastQuotePromptAt = Date.now();
+                   sessionState.lastQuotePromptText = spokenMessage;
+
                    dispatchResult = {
                      needs_fare_confirm: true,
                      ada_message: spokenMessage,
