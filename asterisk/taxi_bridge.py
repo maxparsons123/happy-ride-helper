@@ -38,9 +38,9 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = 9092
 
-# Load WS_URL from bridge-config.json (look in parent directory of script)
+# Load WS_URL from bridge-config.json (same directory as script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "..", "bridge-config.json")
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "bridge-config.json")
 DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple"
 
 try:
