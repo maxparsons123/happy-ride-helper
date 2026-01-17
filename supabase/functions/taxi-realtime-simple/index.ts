@@ -3082,6 +3082,8 @@ Do NOT say 'booked' until the tool returns success.]`
                 openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
                 setTimeout(() => {
+                  console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message: "Is there anything else..."`);
+                  
                   openaiWs?.send(JSON.stringify({
                     type: "conversation.item.create",
                     item: {
@@ -3094,7 +3096,14 @@ Do NOT say 'booked' until the tool returns success.]`
                     },
                   }));
 
-                  safeResponseCreate(sessionState, "post-confirm-followup");
+                  // Force response.create directly instead of using safeResponseCreate
+                  // to ensure it's not blocked by any guards
+                  if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                    openaiWs.send(JSON.stringify({ type: "response.create" }));
+                    console.log(`[${sessionState.callId}] ✅ Triggered response.create for post-confirm followup`);
+                  } else {
+                    console.log(`[${sessionState.callId}] ⚠️ Cannot trigger response.create: ws=${!!openaiWs}, connected=${openaiConnected}, ended=${sessionState.callEnded}`);
+                  }
                 }, 350);
               }, 400);
             }
@@ -3786,6 +3795,12 @@ Do NOT say 'booked' until the tool returns success.]`
                    // ✅ Mark that we're about to prompt the fare - prevents broadcast handler from duplicating
                    sessionState.lastQuotePromptAt = Date.now();
                    sessionState.lastQuotePromptText = spokenMessage;
+                   
+                   // ✅ CRITICAL: Clear pendingModification when fare arrives - we've moved past the modification stage
+                   if (sessionState.pendingModification) {
+                     console.log(`[${sessionState.callId}] 🧹 Clearing pendingModification (polling) - fare quote received`);
+                     sessionState.pendingModification = null;
+                   }
 
                    dispatchResult = {
                      needs_fare_confirm: true,
