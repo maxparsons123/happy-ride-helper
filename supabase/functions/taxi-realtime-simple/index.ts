@@ -2390,10 +2390,22 @@ Do NOT say 'booked' until the tool returns success.]`
             // Clear any pending quote (we'll get a new one after confirmation)
             sessionState.pendingQuote = null;
             
-            // Build the confirmation message - simple and clear
-            const confirmationMessage = fieldToChange === "pickup" || fieldToChange === "destination"
-              ? `Updated. From ${sessionState.booking.pickup} to ${sessionState.booking.destination}. Happy with that?`
-              : `Updated to ${newValue} ${fieldToChange}. Happy with that?`;
+            // Build the confirmation message - ALWAYS summarize the FULL updated booking
+            // Use the NEW values from sessionState.booking (already updated above)
+            const pickup = sessionState.booking.pickup || "your location";
+            const destination = sessionState.booking.destination || "your destination";
+            const passengers = sessionState.booking.passengers || 1;
+            
+            let confirmationMessage: string;
+            if (fieldToChange === "pickup") {
+              confirmationMessage = `Got it, pickup changed to ${newValue}. So that's from ${newValue} to ${destination}. Is that correct?`;
+            } else if (fieldToChange === "destination") {
+              confirmationMessage = `Got it, destination changed to ${newValue}. So that's from ${pickup} to ${newValue}. Is that correct?`;
+            } else if (fieldToChange === "passengers") {
+              confirmationMessage = `Updated to ${newValue} passengers. From ${pickup} to ${destination} for ${newValue} passengers. Is that correct?`;
+            } else {
+              confirmationMessage = `Updated. So that's from ${pickup} to ${destination}. Is that correct?`;
+            }
             
             // === ASK USER TO CONFIRM THE CHANGE ===
             // CRITICAL: Only announce the change. Do NOT mention book_taxi or webhooks.
