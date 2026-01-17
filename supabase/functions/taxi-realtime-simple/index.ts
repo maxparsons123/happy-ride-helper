@@ -2441,6 +2441,8 @@ Do NOT say 'booked' until the tool returns success.]`
               : `Updated to ${newValue} ${fieldToChange}. Happy with that?`;
             
             // === ASK USER TO CONFIRM THE CHANGE ===
+            // CRITICAL: Only announce the change. Do NOT mention book_taxi or webhooks.
+            // The system will handle the next step when user says "yes"
             setTimeout(() => {
               openaiWs?.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -2449,7 +2451,7 @@ Do NOT say 'booked' until the tool returns success.]`
                   role: "user",
                   content: [{
                     type: "input_text",
-                    text: `[SYSTEM: MODIFICATION APPLIED INTERNALLY - The ${fieldToChange} has been updated to "${newValue}". Say EXACTLY: "${confirmationMessage}" Then WAIT for the customer to confirm (yes/yeah/happy). ONLY AFTER they confirm, call book_taxi with confirmation_state: "request_quote" to get the new fare.]`,
+                    text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. Just wait.]`,
                   }],
                 },
               }));
@@ -2458,7 +2460,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 type: "response.create",
                 response: {
                   modalities: ["audio", "text"],
-                  instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP and wait for yes/no.`
+                  instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
                 }
               }));
             }, 300);
