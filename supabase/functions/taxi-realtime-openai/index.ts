@@ -438,6 +438,23 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
           }));
           break;
 
+        // Response started - guard against VAD-triggered hallucinations
+        case "response.created":
+          // ✅ "ANYTHING ELSE" GUARD: After Ada asks "Is there anything else I can help with?",
+          // block VAD-triggered responses during the grace period to let the user respond.
+          // This prevents Ada from hallucinating cancellations or other statements.
+          if (state.askedAnythingElse && state.askedAnythingElseAt) {
+            const msSinceAsked = Date.now() - state.askedAnythingElseAt;
+            const gracePeriodMs = 5000; // 5 seconds for user to respond
+            
+            if (msSinceAsked < gracePeriodMs) {
+              console.log(`🛑 [${callId}] Cancelling VAD-triggered response - waiting for user response to "anything else?" (${msSinceAsked}ms / ${gracePeriodMs}ms)`);
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              break;
+            }
+          }
+          break;
+
         // Audio output from OpenAI -> send to client
         case "response.audio.delta":
           if (message.delta) {

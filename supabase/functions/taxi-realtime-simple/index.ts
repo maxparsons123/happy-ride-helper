@@ -1578,6 +1578,22 @@ serve(async (req) => {
           break;
         }
 
+        // ✅ "ANYTHING ELSE" GUARD: After Ada asks "Is there anything else I can help with?",
+        // block VAD-triggered responses during the grace period to let the user respond.
+        // This prevents Ada from hallucinating cancellations or other statements.
+        if (sessionState.askedAnythingElse && sessionState.askedAnythingElseAt) {
+          const msSinceAsked = Date.now() - sessionState.askedAnythingElseAt;
+          const waitPeriodMs = sessionState.goodbyeGraceMs || 3000;
+          
+          // Only block during the grace period - after that, Ada can respond naturally
+          if (msSinceAsked < waitPeriodMs) {
+            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user response to "anything else?" (${msSinceAsked}ms / ${waitPeriodMs}ms)`);
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.discardCurrentResponseAudio = true;
+            break;
+          }
+        }
+
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
         // EXCEPT for the single final goodbye response we intentionally trigger.
         if (sessionState.callEnded) {
