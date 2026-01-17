@@ -1303,7 +1303,45 @@ serve(async (req) => {
   let pendingGreeting = false; // Track if greeting should fire when OpenAI ready
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null; // Track for cleanup
   let isConnectionClosed = false; // Prevent operations after cleanup
+  let keepAliveInterval: number | null = null; // Keep-alive ping interval to prevent timeout
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  
+  // --- Keep-alive ping to prevent WebSocket timeout during dispatch callback wait ---
+  const startKeepAlive = (callId: string) => {
+    if (keepAliveInterval) return; // Already running
+    
+    // Send ping every 15 seconds to keep connection alive
+    keepAliveInterval = setInterval(() => {
+      if (isConnectionClosed || !socket) {
+        if (keepAliveInterval) {
+          clearInterval(keepAliveInterval);
+          keepAliveInterval = null;
+        }
+        return;
+      }
+      
+      try {
+        socket.send(JSON.stringify({ type: "keepalive", timestamp: Date.now() }));
+        console.log(`[${callId}] 💓 Keep-alive ping sent`);
+      } catch (e) {
+        console.error(`[${callId}] ❌ Keep-alive ping failed:`, e);
+        if (keepAliveInterval) {
+          clearInterval(keepAliveInterval);
+          keepAliveInterval = null;
+        }
+      }
+    }, 15000) as unknown as number;
+    
+    console.log(`[${callId}] 🔄 Keep-alive started (15s interval)`);
+  };
+  
+  const stopKeepAlive = () => {
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+      keepAliveInterval = null;
+      console.log(`[${state?.callId || "unknown"}] 🛑 Keep-alive stopped`);
+    }
+  };
 
   // --- Connect to OpenAI (can be called early for pre-connection) ---
   const connectToOpenAI = (sessionState: SessionState, triggerGreeting: boolean = true) => {
@@ -5526,6 +5564,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           call_id: callId,
           mode: "simple"
         }));
+        
+        // Start keep-alive pings to prevent WebSocket timeout during dispatch callback wait
+        startKeepAlive(callId);
 
         // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
         dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -6415,6 +6456,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     
     // Mark connection as closed to prevent further operations
     isConnectionClosed = true;
+    
+    // Stop keep-alive pings
+    stopKeepAlive();
     
     // Clear any pending flush timers to prevent memory leaks
     if (state?.transcriptFlushTimer) {
