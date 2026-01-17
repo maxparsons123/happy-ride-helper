@@ -6,7 +6,7 @@
   },
   "edge_functions": {
     "taxi_realtime_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime",
-    "taxi_realtime_simple_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple",
+    "taxi_realtime_simple_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-v2",
     "taxi_realtime_v2_ws": "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-v2",
     "taxi_webhook_test": "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-webhook-test"
   },
