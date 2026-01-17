@@ -119,10 +119,26 @@ interface SessionState {
     eta: string;
   } | null;
   sessionCreated: boolean;
+  cleanedUp: boolean; // Prevent double cleanup
+  timeoutId: number | null; // Session timeout
 }
 
-// Active sessions
+// Active sessions - with periodic cleanup
 const sessions = new Map<string, SessionState>();
+const MAX_SESSION_DURATION_MS = 10 * 60 * 1000; // 10 minutes max per call
+const STALE_SESSION_CHECK_MS = 60 * 1000; // Check every minute
+
+// Periodic stale session cleanup
+setInterval(() => {
+  const now = Date.now();
+  for (const [callId, state] of sessions.entries()) {
+    if (state.cleanedUp) {
+      sessions.delete(callId);
+      console.log(`🧹 [${callId}] Removed stale session`);
+    }
+  }
+  console.log(`📊 Active sessions: ${sessions.size}`);
+}, STALE_SESSION_CHECK_MS);
 
 // Call taxi-extract-unified to extract booking details from conversation
 async function extractBookingDetails(
@@ -260,8 +276,16 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
     },
     pendingQuote: null,
     sessionCreated: false,
+    cleanedUp: false,
+    timeoutId: null,
   };
   sessions.set(callId, state);
+
+  // Set max session timeout to prevent hanging connections
+  state.timeoutId = setTimeout(() => {
+    console.log(`⏰ [${callId}] Session timeout - forcing cleanup`);
+    cleanup();
+  }, MAX_SESSION_DURATION_MS) as unknown as number;
 
   // Create live call record
   await supabase.from("live_calls").insert({
@@ -499,24 +523,53 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
     }
   };
 
-  // Cleanup on close
+  // Cleanup on close - with double-cleanup protection
   const cleanup = async () => {
-    console.log(`📴 [${callId}] Call ended`);
+    if (state.cleanedUp) {
+      console.log(`⚠️ [${callId}] Cleanup already done, skipping`);
+      return;
+    }
+    state.cleanedUp = true;
+    
+    // Clear session timeout
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+      state.timeoutId = null;
+    }
+    
+    console.log(`📴 [${callId}] Call ended - cleaning up`);
     
     // Update DB
-    await supabase.from("live_calls").update({
-      status: "ended",
-      ended_at: new Date().toISOString(),
-    }).eq("call_id", callId);
+    try {
+      await supabase.from("live_calls").update({
+        status: "ended",
+        ended_at: new Date().toISOString(),
+      }).eq("call_id", callId);
+    } catch (e) {
+      console.error(`[${callId}] DB cleanup error:`, e);
+    }
     
+    // Remove from sessions map
     sessions.delete(callId);
     
-    if (openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.close();
+    // Close WebSockets
+    try {
+      if (openaiWs.readyState === WebSocket.OPEN || openaiWs.readyState === WebSocket.CONNECTING) {
+        openaiWs.close();
+      }
+    } catch (e) {
+      console.error(`[${callId}] OpenAI WS close error:`, e);
     }
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close();
+    
+    try {
+      if (clientWs.readyState === WebSocket.OPEN || clientWs.readyState === WebSocket.CONNECTING) {
+        clientWs.close();
+      }
+    } catch (e) {
+      console.error(`[${callId}] Client WS close error:`, e);
     }
+    
+    console.log(`✅ [${callId}] Cleanup complete. Active sessions: ${sessions.size}`);
   };
 
   clientWs.onclose = cleanup;
@@ -527,9 +580,7 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
   
   openaiWs.onclose = () => {
     console.log(`🔌 [${callId}] OpenAI disconnected`);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close();
-    }
+    cleanup();
   };
   
   openaiWs.onerror = (e) => {
