@@ -2176,14 +2176,26 @@ Do NOT say 'booked' until the tool returns success.]`
         }
 
         if (userText) {
+          // Use the actual speech start time (from input_audio_buffer.speech_started) as the timestamp.
+          // This prevents the dashboard transcript from looking “out of order” when STT arrives late.
+          const userTimestampMs =
+            typeof sessionState.speechStartTime === "number" && sessionState.speechStartTime > 0
+              ? sessionState.speechStartTime
+              : Date.now();
+
           sessionState.transcripts.push({
             role: "user",
             text: userText,
-            timestamp: new Date().toISOString(),
+            timestamp: new Date(userTimestampMs).toISOString(),
           });
+
+          // Clear speech timing markers after we’ve turned them into a transcript timestamp.
+          sessionState.speechStartTime = null;
+          sessionState.speechStopTime = null;
+
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
-          
+
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
           sessionState.bookingConfirmedThisTurn = false;
