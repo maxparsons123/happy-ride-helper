@@ -2435,10 +2435,10 @@ Do NOT say 'booked' until the tool returns success.]`
             // Clear any pending quote (we'll get a new one after confirmation)
             sessionState.pendingQuote = null;
             
-            // Build the confirmation message based on field changed
+            // Build the confirmation message - simple and clear
             const confirmationMessage = fieldToChange === "pickup" || fieldToChange === "destination"
-              ? `Your booking has been updated. Picking up from ${sessionState.booking.pickup} going to ${sessionState.booking.destination}. Are you happy with that?`
-              : `Updated to ${newValue} ${fieldToChange}. Are you happy with that?`;
+              ? `Updated. From ${sessionState.booking.pickup} to ${sessionState.booking.destination}. Happy with that?`
+              : `Updated to ${newValue} ${fieldToChange}. Happy with that?`;
             
             // === ASK USER TO CONFIRM THE CHANGE ===
             setTimeout(() => {
