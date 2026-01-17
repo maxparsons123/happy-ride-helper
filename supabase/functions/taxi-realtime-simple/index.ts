@@ -1284,8 +1284,10 @@ interface SessionState {
   // "Anything else?" guard - set to true ONLY after Ada asks "Is there anything else I can help you with?"
   // Until this is true, phrases like "no thanks" should NOT trigger goodbye (user might be rejecting fare)
   askedAnythingElse: boolean;
-  // Timestamp when "anything else?" was asked - used to enforce a 3-second grace period for user response
+  // Timestamp when "anything else?" was asked - used to enforce grace period for user response
   askedAnythingElseAt: number | null;
+  // Configurable grace period (from agent.goodbye_grace_ms) - how long to wait before accepting soft goodbyes
+  goodbyeGraceMs: number;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -2236,8 +2238,9 @@ Do NOT say 'booked' until the tool returns success.]`
           const isHardGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText);
           const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText);
           
-          // Check if 3 seconds have passed since "anything else?" was asked
-          const gracePeriodMs = 3000; // 3 seconds for user to respond
+          // Check if grace period has passed since "anything else?" was asked
+          // Uses configurable goodbyeGraceMs from agent settings (default 3000ms)
+          const gracePeriodMs = sessionState.goodbyeGraceMs || 3000;
           const enoughTimeElapsed = !sessionState.askedAnythingElseAt || 
             (Date.now() - sessionState.askedAnythingElseAt > gracePeriodMs);
           
@@ -5091,6 +5094,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            activeBookingAcknowledged: false,
            askedAnythingElse: false,
            askedAnythingElseAt: null,
+           goodbyeGraceMs: 3000, // Default, will be updated from agent config if available
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -5200,6 +5204,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              activeBookingAcknowledged: false,
              askedAnythingElse: false,
              askedAnythingElseAt: null,
+             goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
@@ -5215,10 +5220,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           };
         }
         
-        // Also update useRasaAudioProcessing and halfDuplex from init message if pre-connected
+        // Also update settings from init message if pre-connected
         if (state && preConnected) {
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
           state.halfDuplex = message.half_duplex ?? false;
+          state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
         }
         
         console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
