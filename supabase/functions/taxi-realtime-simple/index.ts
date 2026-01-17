@@ -1498,7 +1498,7 @@ serve(async (req) => {
           prefix_padding_ms: sessionState.useRasaAudioProcessing ? 250 : 500,
           silence_duration_ms: sessionState.useRasaAudioProcessing ? 800 : 1800,
         },
-        temperature: 0.6,
+        temperature: 0.4, // Lowered from 0.6 for more consistent responses
         tools: TOOLS,
         tool_choice: "auto"
       }
