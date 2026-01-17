@@ -530,6 +530,12 @@ const STT_CORRECTIONS: Record<string, string> = {
   "b high": "B High",
   "fifty to a": "52A",
   "fifty too a": "52A",
+  "fifty two a": "52A",
+  "52 a": "52A",
+  
+  // Common number mishearings in addresses
+  "28 david": "52A David",
+  "twenty eight david": "52A David",
 };
 
 // Hallucination patterns - common STT artifacts from telephony noise
