@@ -290,21 +290,18 @@ AFTER DISPATCH CONFIRMATION (WhatsApp message):
 - If user says "no" or "that's all" → Say "Safe travels!" then call end_call.
 - If user has another request → Process it normally.
 
-BOOKING MODIFICATIONS - CONFIRM BEFORE FARE:
-⚠️ When customer requests a change, CONFIRM it first, THEN get fare only after they agree.
+BOOKING MODIFICATIONS - AUTOMATIC PROCESSING:
+⚠️ When customer requests a change, the system AUTOMATICALLY detects and applies it.
+You will receive a [SYSTEM: MODIFICATION APPLIED] message when a change is processed.
 
-STEP 1 - ACKNOWLEDGE AND CONFIRM:
-- Customer says "change destination to X" → Say: "Got it, changing destination to X. Is that right?"
-- Customer says "change pickup to X" → Say: "Got it, changing pickup to X. Is that right?"
-- Customer says "no, the pickup is X" → Say: "Got it, pickup is X. Is that correct?"
-- WAIT for customer to confirm (yes/yeah/correct).
+AFTER RECEIVING MODIFICATION APPLIED MESSAGE:
+- The system has already updated the booking and sent it to dispatch.
+- You will receive the new fare from dispatch.
+- Simply announce: "The fare is [FARE]. Shall I book that?"
+- Wait for yes/no response.
 
-STEP 2 - AFTER CUSTOMER CONFIRMS:
-- Call modify_booking with the new value.
-- Call book_taxi with confirmation_state: "request_quote".
-- Announce the new fare: "The fare is [FARE]. Shall I book that?"
-
-NEVER get a fare quote before the customer confirms they're happy with the change.
+DO NOT ask "Is that correct?" for modifications - the system handles validation.
+DO NOT repeat the changed address - just announce the new fare when it arrives.
 
 RULES:
 1. ALWAYS ask for PICKUP before DESTINATION. Never assume or swap them.
@@ -1008,7 +1005,7 @@ const Ada = {
       return Ada.Detection.NO_PHRASES.some(p => new RegExp(`\\b${p}\\b`, "i").test(lower));
     },
     
-    /** Detect address correction intent */
+    /** Detect address correction intent (negation) */
     detectAddressCorrection: (text: string): { field: "pickup" | "destination" | null; value: string | null } => {
       const pickupMatch = text.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:pickup|pick\s*up)\s+(?:is|should be|location is)\s+(.+)/i) ||
                           text.match(/(?:no|not|wrong)[,.]?\s*(?:i(?:'?m| am)\s+at|from)\s+(.+)/i);
@@ -1019,6 +1016,103 @@ const Ada = {
       if (pickupMatch) return { field: "pickup", value: pickupMatch[1].trim() };
       if (destMatch) return { field: "destination", value: destMatch[1].trim() };
       return { field: null, value: null };
+    },
+    
+    /**
+     * Detect booking modification intent from user speech.
+     * Returns the field to change and the new value if detected.
+     * This allows auto-applying changes without double confirmation.
+     */
+    detectBookingModification: (text: string): { 
+      field: "pickup" | "destination" | "passengers" | "bags" | null; 
+      value: string | null;
+      isModification: boolean;
+    } => {
+      const lower = text.toLowerCase().trim();
+      
+      // PICKUP changes
+      // "change pickup to X", "pickup is X", "pick me up from X instead", "actually from X"
+      const pickupPatterns = [
+        /(?:change|update|modify)\s+(?:the\s+)?(?:pickup|pick\s*up)(?:\s+(?:to|address))?\s+(?:to\s+)?(.+)/i,
+        /(?:pickup|pick\s*up)\s+(?:is|should be|from)\s+(.+)/i,
+        /(?:pick\s+(?:me\s+)?up|collect\s+(?:me|us))\s+(?:from|at)\s+(.+?)(?:\s+instead)?$/i,
+        /(?:actually|no)\s+(?:from|at|pick\s*up\s+from)\s+(.+)/i,
+        /(?:i(?:'?m| am)|we(?:'?re| are))\s+(?:at|on)\s+(.+?)(?:\s+(?:not|instead))/i,
+        /(?:change|switch)\s+(?:it|that)\s+to\s+(.+?)\s+(?:for\s+)?(?:pickup|pick\s*up)/i,
+      ];
+      
+      for (const pattern of pickupPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          const value = match[1].replace(/(?:\s+please|\s+thanks?|\s+instead)$/i, "").trim();
+          if (value.length > 2) {
+            return { field: "pickup", value, isModification: true };
+          }
+        }
+      }
+      
+      // DESTINATION changes
+      // "change destination to X", "going to X instead", "actually to X", "take me to X instead"
+      const destPatterns = [
+        /(?:change|update|modify)\s+(?:the\s+)?(?:destination|drop\s*off)(?:\s+(?:to|address))?\s+(?:to\s+)?(.+)/i,
+        /(?:destination|drop\s*off)\s+(?:is|should be|to)\s+(.+)/i,
+        /(?:going|go)\s+to\s+(.+?)(?:\s+instead)?$/i,
+        /(?:actually|no)\s+(?:to|going\s+to)\s+(.+)/i,
+        /(?:take|drop)\s+(?:me|us)\s+(?:to|at|off\s+at)\s+(.+?)(?:\s+instead)?$/i,
+        /(?:change|switch)\s+(?:it|that)\s+to\s+(.+?)\s+(?:for\s+)?(?:destination|drop\s*off)/i,
+        /(?:i\s+)?(?:want|need)\s+to\s+go\s+to\s+(.+?)(?:\s+instead)?$/i,
+      ];
+      
+      for (const pattern of destPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          const value = match[1].replace(/(?:\s+please|\s+thanks?|\s+instead)$/i, "").trim();
+          if (value.length > 2) {
+            return { field: "destination", value, isModification: true };
+          }
+        }
+      }
+      
+      // PASSENGERS changes
+      // "change to 3 passengers", "actually 4 people", "there's 2 of us"
+      const passengersPatterns = [
+        /(?:change|update)\s+(?:to\s+)?(\d+)\s+(?:passengers?|people|persons?)/i,
+        /(?:actually|no)\s+(\d+)\s+(?:passengers?|people|persons?)/i,
+        /(?:there(?:'s| is| are)|we(?:'re| are))\s+(\d+)\s+(?:of\s+us|people|passengers?)/i,
+        /(\d+)\s+(?:passengers?|people)\s+(?:instead|now)/i,
+      ];
+      
+      for (const pattern of passengersPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          const num = parseInt(match[1], 10);
+          if (num >= 1 && num <= 8) {
+            return { field: "passengers", value: String(num), isModification: true };
+          }
+        }
+      }
+      
+      // BAGS changes
+      // "actually 2 bags", "no bags", "3 pieces of luggage"
+      const bagsPatterns = [
+        /(?:change|update)\s+(?:to\s+)?(\d+)\s+(?:bags?|luggage|suitcases?)/i,
+        /(?:actually|no)\s+(\d+)\s+(?:bags?|luggage|suitcases?)/i,
+        /(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:got\s+)?(\d+)\s+(?:bags?|pieces?\s+of\s+luggage)/i,
+        /(?:no\s+)?(?:bags?|luggage)/i, // "no bags" or "no luggage"
+      ];
+      
+      for (const pattern of bagsPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          if (match[1]) {
+            return { field: "bags", value: match[1], isModification: true };
+          } else if (/^no\s+(?:bags?|luggage)/i.test(text)) {
+            return { field: "bags", value: "0", isModification: true };
+          }
+        }
+      }
+      
+      return { field: null, value: null, isModification: false };
     }
   }
 };
@@ -2265,48 +2359,89 @@ Do NOT say 'booked' until the tool returns success.]`
             }, 350);
           }
           
-          // === ADDRESS CORRECTION DETECTION ===
-          // Catch "No, the pickup is X" or "No, it's X" type corrections
-          const pickupCorrectionMatch = userText.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:pickup|pick\s*up)\s+(?:is|should be|location is)\s+(.+)/i) ||
-            userText.match(/(?:no|not|wrong)[,.]?\s*(?:i(?:'?m| am)\s+at|from)\s+(.+)/i);
-          const destCorrectionMatch = userText.match(/(?:no|not|wrong)[,.]?\s*(?:the\s+)?(?:destination|drop\s*off|going to)\s+(?:is|should be)\s+(.+)/i) ||
-            userText.match(/(?:no|not|wrong)[,.]?\s*(?:to|going to)\s+(.+)/i);
+          // === BOOKING MODIFICATION AUTO-DETECTION ===
+          // Detect modification intent from user speech and automatically apply changes
+          // This provides ONE confirmation (fare) instead of two (change + fare)
+          const modificationDetection = Ada.Detection.detectBookingModification(userText);
           
-          const isCorrectionUtterance = (pickupCorrectionMatch || destCorrectionMatch) && hasExistingBookingContext;
+          // Also catch address corrections like "No, the pickup is X"
+          const correctionDetection = Ada.Detection.detectAddressCorrection(userText);
           
-          if (isCorrectionUtterance && openaiWs && openaiConnected && !sessionState.callEnded) {
-            const correctedPickup = pickupCorrectionMatch ? pickupCorrectionMatch[1].trim() : null;
-            const correctedDest = destCorrectionMatch ? destCorrectionMatch[1].trim() : null;
+          // Determine if this is a modification
+          const isModificationRequest = 
+            (modificationDetection.isModification && modificationDetection.field && modificationDetection.value) ||
+            (correctionDetection.field && correctionDetection.value);
+          
+          if (isModificationRequest && hasExistingBookingContext && openaiWs && openaiConnected && !sessionState.callEnded) {
+            // Use modification detection first, fall back to correction detection
+            const fieldToChange = modificationDetection.field || correctionDetection.field;
+            const newValue = modificationDetection.value || correctionDetection.value;
             
-            console.log(`[${sessionState.callId}] 🔧 Address correction detected: pickup="${correctedPickup || 'unchanged'}", dest="${correctedDest || 'unchanged'}"`);
+            console.log(`[${sessionState.callId}] 🔧 AUTO-MODIFICATION: ${fieldToChange}="${newValue}" detected from: "${userText}"`);
+            
+            // === AUTO-APPLY THE MODIFICATION ===
+            // Apply the change directly to session state (no confirmation needed)
+            if (fieldToChange === "pickup") {
+              sessionState.booking.pickup = newValue;
+            } else if (fieldToChange === "destination") {
+              sessionState.booking.destination = newValue;
+            } else if (fieldToChange === "passengers") {
+              sessionState.booking.passengers = parseInt(newValue || "1", 10);
+            } else if (fieldToChange === "bags") {
+              sessionState.booking.bags = parseInt(newValue || "0", 10);
+            }
+            
+            // Increment version and update database
+            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+            
+            // Sync to live_calls (fire-and-forget, don't block)
+            supabase.from("live_calls").update({
+              pickup: sessionState.booking.pickup,
+              destination: sessionState.booking.destination,
+              passengers: sessionState.booking.passengers || 1,
+              updated_at: new Date().toISOString()
+            }).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ live_calls updated with modification`);
+            });
+            
+            console.log(`[${sessionState.callId}] ✅ Modification auto-applied: ${fieldToChange} → "${newValue}"`);
             
             // Cancel any in-flight response
             if (sessionState.openAiResponseActive) {
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             
-            const fieldToChange = correctedPickup ? "pickup" : "destination";
-            const newValue = correctedPickup || correctedDest;
+            // Clear any pending quote (we'll get a new one)
+            sessionState.pendingQuote = null;
             
+            // === TRIGGER FARE QUOTE AUTOMATICALLY ===
+            // Inject a message telling Ada to call book_taxi with request_quote
+            // Ada will only confirm ONCE with the new fare
             setTimeout(() => {
-              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{
+                    type: "input_text",
+                    text: `[SYSTEM: MODIFICATION APPLIED - The ${fieldToChange} has been updated to "${newValue}". The booking is now: Pickup="${sessionState.booking.pickup}", Destination="${sessionState.booking.destination}". NOW CALL book_taxi with confirmation_state: "request_quote", pickup: "${sessionState.booking.pickup}", destination: "${sessionState.booking.destination}" to get the updated fare. DO NOT say "Is that correct?" - just get the fare and announce it.]`,
+                  }],
+                },
+              }));
               
-              setTimeout(() => {
-                openaiWs?.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_text",
-                      text: `[SYSTEM: The customer is CORRECTING the ${fieldToChange}. The new ${fieldToChange} is: "${newValue}". Say: "Got it, ${fieldToChange} is ${newValue}. Is that correct?" Then WAIT for their confirmation (yes/yeah/correct). Only AFTER they confirm, call modify_booking and then book_taxi with confirmation_state: "request_quote".]`,
-                    }],
-                  },
-                }));
-                
-                openaiWs?.send(JSON.stringify({ type: "response.create" }));
-              }, 200);
-            }, 200);
+              // Force Ada to call the tool
+              openaiWs?.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `The booking was just modified. Call book_taxi with confirmation_state: "request_quote" to get the new fare. Do not speak until you have the fare.`
+                }
+              }));
+            }, 300);
+            
+            break; // Don't process further - modification is being handled
           }
           // === POST-BOOKING RESPONSE HELPER ===
           // If booking was confirmed and user says something positive (not goodbye/thanks),
