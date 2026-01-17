@@ -68,7 +68,8 @@ EXTRACTION RULES (NEW BOOKING)
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
    - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
-   - 'nearest' or 'closest' → extract as nearest_place
+   - 'nearest X' or 'closest X' for PICKUP (e.g., 'from the nearest tube station') → set nearest_pickup = 'tube station', leave pickup_location EMPTY
+   - 'nearest X' or 'closest X' for DROPOFF (e.g., 'take me to the nearest hospital') → set nearest_dropoff = 'hospital', leave dropoff_location EMPTY
    - 'as directed' or no destination → dropoff_location = 'as directed'
 
 2. **Address Preservation - CRITICAL**:
@@ -167,7 +168,8 @@ You MUST NOT:
 1. **Location Extraction**:
    - Detect 'from' and 'to' (or variants in other languages).
    - If only one place + 'pick up' → set as pickup_location.
-   - If 'nearest' or 'closest' is mentioned, extract as 'nearest_place'.
+   - If 'nearest' or 'closest' is mentioned for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY.
+   - If 'nearest' or 'closest' is mentioned for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY.
    - If no drop-off given or 'as directed', set dropoff_location = 'as directed'.
    - If user says 'my location', 'here', etc., leave pickup_location EMPTY (agent will ask for address).
 
@@ -312,9 +314,13 @@ const BOOKING_EXTRACTION_TOOL = {
           type: "string", 
           description: "Special requests (driver preferences, accessibility, etc.)" 
         },
-        nearest_place: { 
+        nearest_pickup: { 
           type: "string", 
-          description: "If user asks for 'nearest' or 'closest' something." 
+          description: "If user asks for pickup from 'nearest' or 'closest' something (e.g., 'pick me up from the nearest tube station' → 'tube station')" 
+        },
+        nearest_dropoff: { 
+          type: "string", 
+          description: "If user asks to go to 'nearest' or 'closest' something (e.g., 'take me to the nearest hospital' → 'hospital')" 
         },
         fields_changed: {
           type: "array",

@@ -3825,6 +3825,8 @@ Do NOT say 'booked' until the tool returns success.]`
             pickup_time?: string;
             confidence?: string;
             missing_fields?: string[];
+            nearest_pickup?: string;
+            nearest_dropoff?: string;
           } = {};
           
           // ALWAYS run AI extraction for accurate address capture
@@ -4125,6 +4127,9 @@ Do NOT say 'booked' until the tool returns success.]`
                 // Raw caller addresses (what they actually said)
                 callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
                 callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
+                // Nearest place flags (if customer requested "nearest hospital", "closest tube station", etc.)
+                nearest_pickup: extractedBooking?.nearest_pickup || null,
+                nearest_dropoff: extractedBooking?.nearest_dropoff || null,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
                 // GPS location (if available)
