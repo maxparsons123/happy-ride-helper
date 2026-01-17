@@ -2568,6 +2568,8 @@ Do NOT say 'booked' until the tool returns success.]`
               
               // === ASK USER TO CONFIRM THE NEW BOOKING ===
               setTimeout(() => {
+                // CRITICAL: Only inject ONE instruction source to prevent Ada from repeating
+                // Use conversation.item.create ONLY - do NOT add duplicate instructions in response.create
                 openaiWs?.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -2575,20 +2577,15 @@ Do NOT say 'booked' until the tool returns success.]`
                     role: "user",
                     content: [{
                       type: "input_text",
-                      text: `[SYSTEM: NEW BOOKING DETECTED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call book_taxi yet. DO NOT continue speaking. Just wait for yes/no.]`,
+                      text: `[SYSTEM: NEW BOOKING DETECTED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call book_taxi yet. DO NOT continue speaking. DO NOT repeat any addresses. Just wait for yes/no.]`,
                     }],
                   },
                 }));
                 
                 sessionState.newBookingPromptPending = true;
 
-                openaiWs?.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio", "text"],
-                    instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
-                  }
-                }));
+                // Use simple response.create WITHOUT duplicate instructions
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
                 
                 // Clear extraction flag AFTER we've injected the response
                 sessionState.extractionInProgress = false;
@@ -2798,6 +2795,8 @@ Do NOT say 'booked' until the tool returns success.]`
               
               // === ASK USER TO CONFIRM THE CHANGE ===
               setTimeout(() => {
+                // CRITICAL: Only inject ONE instruction source to prevent Ada from repeating
+                // Use conversation.item.create ONLY - do NOT add duplicate instructions in response.create
                 openaiWs?.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -2805,20 +2804,15 @@ Do NOT say 'booked' until the tool returns success.]`
                     role: "user",
                     content: [{
                       type: "input_text",
-                      text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. Just wait.]`,
+                      text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. DO NOT repeat any addresses. Just wait.]`,
                     }],
                   },
                 }));
                 
                 sessionState.modificationPromptPending = true;
 
-                openaiWs?.send(JSON.stringify({
-                  type: "response.create",
-                  response: {
-                    modalities: ["audio", "text"],
-                    instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
-                  }
-                }));
+                // Use simple response.create WITHOUT duplicate instructions
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
                 
                 // Clear extraction flag AFTER we've injected the response
                 sessionState.extractionInProgress = false;
