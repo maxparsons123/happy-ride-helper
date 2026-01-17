@@ -5107,7 +5107,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            activeBookingAcknowledged: false,
            askedAnythingElse: false,
            askedAnythingElseAt: null,
-           goodbyeGraceMs: 3000, // Default, will be updated from agent config if available
+           goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
