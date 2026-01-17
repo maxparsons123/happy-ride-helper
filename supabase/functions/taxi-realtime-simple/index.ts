@@ -260,11 +260,11 @@ STEP 1 - REQUEST QUOTE:
 STEP 2 - CUSTOMER RESPONDS YES:
 - If customer says "yes", "yeah", "go ahead", "book it" → CALL book_taxi with confirmation_state: "confirmed" (same pickup/destination)
 - This confirms the booking with dispatch
-- Then say: "Booked! Your driver is on the way. Is there anything else?"
+- Then say: "That's booked for you. Is there anything else I can help you with?"
 
 STEP 3 - CUSTOMER RESPONDS NO:
 - If customer says "no", "cancel", "never mind" → CALL book_taxi with confirmation_state: "rejected"
-- Then say: "No problem, I've cancelled that. Is there anything else I can help with?"
+- Then say: "No problem, I've cancelled that. Is there anything else I can help you with?"
 
 🚫 FORBIDDEN - NEVER DO THESE:
 - NEVER say fare/price before receiving it from book_taxi result
@@ -783,7 +783,7 @@ const Ada = {
   Scripts: {
     /** Booking confirmed - taxi on the way */
     bookingConfirmed: (): string => 
-      "That's on the way. Is there anything else I can help you with?",
+      "That's booked for you. Is there anything else I can help you with?",
     
     /** Fare quote prompt - NO booking recap, just fare and ETA */
     fareQuote: (fare: string, eta: string): string => 
