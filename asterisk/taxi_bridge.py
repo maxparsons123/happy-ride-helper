@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Taxi AI Asterisk Bridge v6.2 - VAD + Hallucination Reduction
+"""Taxi AI Asterisk Bridge v6.4 - SMOOTH VAD + HYSTERESIS
 
-Improvements in v6.2:
-1. Voice Activity Detection (VAD) - only send frames with actual speech
-2. Increased noise gate threshold (50 vs 25)
-3. MIN_RMS_FOR_PROCESSING to skip silent frames entirely
-4. Speech peak detection for better VAD accuracy
-5. Consecutive silence frame tracking to reduce API load
+Improvements in v6.4:
+1. Lowered VAD thresholds (RMS 80, Peak 250) for better sensitivity
+2. Hysteresis: minimum speech duration before allowing end
+3. Hangover time: wait longer after speech before declaring silence
+4. Looser peak detection (1 peak vs 2)
+5. Speech continuation: once speaking, stay speaking longer
 
 Dependencies:
     pip install websockets numpy scipy
@@ -94,11 +94,13 @@ NOISE_FLOOR_GROW = 0.92       # How quickly noise floor tracks up (slower = more
 SPEECH_NOISE_RATIO = 2.5      # RMS must be this many times above noise floor to be "speech"
 MAX_NOISE_ATTEN_DB = -18.0    # dB attenuation for pure noise frames
 
-# VAD (Voice Activity Detection) settings
-VAD_RMS_THRESHOLD = 120       # Lowered - dynamic floor handles noise now
-VAD_PEAK_THRESHOLD = 400      # Peak amplitude threshold for speech detection
-VAD_MIN_PEAKS = 2             # Minimum speech-like peaks in a frame
-VAD_CONSECUTIVE_SILENCE = 10  # Number of silent frames before stopping audio stream
+# VAD (Voice Activity Detection) settings - SMOOTHED for better recognition
+VAD_RMS_THRESHOLD = 80        # Lowered for better sensitivity
+VAD_PEAK_THRESHOLD = 250      # Lowered - was cutting off consonants
+VAD_MIN_PEAKS = 1             # Just 1 peak needed (was 2)
+VAD_CONSECUTIVE_SILENCE = 25  # Wait longer before ending speech (was 10)
+VAD_MIN_SPEECH_FRAMES = 4     # Minimum frames to count as speech start
+VAD_HANGOVER_FRAMES = 15      # Keep "speaking" state this many frames after last voice
 
 # =============================================================================
 # LOGGING - Force stdout/stderr for systemd
@@ -112,7 +114,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-print("🚀 Starting taxi_bridge.py v6.3...", flush=True)
+print("🚀 Starting taxi_bridge.py v6.4...", flush=True)
 
 # =============================================================================
 # AUDIO CODECS AND FILTERS
@@ -326,8 +328,10 @@ class TaxiBridgeV6:
         self.current_ws_url = WS_URL
         self.pending_audio_buffer = deque(maxlen=50)
         
-        # VAD state tracking
+        # VAD state tracking with hysteresis
         self.consecutive_silence = 0
+        self.consecutive_voice = 0       # Track consecutive voice frames
+        self.hangover_counter = 0        # Frames since last voice (for hangover)
         self.frames_sent = 0
         self.frames_skipped = 0
         self.is_speaking = False
@@ -528,37 +532,46 @@ class TaxiBridgeV6:
                     # Apply noise reduction (may return empty bytes for silent/noise frames)
                     cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
 
-                    has_voice = bool(cleaned) and is_voice_activity(cleaned)
+                    raw_has_voice = bool(cleaned) and is_voice_activity(cleaned)
 
-                    if has_voice:
-                        # Voice detected - reset silence counter
+                    # Hysteresis logic: smooth out choppy VAD
+                    if raw_has_voice:
+                        self.consecutive_voice += 1
+                        self.hangover_counter = 0
                         self.consecutive_silence = 0
-                        self.frames_sent += 1
+                    else:
+                        self.hangover_counter += 1
+                        self.consecutive_voice = 0
+                        self.consecutive_silence += 1
 
-                        if not self.is_speaking:
+                    # Determine effective voice state with hysteresis
+                    # Start speaking: need VAD_MIN_SPEECH_FRAMES consecutive voice frames
+                    # Stop speaking: need VAD_CONSECUTIVE_SILENCE frames AND hangover expired
+                    if not self.is_speaking:
+                        # Not speaking yet - need sustained voice to start
+                        if self.consecutive_voice >= VAD_MIN_SPEECH_FRAMES:
                             self.is_speaking = True
                             self.speech_start_time = time.time()
                             print(f"[{self.call_id}] 🎤 Speech started", flush=True)
-
-                        # Prepare audio for sending
-                        if SEND_NATIVE_ULAW:
-                            audio_to_send = lin2ulaw(cleaned)
-                        else:
-                            audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
-
                     else:
-                        # No voice activity - IMPORTANT: still send SILENCE frames so OpenAI server VAD can detect speech end.
-                        self.consecutive_silence += 1
-                        self.frames_skipped += 1
-
-                        if self.is_speaking and self.consecutive_silence >= VAD_CONSECUTIVE_SILENCE:
+                        # Currently speaking - use hangover to avoid choppy cutoff
+                        if self.hangover_counter >= VAD_HANGOVER_FRAMES and self.consecutive_silence >= VAD_CONSECUTIVE_SILENCE:
                             self.is_speaking = False
                             speech_duration = time.time() - self.speech_start_time if self.speech_start_time else 0
                             print(f"[{self.call_id}] 🔇 Speech ended ({speech_duration:.1f}s)", flush=True)
                             self.speech_start_time = None
 
+                    # Send real audio when speaking (or raw voice detected), silence otherwise
+                    # This ensures OpenAI gets continuous audio stream
+                    if self.is_speaking or raw_has_voice:
+                        self.frames_sent += 1
                         if SEND_NATIVE_ULAW:
-                            # ulaw length is half of PCM16 bytes (or already ulaw if ast_codec==ulaw)
+                            audio_to_send = lin2ulaw(cleaned)
+                        else:
+                            audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
+                    else:
+                        self.frames_skipped += 1
+                        if SEND_NATIVE_ULAW:
                             ulaw_len = len(payload) if self.ast_codec == "ulaw" else (len(linear16) // 2)
                             audio_to_send = (b"\xFF" * ulaw_len)  # ulaw silence
                         else:
@@ -721,12 +734,13 @@ async def main():
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
 
-    print(f"🚀 Taxi Bridge v6.3 - DYNAMIC NOISE FLOOR + GENTLE AGC", flush=True)
+    print(f"🚀 Taxi Bridge v6.4 - SMOOTH VAD + HYSTERESIS", flush=True)
     print(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}", flush=True)
     print(f"   Config: {CONFIG_PATH}", flush=True)
     print(f"   WebSocket: {WS_URL}", flush=True)
-    print(f"   VAD: RMS>{VAD_RMS_THRESHOLD}, Peaks>{VAD_PEAK_THRESHOLD}, Silence>{VAD_CONSECUTIVE_SILENCE} frames", flush=True)
-    print(f"   Noise Floor: init={NOISE_FLOOR_INIT}, speech_ratio={SPEECH_NOISE_RATIO}, atten={MAX_NOISE_ATTEN_DB}dB", flush=True)
+    print(f"   VAD: RMS>{VAD_RMS_THRESHOLD}, Peaks>{VAD_PEAK_THRESHOLD}", flush=True)
+    print(f"   Hysteresis: min_speech={VAD_MIN_SPEECH_FRAMES}, hangover={VAD_HANGOVER_FRAMES}, silence>{VAD_CONSECUTIVE_SILENCE}", flush=True)
+    print(f"   Noise Floor: init={NOISE_FLOOR_INIT}, speech_ratio={SPEECH_NOISE_RATIO}", flush=True)
     print(f"   Filters: HPF={HIGH_PASS_CUTOFF}Hz, LPF={LOW_PASS_CUTOFF}Hz", flush=True)
 
     async with server:
