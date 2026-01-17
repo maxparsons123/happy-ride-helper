@@ -2748,11 +2748,12 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // AI-FIRST APPROACH: If user has active booking and says something substantial,
           // use AI to extract and compare - no more relying on fragile regex patterns
+          // NOTE: We now allow extraction even with pendingQuote, as user might be changing their trip
+          // after being asked "keep, change, or cancel?"
           const shouldUseAiExtraction = hasExistingBookingContext && 
             isSubstantialInput &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
-            !sessionState.pendingQuote &&
             !sessionState.callEnded;
           
           if (shouldUseAiExtraction && openaiWs && openaiConnected) {
