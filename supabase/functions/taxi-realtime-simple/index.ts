@@ -5630,6 +5630,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           if (state) {
             state.bookingConfirmedThisTurn = true;
             state.pendingQuote = null; // Clear quote
+            // ✅ CRITICAL: Set askedAnythingElse so goodbye enforcement waits for user response
+            state.askedAnythingElse = true;
+            state.askedAnythingElseAt = Date.now();
           }
           
           // Build the confirmation message for Ada to speak
