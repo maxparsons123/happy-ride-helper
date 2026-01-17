@@ -98,8 +98,8 @@ logger = logging.getLogger("TaxiBridgeV7")
 # AUDIO HELPERS
 # =============================================================================
 
-# Pre-compute high-pass filter coefficients
-_highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype="high", fs=AST_RATE, output="sos")
+# Pre-compute high-pass filter coefficients (use 8kHz as base, works for all rates)
+_highpass_sos = butter(2, HIGH_PASS_CUTOFF, btype="high", fs=ULAW_RATE, output="sos")
 
 
 def ulaw2lin(ulaw_bytes: bytes) -> bytes:
