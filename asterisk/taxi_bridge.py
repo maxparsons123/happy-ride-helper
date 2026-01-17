@@ -483,47 +483,57 @@ class TaxiBridgeV6:
                     if m_len != self.ast_frame_bytes:
                         self._detect_format(m_len)
                     
-                    # Decode to linear PCM
+                    # Decode to linear PCM (8kHz)
                     linear16 = ulaw2lin(payload) if self.ast_codec == "ulaw" else payload
                     
-                    # Apply noise reduction (returns empty bytes for silent frames)
+                    # Apply noise reduction (may return empty bytes for silent/noise frames)
                     cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
-                    
-                    # VAD check: only send if voice activity detected
-                    if cleaned and is_voice_activity(cleaned):
+
+                    has_voice = bool(cleaned) and is_voice_activity(cleaned)
+
+                    if has_voice:
                         # Voice detected - reset silence counter
                         self.consecutive_silence = 0
-                        
+                        self.frames_sent += 1
+
                         if not self.is_speaking:
                             self.is_speaking = True
                             self.speech_start_time = time.time()
                             print(f"[{self.call_id}] 🎤 Speech started", flush=True)
-                        
+
                         # Prepare audio for sending
                         if SEND_NATIVE_ULAW:
                             audio_to_send = lin2ulaw(cleaned)
                         else:
                             audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
-                        
-                        if self.ws_connected and self.ws:
-                            try:
-                                await self.ws.send(audio_to_send)
-                                self.binary_audio_count += 1
-                                self.frames_sent += 1
-                                self.last_ws_activity = time.time()
-                            except:
-                                self.pending_audio_buffer.append(audio_to_send)
-                                raise
+
                     else:
-                        # No voice activity - track consecutive silence
+                        # No voice activity - IMPORTANT: still send SILENCE frames so OpenAI server VAD can detect speech end.
                         self.consecutive_silence += 1
                         self.frames_skipped += 1
-                        
+
                         if self.is_speaking and self.consecutive_silence >= VAD_CONSECUTIVE_SILENCE:
                             self.is_speaking = False
                             speech_duration = time.time() - self.speech_start_time if self.speech_start_time else 0
                             print(f"[{self.call_id}] 🔇 Speech ended ({speech_duration:.1f}s)", flush=True)
                             self.speech_start_time = None
+
+                        if SEND_NATIVE_ULAW:
+                            # ulaw length is half of PCM16 bytes (or already ulaw if ast_codec==ulaw)
+                            ulaw_len = len(payload) if self.ast_codec == "ulaw" else (len(linear16) // 2)
+                            audio_to_send = (b"\xFF" * ulaw_len)  # ulaw silence
+                        else:
+                            silence_8k = b"\x00" * len(linear16)
+                            audio_to_send = resample_audio(silence_8k, AST_RATE, AI_RATE)
+
+                    if self.ws_connected and self.ws:
+                        try:
+                            await self.ws.send(audio_to_send)
+                            self.binary_audio_count += 1
+                            self.last_ws_activity = time.time()
+                        except:
+                            self.pending_audio_buffer.append(audio_to_send)
+                            raise
 
                 elif m_type == MSG_HANGUP:
                     print(f"[{self.call_id}] 📴 Hangup", flush=True)
