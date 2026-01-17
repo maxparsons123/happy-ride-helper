@@ -98,15 +98,16 @@ EXTRACTION RULES (NEW BOOKING)
 };
 
 // Build system prompt for BOOKING UPDATES (comprehensive C#-style prompt)
+// Returns COMPLETE booking - unchanged fields use existing values
 const buildUpdateBookingPrompt = (
   now: string,
   existingBooking: ExistingBooking
 ) => {
-  return `You are a STRICT taxi booking AI handling UPDATES ONLY.
+  return `You are a STRICT taxi booking AI handling UPDATES.
 Current time (London): ${now}
 
 ==================================================
-EXISTING BOOKING (REFERENCE ONLY — DO NOT COPY)
+EXISTING BOOKING (USE AS BASE - KEEP UNCHANGED FIELDS)
 ==================================================
 Pickup: ${existingBooking.pickup || 'not set'}
 Dropoff: ${existingBooking.destination || 'not set'}
@@ -115,19 +116,28 @@ Passengers: ${existingBooking.passengers || 1}
 Luggage: ${existingBooking.luggage || 'not specified'}
 Special requests: ${existingBooking.special_requests || 'none'}
 
-You MUST NOT reuse these values unless the user explicitly changes them.
+==================================================
+OUTPUT RULES (CRITICAL - RETURN COMPLETE BOOKING)
+==================================================
+You MUST return a COMPLETE booking with ALL fields:
+• If a field is CHANGED by the user → return the NEW value
+• If a field is NOT changed → return the EXISTING value from above
+• "remove luggage" → luggage = "CLEAR"
+
+This means your output will ALWAYS have values for:
+pickup_location, dropoff_location, pickup_time, number_of_passengers, luggage
+
 You MUST ALWAYS reply in English, even if the input is in another language.
-Try to put user message into a structured format so it reads good English.
-Never reply in Bengali, Hindi, Urdu, or Punjabi.
+Try to put user message into structured format with good English.
 
 ==================================================
-UPDATE RULES (CRITICAL)
+CHANGE DETECTION RULES
 ==================================================
-• Only return fields the user EXPLICITLY changes.
-• Any field NOT changed must be returned as null.
-• "remove luggage" → luggage = "CLEAR".
-• intent MUST be "update_booking".
-• If user says 'my location', 'here', etc., set pickup_location = 'by_gps'.
+• User says "change pickup to X" → pickup_location = X, keep all other existing values
+• User says "going to Y instead" → dropoff_location = Y, keep pickup and other values
+• User says "from X to Y" → update BOTH pickup and dropoff, keep passengers/luggage/time
+• User says "add 2 passengers" → number_of_passengers = existing + 2
+• User says "3 passengers" → number_of_passengers = 3
 
 ==================================================
 ADDRESS RULES (STRICT)
@@ -142,18 +152,18 @@ You MUST NOT:
    - Detect 'from' and 'to' (or variants in other languages).
    - If only one place + 'pick up' → set as pickup_location.
    - If 'nearest' or 'closest' is mentioned, extract as 'nearest_place'.
-   - If no drop-off given or phrases like 'as directed', set dropoff_location = 'as directed'.
+   - If no drop-off given or 'as directed', set dropoff_location = 'as directed'.
+   - If user says 'my location', 'here', etc., set pickup_location = 'by_gps'.
 
-You MUST return the EXACT text the user typed.
+You MUST return the EXACT text the user typed for any NEW addresses.
 
 ==================================================
 PICKUP + DROPOFF UPDATE RULE (CRITICAL)
 ==================================================
 If the user message includes BOTH a new pickup AND a new dropoff,
-you MUST return BOTH fields, even if the user writes them in a single
-sentence, multiple sentences, or mixed with other instructions.
+you MUST return BOTH new values.
 
-This includes patterns such as:
+Patterns:
 • "from X to Y"
 • "pickup from X and drop at Y"
 • "pick me up at X take me to Y"
@@ -164,19 +174,10 @@ RULE:
 • pickup_location = EXACT text of X
 • dropoff_location = EXACT text of Y
 
-You MUST return BOTH fields whenever both are updated.
-You MUST NOT ignore one of the locations.
-You MUST NOT return null for either if both were updated.
-
-LOCATION CLEANING RULE (IMPORTANT):
-When extracting pickup_location or dropoff_location:
-• If a location begins with "the ", "a ", or "an ", remove ONLY that article.
+LOCATION CLEANING RULE:
+• If location begins with "the ", "a ", or "an ", remove ONLY that article.
 • If "going to" appears, it ALWAYS defines the dropoff_location.
-• The rest of the text must remain EXACTLY as typed.
-
-Examples:
-"from the high street" → pickup_location = "high street"
-"to the station" → dropoff_location = "station"
+• Rest of text must remain EXACTLY as typed.
 
 ==================================================
 POSTCODE RULE (STRICT)
@@ -187,73 +188,57 @@ You MUST return their postcode EXACTLY as typed. NO editing.
 ==================================================
 TIME UPDATE RULES
 ==================================================
-If the user specifies a time, output pickup_time in:
+If the user specifies a NEW time, output pickup_time in:
   "YYYY-MM-DD HH:MM" (24-hour)
-Else → pickup_time = null.
+If time NOT changed → return existing time: "${existingBooking.pickup_time || 'ASAP'}"
 
-Rules:
-• "now" / "asap" → "ASAP".
-• Time alone ("5pm") → TODAY at 17:00, unless past → then TOMORROW.
-• "in X minutes/hours" → add duration to current time.
-• Natural phrases:
-    "tonight" → 21:00 today
-    "this evening" → 19:00 today
-    "afternoon" → 15:00 today
-    "morning" → 09:00 today
+Rules for NEW times:
+• "now" / "asap" → "ASAP"
+• Time alone ("5pm") → TODAY at 17:00, unless past → TOMORROW
+• "in X minutes/hours" → add duration to current time
+• "tonight" → 21:00, "this evening" → 19:00, "afternoon" → 15:00, "morning" → 09:00
 
 ==================================================
 LUGGAGE EXTRACTION RULES (STRONG)
 ==================================================
-You MUST treat ANY of the following words as a luggage update:
-"luggage", "bags", "bag", "suitcase", "suitcases", "cases", "holdall", 
-"backpack", "rucksack"
+Luggage keywords: "luggage", "bags", "bag", "suitcase", "suitcases", "cases", "holdall", "backpack", "rucksack"
 
-If the user message contains a number near one of these words:
-luggage = EXACT text the user wrote.
-
-Examples:
+If user mentions luggage → update it:
 "can I add 2 luggage" → luggage = "2 luggage"
 "add 3 bags please"   → luggage = "3 bags"
 "I have one suitcase" → luggage = "one suitcase"
 "remove luggage"      → luggage = "CLEAR"
 
-If luggage is mentioned WITHOUT a number:
-return the EXACT phrase as luggage.
+If luggage NOT mentioned → keep existing: "${existingBooking.luggage || 'not specified'}"
 
 IMPORTANT: Luggage ALWAYS has priority over special_requests.
 
 ==================================================
+PASSENGERS RULES
+==================================================
+If user mentions passengers → update number_of_passengers
+If NOT mentioned → keep existing: ${existingBooking.passengers || 1}
+
+==================================================
 INTERMEDIATE STOP / VIA RULES
 ==================================================
-If the user mentions:
-• "stop at", "via", "then go to", "drop me at X then Y", "wait at X"
+If user mentions: "stop at", "via", "then go to", "drop me at X then Y", "wait at X"
 
-You MUST treat this as a VIA STOP.
-• The FIRST destination after pickup is the via_stop.
-• The FINAL destination is the dropoff_location.
-• Any duration (e.g. "10 minutes") MUST be included in special_requests.
+• The FIRST destination after pickup is the via_stop
+• The FINAL destination is the dropoff_location
+• Duration (e.g. "10 minutes") goes in special_requests
 
-If a via stop exists:
-• pickup_location = origin
-• dropoff_location = FINAL destination
+If via stop exists:
 • special_requests MUST include: "Stop at <via location> for <duration>"
 
 ==================================================
 SPECIAL REQUESTS (STRICT)
 ==================================================
-ANY user text that:
-• instructs the driver
-• requests a specific driver (e.g., "driver 314 please")
-• requests vehicle type
-• gives behaviour instructions
-• adds preferences or notes
-• does NOT modify pickup, dropoff, time, passengers, or luggage
-
-MUST go into special_requests EXACTLY as written.
+Driver instructions, specific driver requests, vehicle preferences, notes that don't modify booking fields → go into special_requests.
 
 Examples: "driver 314 please", "ring me when outside", "wheelchair access"
 
-This content MUST NOT set any booking fields.
+If no NEW special requests → keep existing: "${existingBooking.special_requests || ''}"
 `;
 };
 
@@ -273,51 +258,57 @@ const buildSystemPrompt = (
 };
 
 // Tool definition for structured extraction
+// For modifications: AI returns COMPLETE booking with all fields populated
 const BOOKING_EXTRACTION_TOOL = {
   type: "function",
   function: {
     name: "extract_booking",
-    description: "Extract all taxi booking details from the conversation transcript.",
+    description: "Extract taxi booking details. For updates: return COMPLETE booking with unchanged fields preserved from existing booking.",
     parameters: {
       type: "object",
       properties: {
         pickup_location: { 
           type: "string", 
-          description: "Pickup address. Must be a specific street address, landmark, or venue. Do NOT use 'by_gps'." 
+          description: "Pickup address. For updates: return existing value if not changed by user." 
         },
         dropoff_location: { 
           type: "string", 
-          description: "Destination address. Use 'as directed' if not specified." 
+          description: "Destination address. For updates: return existing value if not changed." 
         },
         pickup_time: { 
           type: "string", 
-          description: "Pickup time in 'YYYY-MM-DD HH:MM' format, or 'ASAP' for immediate." 
+          description: "Pickup time in 'YYYY-MM-DD HH:MM' format, or 'ASAP'. For updates: return existing if not changed." 
         },
         number_of_passengers: { 
           type: "integer", 
-          description: "Number of passengers (1-8). Default 1 if not specified." 
+          description: "Number of passengers (1-8). For updates: return existing if not changed." 
         },
         luggage: { 
           type: "string", 
-          description: "Luggage description (e.g., '2 bags', 'no luggage'). Leave empty if not mentioned." 
+          description: "Luggage description. 'CLEAR' to remove. For updates: return existing if not changed." 
         },
         vehicle_type: { 
           type: "string", 
           enum: ["saloon", "estate", "mpv", "minibus", "8-seater"],
-          description: "Requested vehicle type. Only set if explicitly requested." 
+          description: "Vehicle type. Only set if explicitly requested or derived from passengers/luggage." 
         },
         special_requests: { 
           type: "string", 
-          description: "Any special requests (ring on arrival, wheelchair, child seat, etc.)" 
+          description: "Special requests (driver preferences, accessibility, etc.)" 
         },
         nearest_place: { 
           type: "string", 
-          description: "If user asks for 'nearest' or 'closest' something (e.g., 'nearest hotel')." 
+          description: "If user asks for 'nearest' or 'closest' something." 
+        },
+        fields_changed: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of fields that were CHANGED in this update (e.g., ['pickup', 'destination'])"
         },
         missing_fields: {
           type: "array",
           items: { type: "string" },
-          description: "List of essential fields still needed: pickup, destination, passengers, luggage (if travel hub)"
+          description: "List of essential fields still needed"
         },
         confidence: {
           type: "string",
@@ -326,10 +317,10 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         extraction_notes: {
           type: "string",
-          description: "Brief note about any ambiguity, assumptions, or alias resolutions applied"
+          description: "Brief note about changes detected, ambiguity, or alias resolutions"
         }
       },
-      required: ["pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "missing_fields", "confidence"]
+      required: ["pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "confidence"]
     }
   }
 };
@@ -489,37 +480,26 @@ serve(async (req) => {
       extracted.missing_fields.push("luggage");
     }
 
-    // For modifications: merge with existing booking (only changed fields update)
+    // AI now returns COMPLETE booking for modifications (unchanged fields preserved)
+    // Only need fallback merge if AI returns null for fields that should be preserved
     let finalResult = {
-      pickup: extracted.pickup_location || null,
-      destination: extracted.dropoff_location || null,
-      passengers: extracted.number_of_passengers || 1,
-      luggage: extracted.luggage || null,
-      vehicle_type: extracted.vehicle_type || null,
-      pickup_time: extracted.pickup_time || "ASAP",
-      special_requests: extracted.special_requests || null,
+      pickup: extracted.pickup_location || (is_modification && current_booking?.pickup) || null,
+      destination: extracted.dropoff_location || (is_modification && current_booking?.destination) || null,
+      passengers: extracted.number_of_passengers || (is_modification && current_booking?.passengers) || 1,
+      luggage: extracted.luggage === "CLEAR" ? null : (extracted.luggage || (is_modification && current_booking?.luggage) || null),
+      vehicle_type: extracted.vehicle_type || (is_modification && current_booking?.vehicle_type) || null,
+      pickup_time: extracted.pickup_time || (is_modification && current_booking?.pickup_time) || "ASAP",
+      special_requests: extracted.special_requests || (is_modification && current_booking?.special_requests) || null,
       nearest_place: extracted.nearest_place || null,
+      fields_changed: extracted.fields_changed || [],
       missing_fields: extracted.missing_fields || [],
       confidence: extracted.confidence || "medium",
       extraction_notes: extracted.extraction_notes || null,
+      is_modification: is_modification,
     };
 
-    if (is_modification && current_booking) {
-      // Keep existing values for fields not explicitly changed
-      finalResult = {
-        pickup: extracted.pickup_location || current_booking.pickup || null,
-        destination: extracted.dropoff_location || current_booking.destination || null,
-        passengers: extracted.number_of_passengers || current_booking.passengers || 1,
-        luggage: extracted.luggage || current_booking.luggage || null,
-        vehicle_type: extracted.vehicle_type || current_booking.vehicle_type || null,
-        pickup_time: extracted.pickup_time || current_booking.pickup_time || "ASAP",
-        special_requests: extracted.special_requests || null,
-        nearest_place: extracted.nearest_place || null,
-        missing_fields: extracted.missing_fields || [],
-        confidence: extracted.confidence || "medium",
-        extraction_notes: extracted.extraction_notes || null,
-      };
-      console.log(`[taxi-extract-unified] Merged with existing booking for modification`);
+    if (is_modification) {
+      console.log(`[taxi-extract-unified] Modification result - fields_changed: ${JSON.stringify(extracted.fields_changed || [])}`);
     }
 
     // Apply alias fallback in TypeScript (in case AI missed it)
