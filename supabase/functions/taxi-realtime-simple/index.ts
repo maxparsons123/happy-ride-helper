@@ -2340,117 +2340,181 @@ Do NOT say 'booked' until the tool returns success.]`
           // All modification/correction handling is now done by the block below (AUTO-DETECTION + pendingModification).
 
           
-          // === BOOKING MODIFICATION AUTO-DETECTION ===
-          // Detect modification intent from user speech and update internally
-          // Ada confirms the change, THEN sends webhook only after user approves
-          const modificationDetection = Ada.Detection.detectBookingModification(userText);
+          // === BOOKING MODIFICATION AUTO-DETECTION (AI-BASED) ===
+          // Use AI extraction instead of regex for reliable modification detection
+          // When there's an existing booking and user says something that sounds like a change,
+          // call taxi-extract-unified to properly decode what they want
           
-          // Also catch address corrections like "No, the pickup is X"
-          const correctionDetection = Ada.Detection.detectAddressCorrection(userText);
+          // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
+          const mightBeModification = hasExistingBookingContext && 
+            !isConfirmationPhrase &&
+            (/\b(change|going to|from|to|pick up|pickup|destination|instead|actually|no|wrong|correct)\b/i.test(lowerUserText) ||
+             /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText));
           
-          // Determine if this is a modification
-          const isModificationRequest = 
-            (modificationDetection.isModification && modificationDetection.field && modificationDetection.value) ||
-            (correctionDetection.field && correctionDetection.value);
-          
-          if (isModificationRequest && hasExistingBookingContext && openaiWs && openaiConnected && !sessionState.callEnded) {
-            // Use modification detection first, fall back to correction detection
-            const fieldToChange = modificationDetection.field || correctionDetection.field;
-            const newValue = modificationDetection.value || correctionDetection.value;
+          if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected, calling AI extraction...`);
             
-            // Get old values for the confirmation message
-            const oldPickup = sessionState.booking.pickup || "unknown";
-            const oldDestination = sessionState.booking.destination || "unknown";
+            // Build conversation history for AI from transcripts
+            const conversationForAi = sessionState.transcripts
+              .slice(-10) // Last 10 turns for context
+              .map((turn: TranscriptItem) => ({
+                role: turn.role as "user" | "assistant",
+                text: turn.text
+              }));
             
-            console.log(`[${sessionState.callId}] 🔧 MODIFICATION DETECTED: ${fieldToChange}="${newValue}" from: "${userText}"`);
+            // Add the current user message
+            conversationForAi.push({ role: "user" as const, text: userText });
             
-            // === APPLY THE MODIFICATION INTERNALLY ===
-            if (fieldToChange === "pickup") {
-              sessionState.booking.pickup = newValue;
-            } else if (fieldToChange === "destination") {
-              sessionState.booking.destination = newValue;
-            } else if (fieldToChange === "passengers") {
-              sessionState.booking.passengers = parseInt(newValue || "1", 10);
-            } else if (fieldToChange === "bags") {
-              sessionState.booking.bags = parseInt(newValue || "0", 10);
-            }
-            
-            // Increment version
-            sessionState.booking.version = (sessionState.booking.version || 1) + 1;
-            
-            // Mark that we have a pending modification awaiting user confirmation
-            // The webhook will only be sent AFTER user says "yes"
-            sessionState.pendingModification = {
-              field: fieldToChange!,
-              oldValue: fieldToChange === "pickup" ? oldPickup : oldDestination,
-              newValue: newValue!,
-              timestamp: Date.now()
-            };
-            
-            // Sync to live_calls (fire-and-forget)
-            supabase.from("live_calls").update({
-              pickup: sessionState.booking.pickup,
-              destination: sessionState.booking.destination,
-              passengers: sessionState.booking.passengers || 1,
-              updated_at: new Date().toISOString()
-            }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ live_calls updated with pending modification`);
+            // Call AI extraction (non-blocking with .then())
+            fetch(
+              `${Deno.env.get("SUPABASE_URL")}/functions/v1/taxi-extract-unified`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                },
+                body: JSON.stringify({
+                  conversation: conversationForAi,
+                  current_booking: {
+                    pickup: sessionState.booking.pickup,
+                    destination: sessionState.booking.destination,
+                    passengers: sessionState.booking.passengers,
+                    luggage: sessionState.booking.bags ? `${sessionState.booking.bags} bags` : null,
+                    vehicle_type: sessionState.booking.vehicle_type,
+                  },
+                  caller_phone: sessionState.phone,
+                  is_modification: true,
+                }),
+              }
+            ).then(async (extractResponse) => {
+              if (!extractResponse.ok) {
+                console.error(`[${sessionState.callId}] ❌ AI extraction failed: ${extractResponse.status}`);
+                return;
+              }
+              
+              const extracted = await extractResponse.json();
+              console.log(`[${sessionState.callId}] 🤖 AI extraction result:`, extracted);
+              
+              // Compare AI extraction with current booking to detect changes
+              const oldPickup = sessionState.booking.pickup || "";
+              const oldDestination = sessionState.booking.destination || "";
+              const oldPassengers = sessionState.booking.passengers || 1;
+              const oldBags = sessionState.booking.bags || 0;
+              
+              const newPickup = extracted.pickup || oldPickup;
+              const newDestination = extracted.destination || oldDestination;
+              const newPassengers = extracted.passengers || oldPassengers;
+              const newBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : oldBags;
+              
+              // Normalize for comparison
+              const normalizeAddr = (s: string) => s.toLowerCase().replace(/[.,\s]+/g, " ").trim();
+              
+              const pickupChanged = newPickup && normalizeAddr(newPickup) !== normalizeAddr(oldPickup);
+              const destinationChanged = newDestination && normalizeAddr(newDestination) !== normalizeAddr(oldDestination);
+              const passengersChanged = newPassengers !== oldPassengers;
+              const bagsChanged = newBags !== oldBags;
+              
+              const hasChanges = pickupChanged || destinationChanged || passengersChanged || bagsChanged;
+              
+              if (!hasChanges) {
+                console.log(`[${sessionState.callId}] AI extraction found no changes from current booking`);
+                return;
+              }
+              
+              console.log(`[${sessionState.callId}] ✅ AI detected changes: pickup=${pickupChanged}, dest=${destinationChanged}, passengers=${passengersChanged}, bags=${bagsChanged}`);
+              
+              // Apply the changes from AI extraction
+              if (pickupChanged) sessionState.booking.pickup = newPickup;
+              if (destinationChanged) sessionState.booking.destination = newDestination;
+              if (passengersChanged) sessionState.booking.passengers = newPassengers;
+              if (bagsChanged) sessionState.booking.bags = newBags;
+              
+              // Increment version
+              sessionState.booking.version = (sessionState.booking.version || 1) + 1;
+              
+              // Determine primary changed field for confirmation message
+              let primaryField: string;
+              if (pickupChanged) primaryField = "pickup";
+              else if (destinationChanged) primaryField = "destination";
+              else if (passengersChanged) primaryField = "passengers";
+              else primaryField = "bags";
+              
+              // Mark pending modification
+              sessionState.pendingModification = {
+                field: primaryField as any,
+                oldValue: primaryField === "pickup" ? oldPickup : 
+                          primaryField === "destination" ? oldDestination :
+                          primaryField === "passengers" ? String(oldPassengers) : String(oldBags),
+                newValue: primaryField === "pickup" ? newPickup :
+                          primaryField === "destination" ? newDestination :
+                          primaryField === "passengers" ? String(newPassengers) : String(newBags),
+                timestamp: Date.now()
+              };
+              
+              // Sync to live_calls
+              supabase.from("live_calls").update({
+                pickup: sessionState.booking.pickup,
+                destination: sessionState.booking.destination,
+                passengers: sessionState.booking.passengers || 1,
+                updated_at: new Date().toISOString()
+              }).eq("call_id", sessionState.callId).then(() => {
+                console.log(`[${sessionState.callId}] ✅ live_calls updated with AI-extracted modification`);
+              });
+              
+              // Cancel any in-flight response
+              if (sessionState.openAiResponseActive) {
+                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // Clear pending quote
+              sessionState.pendingQuote = null;
+              
+              // Build confirmation message summarizing the FULL updated booking
+              const pickup = sessionState.booking.pickup || "your location";
+              const destination = sessionState.booking.destination || "your destination";
+              const passengers = sessionState.booking.passengers || 1;
+              
+              // Build a clear summary of what changed
+              const changes: string[] = [];
+              if (pickupChanged) changes.push(`pickup to ${newPickup}`);
+              if (destinationChanged) changes.push(`destination to ${newDestination}`);
+              if (passengersChanged) changes.push(`${newPassengers} passengers`);
+              if (bagsChanged) changes.push(`${newBags} bags`);
+              
+              const changesSummary = changes.join(" and ");
+              const confirmationMessage = `Got it, ${changesSummary}. So that's from ${pickup} to ${destination}${passengers > 1 ? ` for ${passengers} passengers` : ""}. Is that correct?`;
+              
+              // === ASK USER TO CONFIRM THE CHANGE ===
+              setTimeout(() => {
+                openaiWs?.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. Just wait.]`,
+                    }],
+                  },
+                }));
+                
+                openaiWs?.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
+                  }
+                }));
+              }, 300);
+              
+            }).catch((extractError) => {
+              console.error(`[${sessionState.callId}] ❌ AI extraction error:`, extractError);
             });
             
-            console.log(`[${sessionState.callId}] ✅ Modification applied internally, awaiting user confirmation`);
-            
-            // Cancel any in-flight response
-            if (sessionState.openAiResponseActive) {
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            }
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            
-            // Clear any pending quote (we'll get a new one after confirmation)
-            sessionState.pendingQuote = null;
-            
-            // Build the confirmation message - ALWAYS summarize the FULL updated booking
-            // Use the NEW values from sessionState.booking (already updated above)
-            const pickup = sessionState.booking.pickup || "your location";
-            const destination = sessionState.booking.destination || "your destination";
-            const passengers = sessionState.booking.passengers || 1;
-            
-            let confirmationMessage: string;
-            if (fieldToChange === "pickup") {
-              confirmationMessage = `Got it, pickup changed to ${newValue}. So that's from ${newValue} to ${destination}. Is that correct?`;
-            } else if (fieldToChange === "destination") {
-              confirmationMessage = `Got it, destination changed to ${newValue}. So that's from ${pickup} to ${newValue}. Is that correct?`;
-            } else if (fieldToChange === "passengers") {
-              confirmationMessage = `Updated to ${newValue} passengers. From ${pickup} to ${destination} for ${newValue} passengers. Is that correct?`;
-            } else {
-              confirmationMessage = `Updated. So that's from ${pickup} to ${destination}. Is that correct?`;
-            }
-            
-            // === ASK USER TO CONFIRM THE CHANGE ===
-            // CRITICAL: Only announce the change. Do NOT mention book_taxi or webhooks.
-            // The system will handle the next step when user says "yes"
-            setTimeout(() => {
-              openaiWs?.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{
-                    type: "input_text",
-                    text: `[SYSTEM: MODIFICATION APPLIED - Say EXACTLY: "${confirmationMessage}" Then STOP COMPLETELY and wait silently for their response. DO NOT call any tools. DO NOT continue speaking. Just wait.]`,
-                  }],
-                },
-              }));
-              
-              openaiWs?.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio", "text"],
-                  instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
-                }
-              }));
-            }, 300);
-            
-            break; // Don't process further - modification is being handled
+            // Don't break here - let normal processing continue while AI extraction runs in background
+            // If AI finds changes, it will inject the confirmation message
           }
           
           // === PENDING MODIFICATION CONFIRMATION ===
