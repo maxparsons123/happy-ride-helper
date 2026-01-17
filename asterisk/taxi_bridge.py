@@ -79,7 +79,8 @@ GAIN_SMOOTHING_FACTOR = 0.2
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -595,11 +596,19 @@ async def main():
         lambda r, w: TaxiBridgeV6(r, w).run(),
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
-    logger.info(f"🚀 Taxi Bridge v6.1 - FIXED MEMORY LEAKS")
-    logger.info(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}")
-    logger.info(f"   Config: {CONFIG_PATH}")
-    logger.info(f"   WebSocket: {WS_URL}")
 
+    startup_lines = [
+        "🚀 Taxi Bridge v6.1 - FIXED MEMORY LEAKS",
+        f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
+        f"   Config: {CONFIG_PATH}",
+        f"   WebSocket: {WS_URL}",
+    ]
+    for line in startup_lines:
+        print(line, flush=True)
+        logger.info(line)
+
+    async with server:
+        await server.serve_forever()
     async with server:
         await server.serve_forever()
 
