@@ -1253,6 +1253,9 @@ interface SessionState {
     timestamp: number;
   } | null;
 
+  // AI extraction in progress - blocks Ada from responding until complete
+  extractionInProgress: boolean;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -1564,6 +1567,15 @@ serve(async (req) => {
       case "response.created":
         // Start-of-response marker (used to avoid response.cancel_not_active)
         sessionState.openAiResponseActive = true;
+
+        // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
+        // We'll trigger the correct response once extraction completes
+        if (sessionState.extractionInProgress) {
+          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - extraction in progress`);
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          sessionState.discardCurrentResponseAudio = true;
+          break;
+        }
 
         // ✅ POST-GOODBYE GUARD: If call is ending, cancel any new response immediately
         // EXCEPT for the single final goodbye response we intentionally trigger.
@@ -2352,7 +2364,21 @@ Do NOT say 'booked' until the tool returns success.]`
              /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText));
           
           if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected, calling AI extraction...`);
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected, BLOCKING Ada and calling AI extraction...`);
+            
+            // === CRITICAL: BLOCK ADA FROM RESPONDING ===
+            // Set flag IMMEDIATELY to prevent OpenAI VAD from triggering a response
+            sessionState.extractionInProgress = true;
+            
+            // Cancel any in-flight response so Ada doesn't speak with old data
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              sessionState.discardCurrentResponseAudio = true;
+              console.log(`[${sessionState.callId}] ⏸️ Cancelled in-flight response for modification extraction`);
+            }
+            
+            // Clear audio buffer to prevent stale responses
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             
             // Build conversation history for AI from transcripts
             const conversationForAi = sessionState.transcripts
@@ -2419,6 +2445,10 @@ Do NOT say 'booked' until the tool returns success.]`
               
               if (!hasChanges) {
                 console.log(`[${sessionState.callId}] AI extraction found no changes from current booking`);
+                // Clear extraction flag - no changes, let Ada respond normally
+                sessionState.extractionInProgress = false;
+                // Trigger a response since we blocked VAD earlier
+                openaiWs?.send(JSON.stringify({ type: "response.create" }));
                 return;
               }
               
@@ -2507,10 +2537,16 @@ Do NOT say 'booked' until the tool returns success.]`
                     instructions: `Say EXACTLY: "${confirmationMessage}" Then STOP. Do not call any tools. Wait silently.`
                   }
                 }));
+                
+                // Clear extraction flag AFTER we've injected the response
+                sessionState.extractionInProgress = false;
               }, 300);
               
             }).catch((extractError) => {
               console.error(`[${sessionState.callId}] ❌ AI extraction error:`, extractError);
+              // Clear extraction flag on error so Ada can respond
+              sessionState.extractionInProgress = false;
+              openaiWs?.send(JSON.stringify({ type: "response.create" }));
             });
             
             // Don't break here - let normal processing continue while AI extraction runs in background
@@ -4625,6 +4661,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastQuotePromptText: null,
           pendingDispatchEvents: [],
           pendingModification: null,
+          extractionInProgress: false,
           sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -4724,6 +4761,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastQuotePromptText: null,
             pendingDispatchEvents: [],
             pendingModification: null,
+            extractionInProgress: false,
             sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
