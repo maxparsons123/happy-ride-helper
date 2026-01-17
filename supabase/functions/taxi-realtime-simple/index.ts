@@ -4295,9 +4295,13 @@ Do NOT say 'booked' until the tool returns success.]`
                      ? String(etaRaw)
                      : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
-                   const spokenMessage = (fareText && etaText)
-                     ? `Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
-                     : (dispatchAskConfirm.text || "");
+                    const recapText = (finalPickup && finalDestination)
+                      ? `Just to confirm, you're going from ${finalPickup} to ${finalDestination} for ${finalPassengers} passenger${finalPassengers === 1 ? "" : "s"}. `
+                      : "";
+
+                    const spokenMessage = (fareText && etaText)
+                      ? `${recapText}Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
+                      : (dispatchAskConfirm.text || "");
 
                    // Store pending quote state for confirmation_state flow
                    sessionState.pendingQuote = {
@@ -5519,9 +5523,17 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             ? String(etaRaw)
             : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
-          // NO booking recap here - just price and ETA, then ask to book
+          // Include booking recap so the caller hears the route before deciding on price/ETA
+          const recapPickup = state?.booking?.pickup || "";
+          const recapDest = state?.booking?.destination || "";
+          const recapPassengers = state?.booking?.passengers || 1;
+
+          const recapText = (recapPickup && recapDest)
+            ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
+            : "";
+
           const spokenMessage = (fareText && etaText)
-            ? `The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
+            ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
             : (message ? String(message) : "");
 
           console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
