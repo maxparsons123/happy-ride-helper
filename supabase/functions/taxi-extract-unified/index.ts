@@ -67,7 +67,7 @@ EXTRACTION RULES (NEW BOOKING)
 1. **Location Detection**:
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
-   - 'my location', 'here', 'current location' → set pickup_location = 'by_gps'
+   - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
    - 'nearest' or 'closest' → extract as nearest_place
    - 'as directed' or no destination → dropoff_location = 'as directed'
 
@@ -153,7 +153,7 @@ You MUST NOT:
    - If only one place + 'pick up' → set as pickup_location.
    - If 'nearest' or 'closest' is mentioned, extract as 'nearest_place'.
    - If no drop-off given or 'as directed', set dropoff_location = 'as directed'.
-   - If user says 'my location', 'here', etc., set pickup_location = 'by_gps'.
+   - If user says 'my location', 'here', etc., leave pickup_location EMPTY (agent will ask for address).
 
 You MUST return the EXACT text the user typed for any NEW addresses.
 
