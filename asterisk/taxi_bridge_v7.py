@@ -37,12 +37,18 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
+# Load from bridge-config.json if available, otherwise use defaults
+import os
+try:
+    with open(os.path.join(os.path.dirname(__file__), '..', 'bridge-config.json')) as f:
+        _config = json.load(f)
+        WS_URL = _config.get('edge_functions', {}).get('taxi_realtime_simple_ws', 
+            "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple")
+except (FileNotFoundError, json.JSONDecodeError):
+    WS_URL = os.environ.get("WS_URL", "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple")
 
 AUDIOSOCKET_HOST = "0.0.0.0"
-AUDIOSOCKET_PORT = 9092
-
-# DIRECT connection to realtime function
-WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime-simple"
+AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
 # Audio rates
 AST_RATE = 8000   # Asterisk telephony

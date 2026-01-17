@@ -4,8 +4,9 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Mic, Phone, PhoneOff, Bot } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { TAXI_REALTIME_WS_URL } from "@/config/supabase";
 
-const WS_URL = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime";
+const WS_URL = TAXI_REALTIME_WS_URL;
 
 interface Agent {
   id: string;
