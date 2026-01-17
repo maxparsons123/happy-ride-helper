@@ -2630,19 +2630,25 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // === PENDING MODIFICATION CONFIRMATION ===
           // If user says "yes" after a modification was applied, NOW send the webhook
-          if (sessionState.pendingModification && 
-              Date.now() - sessionState.pendingModification.timestamp < 60000 &&
+          // Check BOTH pendingModification AND modificationPromptPending (fallback for when AI didn't detect changes)
+          const hasPendingMod = sessionState.pendingModification && 
+              Date.now() - sessionState.pendingModification.timestamp < 60000;
+          const hasModPromptPending = sessionState.modificationPromptPending && 
+              sessionState.lastModificationPromptAt && 
+              Date.now() - sessionState.lastModificationPromptAt < 60000;
+          
+          if ((hasPendingMod || hasModPromptPending) &&
               openaiWs && openaiConnected && !sessionState.callEnded) {
             
-            const isConfirmingModification = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure)\b/i.test(lowerUserText);
+            const isConfirmingModification = /\b(yes|yeah|yep|yup|happy|correct|that's right|thats right|sounds good|perfect|great|fine|ok|okay|sure|please)\b/i.test(lowerUserText);
             const isRejectingModification = /\b(no|nope|wrong|change|not right|incorrect)\b/i.test(lowerUserText);
             
             if (isConfirmingModification) {
-              console.log(`[${sessionState.callId}] ✅ User confirmed modification - NOW sending webhook for fare`);
+              console.log(`[${sessionState.callId}] ✅ User confirmed modification - NOW sending webhook for fare (pendingMod=${hasPendingMod}, promptPending=${hasModPromptPending})`);
               
-              // Clear the pending modification
-              const pendingMod = sessionState.pendingModification;
+              // Clear both flags
               sessionState.pendingModification = null;
+              sessionState.modificationPromptPending = false;
               
               // Cancel any in-flight response
               if (sessionState.openAiResponseActive) {
@@ -2677,8 +2683,9 @@ Do NOT say 'booked' until the tool returns success.]`
             } else if (isRejectingModification) {
               console.log(`[${sessionState.callId}] ❌ User rejected modification - asking what they want instead`);
               
-              // Clear the pending modification
+              // Clear both flags
               sessionState.pendingModification = null;
+              sessionState.modificationPromptPending = false;
               
               // Revert the change (restore old values would require storing them)
               // For now, just ask what they want
