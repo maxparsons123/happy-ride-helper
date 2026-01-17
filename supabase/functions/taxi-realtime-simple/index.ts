@@ -1795,7 +1795,7 @@ serve(async (req) => {
             const matchingWords = wordsFromLast.filter(w => currentNormalized.includes(w));
             const similarityRatio = wordsFromLast.length > 0 ? matchingWords.length / wordsFromLast.length : 0;
             
-            if (similarityRatio > 0.5 && currentText.length > 30) {
+            if (similarityRatio > 0.75 && currentText.length > 40) {
               console.log(`[${sessionState.callId}] 🔁 REPETITION DETECTED: Ada is repeating confirmation (${(similarityRatio * 100).toFixed(0)}% similar) - cancelling`);
               console.log(`[${sessionState.callId}] 🔁 Last: "${sessionState.lastSpokenConfirmation.substring(0, 50)}..."`);
               console.log(`[${sessionState.callId}] 🔁 Current: "${currentText.substring(0, 50)}..."`);
@@ -1822,10 +1822,14 @@ serve(async (req) => {
 
           // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
           // Check if Ada is trying to confirm a booking without having called book_taxi
+          // IMPORTANT: Wait for at least 25 chars before running phrase detection
+          // to avoid premature cancellations on partial streaming transcripts
+          if (currentText.length < 25) {
+            break; // Too early to analyze - wait for more content
+          }
 
           // Phrases that indicate a booking confirmation (multi-language)
           // NOTE: This runs on streaming transcript deltas to cancel fast.
-          // AGGRESSIVE: Cancel on ANY phrase that sounds like confirmation
           const BOOKING_CONFIRMATION_PHRASES = [
             // English - booking/confirmation phrases
             "booked!",
