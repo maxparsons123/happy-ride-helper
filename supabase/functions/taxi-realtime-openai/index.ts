@@ -51,7 +51,18 @@ The system will provide fare and ETA. Then ask:
 If user confirms:
 → CALL book_taxi with confirmation_state="confirmed"
 
-Then say: "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!"
+After booking is confirmed, say: "That's booked for you. Is there anything else I can help you with?"
+Then STOP and WAIT for their response.
+
+## AFTER "ANYTHING ELSE?" - CRITICAL
+When user responds to "Is there anything else I can help you with?":
+
+If they say NO (e.g., "no", "no thanks", "nothing else", "that's all", "I'm good"):
+→ Say: "You're welcome! Have a safe journey. Goodbye!"
+→ CALL end_call immediately
+
+If they say YES or have another request:
+→ Help them with their new request
 
 ## HANDLING CORRECTIONS
 If user corrects ANY detail:
@@ -64,6 +75,8 @@ If user corrects ANY detail:
 - NEVER invent fares or ETAs - use tool calls
 - If user changes details after summary, re-summarize everything
 - Keep responses SHORT (phone call pacing)
+- After asking "Is there anything else?", you MUST wait for user response before saying goodbye
+- NEVER say "Safe travels" or goodbye until AFTER user responds to "anything else?"
 `;
 
 // Tool definitions
@@ -98,6 +111,18 @@ const TOOLS = [
         name: { type: "string", description: "Customer's name" }
       },
       required: ["name"]
+    }
+  },
+  {
+    type: "function",
+    name: "end_call",
+    description: "End the call gracefully after user confirms they don't need anything else. ONLY call this AFTER user has responded to 'Is there anything else I can help you with?' with 'no', 'no thanks', 'nothing else', etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Reason for ending call (e.g., 'user_finished', 'booking_complete')" }
+      },
+      required: ["reason"]
     }
   }
 ];
@@ -566,8 +591,16 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
             state.callerName = toolArgs.name;
             toolResult = { success: true, message: `Saved name: ${toolArgs.name}` };
             await updateLiveCall(callId, state);
+          } else if (toolName === "end_call") {
+            console.log(`📴 [${callId}] end_call tool triggered: ${toolArgs.reason}`);
+            toolResult = { success: true, message: "Call ended gracefully." };
+            
+            // Give Ada time to say goodbye, then close connections
+            setTimeout(async () => {
+              console.log(`📴 [${callId}] Closing call after goodbye`);
+              await cleanup();
+            }, 3000); // 3 seconds for Ada to say goodbye
           }
-          
           // Send tool result back to OpenAI
           openaiWs.send(JSON.stringify({
             type: "conversation.item.create",
