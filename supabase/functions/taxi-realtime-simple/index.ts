@@ -1301,6 +1301,9 @@ interface SessionState {
   askedAnythingElseAt: number | null;
   // Configurable grace period (from agent.goodbye_grace_ms) - how long to wait before accepting soft goodbyes
   goodbyeGraceMs: number;
+  
+  // Session start timestamp - used to filter out old transcripts from previous calls on reused live_calls records
+  sessionStartedAt: number;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1510,6 +1513,7 @@ serve(async (req) => {
     // Clone transcripts to avoid mutation issues
     const localTranscripts = [...sessionState.transcripts];
     const callId = sessionState.callId;
+    const sessionStartedAt = sessionState.sessionStartedAt;
     
     // Fire and forget - do NOT await, but merge dispatch entries first
     supabase
@@ -1530,12 +1534,25 @@ serve(async (req) => {
         const dbTranscripts = (data?.transcripts as any[]) || [];
         
         // Find dispatch entries in DB that aren't in our local state (by timestamp + role)
+        // CRITICAL: Only merge entries that are NEWER than this session started - prevents old call transcripts bleeding through
         const dispatchRoles = ["dispatch", "dispatch_confirm", "dispatch_ask_confirm", "dispatch_say"];
         const localTimestamps = new Set(localTranscripts.map((t: any) => `${t.role}:${t.timestamp}`));
         
-        const missingDispatchEntries = dbTranscripts.filter((t: any) => 
-          dispatchRoles.includes(t.role) && !localTimestamps.has(`${t.role}:${t.timestamp}`)
-        );
+        const missingDispatchEntries = dbTranscripts.filter((t: any) => {
+          // Only consider dispatch entries
+          if (!dispatchRoles.includes(t.role)) return false;
+          // Skip if already in local state
+          if (localTimestamps.has(`${t.role}:${t.timestamp}`)) return false;
+          // CRITICAL: Skip entries from before this session started (old call transcripts)
+          if (sessionStartedAt && t.timestamp) {
+            const entryTime = new Date(t.timestamp).getTime();
+            if (entryTime < sessionStartedAt) {
+              console.log(`[${callId}] 🚫 Skipping old dispatch entry from previous call: ${t.role} @ ${t.timestamp}`);
+              return false;
+            }
+          }
+          return true;
+        });
         
         if (missingDispatchEntries.length > 0) {
           console.log(`[${callId}] 🔀 Merging ${missingDispatchEntries.length} dispatch entries from DB`);
@@ -5108,6 +5125,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
            askedAnythingElse: false,
            askedAnythingElseAt: null,
            goodbyeGraceMs: 3000, // Default, will be updated from agent config if available
+           sessionStartedAt: Date.now(), // Track when this session started to filter old transcripts
            sttMetrics: {
             totalTranscripts: 0,
             totalWords: 0,
@@ -5218,6 +5236,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              askedAnythingElse: false,
              askedAnythingElseAt: null,
              goodbyeGraceMs: message.goodbye_grace_ms ?? 3000, // From agent config or default 3s
+             sessionStartedAt: Date.now(), // Track when this session started to filter old transcripts
              sttMetrics: {
               totalTranscripts: 0,
               totalWords: 0,
