@@ -487,8 +487,22 @@ const STT_CORRECTIONS: Record<string, string> = {
   "sweet briar": "Sweet Spot",
   "sweetbrier": "Sweet Spot",
   "sweet brier": "Sweet Spot",
+  "street spots": "Sweet Spot",
+  "streetspots": "Sweet Spot",
+  "street spot": "Sweet Spot",
 
-  // Number mishearings
+  // Number mishearings - standalone numbers
+  "free": "three",
+  "tree": "three",
+  "for": "four",
+  "to": "two",
+  "too": "two",
+  "won": "one",
+  "wan": "one",
+  "fife": "five",
+  "sicks": "six",
+  
+  // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
   "fore passengers": "4 passengers",
   "to passengers": "2 passengers",
