@@ -2562,10 +2562,17 @@ Do NOT say 'booked' until the tool returns success.]`
               const extracted = await extractResponse.json();
               console.log(`[${sessionState.callId}] 🤖 New booking AI extraction result:`, extracted);
               
-              const extractedPickup = extracted.pickup || "";
-              const extractedDestination = extracted.destination || "";
+              // Apply STT corrections to extracted addresses as safeguard
+              const rawPickup = extracted.pickup || "";
+              const rawDestination = extracted.destination || "";
+              const extractedPickup = correctTranscript(rawPickup);
+              const extractedDestination = correctTranscript(rawDestination);
               const extractedPassengers = extracted.passengers || 1;
               const extractedBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : 0;
+              
+              if (rawPickup !== extractedPickup || rawDestination !== extractedDestination) {
+                console.log(`[${sessionState.callId}] 🔧 Corrected extraction: pickup="${rawPickup}"→"${extractedPickup}", dest="${rawDestination}"→"${extractedDestination}"`);
+              }
               
               // Only proceed if we have BOTH pickup AND destination
               if (!extractedPickup || !extractedDestination) {
@@ -2779,10 +2786,17 @@ Do NOT say 'booked' until the tool returns success.]`
               const oldPassengers = sessionState.booking.passengers || 1;
               const oldBags = sessionState.booking.bags || 0;
               
-              const newPickup = extracted.pickup || oldPickup;
-              const newDestination = extracted.destination || oldDestination;
+              // Apply STT corrections to extracted addresses as safeguard
+              const rawNewPickup = extracted.pickup || oldPickup;
+              const rawNewDestination = extracted.destination || oldDestination;
+              const newPickup = correctTranscript(rawNewPickup);
+              const newDestination = correctTranscript(rawNewDestination);
               const newPassengers = extracted.passengers || oldPassengers;
               const newBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : oldBags;
+              
+              if (rawNewPickup !== newPickup || rawNewDestination !== newDestination) {
+                console.log(`[${sessionState.callId}] 🔧 Corrected modification: pickup="${rawNewPickup}"→"${newPickup}", dest="${rawNewDestination}"→"${newDestination}"`);
+              }
               
               // Normalize for comparison
               const normalizeAddr = (s: string) => s.toLowerCase().replace(/[.,\s]+/g, " ").trim();
