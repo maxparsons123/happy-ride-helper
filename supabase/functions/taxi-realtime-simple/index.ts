@@ -3586,8 +3586,12 @@ Do NOT say 'booked' until the tool returns success.]`
               // ✅ CRITICAL: Enable audio immediately - booking is fully confirmed
               sessionState.discardCurrentResponseAudio = false;
               sessionState.audioVerified = true;
+
+              // ✅ Prepare "anything else" wait-state, but DON'T start grace timer until Ada finishes speaking.
+              // If we set askedAnythingElseAt here, the response.created guard can cancel Ada's own prompt.
               sessionState.askedAnythingElse = true;
-              sessionState.askedAnythingElseAt = Date.now(); // Track when we asked for 3-second grace period
+              sessionState.askedAnythingElseAt = null;
+              sessionState.confirmationResponsePending = true;
               
               console.log(`[${sessionState.callId}] 📤 Injecting post-confirm message immediately: "That's booked for you. Is there anything else..."`);
               
