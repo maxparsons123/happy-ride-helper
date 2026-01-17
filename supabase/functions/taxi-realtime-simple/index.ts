@@ -2380,15 +2380,21 @@ Do NOT say 'booked' until the tool returns success.]`
           // call taxi-extract-unified to properly decode what they want
           
           // Quick check: does this look like a potential modification? (Simple keyword check to avoid unnecessary AI calls)
+          // IMPORTANT: Require stronger modification signals to avoid false positives from common words
+          const hasModificationKeyword = /\b(change|instead|actually|wrong|different|not\s+there|no\s+not|from\s+\w+\s+to\s+\w+)\b/i.test(lowerUserText);
+          const hasAddressWithDirection = /\b(going\s+to|pick\s*up\s+from|destination|drop\s*off)\b/i.test(lowerUserText) && 
+            (lowerUserText.length > 20); // Must be substantial to include an address
+          const hasPassengerChange = /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText);
+          
           const mightBeModification = hasExistingBookingContext && 
             !isConfirmationPhrase &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
-            (/\b(change|going to|from|to|pick up|pickup|destination|instead|actually|no|wrong|correct)\b/i.test(lowerUserText) ||
-             /\d+\s*(passenger|people|bag|luggage)/i.test(lowerUserText));
+            (hasModificationKeyword || hasAddressWithDirection || hasPassengerChange);
           
           if (mightBeModification && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 🔍 Potential modification detected, BLOCKING Ada and calling AI extraction...`);
+            console.log(`[${sessionState.callId}] 🔍 Potential modification detected: "${userText.substring(0, 50)}..." (keyword=${hasModificationKeyword}, addr=${hasAddressWithDirection}, passengers=${hasPassengerChange})`);
+            console.log(`[${sessionState.callId}] 🔍 BLOCKING Ada and calling AI extraction...`);
             
             // === CRITICAL: BLOCK ADA FROM RESPONDING ===
             // Set flag IMMEDIATELY to prevent OpenAI VAD from triggering a response
