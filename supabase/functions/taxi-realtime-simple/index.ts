@@ -252,8 +252,10 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER use 'As directed' or any placeholder - always ask for specifics.
 ❌ NEVER move to Summary until all 4 checklist items are filled.
 ❌ NEVER repeat addresses after the summary is confirmed.
-✅ If address is unclear, ask: "Just to be sure, was that [Address]?"
-✅ House numbers are critical. If unclear: "Could you repeat that number?"
+❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address - just accept it and move on.
+✅ ONLY ask for clarification if the address is genuinely ambiguous (e.g., missing house number, unclear street name).
+✅ If you heard a complete address with house number and street, accept it and proceed to the next question.
+✅ House numbers are critical. If missing: "Could I get the house number please?"
 `;
 
 
@@ -387,6 +389,16 @@ const STT_CORRECTIONS: Record<string, string> = {
   "london road": "London Road",
   "london wrote": "London Road",
 
+  // Russell Street mishearings
+  "ruffles street": "Russell Street",
+  "ruffles sthreet": "Russell Street",
+  "ruffle street": "Russell Street",
+  "ruffels street": "Russell Street",
+  "ruffals street": "Russell Street",
+  "roswell street": "Russell Street",
+  "russle street": "Russell Street",
+  "russel street": "Russell Street",
+  
   // Specific mishearings observed in testing (destination corrections)
   "exum road": "Exmoor Road",
   "exxon roll": "Exmoor Road",
