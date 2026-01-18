@@ -2695,7 +2695,7 @@ Do NOT say 'booked' until the tool returns success.]`
               const rawDestination = extracted.destination || "";
               const extractedPickup = correctTranscript(rawPickup);
               const extractedDestination = correctTranscript(rawDestination);
-              const extractedPassengers = extracted.passengers || 1;
+              const extractedPassengers = extracted.passengers ?? null;
               const extractedBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : 0;
               
               if (rawPickup !== extractedPickup || rawDestination !== extractedDestination) {
@@ -3004,7 +3004,7 @@ Do NOT say 'booked' until the tool returns success.]`
               supabase.from("live_calls").update({
                 pickup: sessionState.booking.pickup,
                 destination: sessionState.booking.destination,
-                passengers: sessionState.booking.passengers || 1,
+                passengers: sessionState.booking.passengers,
                 updated_at: new Date().toISOString()
               }).eq("call_id", sessionState.callId).then(() => {
                 console.log(`[${sessionState.callId}] ✅ live_calls updated with AI-extracted modification`);
@@ -3275,7 +3275,7 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] 🆕 New request after booking: "${userText}"`);
             
             // Reset booking state for new request
-            sessionState.booking = { pickup: "", destination: "", passengers: 1, bags: 0, vehicle_type: "saloon", version: 0 };
+            sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
             sessionState.hasActiveBooking = false;
             
             // Ensure OpenAI responds to this new request
@@ -3591,7 +3591,7 @@ Do NOT say 'booked' until the tool returns success.]`
               .update({
                 pickup: finalPickup,
                 destination: finalDestination,
-                passengers: sessionState.booking.passengers || 1,
+                passengers: sessionState.booking.passengers,
                 updated_at: new Date().toISOString(),
               })
               .eq("call_id", sessionState.callId);
@@ -3619,7 +3619,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 caller_name: sessionState.customerName,
                 pickup: finalPickup,
                 destination: finalDestination,
-                passengers: sessionState.booking.passengers || 1,
+                passengers: sessionState.booking.passengers ?? 1,
                 fare: pendingQuote.fare,
                 eta: pendingQuote.eta,
                 status: "confirmed",
@@ -4685,7 +4685,7 @@ Do NOT say 'booked' until the tool returns success.]`
             caller_name: sessionState.customerName,
             pickup: args.pickup,
             destination: args.destination,
-            passengers: args.passengers || 1,
+            passengers: args.passengers ?? 1,
             fare: fare,
             eta: `${etaMinutes} minutes`,
             status: "confirmed",
@@ -4875,7 +4875,7 @@ Do NOT say 'booked' until the tool returns success.]`
             verifiedBooking = {
               pickup: sessionState.booking.pickup || null,
               destination: sessionState.booking.destination || null,
-              passengers: sessionState.booking.passengers || 1,
+              passengers: sessionState.booking.passengers ?? null,
               luggage: sessionState.booking.bags ? String(sessionState.booking.bags) : null,
               vehicle_type: sessionState.booking.vehicle_type || "saloon",
               pickup_time: "now",
