@@ -883,6 +883,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           // Handle init/phone/format updates
           if (data.phone && data.phone !== "unknown") {
             callerPhone = data.phone;
+            sessionState.callerPhone = data.phone; // Update session state too!
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
           }
 
