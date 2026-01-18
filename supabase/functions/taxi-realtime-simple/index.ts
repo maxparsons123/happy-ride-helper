@@ -1547,8 +1547,29 @@ serve(async (req) => {
     };
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
-    // Trigger greeting IMMEDIATELY after session update - don't wait for confirmation
-    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+
+    // Inject the exact welcome greeting as a conversation item to force OpenAI to speak it
+    // This prevents OpenAI from skipping or paraphrasing the greeting
+    const greetingText = sessionState.hasActiveBooking
+      ? `Hi ${sessionState.customerName || "there"}, welcome back! I can see you have a booking from ${sessionState.booking.pickup || "your pickup"} to ${sessionState.booking.destination || "your destination"}. Would you like to keep it, change it, or cancel it?`
+      : `Hello, and welcome to the Taxibot demo! I'm ${sessionState.agentName || "Ada"}, your taxi booking assistant. I'm here to make booking a taxi quick and easy. Where would you like to be picked up?`;
+
+    openaiWs?.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "[SYSTEM: Call connected. Say your greeting now.]" }]
+      }
+    }));
+
+    openaiWs?.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["text", "audio"],
+        instructions: `Say this EXACTLY (do not change or shorten it): "${greetingText}"`
+      }
+    }));
     console.log(`[${sessionState.callId}] 📝 Session updated + greeting triggered`);
   };
 
