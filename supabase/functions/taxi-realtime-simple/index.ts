@@ -1297,6 +1297,7 @@ interface SessionState {
     eta: string | null;
     pickup: string | null;
     destination: string | null;
+    pickup_time: string | null; // Normalized pickup time (YYYY-MM-DD HH:MM or ASAP)
     callback_url: string | null;
     timestamp: number;
     lastPrompt: string | null; // The fare prompt text to repeat if duplicate request_quote
@@ -4019,6 +4020,8 @@ Do NOT say 'booked' until the tool returns success.]`
                   destination: finalDestination,
                   fare: pendingQuote.fare,
                   eta: pendingQuote.eta,
+                  pickup_time: pendingQuote.pickup_time || sessionState.booking.pickup_time || "ASAP", // Include normalized pickup time
+                  passengers: sessionState.booking.passengers || 1,
                   customer_name: sessionState.customerName,
                   caller_phone: sessionState.phone,
                   timestamp: new Date().toISOString()
@@ -4720,6 +4723,9 @@ Do NOT say 'booked' until the tool returns success.]`
               const normalizedPickupTime = await normalizePickupTime(rawPickupTime);
               console.log(`[${sessionState.callId}] 🕐 Pickup time: raw="${rawPickupTime}" → normalized="${normalizedPickupTime}"`);
               
+              // Update session state with normalized time for confirmation callback
+              sessionState.booking.pickup_time = normalizedPickupTime;
+              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
@@ -4864,6 +4870,7 @@ Do NOT say 'booked' until the tool returns success.]`
                      eta: dispatchAskConfirm.eta || null,
                      pickup: finalPickup,
                      destination: finalDestination,
+                     pickup_time: sessionState.booking.pickup_time || null, // Preserve normalized pickup time
                      callback_url: dispatchAskConfirm.callback_url || null,
                      timestamp: Date.now(),
                      lastPrompt: spokenMessage || null
@@ -6287,6 +6294,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               eta: eta || null,
               pickup: state.booking.pickup,
               destination: state.booking.destination,
+              pickup_time: state.booking.pickup_time || null, // Preserve normalized pickup time
               callback_url: callback_url || null,
               timestamp: Date.now(),
               lastPrompt: spokenMessage || null
