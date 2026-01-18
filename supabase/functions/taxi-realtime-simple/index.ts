@@ -563,6 +563,9 @@ const STT_CORRECTIONS: Record<string, string> = {
   "wan": "one",
   "fife": "five",
   "sicks": "six",
+  "freight": "eight",  // Common mishearing for "eight"
+  "fright": "eight",
+  "fate": "eight",
   
   // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
@@ -578,6 +581,8 @@ const STT_CORRECTIONS: Record<string, string> = {
   "fife passengers": "5 passengers",
   "six passengers": "6 passengers",
   "sicks passengers": "6 passengers",
+  "freight passengers": "8 passengers",
+  "eight passengers": "8 passengers",
   
   // Common phrases
   "pick me up": "pick me up",
@@ -4513,42 +4518,65 @@ Do NOT say 'booked' until the tool returns success.]`
           const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || existingVehicleType || "saloon";
           
           // Handle both 'time' (from tool schema) and 'pickup_time' (legacy)
-          // If Ada didn't pass time, try to extract from recent transcripts
+          // LAST-WORD-WINS: Always scan transcripts for time - user may have updated it
           let finalPickupTime = args.time || args.pickup_time || extractedBooking.pickup_time || sessionState.booking.pickup_time;
           
-          if (!finalPickupTime || finalPickupTime === "now") {
-            // Look for time expressions in recent user transcripts
-            const recentUserTexts = sessionState.transcripts
-              .filter(t => t.role === "user")
-              .slice(-5)
-              .map(t => t.text.toLowerCase())
-              .join(" ");
+          // Extract time from transcripts using "Last-Word-Wins" approach
+          // Scan ALL user transcripts for time expressions, taking the LAST match
+          const userTranscripts = sessionState.transcripts.filter(t => t.role === "user");
+          let extractedTimeFromTranscripts: string | null = null;
+          
+          // Time patterns to detect (ordered by specificity)
+          const timePatterns = [
+            // "tomorrow at 1230" / "tomorrow at 12:30"
+            { pattern: /tomorrow\s+(?:at\s+)?(\d{1,2})[:.:]?(\d{2})?\s*(am|pm|hours?)?/i, hasTomorrow: true },
+            // "at 1230 tomorrow" / "12:30 tomorrow"  
+            { pattern: /(?:at\s+)?(\d{1,2})[:.:]?(\d{2})?\s*(am|pm|hours?)?\s+tomorrow/i, hasTomorrow: true },
+            // "1230" / "12:30" / "1230 hours" (4-digit time)
+            { pattern: /\b(\d{2})[:.:]?(\d{2})\s*(?:hours?)?\b/i, hasTomorrow: false },
+            // "at 3pm" / "at 3:30pm"
+            { pattern: /(?:at\s+)?(\d{1,2})[:.:]?(\d{2})?\s*(am|pm)/i, hasTomorrow: false },
+            // "in 15 minutes" / "in 2 hours"
+            { pattern: /in\s+(\d+)\s*(minutes?|hours?|mins?|hrs?)/i, hasTomorrow: false },
+            // Just "tomorrow" with no time (defaults to morning)
+            { pattern: /\btomorrow\b/i, hasTomorrow: true },
+          ];
+          
+          // Scan transcripts in REVERSE order (last mentioned time wins)
+          for (let i = userTranscripts.length - 1; i >= 0; i--) {
+            const text = userTranscripts[i].text.toLowerCase();
             
-            // Time patterns to detect
-            const timePatterns = [
-              /tomorrow\s+(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm)?/i,
-              /(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm)?\s+tomorrow/i,
-              /(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm|o'?clock)?/i,
-              /in\s+(\d+)\s*(minutes?|hours?|mins?|hrs?)/i,
-              /(\d{2})[:.:]?(\d{2})\s*(?:hours?)?/i, // 1230, 12:30, 1230 hours
-            ];
-            
-            for (const pattern of timePatterns) {
-              const match = recentUserTexts.match(pattern);
+            for (const { pattern, hasTomorrow } of timePatterns) {
+              const match = text.match(pattern);
               if (match) {
-                // Extract the matched time expression
-                const fullMatch = match[0];
-                console.log(`[${sessionState.callId}] 🕐 Extracted time from transcripts: "${fullMatch}"`);
-                finalPickupTime = fullMatch;
+                // Build the time expression
+                let timeExpr = match[0].trim();
+                
+                // If pattern detected "tomorrow", include it
+                if (hasTomorrow && !timeExpr.includes("tomorrow")) {
+                  timeExpr = "tomorrow " + timeExpr;
+                }
+                
+                extractedTimeFromTranscripts = timeExpr;
+                console.log(`[${sessionState.callId}] 🕐 Last-Word-Wins: Found time in transcript "${userTranscripts[i].text}": "${extractedTimeFromTranscripts}"`);
                 break;
               }
+            }
+            if (extractedTimeFromTranscripts) break;
+          }
+          
+          // If we found a time in transcripts, use it (overrides Ada's guess or "now")
+          if (extractedTimeFromTranscripts) {
+            // Only override if Ada's time is missing or is "now"
+            if (!finalPickupTime || finalPickupTime === "now" || finalPickupTime.toLowerCase() === "asap") {
+              finalPickupTime = extractedTimeFromTranscripts;
             }
           }
           
           // Default to "now" if still nothing
           if (!finalPickupTime) finalPickupTime = "now";
           
-          console.log(`[${sessionState.callId}] 🕐 Raw time from Ada: time="${args.time}", pickup_time="${args.pickup_time}", extracted="${finalPickupTime}"`);
+          console.log(`[${sessionState.callId}] 🕐 Time resolution: args.time="${args.time}", transcript="${extractedTimeFromTranscripts}", final="${finalPickupTime}"`);
           
           console.log(`[${sessionState.callId}] ✅ Final booking details:`);
           console.log(`[${sessionState.callId}]   Pickup: "${finalPickup}"`);
