@@ -890,6 +890,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           if (data.delta) {
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
+              console.log(`[${callId}] 🔊 First audio chunk received`);
             }
             sessionState.openAiResponseActive = true;
 
@@ -898,6 +899,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 type: "audio",
                 audio: data.delta
               }));
+            } else {
+              console.log(`[${callId}] ⚠️ Socket not open (state: ${socket.readyState}), can't send audio`);
             }
           }
           break;
@@ -1274,6 +1277,13 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
 
         case "error":
           console.error(`[${callId}] ❌ OpenAI error:`, data.error);
+          break;
+          
+        default:
+          // Log unhandled events for debugging
+          if (data.type && !data.type.startsWith("input_audio_buffer") && !data.type.startsWith("rate_limits")) {
+            console.log(`[${callId}] 📨 OpenAI event: ${data.type}`);
+          }
           break;
       }
     } catch (e) {
