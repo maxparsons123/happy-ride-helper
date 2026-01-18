@@ -341,12 +341,13 @@ function isPhantomHallucination(text: string): boolean {
   return false;
 }
 
-// Detect if Ada is hallucinating a price without having received one from dispatch
-function isPriceHallucination(text: string, hasPendingFare: boolean): boolean {
+// Detect if Ada is hallucinating a price or ETA without having received one from dispatch
+function isPriceOrEtaHallucination(text: string, hasPendingFare: boolean): boolean {
   if (hasPendingFare) return false; // We have a real fare, so it's not hallucination
   
   const lower = text.toLowerCase();
-  // Check for price patterns (£X, X pounds, fare of, cost of, etc.)
+  
+  // Price patterns (£X, X pounds, fare of, cost of, etc.)
   const pricePatterns = [
     /£\d+/,
     /\d+\s*pounds?/,
@@ -360,11 +361,28 @@ function isPriceHallucination(text: string, hasPendingFare: boolean): boolean {
     /about\s*£?\d+/,
   ];
   
+  // ETA patterns (X minutes, arrive in X, driver will be X)
+  const etaPatterns = [
+    /(\d+)\s*minutes?/,
+    /arrive\s+(in|within)\s*\d+/,
+    /driver\s+(will be|is)\s*\d+/,
+    /eta\s+(is|of)\s*\d+/,
+    /be there\s+(in|within)\s*\d+/,
+    /arrival\s+(time|is)\s*\d+/,
+  ];
+  
   for (const pattern of pricePatterns) {
     if (pattern.test(lower)) {
       return true;
     }
   }
+  
+  for (const pattern of etaPatterns) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
+  
   return false;
 }
 
@@ -932,24 +950,24 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             sessionState.openAiResponseActive = true;
             
-            // PRICE HALLUCINATION GUARD: If Ada mentions a price but we haven't received one from dispatch, cancel!
-            if (isPriceHallucination(data.delta, !!sessionState.pendingFare)) {
-              console.log(`[${callId}] 🚫 PRICE HALLUCINATION DETECTED: "${data.delta}" - cancelling response`);
+            // PRICE/ETA HALLUCINATION GUARD: If Ada mentions a price/ETA but we haven't received one from dispatch, cancel!
+            if (isPriceOrEtaHallucination(data.delta, !!sessionState.pendingFare)) {
+              console.log(`[${callId}] 🚫 PRICE/ETA HALLUCINATION DETECTED: "${data.delta}" - cancelling response`);
               openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs!.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
               
-              // Inject a correction
+              // Inject a correction - be very forceful
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
                   type: "message",
                   role: "user",
-                  content: [{ type: "input_text", text: "[SYSTEM]: You do NOT know the price yet. Say 'I'm just checking that for you now' and wait for dispatch." }]
+                  content: [{ type: "input_text", text: "[SYSTEM ERROR]: You made up a price or ETA. You do NOT know the fare or arrival time yet. Say ONLY: 'I'm just checking that for you now' and then STOP TALKING completely. Wait in silence for dispatch." }]
                 }
               }));
               openaiWs!.send(JSON.stringify({
                 type: "response.create",
-                response: { modalities: ["audio", "text"], instructions: "Say: 'I'm just checking that for you now.'" }
+                response: { modalities: ["audio", "text"], instructions: "Say ONLY: 'I'm just checking that for you now.' Then STOP. Do not say anything else." }
               }));
             }
           }
@@ -1272,7 +1290,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 pickup_time: resolvedPickupTime
               });
 
-              // Tell Ada to WAIT for dispatch callback - do NOT make up a price!
+              // Tell Ada to WAIT SILENTLY for dispatch callback - do NOT make up a price or ETA!
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -1281,7 +1299,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   output: JSON.stringify({
                     success: true,
                     status: "pending",
-                    message: "Quote request sent. Say 'One moment please while I get your quote' and then WAIT. Do NOT guess or invent any prices or times."
+                    message: "Quote request sent to dispatch. Say ONLY 'One moment please while I check the price' then STOP TALKING COMPLETELY. Do NOT say any fare amount. Do NOT say any ETA or minutes. Do NOT guess. WAIT IN COMPLETE SILENCE until you receive a [DISPATCH QUOTE RECEIVED] message with the real price."
                   })
                 }
               }));
