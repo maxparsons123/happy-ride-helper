@@ -610,6 +610,11 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
     
+    // CRITICAL: Activate summary protection IMMEDIATELY to prevent barge-in during fare quote
+    // This protects Ada's speech from being cut off by background noise or premature user input
+    sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+    console.log(`[${callId}] 🛡️ Fare quote protection activated for ${SUMMARY_PROTECTION_MS}ms`);
+    
     // Inject the fare/ETA message for Ada to speak
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
@@ -648,6 +653,10 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
     
+    // Activate speech protection so Ada doesn't get cut off
+    sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+    console.log(`[${callId}] 🛡️ Dispatch say protection activated for ${SUMMARY_PROTECTION_MS}ms`);
+    
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
       item: {
@@ -679,6 +688,10 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    
+    // Activate speech protection for booking confirmation - use longer window for goodbye
+    sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 1.5);
+    console.log(`[${callId}] 🛡️ Booking confirm protection activated for ${SUMMARY_PROTECTION_MS * 1.5}ms`);
     
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
