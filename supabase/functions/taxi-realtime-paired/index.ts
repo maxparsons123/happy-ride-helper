@@ -351,16 +351,21 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         instructions: SYSTEM_PROMPT + `\n\n[CALL CONTEXT]\nCall ID: ${callId}\nCaller: ${callerPhone}`,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        input_audio_transcription: { model: "whisper-1" },
+        input_audio_transcription: { 
+          model: "whisper-1",
+          // Prompt hint helps Whisper recognize place names and taxi terminology
+          prompt: "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination."
+        },
         turn_detection: {
           type: "server_vad",
+          // Match taxi-realtime-simple settings for consistent quality
           threshold: 0.5,
-          prefix_padding_ms: 500,
-          silence_duration_ms: 800
+          prefix_padding_ms: 300,
+          silence_duration_ms: 1200
         },
         tools: TOOLS,
         tool_choice: "auto",
-        temperature: 0.7
+        temperature: 0.6 // OpenAI Realtime API minimum is 0.6
       }
     };
     
