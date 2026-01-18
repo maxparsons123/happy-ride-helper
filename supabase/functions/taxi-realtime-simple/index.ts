@@ -4149,7 +4149,7 @@ Do NOT say 'booked' until the tool returns success.]`
           const existingBags = sessionState.booking?.bags;
           const existingVehicleType = sessionState.booking?.vehicle_type;
           
-          const finalPassengers = args.passengers || extractedBooking.passengers || existingPassengers || 1;
+          const finalPassengers = args.passengers ?? extractedBooking.passengers ?? existingPassengers ?? null;
           
           // Parse bags - extractedBooking.luggage may be a string like "no baggage" or "2 bags"
           let finalBags = existingBags ?? 0;  // Default to existing, fallback to 0
