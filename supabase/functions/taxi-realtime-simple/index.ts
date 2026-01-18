@@ -197,6 +197,77 @@ function detectLanguageFromPhone(phone: string | null): string | null {
 // Normalize to digits-only for DB lookups (callers/bookings use digits-only phone_number)
 const normalizePhone = (phone: string | null | undefined) => String(phone || "").replace(/\D/g, "");
 
+// --- Booking Step State Machine Helpers ---
+type BookingStep = "pickup" | "destination" | "passengers" | "time" | "summary" | "confirmed";
+const BOOKING_STEP_ORDER: BookingStep[] = ["pickup", "destination", "passengers", "time", "summary", "confirmed"];
+
+/**
+ * Get the next step in the booking flow
+ */
+function getNextStep(currentStep: BookingStep): BookingStep | null {
+  const idx = BOOKING_STEP_ORDER.indexOf(currentStep);
+  if (idx === -1 || idx >= BOOKING_STEP_ORDER.length - 1) return null;
+  return BOOKING_STEP_ORDER[idx + 1];
+}
+
+/**
+ * Check if a step is before another in the flow
+ */
+function isStepBefore(step: BookingStep, referenceStep: BookingStep): boolean {
+  return BOOKING_STEP_ORDER.indexOf(step) < BOOKING_STEP_ORDER.indexOf(referenceStep);
+}
+
+/**
+ * Check if the booking state has the required field for a step
+ */
+function isStepComplete(step: BookingStep, booking: { pickup: string | null; destination: string | null; passengers: number | null; pickup_time: string | null }): boolean {
+  switch (step) {
+    case "pickup": return !!booking.pickup && booking.pickup.length > 2;
+    case "destination": return !!booking.destination && booking.destination.length > 2;
+    case "passengers": return booking.passengers !== null && booking.passengers > 0;
+    case "time": return booking.pickup_time !== null;
+    case "summary": return true; // Summary is complete when user confirms
+    case "confirmed": return true;
+    default: return false;
+  }
+}
+
+/**
+ * Advance to the next step if current step is complete
+ * Returns the new step (may be same as current if not complete)
+ */
+function advanceBookingStep(
+  sessionState: { bookingStep: BookingStep; bookingStepAdvancedAt: number | null; booking: any; callId: string }
+): BookingStep {
+  const current = sessionState.bookingStep;
+  if (!isStepComplete(current, sessionState.booking)) {
+    return current; // Can't advance - current step not complete
+  }
+  
+  const next = getNextStep(current);
+  if (!next) return current; // Already at end
+  
+  // Don't advance too rapidly (prevents extraction race conditions)
+  const now = Date.now();
+  if (sessionState.bookingStepAdvancedAt && now - sessionState.bookingStepAdvancedAt < 500) {
+    return current;
+  }
+  
+  console.log(`[${sessionState.callId}] 📈 STEP ADVANCE: ${current} → ${next}`);
+  sessionState.bookingStep = next;
+  sessionState.bookingStepAdvancedAt = now;
+  return next;
+}
+
+/**
+ * Map a question type to its corresponding step
+ */
+function questionTypeToStep(questionType: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null): BookingStep | null {
+  if (!questionType) return null;
+  if (questionType === "confirmation") return "summary";
+  return questionType as BookingStep;
+}
+
 // --- Pickup Time Normalization ---
 // Converts natural language time expressions to YYYY-MM-DD HH:MM format using LLM
 async function normalizePickupTime(rawTime: string | null | undefined): Promise<string> {
@@ -1379,6 +1450,14 @@ interface SessionState {
 
   // GREETING COMPLETION GUARD: prevents follow-up responses until greeting is fully delivered
   greetingDelivered: boolean;
+  
+  // STRICT SEQUENTIAL BOOKING STATE MACHINE
+  // Enforces Pickup → Destination → Passengers → Time order
+  // Ada cannot advance to the next step until the current field is complete
+  // Guards cannot rewind to previous steps - only forward progress allowed
+  bookingStep: "pickup" | "destination" | "passengers" | "time" | "summary" | "confirmed";
+  // Track when we advanced to current step (prevents rapid step changes from extraction race conditions)
+  bookingStepAdvancedAt: number | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -2035,7 +2114,36 @@ serve(async (req) => {
                 if (firstQuestion || questionMarkCount >= 2) {
                   console.log(`[${sessionState.callId}] 🛑 MULTI-QUESTION detected; cancelling and forcing single-question re-ask`);
                   console.log(`[${sessionState.callId}] 🛑 Current: "${currentText.substring(0, 120)}"`);
-                  if (firstQuestion) console.log(`[${sessionState.callId}] ✅ Keeping: "${firstQuestion}"`);
+                  console.log(`[${sessionState.callId}] 📊 Current booking step: ${sessionState.bookingStep}`);
+                  
+                  // ✅ STEP-AWARE RE-ASK: Use the CURRENT booking step to determine which question to ask
+                  // This prevents rewinding to a previous step when multi-question guard fires
+                  let stepAlignedQuestion = "";
+                  const currentStep = sessionState.bookingStep;
+                  
+                  switch (currentStep) {
+                    case "pickup":
+                      stepAlignedQuestion = "Where would you like to be picked up?";
+                      break;
+                    case "destination":
+                      stepAlignedQuestion = "And what is your destination?";
+                      break;
+                    case "passengers":
+                      stepAlignedQuestion = "How many people will be travelling?";
+                      break;
+                    case "time":
+                      stepAlignedQuestion = "When do you need the taxi?";
+                      break;
+                    case "summary":
+                    case "confirmed":
+                      // At summary/confirmed, use the detected first question (probably summary prompt)
+                      stepAlignedQuestion = firstQuestion;
+                      break;
+                    default:
+                      stepAlignedQuestion = firstQuestion;
+                  }
+                  
+                  if (stepAlignedQuestion) console.log(`[${sessionState.callId}] ✅ Step-aligned question: "${stepAlignedQuestion}"`);
 
                   sessionState.lastMultiQuestionFixAt = Date.now();
 
@@ -2054,7 +2162,7 @@ serve(async (req) => {
                     sessionState.assistantTranscriptIndex = null;
                   }
 
-                  const forcedQuestion = firstQuestion || "Please ask only one question.";
+                  const forcedQuestion = stepAlignedQuestion || firstQuestion || "Please ask only one question.";
                   openaiWs?.send(
                     JSON.stringify({
                       type: "conversation.item.create",
@@ -3113,6 +3221,22 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.booking.passengers = extractedPassengers;
               sessionState.booking.bags = extractedBags;
               
+              // ✅ ADVANCE BOOKING STEP based on what we captured
+              // Skip to the furthest complete step
+              if (extractedPickup) {
+                sessionState.bookingStep = "destination";
+                sessionState.bookingStepAdvancedAt = Date.now();
+              }
+              if (extractedDestination) {
+                sessionState.bookingStep = "passengers";
+                sessionState.bookingStepAdvancedAt = Date.now();
+              }
+              if (extractedPassengers) {
+                sessionState.bookingStep = "time";
+                sessionState.bookingStepAdvancedAt = Date.now();
+              }
+              console.log(`[${sessionState.callId}] 📊 Booking step after extraction: ${sessionState.bookingStep}`);
+              
               // Mark new booking as pending confirmation
               sessionState.pendingNewBooking = {
                 pickup: extractedPickup,
@@ -3649,6 +3773,9 @@ Do NOT say 'booked' until the tool returns success.]`
             // Reset booking state for new request
             sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 };
             sessionState.hasActiveBooking = false;
+            // ✅ Reset booking step for new booking flow
+            sessionState.bookingStep = "pickup";
+            sessionState.bookingStepAdvancedAt = Date.now();
             
             // Ensure OpenAI responds to this new request
             safeResponseCreate(sessionState, "post-booking-new-request");
@@ -4653,6 +4780,11 @@ Do NOT say 'booked' until the tool returns success.]`
             version: 1,
           };
           
+          // ✅ ADVANCE BOOKING STEP: At book_taxi request_quote, all fields are complete → summary
+          sessionState.bookingStep = "summary";
+          sessionState.bookingStepAdvancedAt = Date.now();
+          console.log(`[${sessionState.callId}] 📊 Booking step advanced to: ${sessionState.bookingStep}`);
+          
           // Sync pickup/destination to live_calls for dashboard display
           await supabase.from("live_calls").update({
             pickup: finalPickup,
@@ -5267,6 +5399,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // Clear session state
           sessionState.hasActiveBooking = false;
           sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 };
+          sessionState.bookingStep = "pickup"; // ✅ Reset to start of booking flow
+          sessionState.bookingStepAdvancedAt = Date.now();
           sessionState.pendingQuote = null;
           sessionState.quoteRequestedAt = null;
           sessionState.quoteTripKey = null;
@@ -5903,6 +6037,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastSpokenQuestionAt: null,
           lastMultiQuestionFixAt: null,
           greetingDelivered: false,
+          bookingStep: "pickup", // Start at pickup step
+          bookingStepAdvancedAt: null,
         };
         
         preConnected = true;
@@ -6027,6 +6163,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastSpokenQuestionAt: null,
             lastMultiQuestionFixAt: null,
             greetingDelivered: false,
+            bookingStep: "pickup", // Start at pickup step
+            bookingStepAdvancedAt: null,
           };
         }
         
