@@ -800,21 +800,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
     greetingSent = true;
     
-    console.log(`[${callId}] 🎙️ Sending initial greeting...`);
+    console.log(`[${callId}] 🎙️ Sending initial greeting via response.create...`);
     
-    const greeting = {
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{
-          type: "input_text",
-          text: "[SYSTEM: New call started. Greet the caller warmly and ask for their pickup location. Remember to track last_question_asked as 'pickup'.]"
-        }]
+    // Use response.create with instructions to trigger immediate speech
+    openaiWs!.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["text", "audio"],
+        instructions: "Greet the caller warmly. Say something like: 'Hello, this is Ada from Ridenow Cars. Where can I pick you up from today?' Keep it short and friendly."
       }
-    };
-    openaiWs!.send(JSON.stringify(greeting));
-    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+    }));
     
     sessionState.lastQuestionAsked = "pickup";
   };
