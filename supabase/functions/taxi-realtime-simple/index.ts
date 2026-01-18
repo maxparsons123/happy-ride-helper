@@ -5232,19 +5232,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
-          // CRITICAL: Block audio while Ada is speaking to prevent echo/hallucination
-          // OpenAI's VAD will detect Ada's TTS as "user speech" and Whisper will hallucinate.
-          // This applies to ALL modes - half-duplex buffers it, full-duplex just drops it.
-          if (state.isAdaSpeaking) {
-            if (state.halfDuplex) {
-              // Buffer the raw audio (we'll process it when Ada stops)
-              state.halfDuplexBuffer.push(audioData);
-              // Cap buffer to prevent memory issues (keep last ~5 seconds at 8kHz, 20ms chunks = 250 chunks)
-              if (state.halfDuplexBuffer.length > 250) {
-                state.halfDuplexBuffer.shift();
-              }
+          // If we're in half-duplex and Ada is speaking, buffer raw audio and stop.
+          // (Half-duplex explicitly disallows barge-in.)
+          if (state.isAdaSpeaking && state.halfDuplex) {
+            state.halfDuplexBuffer.push(audioData);
+            // Cap buffer to prevent memory issues (keep last ~5 seconds at 8kHz, 20ms chunks = 250 chunks)
+            if (state.halfDuplexBuffer.length > 250) {
+              state.halfDuplexBuffer.shift();
             }
-            // Don't forward audio while Ada speaks (prevents echo detection by OpenAI VAD)
             return;
           }
 
@@ -5252,15 +5247,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // Bridge can send: ulaw (8kHz), slin (8kHz PCM), or slin16 (16kHz PCM)
           let pcmInput: Int16Array;
           const inputSampleRate = state.inboundSampleRate;
-          
+
           if (state.inboundAudioFormat === "ulaw") {
             // Decode µ-law to 16-bit PCM (8kHz)
             pcmInput = new Int16Array(audioData.length);
             for (let i = 0; i < audioData.length; i++) {
-              const ulaw = ~audioData[i] & 0xFF;
+              const ulaw = ~audioData[i] & 0xff;
               const sign = (ulaw & 0x80) ? -1 : 1;
               const exponent = (ulaw >> 4) & 0x07;
-              const mantissa = ulaw & 0x0F;
+              const mantissa = ulaw & 0x0f;
               let sample = ((mantissa << 3) + 0x84) << exponent;
               sample -= 0x84;
               pcmInput[i] = sign * sample;
@@ -5270,48 +5265,52 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             pcmInput = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
           }
 
-          // BARGE-IN (only in full-duplex mode): If Ada is currently speaking and we detect real user energy,
-          // cancel the current AI response immediately so Ada can hear the caller.
-          // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
-          // SKIP barge-in when a pending quote is active - we want Ada to finish speaking the fare
-          // and let the user's "yes/no" be processed naturally by OpenAI's VAD.
+          // FULL-DUPLEX echo suppression + barge-in:
+          // - If Ada is speaking and we detect REAL user energy, cancel the AI response (barge-in) and then forward audio.
+          // - Otherwise, drop audio while Ada is speaking to prevent VAD/Whisper echo hallucinations.
           const pendingQuoteActive = state.pendingQuote && Date.now() - state.pendingQuote.timestamp < 15000;
-          
-          if (!state.halfDuplex && state.isAdaSpeaking && state.openAiResponseActive && !pendingQuoteActive) {
-            // Skip barge-in check during initial echo guard, but DON'T drop audio
-            const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
-            
-            if (!inEchoGuard) {
-              let sumSq = 0;
-              for (let i = 0; i < pcmInput.length; i++) {
-                const s = pcmInput[i];
-                sumSq += s * s;
+
+          if (state.isAdaSpeaking && !state.halfDuplex) {
+            if (pendingQuoteActive) {
+              // User should answer after the fare is read; dropping during this window prevents echo loops.
+              if (Math.random() < 0.01) {
+                console.log(`[${state.callId}] 🔇 Dropping audio while speaking (fare window)`);
               }
-              const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
-
-              // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
-              const isRealBargeIn = rms >= 650 && rms < 20000;
-
-              if (isRealBargeIn) {
-                console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
-                try {
-                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                } catch (e) {
-                  console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
-                }
-
-                state.isAdaSpeaking = false;
-                state.echoGuardUntil = Date.now() + 200;
-                socket.send(JSON.stringify({ type: "ai_interrupted" }));
-              }
-              // If not real barge-in, we just skip cancellation but STILL forward audio below
+              return;
             }
-          } else if (pendingQuoteActive && state.isAdaSpeaking) {
-            // Log that we're skipping barge-in during fare confirmation window
-            // (only log occasionally to avoid spam)
-            if (Math.random() < 0.01) {
-              console.log(`[${state.callId}] ⏸️ Barge-in disabled during fare confirmation window`);
+
+            // Skip barge-in checks briefly at the start of Ada speech (startup echo), but still drop audio.
+            const inStartupEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
+            if (inStartupEchoGuard || !state.openAiResponseActive) {
+              return;
+            }
+
+            let sumSq = 0;
+            for (let i = 0; i < pcmInput.length; i++) {
+              const s = pcmInput[i];
+              sumSq += s * s;
+            }
+            const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
+
+            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
+            const isRealBargeIn = rms >= 650 && rms < 20000;
+
+            if (isRealBargeIn) {
+              console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
+              try {
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              } catch (e) {
+                console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+              }
+
+              // Allow audio to flow immediately after cancelling.
+              state.isAdaSpeaking = false;
+              state.echoGuardUntil = Date.now() + 200;
+              socket.send(JSON.stringify({ type: "ai_interrupted" }));
+            } else {
+              // Not a real barge-in → drop to prevent echo.
+              return;
             }
           }
 
