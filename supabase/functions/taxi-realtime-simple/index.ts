@@ -5220,15 +5220,20 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
-          // HALF-DUPLEX MODE: Buffer audio while Ada is speaking, flush when she stops
-          if (state.halfDuplex && state.isAdaSpeaking) {
-            // Buffer the raw audio (we'll process it when Ada stops)
-            state.halfDuplexBuffer.push(audioData);
-            // Cap buffer to prevent memory issues (keep last ~5 seconds at 8kHz, 20ms chunks = 250 chunks)
-            if (state.halfDuplexBuffer.length > 250) {
-              state.halfDuplexBuffer.shift();
+          // CRITICAL: Block audio while Ada is speaking to prevent echo/hallucination
+          // OpenAI's VAD will detect Ada's TTS as "user speech" and Whisper will hallucinate.
+          // This applies to ALL modes - half-duplex buffers it, full-duplex just drops it.
+          if (state.isAdaSpeaking) {
+            if (state.halfDuplex) {
+              // Buffer the raw audio (we'll process it when Ada stops)
+              state.halfDuplexBuffer.push(audioData);
+              // Cap buffer to prevent memory issues (keep last ~5 seconds at 8kHz, 20ms chunks = 250 chunks)
+              if (state.halfDuplexBuffer.length > 250) {
+                state.halfDuplexBuffer.shift();
+              }
             }
-            return; // Don't forward audio while Ada speaks in half-duplex mode
+            // Don't forward audio while Ada speaks (prevents echo detection by OpenAI VAD)
+            return;
           }
 
           // Step 1: Decode audio to PCM16 based on inbound format
