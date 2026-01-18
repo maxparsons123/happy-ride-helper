@@ -584,6 +584,18 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       return;
     }
     
+    // DUPLICATE PROTECTION: Ignore if we already received a quote and are awaiting confirmation
+    if (sessionState.awaitingConfirmation) {
+      console.log(`[${callId}] ⚠️ Ignoring duplicate dispatch_ask_confirm - already awaiting confirmation`);
+      return;
+    }
+    
+    // DUPLICATE PROTECTION: Ignore if booking is already confirmed
+    if (sessionState.bookingConfirmed) {
+      console.log(`[${callId}] ⚠️ Ignoring dispatch_ask_confirm - booking already confirmed`);
+      return;
+    }
+    
     // Store the callback URL for when customer confirms
     sessionState.pendingConfirmationCallback = callback_url;
     sessionState.pendingFare = fare;
