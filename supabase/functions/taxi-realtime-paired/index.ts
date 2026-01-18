@@ -1227,12 +1227,13 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             openaiWs!.send(JSON.stringify({ type: "response.create" }));
             
             // Give extra time so the final message isn't truncated before hangup
+            // Must be >= protection window (SUMMARY_PROTECTION_MS * 2 = 16s) + buffer
             setTimeout(() => {
               try {
                 socket.send(JSON.stringify({ type: "hangup", reason: toolArgs.reason }));
               } catch { /* ignore */ }
               cleanup();
-            }, 12000);
+            }, 18000);
           }
           break;
 
