@@ -4509,7 +4509,9 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || existingVehicleType || "saloon";
-          const finalPickupTime = args.pickup_time || extractedBooking.pickup_time || "now";
+          // Handle both 'time' (from tool schema) and 'pickup_time' (legacy)
+          const finalPickupTime = args.time || args.pickup_time || extractedBooking.pickup_time || "now";
+          console.log(`[${sessionState.callId}] 🕐 Raw time from Ada: time="${args.time}", pickup_time="${args.pickup_time}", final="${finalPickupTime}"`);
           
           console.log(`[${sessionState.callId}] ✅ Final booking details:`);
           console.log(`[${sessionState.callId}]   Pickup: "${finalPickup}"`);
