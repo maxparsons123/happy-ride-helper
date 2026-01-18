@@ -203,6 +203,11 @@ interface SessionState {
   // Inbound audio format
   inboundAudioFormat: "ulaw" | "slin" | "slin16";
   inboundSampleRate: number;
+  
+  // Keep-alive and timeout tracking
+  lastActivityAt: number;
+  keepAliveTimer: number | null;
+  sessionTimeoutTimer: number | null;
 }
 
 // Check if all 4 fields are complete - THE GATE
@@ -238,9 +243,14 @@ serve(async (req: Request) => {
     return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
+  // Increase idle timeout to 10 minutes (600 seconds)
+  const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 600 });
   
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  
+  // Keep-alive configuration
+  const KEEPALIVE_INTERVAL_MS = 15000; // Send ping every 15 seconds
+  const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minute max session
   
   // Initialize session state with empty booking struct
   const sessionState: SessionState = {
@@ -268,6 +278,9 @@ serve(async (req: Request) => {
     assistantTranscriptBuffer: "",
     inboundAudioFormat: "slin16",
     inboundSampleRate: 16000,
+    lastActivityAt: Date.now(),
+    keepAliveTimer: null,
+    sessionTimeoutTimer: null,
   };
 
   let openaiWs: WebSocket | null = null;
@@ -667,13 +680,87 @@ serve(async (req: Request) => {
   // BRIDGE SOCKET HANDLERS
   // ═══════════════════════════════════════════════════════════════════════════════
   
+  // Keep-alive helper: sends ping to bridge every 15 seconds
+  const startKeepAlive = () => {
+    if (sessionState.keepAliveTimer) return;
+    
+    sessionState.keepAliveTimer = setInterval(() => {
+      if (sessionState.callEnded) {
+        clearInterval(sessionState.keepAliveTimer!);
+        sessionState.keepAliveTimer = null;
+        return;
+      }
+      
+      try {
+        socket.send(JSON.stringify({ type: "keepalive", timestamp: Date.now() }));
+        console.log(`[${sessionState.callId}] 💓 Keep-alive ping sent`);
+      } catch (e) {
+        console.error(`[${sessionState.callId}] Keep-alive error:`, e);
+      }
+    }, KEEPALIVE_INTERVAL_MS) as unknown as number;
+  };
+  
+  // Session timeout: gracefully end call after 10 minutes max
+  const startSessionTimeout = () => {
+    sessionState.sessionTimeoutTimer = setTimeout(() => {
+      if (sessionState.callEnded) return;
+      
+      console.log(`[${sessionState.callId}] ⏰ Session timeout (${SESSION_TIMEOUT_MS / 60000} minutes) - ending call gracefully`);
+      
+      // Inject goodbye message before closing
+      if (openaiWs && openaiConnected) {
+        openaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ 
+              type: "input_text", 
+              text: "[SYSTEM: Session timeout reached. Say 'I apologize, but we need to end this call now due to time limits. Please call back to complete your booking. Goodbye!' Then end the call.]" 
+            }]
+          }
+        }));
+        openaiWs.send(JSON.stringify({ type: "response.create" }));
+      }
+      
+      // Close after delay to let goodbye play
+      setTimeout(() => {
+        sessionState.callEnded = true;
+        openaiWs?.close();
+        socket.close();
+      }, 5000);
+    }, SESSION_TIMEOUT_MS) as unknown as number;
+  };
+  
+  // Activity tracker: reset timeout on user activity
+  const updateActivity = () => {
+    sessionState.lastActivityAt = Date.now();
+  };
+  
+  // Cleanup function
+  const cleanup = () => {
+    if (sessionState.keepAliveTimer) {
+      clearInterval(sessionState.keepAliveTimer);
+      sessionState.keepAliveTimer = null;
+    }
+    if (sessionState.sessionTimeoutTimer) {
+      clearTimeout(sessionState.sessionTimeoutTimer);
+      sessionState.sessionTimeoutTimer = null;
+    }
+  };
+  
   socket.onopen = () => {
     console.log(`[${sessionState.callId}] 📞 Bridge WebSocket connected`);
+    startKeepAlive();
+    startSessionTimeout();
   };
   
   socket.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
+      
+      // Update activity on any message
+      updateActivity();
       
       switch (data.type) {
         case "init":
@@ -707,9 +794,15 @@ serve(async (req: Request) => {
           }
           break;
           
+        case "keepalive_ack":
+          // Bridge responded to our keep-alive
+          console.log(`[${sessionState.callId}] 💓 Keep-alive ack received`);
+          break;
+          
         case "hangup":
           console.log(`[${sessionState.callId}] 📞 Call ended by bridge`);
           sessionState.callEnded = true;
+          cleanup();
           openaiWs?.close();
           break;
       }
@@ -721,6 +814,7 @@ serve(async (req: Request) => {
   socket.onclose = () => {
     console.log(`[${sessionState.callId}] 🔌 Bridge WebSocket closed`);
     sessionState.callEnded = true;
+    cleanup();
     openaiWs?.close();
     
     // Update live_calls with final state
