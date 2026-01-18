@@ -872,9 +872,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
           
         case "session.updated":
-          // Session config applied - NOW send the greeting
-          console.log(`[${callId}] ✅ Session configured - triggering greeting`);
-          sendGreeting();
+          // Session config applied - NOW send the greeting (with tiny delay for stability)
+          console.log(`[${callId}] ✅ Session configured - triggering greeting in 200ms`);
+          setTimeout(() => sendGreeting(), 200);
           break;
           
         case "response.created":
