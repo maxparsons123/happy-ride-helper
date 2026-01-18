@@ -2905,11 +2905,18 @@ Do NOT say 'booked' until the tool returns success.]`
                 console.log(`[${sessionState.callId}] 🔧 Corrected modification: pickup="${rawNewPickup}"→"${newPickup}", dest="${rawNewDestination}"→"${newDestination}"`);
               }
               
-              // Normalize for comparison
+              // Normalize for comparison - also treat placeholder values as empty
               const normalizeAddr = (s: string) => s.toLowerCase().replace(/[.,\s]+/g, " ").trim();
+              const isPlaceholder = (s: string) => {
+                const lower = s.toLowerCase().trim();
+                return !lower || lower === "not set" || lower === "not specified" || 
+                       lower === "unknown" || lower === "none" || lower === "n/a" ||
+                       lower === "your location" || lower === "your destination";
+              };
               
-              const pickupChanged = newPickup && normalizeAddr(newPickup) !== normalizeAddr(oldPickup);
-              const destinationChanged = newDestination && normalizeAddr(newDestination) !== normalizeAddr(oldDestination);
+              // Only count as "changed" if the new value is a real address (not a placeholder)
+              const pickupChanged = newPickup && !isPlaceholder(newPickup) && normalizeAddr(newPickup) !== normalizeAddr(oldPickup);
+              const destinationChanged = newDestination && !isPlaceholder(newDestination) && normalizeAddr(newDestination) !== normalizeAddr(oldDestination);
               const passengersChanged = newPassengers !== oldPassengers;
               const bagsChanged = newBags !== oldBags;
               
@@ -2992,8 +2999,18 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.pendingQuote = null;
               
               // Build confirmation message summarizing the FULL updated booking
-              const pickup = sessionState.booking.pickup || "your location";
-              const destination = sessionState.booking.destination || "your destination";
+              // Use friendly fallbacks for any missing/placeholder values
+              const safeAddr = (addr: string | null | undefined, fallback: string) => {
+                if (!addr) return fallback;
+                const lower = addr.toLowerCase().trim();
+                if (!lower || lower === "not set" || lower === "not specified" || 
+                    lower === "unknown" || lower === "none" || lower === "n/a") {
+                  return fallback;
+                }
+                return addr;
+              };
+              const pickup = safeAddr(sessionState.booking.pickup, "your pickup location");
+              const destination = safeAddr(sessionState.booking.destination, "your destination");
               const passengers = sessionState.booking.passengers || 1;
               
               // Build a clear summary of what changed
