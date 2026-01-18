@@ -802,7 +802,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     console.log(`[${callId}] 🎙️ Sending initial greeting via response.create only...`);
     
-    const greetingText = "Hello, this is Ada from Ridenow Cars. Where can I pick you up from today?";
+    const greetingText = "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?";
     
     // Simple approach: just request a response with specific instructions
     // Don't inject conversation items - let the model generate from session instructions
