@@ -1436,6 +1436,18 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               break;
             }
             
+            // POST-CONFIRMATION GUARD: After booking is confirmed, ignore all user input
+            // except explicit cancellation or "something else" requests
+            if (sessionState.bookingConfirmed) {
+              const lower = userText.toLowerCase();
+              const isRelevant = lower.includes("cancel") || lower.includes("else") || 
+                                 lower.includes("another") || lower.includes("new booking");
+              if (!isRelevant) {
+                console.log(`[${callId}] 🛡️ Post-confirmation guard: ignoring input "${userText}"`);
+                break;
+              }
+            }
+            
             console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
             // Add to history with context annotation
@@ -1718,12 +1730,20 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               // bookingConfirmed already set at top of this block to prevent race conditions
               sessionState.awaitingConfirmation = false;
               sessionState.quoteInFlight = false;
+              
+              // Protect goodbye speech from interruption
+              sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+              
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
                   type: "function_call_output",
                   call_id: data.call_id,
-                  output: JSON.stringify({ success: true, status: "confirmed" })
+                  output: JSON.stringify({ 
+                    success: true, 
+                    status: "confirmed",
+                    message: "Booking confirmed! Say ONLY: 'Perfect, your booking is confirmed. You'll receive details via WhatsApp. Thank you for using Taxibot demo, have a safe journey.' Then IMMEDIATELY call end_call()."
+                  })
                 }
               }));
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
