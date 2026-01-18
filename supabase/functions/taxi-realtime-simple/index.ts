@@ -1368,6 +1368,9 @@ interface SessionState {
   // MULTI-QUESTION GUARD: prevents "... destination? ... passengers?" in one assistant turn
   lastMultiQuestionFixAt: number | null;
 
+  // GREETING COMPLETION GUARD: prevents follow-up responses until greeting is fully delivered
+  greetingDelivered: boolean;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -1753,6 +1756,17 @@ serve(async (req) => {
           break;
         }
 
+        // ✅ GREETING COMPLETION GUARD: Block all VAD-triggered responses until greeting is fully delivered
+        // This prevents the model from firing all questions at once before the greeting finishes
+        // EXCEPTION: Allow the first response (the greeting itself) through
+        if (!sessionState.greetingDelivered && sessionState.openAiResponseActive) {
+          // This is a second response trying to fire before the greeting is done - block it
+          console.log(`[${sessionState.callId}] 🛑 Cancelling response - greeting not yet delivered`);
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+          sessionState.discardCurrentResponseAudio = true;
+          break;
+        }
+
         // ✅ PENDING MODIFICATION GUARD: While waiting for the caller to confirm an update,
         // do NOT allow VAD/noise to trigger extra assistant turns (this causes repeated summaries).
         // We allow exactly ONE response right after we inject the modification prompt.
@@ -1815,6 +1829,13 @@ serve(async (req) => {
        case "response.done":
          sessionState.openAiResponseActive = false;
          sessionState.discardCurrentResponseAudio = false;
+
+         // ✅ GREETING COMPLETION: Mark greeting as delivered on first response.done
+         // This unlocks follow-up responses and prevents the model from firing all questions at once
+         if (!sessionState.greetingDelivered) {
+           sessionState.greetingDelivered = true;
+           console.log(`[${sessionState.callId}] 🎉 Greeting delivered - follow-up responses now allowed`);
+         }
 
          // ✅ If we just finished speaking the confirmation message, NOW set the askedAnythingElseAt timestamp
          // This ensures the grace period starts AFTER Ada finishes speaking, not when we sent the response.create
@@ -5874,6 +5895,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastSpokenQuestion: null,
           lastSpokenQuestionAt: null,
           lastMultiQuestionFixAt: null,
+          greetingDelivered: false,
         };
         
         preConnected = true;
@@ -5997,6 +6019,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastSpokenQuestion: null,
             lastSpokenQuestionAt: null,
             lastMultiQuestionFixAt: null,
+            greetingDelivered: false,
           };
         }
         
