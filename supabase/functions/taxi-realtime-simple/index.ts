@@ -4511,9 +4511,44 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           
           const finalVehicleType = args.vehicle_type || extractedBooking.vehicle_type || existingVehicleType || "saloon";
+          
           // Handle both 'time' (from tool schema) and 'pickup_time' (legacy)
-          const finalPickupTime = args.time || args.pickup_time || extractedBooking.pickup_time || "now";
-          console.log(`[${sessionState.callId}] 🕐 Raw time from Ada: time="${args.time}", pickup_time="${args.pickup_time}", final="${finalPickupTime}"`);
+          // If Ada didn't pass time, try to extract from recent transcripts
+          let finalPickupTime = args.time || args.pickup_time || extractedBooking.pickup_time || sessionState.booking.pickup_time;
+          
+          if (!finalPickupTime || finalPickupTime === "now") {
+            // Look for time expressions in recent user transcripts
+            const recentUserTexts = sessionState.transcripts
+              .filter(t => t.role === "user")
+              .slice(-5)
+              .map(t => t.text.toLowerCase())
+              .join(" ");
+            
+            // Time patterns to detect
+            const timePatterns = [
+              /tomorrow\s+(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm)?/i,
+              /(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm)?\s+tomorrow/i,
+              /(?:at\s+)?(\d{1,2}[:.:]?\d{0,2})\s*(am|pm|o'?clock)?/i,
+              /in\s+(\d+)\s*(minutes?|hours?|mins?|hrs?)/i,
+              /(\d{2})[:.:]?(\d{2})\s*(?:hours?)?/i, // 1230, 12:30, 1230 hours
+            ];
+            
+            for (const pattern of timePatterns) {
+              const match = recentUserTexts.match(pattern);
+              if (match) {
+                // Extract the matched time expression
+                const fullMatch = match[0];
+                console.log(`[${sessionState.callId}] 🕐 Extracted time from transcripts: "${fullMatch}"`);
+                finalPickupTime = fullMatch;
+                break;
+              }
+            }
+          }
+          
+          // Default to "now" if still nothing
+          if (!finalPickupTime) finalPickupTime = "now";
+          
+          console.log(`[${sessionState.callId}] 🕐 Raw time from Ada: time="${args.time}", pickup_time="${args.pickup_time}", extracted="${finalPickupTime}"`);
           
           console.log(`[${sessionState.callId}] ✅ Final booking details:`);
           console.log(`[${sessionState.callId}]   Pickup: "${finalPickup}"`);
