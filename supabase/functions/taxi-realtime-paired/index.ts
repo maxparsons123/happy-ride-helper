@@ -515,7 +515,7 @@ async function sendDispatchWebhook(
     console.log(`[${sessionState.callId}] 📡 Sending webhook (${action}):`, JSON.stringify(webhookPayload).substring(0, 200));
     
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for slow dispatch backends
     
     const response = await fetch(DISPATCH_WEBHOOK_URL, {
       method: "POST",
