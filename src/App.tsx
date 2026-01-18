@@ -11,6 +11,7 @@ import SipConfig from "./pages/SipConfig";
 import Agents from "./pages/Agents";
 import WebhookTest from "./pages/WebhookTest";
 import Billing from "./pages/Billing";
+import LiveKitTest from "./pages/LiveKitTest";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
           <Route path="/agents" element={<Agents />} />
           <Route path="/webhook-test" element={<WebhookTest />} />
           <Route path="/billing" element={<Billing />} />
+          <Route path="/livekit" element={<LiveKitTest />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
