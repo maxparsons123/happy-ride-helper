@@ -467,8 +467,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "52 a": "52A",
   
   // Common number mishearings in addresses
-  "28 david": "52A David",
-  "twenty eight david": "52A David",
+  // NOTE: More specific patterns first to prevent partial matches
+  "528 david": "52A David",       // "52A" misheard as "528"
+  "five twenty eight david": "52A David",
+  "five two eight david": "52A David",
+  "5208 david": "52A David",      // "52A" misheard as "5208"
+  "five two a david": "52A David",
+  "fifty two a david": "52A David",
 };
 
 // Hallucination patterns - common STT artifacts from telephony noise
@@ -1822,7 +1827,7 @@ serve(async (req) => {
             const matchingWords = wordsFromLast.filter(w => currentNormalized.includes(w));
             const similarityRatio = wordsFromLast.length > 0 ? matchingWords.length / wordsFromLast.length : 0;
             
-            if (similarityRatio > 0.75 && currentText.length > 40) {
+            if (similarityRatio > 0.6 && currentText.length > 25) {
               console.log(`[${sessionState.callId}] 🔁 REPETITION DETECTED: Ada is repeating confirmation (${(similarityRatio * 100).toFixed(0)}% similar) - cancelling`);
               console.log(`[${sessionState.callId}] 🔁 Last: "${sessionState.lastSpokenConfirmation.substring(0, 50)}..."`);
               console.log(`[${sessionState.callId}] 🔁 Current: "${currentText.substring(0, 50)}..."`);
