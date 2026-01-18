@@ -2645,6 +2645,59 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
         }
+
+        // AUTO-TRIGGER (TOOL ENFORCEMENT): If Ada says she's "checking the price" but never calls book_taxi,
+        // force a silent request_quote tool call so the dispatch webhook actually fires.
+        // This is mainly needed for weaker tool-calling realtime models.
+        const isCheckingPrice =
+          (lowerAssistantText.includes("check") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare"))) ||
+          (lowerAssistantText.includes("one moment") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare"))) ||
+          (lowerAssistantText.includes("checking") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare") || lowerAssistantText.includes("trip")));
+
+        const hasRequiredBookingFields =
+          !!sessionState.booking?.pickup &&
+          !!sessionState.booking?.destination &&
+          sessionState.booking?.passengers !== null;
+
+        const quoteAlreadyInProgress =
+          !!sessionState.quoteRequestedAt ||
+          !!sessionState.pendingQuote ||
+          !!sessionState.awaitingDispatchCallback;
+
+        if (
+          isCheckingPrice &&
+          hasRequiredBookingFields &&
+          !quoteAlreadyInProgress &&
+          sessionState.bookingStep === "summary" &&
+          openaiWs &&
+          openaiConnected
+        ) {
+          console.log(`[${sessionState.callId}] 🔄 AUTO-TRIGGER: Ada said she's checking price but no quote requested yet → forcing book_taxi(request_quote)`);
+
+          const pickup = sessionState.booking.pickup;
+          const destination = sessionState.booking.destination;
+          const passengers = sessionState.booking.passengers;
+          const time = sessionState.booking.pickup_time || "now";
+
+          // Instruct the model to call the tool WITHOUT speaking (prevents price hallucination).
+          openaiWs.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: `[SYSTEM ERROR: You said you are checking the price, but you did not call the booking tool. IMMEDIATELY call book_taxi with action: "request_quote", pickup: "${pickup}", destination: "${destination}", passengers: ${passengers}, time: "${time}". DO NOT SPEAK - only call the tool.]`,
+                  },
+                ],
+              },
+            })
+          );
+
+          safeResponseCreate(sessionState, "auto-trigger-request-quote");
+        }
         
          // FINAL FLUSH: Release any remaining buffered audio now that transcript is complete
          // This ensures we don't hold audio forever waiting for sentence completion
