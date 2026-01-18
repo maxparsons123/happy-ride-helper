@@ -921,26 +921,55 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           } else if (toolName === "book_taxi") {
             const action = toolArgs.action as string;
             
-            const webhookResult = await sendDispatchWebhook(sessionState, action, {
+            // Send webhook to dispatch system (async - they respond via callback)
+            await sendDispatchWebhook(sessionState, action, {
               pickup: toolArgs.pickup || sessionState.booking.pickup,
               destination: toolArgs.destination || sessionState.booking.destination,
               passengers: toolArgs.passengers || sessionState.booking.passengers,
               pickup_time: toolArgs.pickup_time || sessionState.booking.pickupTime
             });
             
-            if (action === "confirmed" && webhookResult.success) {
+            // For request_quote: tell Ada to WAIT for dispatch callback - do NOT make up a price!
+            // The real price will arrive via dispatch_ask_confirm broadcast channel.
+            if (action === "request_quote") {
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: true,
+                    status: "pending",
+                    message: "Quote request sent. WAIT SILENTLY for the fare and ETA - they will be provided to you shortly. Do NOT guess or make up any prices or times. Say 'One moment please while I get your quote' and then STOP SPEAKING until you receive the quote."
+                  })
+                }
+              }));
+              // Do NOT trigger response.create here - let Ada say "one moment" and wait
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              
+            } else if (action === "confirmed") {
               sessionState.bookingConfirmed = true;
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({ success: true, status: "confirmed" })
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            } else {
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({ success: true })
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
             }
             
-            openaiWs!.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "function_call_output",
-                call_id: data.call_id,
-                output: JSON.stringify(webhookResult)
-              }
-            }));
-            openaiWs!.send(JSON.stringify({ type: "response.create" }));
             await updateLiveCall(sessionState);
             
           } else if (toolName === "end_call") {
