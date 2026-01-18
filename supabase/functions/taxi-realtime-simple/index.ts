@@ -258,6 +258,8 @@ EXAMPLES:
 - "monday evening" → nearest Monday 19:00
 - "1600 hours tomorrow" → next day 16:00`;
 
+  console.log(`🕐 normalizePickupTime called with: "${rawTime}"`);
+  
   try {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
@@ -265,6 +267,7 @@ EXAMPLES:
       return rawTime;
     }
     
+    console.log(`🕐 Calling Lovable API for time normalization...`);
     const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -282,19 +285,24 @@ EXAMPLES:
       })
     });
     
+    console.log(`🕐 Lovable API response status: ${response.status}`);
+    
     if (!response.ok) {
-      console.error(`Time normalization API error: ${response.status}`);
+      console.error(`Time normalization API error: ${response.status} - ${await response.text()}`);
       return rawTime;
     }
     
     const data = await response.json();
     const normalizedTime = data.choices?.[0]?.message?.content?.trim();
     
+    console.log(`🕐 Lovable API result: "${normalizedTime}"`);
+    
     if (normalizedTime) {
       console.log(`🕐 Time normalized: "${rawTime}" → "${normalizedTime}"`);
       return normalizedTime;
     }
     
+    console.log(`🕐 No normalized time returned, using raw: "${rawTime}"`);
     return rawTime;
   } catch (err) {
     console.error("Time normalization failed:", err);
