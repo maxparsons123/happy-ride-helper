@@ -623,12 +623,13 @@ class TaxiBridgeV7:
                         )
 
                         # Prepare for sending to AI
+                        # IMPORTANT: Send audio at the native Asterisk rate.
+                        # The backend will handle resampling (8/16kHz -> 24kHz) before OpenAI.
                         if SEND_NATIVE_ULAW and self.state.ast_codec == "ulaw":
                             audio_to_send = lin2ulaw(cleaned)
                         else:
-                            # Resample from Asterisk rate to AI rate (24kHz)
-                            audio_to_send = resample_audio(cleaned, self.state.ast_rate, AI_RATE)
-
+                            # slin/slin16 PCM16 passthrough (8kHz or 16kHz)
+                            audio_to_send = cleaned
                         # Send to AI
                         if self.state.ws_connected and self.ws:
                             try:
