@@ -2411,9 +2411,9 @@ Do NOT say 'booked' until the tool returns success.]`
                   role: "user",
                   content: [{
                     type: "input_text",
-                    text: `[SYSTEM: The user said "${mismatchedAddress}" but you asked about passengers. This looks like an address - they may have meant it as their destination. Say: "I heard ${mismatchedAddress} - is that where you'd like to go? And how many people will be travelling?" Ask for BOTH the confirmation and passenger count in one question.]`
-                  }]
-                }
+                    text: `[SYSTEM: The user said "${mismatchedAddress}" but you asked about passengers. Treat this as out-of-order info. DO NOT repeat the address back and DO NOT ask "is that where you'd like to go?". Just acknowledge briefly (e.g., "Got it.") and ask ONLY ONE question: "How many people will be travelling?"]`,
+                  }],
+                },
               }));
               
               sessionState.lastQuestionType = "passengers"; // Still need passengers
