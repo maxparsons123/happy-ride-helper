@@ -26,6 +26,78 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
 const VOICE = "shimmer";
 
+// ---------------------------------------------------------------------------
+// Audio helpers (mirror taxi-realtime-simple behavior)
+// OpenAI Realtime requires PCM16 @ 24kHz for input_audio_buffer.append.
+// Our bridge can send: ulaw (8kHz), slin (8kHz PCM16), slin16 (16kHz PCM16)
+// ---------------------------------------------------------------------------
+
+type InboundAudioFormat = "ulaw" | "slin" | "slin16";
+
+function ulawToPcm16(ulaw: Uint8Array): Int16Array {
+  const out = new Int16Array(ulaw.length);
+  for (let i = 0; i < ulaw.length; i++) {
+    const u = (~ulaw[i]) & 0xff;
+    const sign = (u & 0x80) ? -1 : 1;
+    const exponent = (u >> 4) & 0x07;
+    const mantissa = u & 0x0f;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+    out[i] = sign * sample;
+  }
+  return out;
+}
+
+function resamplePcm16To24k(pcm: Int16Array, inputSampleRate: number): Int16Array {
+  if (inputSampleRate === 24000) return pcm;
+
+  if (inputSampleRate === 16000) {
+    // 16kHz → 24kHz (1.5x using 3:2 ratio)
+    const outLen = Math.floor((pcm.length * 3) / 2);
+    const out = new Int16Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const srcIdx = (i * 2) / 3;
+      const idx0 = Math.floor(srcIdx);
+      const idx1 = Math.min(idx0 + 1, pcm.length - 1);
+      const frac = srcIdx - idx0;
+      out[i] = Math.round(pcm[idx0] * (1 - frac) + pcm[idx1] * frac);
+    }
+    return out;
+  }
+
+  // Default: 8kHz → 24kHz (3x linear interpolation)
+  const out = new Int16Array(pcm.length * 3);
+  for (let i = 0; i < pcm.length - 1; i++) {
+    const s0 = pcm[i];
+    const s1 = pcm[i + 1];
+    out[i * 3] = s0;
+    out[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+    out[i * 3 + 2] = Math.round(s0 + ((s1 - s0) * 2) / 3);
+  }
+  const lastIdx = Math.max(pcm.length - 1, 0);
+  out[lastIdx * 3] = pcm[lastIdx] ?? 0;
+  out[lastIdx * 3 + 1] = pcm[lastIdx] ?? 0;
+  out[lastIdx * 3 + 2] = pcm[lastIdx] ?? 0;
+  return out;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  // Avoid spread operator which can overflow the call stack on larger buffers
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j]);
+  }
+  return btoa(binary);
+}
+
+function pcm16ToBase64(pcm: Int16Array): string {
+  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  return bytesToBase64(bytes);
+}
+
+
 // System prompt - same as taxi-realtime-simple
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -298,6 +370,10 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   const sessionState = createSessionState(callId, callerPhone);
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
+
+  // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
+  let inboundAudioFormat: InboundAudioFormat = "ulaw";
+  let inboundSampleRate = 8000;
 
   // Cleanup function
   const cleanup = async () => {
@@ -606,39 +682,71 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
     try {
       // Handle binary audio data from Python bridge
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-        const audioBytes = event.data instanceof ArrayBuffer 
-          ? new Uint8Array(event.data) 
+        const audioBytes = event.data instanceof ArrayBuffer
+          ? new Uint8Array(event.data)
           : event.data;
-        
-        // Convert to base64 for OpenAI
-        const base64Audio = btoa(String.fromCharCode(...audioBytes));
-        
+
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          let pcmInput: Int16Array;
+
+          if (inboundAudioFormat === "ulaw") {
+            pcmInput = ulawToPcm16(audioBytes); // 8kHz PCM16
+          } else {
+            // slin/slin16: already PCM16
+            pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
+          }
+
+          const pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
+          const base64Audio = pcm16ToBase64(pcm24k);
+
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
-            audio: base64Audio
+            audio: base64Audio,
           }));
         }
         return;
       }
-      
+
       // Handle string messages (JSON)
       if (typeof event.data === "string") {
         const data = JSON.parse(event.data);
-        
+
         if (data.type === "audio" && data.audio) {
-          // Forward audio to OpenAI (already base64)
+          // If we receive base64 audio, assume it's 8kHz ulaw unless told otherwise.
+          const binaryStr = atob(data.audio);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+          const assumedFormat: InboundAudioFormat = (data.format === "slin" || data.format === "slin16" || data.format === "ulaw")
+            ? data.format
+            : "ulaw";
+          const assumedRate = typeof data.sample_rate === "number" ? data.sample_rate : 8000;
+
+          const pcmInput = assumedFormat === "ulaw"
+            ? ulawToPcm16(bytes)
+            : new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+
+          const pcm24k = resamplePcm16To24k(pcmInput, assumedRate);
+          const base64Audio = pcm16ToBase64(pcm24k);
+
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "input_audio_buffer.append",
-              audio: data.audio
+              audio: base64Audio,
             }));
           }
-        } else if (data.type === "init" || data.type === "update_phone") {
-          // Handle init/phone updates
+        } else if (data.type === "init" || data.type === "update_phone" || data.type === "update_format") {
+          // Handle init/phone/format updates
           if (data.phone && data.phone !== "unknown") {
             callerPhone = data.phone;
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
+          }
+
+          if (data.inbound_format && (data.inbound_format === "ulaw" || data.inbound_format === "slin" || data.inbound_format === "slin16")) {
+            inboundAudioFormat = data.inbound_format;
+          }
+          if (typeof data.inbound_sample_rate === "number") {
+            inboundSampleRate = data.inbound_sample_rate;
           }
         } else if (data.type === "hangup") {
           console.log(`[${callId}] Client requested hangup`);
