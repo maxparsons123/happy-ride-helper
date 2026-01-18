@@ -793,6 +793,32 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   }
 
   // OpenAI WebSocket handlers
+  // Flag to prevent duplicate greetings
+  let greetingSent = false;
+  
+  const sendGreeting = () => {
+    if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    greetingSent = true;
+    
+    console.log(`[${callId}] 🎙️ Sending initial greeting...`);
+    
+    const greeting = {
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: "[SYSTEM: New call started. Greet the caller warmly and ask for their pickup location. Remember to track last_question_asked as 'pickup'.]"
+        }]
+      }
+    };
+    openaiWs!.send(JSON.stringify(greeting));
+    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+    
+    sessionState.lastQuestionAsked = "pickup";
+  };
+
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime`);
     
@@ -825,24 +851,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     openaiWs!.send(JSON.stringify(sessionConfig));
     
-    // Initial greeting with context setup
-    setTimeout(() => {
-      const greeting = {
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{
-            type: "input_text",
-            text: "[SYSTEM: New call started. Greet the caller warmly and ask for their pickup location. Remember to track last_question_asked as 'pickup'.]"
-          }]
-        }
-      };
-      openaiWs!.send(JSON.stringify(greeting));
-      openaiWs!.send(JSON.stringify({ type: "response.create" }));
-      
-      sessionState.lastQuestionAsked = "pickup";
-    }, 500);
+    // NOTE: Greeting is now sent on session.created, not here
   };
 
   openaiWs.onmessage = async (event) => {
@@ -850,6 +859,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       const data = JSON.parse(event.data);
       
       switch (data.type) {
+        case "session.created":
+          // OpenAI session is ready - NOW send the greeting
+          console.log(`[${callId}] 📋 Session created - triggering greeting`);
+          sendGreeting();
+          break;
+
         case "response.audio.delta":
           // Forward audio to client (and mark that Ada is speaking)
           if (data.delta) {
