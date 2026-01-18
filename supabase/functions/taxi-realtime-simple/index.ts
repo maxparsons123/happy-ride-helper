@@ -1105,6 +1105,7 @@ interface SessionState {
     passengers: number | null;
     bags: number | null;
     vehicle_type: string | null;
+    pickup_time: string | null;
     version: number;
   };
   transcripts: TranscriptItem[];
@@ -3512,7 +3513,7 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] 🆕 New request after booking: "${userText}"`);
             
             // Reset booking state for new request
-            sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
+            sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 };
             sessionState.hasActiveBooking = false;
             
             // Ensure OpenAI responds to this new request
@@ -4452,6 +4453,7 @@ Do NOT say 'booked' until the tool returns success.]`
             passengers: finalPassengers,
             bags: finalBags,
             vehicle_type: finalVehicleType,
+            pickup_time: finalPickupTime,
             version: 1,
           };
           
@@ -5058,7 +5060,7 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // Clear session state
           sessionState.hasActiveBooking = false;
-          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 };
+          sessionState.booking = { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 };
           sessionState.pendingQuote = null;
           sessionState.quoteRequestedAt = null;
           sessionState.quoteTripKey = null;
@@ -5115,7 +5117,7 @@ Do NOT say 'booked' until the tool returns success.]`
               passengers: sessionState.booking.passengers ?? null,
               luggage: sessionState.booking.bags ? String(sessionState.booking.bags) : null,
               vehicle_type: sessionState.booking.vehicle_type || "saloon",
-              pickup_time: "now",
+              pickup_time: sessionState.booking.pickup_time || "now",
               missing_fields: [],
               confidence: "high",
               extraction_notes: "Demo mode - addresses not verified by AI"
@@ -5612,7 +5614,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           customerName: null,
           hasActiveBooking: false,
           activeBookingCallId: null,
-          booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
+          booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 },
           transcripts: [],
           callerLastPickup: null,
           callerLastDestination: null,
@@ -5734,7 +5736,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             customerName: message.customer_name || null,
             hasActiveBooking: message.has_active_booking || false,
             activeBookingCallId: null,
-            booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, version: 0 },
+            booking: { pickup: null, destination: null, passengers: null, bags: null, vehicle_type: null, pickup_time: null, version: 0 },
             transcripts: [],
             callerLastPickup: null,
             callerLastDestination: null,
