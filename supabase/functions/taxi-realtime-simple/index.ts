@@ -1628,7 +1628,7 @@ serve(async (req) => {
       type: "response.create",
       response: {
         modalities: ["text", "audio"],
-        instructions: `Say this EXACTLY (do not change or shorten it): "${greetingText}"`
+        instructions: `Say this EXACTLY (do not change, shorten, or ADD to it): "${greetingText}" - STOP IMMEDIATELY after the question mark. Do NOT add any more questions. Do NOT continue speaking. Wait for the user's response.`
       }
     }));
     console.log(`[${sessionState.callId}] 📝 Session updated + greeting triggered`);
