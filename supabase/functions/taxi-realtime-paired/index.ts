@@ -249,6 +249,8 @@ interface SessionState {
   lastAdaFinishedSpeakingAt: number;
   // Greeting protection: ignore inbound audio right after connect
   greetingProtectionUntil: number;
+  // Summary protection: block interruptions while Ada is recapping/quoting
+  summaryProtectionUntil: number;
   // Dispatch callback state
   pendingConfirmationCallback: string | null;
   pendingFare: string | null;
@@ -262,6 +264,9 @@ const ECHO_GUARD_MS = 250;
 
 // Greeting protection window in ms - ignore early line noise so Ada's first prompt doesn't get cut off
 const GREETING_PROTECTION_MS = 3000;
+
+// Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
+const SUMMARY_PROTECTION_MS = 8000;
 
 // Barge-in RMS thresholds to distinguish real speech from echo/noise
 // (Higher minimum reduces false barge-ins from background/line noise)
@@ -346,6 +351,7 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     echoGuardUntil: 0,
     lastAdaFinishedSpeakingAt: 0,
     greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
+    summaryProtectionUntil: 0,
     // Dispatch callback state
     pendingConfirmationCallback: null,
     pendingFare: null,
@@ -811,6 +817,25 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
             
             // Detect what question was asked based on content
             const lower = data.transcript.toLowerCase();
+            
+            // SUMMARY PROTECTION: If Ada is summarizing the booking or quoting a price,
+            // activate protection window to prevent interruptions
+            const isSummary = lower.includes("let me confirm") || 
+                              lower.includes("to confirm") || 
+                              lower.includes("so that's") ||
+                              lower.includes("summarize") ||
+                              lower.includes("your booking") ||
+                              lower.includes("one moment") ||
+                              lower.includes("checking") ||
+                              lower.includes("your price") ||
+                              lower.includes("fare is") ||
+                              lower.includes("driver will be");
+            
+            if (isSummary) {
+              sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+              console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms`);
+            }
+            
             if (lower.includes("where would you like to be picked up") || lower.includes("pickup")) {
               sessionState.lastQuestionAsked = "pickup";
             } else if (lower.includes("where would you like to go") || lower.includes("destination") || lower.includes("where are you going")) {
@@ -1042,6 +1067,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
         // ECHO GUARD: block audio briefly after Ada finishes speaking
         if (Date.now() < sessionState.echoGuardUntil) {
           return; // Drop this audio frame (likely echo)
+        }
+
+        // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting
+        if (Date.now() < sessionState.summaryProtectionUntil) {
+          return; // Drop - Ada is delivering summary, do not interrupt
         }
 
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
