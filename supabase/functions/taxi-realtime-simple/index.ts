@@ -5417,7 +5417,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           callEnded: false,
           finalGoodbyePending: false,
           inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
-          inboundSampleRate: message.inbound_format === "slin16" ? 16000 : 8000,
+          inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
@@ -5535,7 +5535,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              callEnded: false,
              finalGoodbyePending: false,
              inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
-             inboundSampleRate: message.inbound_format === "slin16" ? 16000 : 8000,
+             inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
              useRasaAudioProcessing: message.rasa_audio_processing ?? false,
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
@@ -5592,6 +5592,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
         }
         
+        console.log(`[${callId}] 🔊 Inbound audio: ${state!.inboundAudioFormat} @ ${state!.inboundSampleRate}Hz`);
         console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
         
         console.log(`[${callId}] 🌐 Phone: ${phone}, Detected: ${detectedLanguage}, Final language: ${state!.language}`);
