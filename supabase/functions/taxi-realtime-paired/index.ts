@@ -468,13 +468,20 @@ async function updateLiveCall(sessionState: SessionState) {
 }
 
 // Send dispatch webhook - matches taxi-realtime-simple format
+// IMPROVED: Longer timeout, retry logic, better logging
+const WEBHOOK_TIMEOUT_MS = 15000; // 15 seconds (was 5)
+const WEBHOOK_MAX_RETRIES = 2;
+const WEBHOOK_RETRY_DELAY_MS = 1000;
+
 async function sendDispatchWebhook(
   sessionState: SessionState,
   action: string,
   bookingData: Record<string, unknown>
 ): Promise<{ success: boolean; fare?: string; eta?: string; error?: string }> {
+  const callId = sessionState.callId;
+  
   if (!DISPATCH_WEBHOOK_URL) {
-    console.log(`[${sessionState.callId}] No dispatch webhook configured, simulating response`);
+    console.log(`[${callId}] ⚠️ No DISPATCH_WEBHOOK_URL configured, simulating response`);
     return {
       success: true,
       fare: "£8.50",
@@ -482,105 +489,148 @@ async function sendDispatchWebhook(
     };
   }
 
-  try {
-    // Reuse a stable job_id across request_quote → confirmed for the same call.
-    // Without this, downstream dispatch systems often treat "confirmed" as a brand-new booking/quote.
-    if (!sessionState.dispatchJobId) {
-      sessionState.dispatchJobId = crypto.randomUUID();
-    }
-    const jobId = sessionState.dispatchJobId;
-    
-    // Format phone number (remove + prefix if present)
-    const formattedPhone = sessionState.callerPhone.replace(/^\+/, "");
-    
-    // Build user transcripts from conversation history
-    const userTranscripts = sessionState.conversationHistory
-      .filter(msg => msg.role === "user")
-      .map(msg => ({
-        text: msg.content.replace(/^\[CONTEXT:.*?\]\s*/i, ""), // Remove context prefix
-        timestamp: new Date(msg.timestamp).toISOString()
-      }));
-    
-    // Match the taxi-realtime-simple webhook payload format (+ add action markers for paired flow)
-    const webhookPayload = {
-      job_id: jobId,
-      call_id: sessionState.callId,
-      caller_phone: formattedPhone,
-      caller_name: null, // Not tracked in paired mode yet
-
-      // Action markers (additive; keeps backward compatibility)
-      action,
-      call_action: action,
-      confirmation_state: action,
-      booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
-
-      // Normalized/validated addresses
-      ada_pickup: bookingData.pickup || sessionState.booking.pickup,
-      ada_destination: bookingData.destination || sessionState.booking.destination,
-      // Raw caller addresses (what they actually said) - same as ada_ for now
-      callers_pickup: null,
-      callers_dropoff: null,
-      // Nearest place flags
-      nearest_pickup: null,
-      nearest_dropoff: null,
-      // Raw STT transcripts from this call
-      user_transcripts: userTranscripts,
-      // GPS location (not tracked in paired mode)
-      gps_lat: null,
-      gps_lon: null,
-      // Booking details
-      // IMPORTANT: do not default passengers to 1; it must be explicitly provided by the caller.
-      passengers: (bookingData.passengers ?? sessionState.booking.passengers ?? null),
-      bags: 0,
-      vehicle_type: "standard",
-      vehicle_request: null,
-      pickup_time: bookingData.pickup_time || sessionState.booking.pickupTime || "ASAP",
-      special_requests: null,
-      timestamp: new Date().toISOString()
-    };
-    
-    console.log(`[${sessionState.callId}] 📡 Sending webhook (${action}):`, JSON.stringify(webhookPayload).substring(0, 200));
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    
-    const response = await fetch(DISPATCH_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(webhookPayload),
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      return { success: false, error: `Webhook returned ${response.status}` };
-    }
-
-    // Many dispatch endpoints respond with plain text (e.g. "OK") or no body.
-    // In paired mode we mainly rely on the async callback, so we treat any 2xx as success.
-    let data: any = null;
-    try {
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        data = text ? { text } : null;
-      }
-    } catch (e) {
-      console.log(`[${sessionState.callId}] ⚠️ Dispatch webhook response not JSON (ignored):`, e);
-    }
-
-    return {
-      success: true,
-      fare: data?.fare || data?.estimated_fare,
-      eta: data?.eta || data?.estimated_eta
-    };
-  } catch (e) {
-    console.error(`[${sessionState.callId}] Dispatch webhook error:`, e);
-    return { success: false, error: String(e) };
+  // Reuse a stable job_id across request_quote → confirmed for the same call.
+  // Without this, downstream dispatch systems often treat "confirmed" as a brand-new booking/quote.
+  if (!sessionState.dispatchJobId) {
+    sessionState.dispatchJobId = crypto.randomUUID();
   }
+  const jobId = sessionState.dispatchJobId;
+  
+  // Format phone number (remove + prefix if present)
+  const formattedPhone = sessionState.callerPhone.replace(/^\+/, "");
+  
+  // Build user transcripts from conversation history
+  const userTranscripts = sessionState.conversationHistory
+    .filter(msg => msg.role === "user")
+    .map(msg => ({
+      text: msg.content.replace(/^\[CONTEXT:.*?\]\s*/i, ""), // Remove context prefix
+      timestamp: new Date(msg.timestamp).toISOString()
+    }));
+  
+  // Match the taxi-realtime-simple webhook payload format (+ add action markers for paired flow)
+  const webhookPayload = {
+    job_id: jobId,
+    call_id: sessionState.callId,
+    caller_phone: formattedPhone,
+    caller_name: null, // Not tracked in paired mode yet
+
+    // Action markers (additive; keeps backward compatibility)
+    action,
+    call_action: action,
+    confirmation_state: action,
+    booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
+
+    // Normalized/validated addresses
+    ada_pickup: bookingData.pickup || sessionState.booking.pickup,
+    ada_destination: bookingData.destination || sessionState.booking.destination,
+    // Raw caller addresses (what they actually said) - same as ada_ for now
+    callers_pickup: null,
+    callers_dropoff: null,
+    // Nearest place flags
+    nearest_pickup: null,
+    nearest_dropoff: null,
+    // Raw STT transcripts from this call
+    user_transcripts: userTranscripts,
+    // GPS location (not tracked in paired mode)
+    gps_lat: null,
+    gps_lon: null,
+    // Booking details
+    // IMPORTANT: do not default passengers to 1; it must be explicitly provided by the caller.
+    passengers: (bookingData.passengers ?? sessionState.booking.passengers ?? null),
+    bags: 0,
+    vehicle_type: "standard",
+    vehicle_request: null,
+    pickup_time: bookingData.pickup_time || sessionState.booking.pickupTime || "ASAP",
+    special_requests: null,
+    timestamp: new Date().toISOString()
+  };
+  
+  console.log(`[${callId}] 📡 WEBHOOK SEND START (${action}) to: ${DISPATCH_WEBHOOK_URL}`);
+  console.log(`[${callId}] 📡 Payload: ${JSON.stringify(webhookPayload)}`);
+  
+  // Retry loop for reliability
+  for (let attempt = 1; attempt <= WEBHOOK_MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log(`[${callId}] ⏰ Webhook timeout after ${WEBHOOK_TIMEOUT_MS}ms (attempt ${attempt})`);
+      controller.abort();
+    }, WEBHOOK_TIMEOUT_MS);
+    
+    try {
+      const startTime = Date.now();
+      
+      const response = await fetch(DISPATCH_WEBHOOK_URL, {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "X-Call-ID": callId,
+          "X-Job-ID": jobId
+        },
+        body: JSON.stringify(webhookPayload),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      const elapsed = Date.now() - startTime;
+      
+      console.log(`[${callId}] 📡 WEBHOOK RESPONSE: status=${response.status}, elapsed=${elapsed}ms (attempt ${attempt})`);
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        console.error(`[${callId}] ❌ Webhook HTTP error: ${response.status} - ${errorText}`);
+        
+        if (attempt < WEBHOOK_MAX_RETRIES) {
+          console.log(`[${callId}] 🔄 Retrying webhook in ${WEBHOOK_RETRY_DELAY_MS}ms...`);
+          await new Promise(r => setTimeout(r, WEBHOOK_RETRY_DELAY_MS));
+          continue;
+        }
+        return { success: false, error: `Webhook returned ${response.status}: ${errorText}` };
+      }
+
+      // Many dispatch endpoints respond with plain text (e.g. "OK") or no body.
+      // In paired mode we mainly rely on the async callback, so we treat any 2xx as success.
+      let data: any = null;
+      try {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          data = await response.json();
+          console.log(`[${callId}] 📡 Webhook JSON response:`, JSON.stringify(data).substring(0, 200));
+        } else {
+          const text = await response.text();
+          console.log(`[${callId}] 📡 Webhook text response: "${text.substring(0, 100)}"`);
+          data = text ? { text } : null;
+        }
+      } catch (e) {
+        console.log(`[${callId}] ⚠️ Dispatch webhook response parse error (ignored):`, e);
+      }
+      
+      console.log(`[${callId}] ✅ WEBHOOK SEND SUCCESS (${action})`);
+
+      return {
+        success: true,
+        fare: data?.fare || data?.estimated_fare,
+        eta: data?.eta || data?.estimated_eta
+      };
+      
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      
+      const isTimeout = e?.name === "AbortError";
+      const errorMsg = isTimeout ? `Timeout after ${WEBHOOK_TIMEOUT_MS}ms` : String(e);
+      console.error(`[${callId}] ❌ Webhook error (attempt ${attempt}): ${errorMsg}`);
+      
+      if (attempt < WEBHOOK_MAX_RETRIES) {
+        console.log(`[${callId}] 🔄 Retrying webhook in ${WEBHOOK_RETRY_DELAY_MS}ms...`);
+        await new Promise(r => setTimeout(r, WEBHOOK_RETRY_DELAY_MS));
+        continue;
+      }
+      
+      return { success: false, error: errorMsg };
+    }
+  }
+  
+  // Should never reach here, but safety fallback
+  return { success: false, error: "Max retries exceeded" };
 }
 
 // Handle WebSocket connection
