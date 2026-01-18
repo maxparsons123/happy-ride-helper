@@ -257,6 +257,8 @@ interface SessionState {
   quoteInFlight: boolean;
   lastQuoteRequestedAt: number;
   // Dispatch callback state
+  dispatchJobId: string | null;
+  pendingBookingRef: string | null;
   pendingConfirmationCallback: string | null;
   pendingFare: string | null;
   pendingEta: string | null;
@@ -264,7 +266,6 @@ interface SessionState {
   bookingRef: string | null;
 }
 
-// Echo guard duration in ms - blocks inbound audio briefly after Ada speaks
 const ECHO_GUARD_MS = 250;
 
 // Greeting protection window in ms - ignore early line noise so Ada's first prompt doesn't get cut off
@@ -364,6 +365,8 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     quoteInFlight: false,
     lastQuoteRequestedAt: 0,
     // Dispatch callback state
+    dispatchJobId: null,
+    pendingBookingRef: null,
     pendingConfirmationCallback: null,
     pendingFare: null,
     pendingEta: null,
@@ -445,8 +448,12 @@ async function sendDispatchWebhook(
   }
 
   try {
-    // Generate a unique job ID
-    const jobId = crypto.randomUUID();
+    // Reuse a stable job_id across request_quote → confirmed for the same call.
+    // Without this, downstream dispatch systems often treat "confirmed" as a brand-new booking/quote.
+    if (!sessionState.dispatchJobId) {
+      sessionState.dispatchJobId = crypto.randomUUID();
+    }
+    const jobId = sessionState.dispatchJobId;
     
     // Format phone number (remove + prefix if present)
     const formattedPhone = sessionState.callerPhone.replace(/^\+/, "");
@@ -459,12 +466,19 @@ async function sendDispatchWebhook(
         timestamp: new Date(msg.timestamp).toISOString()
       }));
     
-    // Match the taxi-realtime-simple webhook payload format
+    // Match the taxi-realtime-simple webhook payload format (+ add action markers for paired flow)
     const webhookPayload = {
       job_id: jobId,
       call_id: sessionState.callId,
       caller_phone: formattedPhone,
       caller_name: null, // Not tracked in paired mode yet
+
+      // Action markers (additive; keeps backward compatibility)
+      action,
+      call_action: action,
+      confirmation_state: action,
+      booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
+
       // Normalized/validated addresses
       ada_pickup: bookingData.pickup || sessionState.booking.pickup,
       ada_destination: bookingData.destination || sessionState.booking.destination,
@@ -587,7 +601,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   dispatchChannel = supabase.channel(`dispatch_${callId}`);
   
   dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
-    const { message, fare, eta, eta_minutes, callback_url } = payload.payload || {};
+    const { message, fare, eta, eta_minutes, callback_url, booking_ref } = payload.payload || {};
     console.log(`[${callId}] 📥 DISPATCH ask_confirm: fare=${fare}, eta=${eta_minutes || eta}, message="${message}"`);
     
     if (!message || !openaiWs || openaiWs.readyState !== WebSocket.OPEN || cleanedUp) {
@@ -611,6 +625,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     sessionState.pendingConfirmationCallback = callback_url;
     sessionState.pendingFare = fare;
     sessionState.pendingEta = eta_minutes || eta;
+    sessionState.pendingBookingRef = booking_ref || null;
     
     // Cancel any active response before injecting dispatch message
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -724,6 +739,10 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     if (hangupMessage && openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+      // Protect this final message from being cut off
+      sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
+      console.log(`[${callId}] 🛡️ Dispatch hangup protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
       
       openaiWs.send(JSON.stringify({
         type: "conversation.item.create",
@@ -744,7 +763,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     }
     
     // Schedule cleanup after giving time for goodbye
-    setTimeout(() => cleanup(), 5000);
+    setTimeout(() => cleanup(), 12000);
   });
   
   // Subscribe to the channel
@@ -1138,6 +1157,8 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               });
 
               sessionState.bookingConfirmed = true;
+              sessionState.awaitingConfirmation = false;
+              sessionState.quoteInFlight = false;
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -1174,6 +1195,10 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               }
             }));
             
+            // Protect the goodbye from being cut off by noise/echo
+            sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
+            console.log(`[${callId}] 🛡️ End-call goodbye protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
+
             // Let Ada say goodbye
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
@@ -1188,12 +1213,13 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             }));
             openaiWs!.send(JSON.stringify({ type: "response.create" }));
             
+            // Give extra time so the final message isn't truncated before hangup
             setTimeout(() => {
               try {
                 socket.send(JSON.stringify({ type: "hangup", reason: toolArgs.reason }));
               } catch { /* ignore */ }
               cleanup();
-            }, 8000);
+            }, 12000);
           }
           break;
 
