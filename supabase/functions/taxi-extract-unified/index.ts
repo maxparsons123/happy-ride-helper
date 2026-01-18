@@ -129,7 +129,7 @@ EXISTING BOOKING (USE AS BASE - KEEP UNCHANGED FIELDS)
 Pickup: ${existingBooking.pickup || 'not set'}
 Dropoff: ${existingBooking.destination || 'not set'}
 Time: ${existingBooking.pickup_time || 'ASAP'}
-Passengers: ${existingBooking.passengers || 1}
+Passengers: ${existingBooking.passengers ?? 'not set'}
 Luggage: ${existingBooking.luggage || 'not specified'}
 Special requests: ${existingBooking.special_requests || 'none'}
 
@@ -418,12 +418,12 @@ serve(async (req) => {
           error: "No conversation provided",
           pickup: null,
           destination: null,
-          passengers: 1,
+          passengers: null,
           luggage: null,
           pickup_time: "ASAP",
           vehicle_type: null,
           special_requests: null,
-          missing_fields: ["pickup", "destination"],
+          missing_fields: ["pickup", "destination", "passengers"],
           confidence: "low"
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -541,7 +541,8 @@ serve(async (req) => {
     let finalResult = {
       pickup: extracted.pickup_location || (is_modification && current_booking?.pickup) || null,
       destination: extracted.dropoff_location || (is_modification && current_booking?.destination) || null,
-      passengers: extracted.number_of_passengers || (is_modification && current_booking?.passengers) || 1,
+      // Keep passengers as null if not explicitly provided - don't default to 1
+      passengers: extracted.number_of_passengers ?? (is_modification ? current_booking?.passengers : null) ?? null,
       luggage: extracted.luggage === "CLEAR" ? null : (extracted.luggage || (is_modification && current_booking?.luggage) || null),
       vehicle_type: extracted.vehicle_type || (is_modification && current_booking?.vehicle_type) || null,
       pickup_time: extracted.pickup_time || (is_modification && current_booking?.pickup_time) || "ASAP",
@@ -595,12 +596,12 @@ serve(async (req) => {
         error: errorMessage,
         pickup: null,
         destination: null,
-        passengers: 1,
+        passengers: null,
         luggage: null,
         pickup_time: "ASAP",
         vehicle_type: null,
         special_requests: null,
-        missing_fields: ["pickup", "destination"],
+        missing_fields: ["pickup", "destination", "passengers"],
         confidence: "low",
         processing_time_ms: processingTime
       }),
