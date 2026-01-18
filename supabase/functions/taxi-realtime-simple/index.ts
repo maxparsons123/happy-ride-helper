@@ -1170,6 +1170,7 @@ interface SessionState {
   // Echo guard / barge-in: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
+  echoRmsGateUntil: number; // timestamp until which we apply RMS filtering to reduce loudspeaker echo
   responseStartTime: number; // timestamp when current AI response started (for initial echo guard)
   bargeInIgnoreUntil: number; // timestamp until which we ignore barge-in checks (startup echo)
   openAiResponseActive: boolean; // true between response.created and response.done
@@ -1774,9 +1775,11 @@ serve(async (req) => {
         // Too-large echo guards clip the first part of the caller's reply (house numbers!),
         // so keep this tight.
         const echoGuardMs = sessionState.useRasaAudioProcessing ? 400 : 250;
+        const echoRmsGateMs = sessionState.useRasaAudioProcessing ? 2500 : 2000;
 
         sessionState.isAdaSpeaking = false;
         sessionState.echoGuardUntil = Date.now() + echoGuardMs;
+        sessionState.echoRmsGateUntil = Date.now() + echoRmsGateMs;
         console.log(`[${sessionState.callId}] 🔇 Echo guard active for ${echoGuardMs}ms`);
 
         
@@ -5232,36 +5235,40 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
-          // AUDIO LEVEL THRESHOLD: Filter out low-volume audio that's likely speaker echo.
-          // Calculate RMS (root mean square) of the audio samples.
-          // This is an additional safety layer on top of the echo guard.
-          const ECHO_RMS_THRESHOLD = 300; // Threshold for 16-bit PCM (range -32768 to 32767)
-          let tempPcm: Int16Array;
-          if (state.inboundAudioFormat === "ulaw") {
-            // Quick decode for RMS check
-            tempPcm = new Int16Array(audioData.length);
-            for (let i = 0; i < audioData.length; i++) {
-              const ulaw = ~audioData[i] & 0xFF;
-              const sign = (ulaw & 0x80) ? -1 : 1;
-              const exponent = (ulaw >> 4) & 0x07;
-              const mantissa = ulaw & 0x0F;
-              let sample = ((mantissa << 3) + 0x84) << exponent;
-              sample -= 0x84;
-              tempPcm[i] = sign * sample;
+          // AUDIO LEVEL THRESHOLD (echo-risk window only): Filter out low-volume audio that's likely speaker echo.
+          // IMPORTANT: Only apply this briefly after Ada speaks; otherwise quiet callers can be muted.
+          const inEchoRmsGate = Date.now() < (state.echoRmsGateUntil || 0);
+          if (inEchoRmsGate) {
+            const ECHO_RMS_THRESHOLD = 120; // conservative threshold to avoid muting real speech
+            let tempPcm: Int16Array;
+
+            if (state.inboundAudioFormat === "ulaw") {
+              // Quick decode for RMS check
+              tempPcm = new Int16Array(audioData.length);
+              for (let i = 0; i < audioData.length; i++) {
+                const ulaw = ~audioData[i] & 0xFF;
+                const sign = (ulaw & 0x80) ? -1 : 1;
+                const exponent = (ulaw >> 4) & 0x07;
+                const mantissa = ulaw & 0x0F;
+                let sample = ((mantissa << 3) + 0x84) << exponent;
+                sample -= 0x84;
+                tempPcm[i] = sign * sample;
+              }
+            } else {
+              tempPcm = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
             }
-          } else {
-            tempPcm = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
-          }
-          
-          let sumSquares = 0;
-          for (let i = 0; i < tempPcm.length; i++) {
-            sumSquares += tempPcm[i] * tempPcm[i];
-          }
-          const rms = Math.sqrt(sumSquares / tempPcm.length);
-          
-          if (rms < ECHO_RMS_THRESHOLD) {
-            // Audio is too quiet - likely echo or background noise, skip it
-            return;
+
+            let sumSquares = 0;
+            for (let i = 0; i < tempPcm.length; i++) {
+              const s = tempPcm[i];
+              sumSquares += s * s;
+            }
+            const rms = Math.sqrt(sumSquares / tempPcm.length);
+
+            if (rms < ECHO_RMS_THRESHOLD) {
+              // Audio is too quiet - likely echo/background, skip it
+              return;
+            }
           }
 
           // CRITICAL: Block audio while Ada is speaking to prevent echo/hallucination
@@ -5456,6 +5463,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
           echoGuardUntil: 0,
+          echoRmsGateUntil: 0,
           responseStartTime: 0,
           bargeInIgnoreUntil: 0,
           openAiResponseActive: false,
@@ -5574,6 +5582,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
             echoGuardUntil: 0,
+            echoRmsGateUntil: 0,
             responseStartTime: 0,
             bargeInIgnoreUntil: 0,
             openAiResponseActive: false,
