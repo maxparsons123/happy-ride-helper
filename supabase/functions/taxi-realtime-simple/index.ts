@@ -1238,6 +1238,11 @@ interface SessionState {
   lastQuestionType: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null;
   lastQuestionAt: number | null;
   lastPassengerMismatchAt: number | null; // Prevent double-asking passengers due to mismatch loop
+  
+  // DUPLICATE QUESTION PREVENTION: Track the exact text of the last question spoken
+  // Used to cancel if Ada tries to ask the same question twice in a row (within 10s)
+  lastSpokenQuestion: string | null;
+  lastSpokenQuestionAt: number | null;
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -1889,6 +1894,53 @@ serve(async (req) => {
               break;
             }
           }
+          
+          // --- DUPLICATE QUESTION DETECTION: Prevent Ada from asking the same question twice ---
+          // This catches OpenAI generating back-to-back identical questions (common with passenger question)
+          const duplicateQuestionWindow = 10000; // 10 seconds
+          const isWithinDuplicateWindow = sessionState.lastSpokenQuestionAt && 
+            (Date.now() - sessionState.lastSpokenQuestionAt < duplicateQuestionWindow);
+          
+          if (isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15) {
+            // Check if this is the same question being asked again
+            const normalizeQuestion = (q: string) => q.toLowerCase()
+              .replace(/[.,!?'"]/g, '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            
+            const lastQ = normalizeQuestion(sessionState.lastSpokenQuestion);
+            const currentQ = normalizeQuestion(currentText);
+            
+            // Check for high similarity (same question asked twice)
+            // Use substring matching since streaming may not have full question yet
+            const isSameQuestion = lastQ.includes(currentQ) || currentQ.includes(lastQ) ||
+              (lastQ.length > 20 && currentQ.length > 20 && 
+               lastQ.split(' ').filter(w => currentQ.includes(w)).length / lastQ.split(' ').length > 0.7);
+            
+            if (isSameQuestion) {
+              console.log(`[${sessionState.callId}] 🔁 DUPLICATE QUESTION DETECTED: Ada is repeating question - cancelling`);
+              console.log(`[${sessionState.callId}] 🔁 Last question: "${sessionState.lastSpokenQuestion}"`);
+              console.log(`[${sessionState.callId}] 🔁 Current: "${currentText}"`);
+              
+              // Cancel the response
+              sessionState.discardCurrentResponseAudio = true;
+              if (sessionState.pendingAudioBuffer.length > 0) {
+                sessionState.pendingAudioBuffer = [];
+              }
+              
+              if (sessionState.openAiResponseActive) {
+                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              }
+              
+              // Remove the repetitive transcript
+              if (sessionState.assistantTranscriptIndex !== null) {
+                sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+                sessionState.assistantTranscriptIndex = null;
+              }
+              
+              break;
+            }
+          }
 
           // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
           // Check if Ada is trying to confirm a booking without having called book_taxi
@@ -2191,27 +2243,52 @@ Do NOT say 'booked' until the tool returns success.]`
         // Detect question type from Ada's completed transcript for question-answer alignment
         const lastAssistantText = sessionState.transcripts
           .filter(t => t.role === "assistant")
-          .slice(-1)[0]?.text?.toLowerCase() || "";
+          .slice(-1)[0]?.text || "";
+        const lowerAssistantText = lastAssistantText.toLowerCase();
         
-        if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lastAssistantText)) {
+        // Check if this is a question (ends with ? or is a known question pattern)
+        const isQuestion = /\?$/.test(lastAssistantText.trim()) || 
+          /(?:where|how many|when|what|which|would you|do you|shall i|is that)/i.test(lowerAssistantText);
+        
+        if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "pickup";
           sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: PICKUP`);
-        } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lastAssistantText)) {
+        } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "destination";
           sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: DESTINATION`);
-        } else if (/(?:how many|passengers|people|travell)/i.test(lastAssistantText)) {
+        } else if (/(?:how many|passengers|people|travell)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "passengers";
           sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: PASSENGERS`);
-        } else if (/(?:when|what time|timing|schedule)/i.test(lastAssistantText)) {
+        } else if (/(?:when|what time|timing|schedule)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "time";
           sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: TIME`);
-        } else if (/(?:is that correct|confirm|shall i book|book that|go ahead)/i.test(lastAssistantText)) {
+        } else if (/(?:is that correct|confirm|shall i book|book that|go ahead)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "confirmation";
           sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
           console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
         }
         
@@ -5500,6 +5577,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastQuestionType: null,
           lastQuestionAt: null,
           lastPassengerMismatchAt: null,
+          lastSpokenQuestion: null,
+          lastSpokenQuestionAt: null,
         };
         
         preConnected = true;
@@ -5619,6 +5698,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastQuestionType: null,
             lastQuestionAt: null,
             lastPassengerMismatchAt: null,
+            lastSpokenQuestion: null,
+            lastSpokenQuestionAt: null,
           };
         }
         
