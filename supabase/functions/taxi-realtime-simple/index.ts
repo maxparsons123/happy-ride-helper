@@ -1756,16 +1756,8 @@ serve(async (req) => {
           break;
         }
 
-        // ✅ GREETING COMPLETION GUARD: Block all VAD-triggered responses until greeting is fully delivered
-        // This prevents the model from firing all questions at once before the greeting finishes
-        // EXCEPTION: Allow the first response (the greeting itself) through
-        if (!sessionState.greetingDelivered && sessionState.openAiResponseActive) {
-          // This is a second response trying to fire before the greeting is done - block it
-          console.log(`[${sessionState.callId}] 🛑 Cancelling response - greeting not yet delivered`);
-          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          sessionState.discardCurrentResponseAudio = true;
-          break;
-        }
+        // NOTE: Greeting guard removed - was too aggressive and blocked legitimate responses.
+        // The "STOP IMMEDIATELY" instruction in the greeting + multi-question guard handles this instead.
 
         // ✅ PENDING MODIFICATION GUARD: While waiting for the caller to confirm an update,
         // do NOT allow VAD/noise to trigger extra assistant turns (this causes repeated summaries).
