@@ -98,7 +98,7 @@ function pcm16ToBase64(pcm: Int16Array): string {
 }
 
 
-// System prompt - same as taxi-realtime-simple
+// System prompt - same as taxi-realtime-simple (NO ADDRESS VERIFICATION)
 const SYSTEM_PROMPT = `
 # IDENTITY
 You are Ada, the professional taxi booking assistant for the Taxibot demo.
@@ -133,6 +133,8 @@ Follow this order exactly. Only move to the next if you have the current answer:
 🚫 DO NOT combine multiple questions into one sentence.
 ✅ After receiving an answer, immediately ask the NEXT question with no filler words.
 ✅ Save all confirmations for the Summary phase.
+✅ ACCEPT ANY ADDRESS AS-IS - do NOT ask for house numbers, postcodes, or more details.
+✅ Accept business names, landmarks, partial addresses, and place names immediately.
 
 # PHASE 3: THE SUMMARY (Gate Keeper)
 Only after the checklist is 100% complete, say:
@@ -180,11 +182,12 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER use 'As directed' or any placeholder - always ask for specifics.
 ❌ NEVER move to Summary until all 4 checklist items are filled.
 ❌ NEVER repeat addresses after the summary is confirmed.
-❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address - just accept it and move on.
-❌ NEVER ask for "more details" or "could you be more specific" - accept the address as given.
-✅ Accept business names, landmarks, and place names as valid pickup/destination (e.g., "Sweet Spot", "Tesco", "The Hospital", "Train Station").
-✅ Only ask for a house number if it's clearly a residential street address missing a number.
-✅ If the user gives a place name or business, accept it immediately and move to the next question.
+❌ NEVER ask for house numbers, postcodes, or more details on ANY address.
+❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address.
+❌ NEVER ask for "more details" or "could you be more specific".
+✅ Accept ANY address exactly as spoken - street names, business names, landmarks, partial addresses.
+✅ If user says "High Street" or "Tesco" or "the hospital" - accept it immediately.
+✅ Move to the next question immediately after receiving any address.
 
 # CONTEXT PAIRING (CRITICAL)
 When the user responds, ALWAYS check what question you just asked them:
@@ -550,48 +553,77 @@ async function sendDispatchWebhook(
   
   console.log(`[${callId}] 📡 Sending webhook (${action}):`, JSON.stringify(webhookPayload));
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-    const response = await fetch(DISPATCH_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(webhookPayload),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-
-    const respBody = await response.text().catch(() => "");
-    console.log(
-      `[${callId}] 📬 Dispatch webhook response: ${response.status} ${response.statusText}` +
-      (respBody ? ` - ${respBody.slice(0, 300)}` : "")
-    );
-
-    if (!response.ok) {
-      return { success: false, error: `Webhook returned ${response.status}` };
-    }
-
-    // Parse JSON response if available
-    let data: any = null;
+  // Retry logic like simple version - more reliable
+  const MAX_RETRIES = 2;
+  const RETRY_DELAY_MS = 1000;
+  
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      if (respBody && respBody.trim().startsWith("{")) {
-        data = JSON.parse(respBody);
-      }
-    } catch (_) {
-      // Not JSON, that's fine
-    }
+      const controller = new AbortController();
+      // Longer timeout: 10s (was 5s) to handle slow dispatch systems
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-    return {
-      success: true,
-      fare: data?.fare || data?.estimated_fare,
-      eta: data?.eta || data?.estimated_eta
-    };
-  } catch (e) {
-    console.error(`[${callId}] ❌ Dispatch webhook error:`, e);
-    return { success: false, error: String(e) };
+      console.log(`[${callId}] 📡 Webhook attempt ${attempt}/${MAX_RETRIES}...`);
+      const response = await fetch(DISPATCH_WEBHOOK_URL, {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "X-Call-ID": callId,
+          "X-Job-ID": jobId
+        },
+        body: JSON.stringify(webhookPayload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      const respBody = await response.text().catch(() => "");
+      console.log(
+        `[${callId}] 📬 Dispatch webhook response (attempt ${attempt}): ${response.status} ${response.statusText}` +
+        (respBody ? ` - ${respBody.slice(0, 300)}` : "")
+      );
+
+      if (!response.ok) {
+        if (attempt < MAX_RETRIES) {
+          console.log(`[${callId}] ⚠️ Webhook failed (${response.status}), retrying in ${RETRY_DELAY_MS}ms...`);
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+        return { success: false, error: `Webhook returned ${response.status}` };
+      }
+
+      // Parse JSON response if available
+      let data: any = null;
+      try {
+        if (respBody && respBody.trim().startsWith("{")) {
+          data = JSON.parse(respBody);
+        }
+      } catch (_) {
+        // Not JSON, that's fine
+      }
+
+      console.log(`[${callId}] ✅ Webhook sent successfully on attempt ${attempt}`);
+      return {
+        success: true,
+        fare: data?.fare || data?.estimated_fare,
+        eta: data?.eta || data?.estimated_eta
+      };
+    } catch (e) {
+      const errMsg = String(e);
+      const isTimeout = errMsg.includes("abort") || errMsg.includes("timeout");
+      console.error(`[${callId}] ❌ Webhook attempt ${attempt} failed: ${errMsg}`);
+      
+      if (attempt < MAX_RETRIES) {
+        console.log(`[${callId}] 🔄 Retrying webhook in ${RETRY_DELAY_MS}ms...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      
+      return { success: false, error: isTimeout ? "Webhook timeout after 10s" : errMsg };
+    }
   }
+  
+  return { success: false, error: "All webhook attempts failed" };
 }
 
 // Handle WebSocket connection
