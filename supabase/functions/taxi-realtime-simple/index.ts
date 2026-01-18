@@ -5232,6 +5232,38 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return;
           }
 
+          // AUDIO LEVEL THRESHOLD: Filter out low-volume audio that's likely speaker echo.
+          // Calculate RMS (root mean square) of the audio samples.
+          // This is an additional safety layer on top of the echo guard.
+          const ECHO_RMS_THRESHOLD = 300; // Threshold for 16-bit PCM (range -32768 to 32767)
+          let tempPcm: Int16Array;
+          if (state.inboundAudioFormat === "ulaw") {
+            // Quick decode for RMS check
+            tempPcm = new Int16Array(audioData.length);
+            for (let i = 0; i < audioData.length; i++) {
+              const ulaw = ~audioData[i] & 0xFF;
+              const sign = (ulaw & 0x80) ? -1 : 1;
+              const exponent = (ulaw >> 4) & 0x07;
+              const mantissa = ulaw & 0x0F;
+              let sample = ((mantissa << 3) + 0x84) << exponent;
+              sample -= 0x84;
+              tempPcm[i] = sign * sample;
+            }
+          } else {
+            tempPcm = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
+          }
+          
+          let sumSquares = 0;
+          for (let i = 0; i < tempPcm.length; i++) {
+            sumSquares += tempPcm[i] * tempPcm[i];
+          }
+          const rms = Math.sqrt(sumSquares / tempPcm.length);
+          
+          if (rms < ECHO_RMS_THRESHOLD) {
+            // Audio is too quiet - likely echo or background noise, skip it
+            return;
+          }
+
           // CRITICAL: Block audio while Ada is speaking to prevent echo/hallucination
           // OpenAI's VAD will detect Ada's TTS as "user speech" and Whisper will hallucinate.
           // This applies to ALL modes - half-duplex buffers it, full-duplex just drops it.
