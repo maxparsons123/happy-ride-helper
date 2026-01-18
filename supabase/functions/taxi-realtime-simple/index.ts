@@ -2080,9 +2080,13 @@ serve(async (req) => {
             sessionState.lastMultiQuestionFixAt !== null &&
             Date.now() - sessionState.lastMultiQuestionFixAt < multiQuestionCooldownMs;
 
-          if (!isWithinMultiFixCooldown && currentText.length > 25) {
+          // ✅ CRITICAL: Skip multi-question guard entirely when at summary/confirmed step
+          // This prevents interfering with fare confirmation, booking summary, and closing sequences
+          const isAtSummaryStep = sessionState.bookingStep === "summary" || sessionState.bookingStep === "confirmed";
+          
+          if (!isWithinMultiFixCooldown && currentText.length > 25 && !isAtSummaryStep) {
             const isSummaryLike = /summari[sz]e|summary|let me quickly summarize|alright, let me/i.test(lowerText);
-            const isPricingLike = /fare|estimated arrival|eta|would you like me to confirm/i.test(lowerText);
+            const isPricingLike = /fare|estimated arrival|eta|would you like me to confirm|anything else|safe journey|whatsapp/i.test(lowerText);
 
             if (!isSummaryLike && !isPricingLike) {
               const questionWordMatches =
@@ -2974,7 +2978,7 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastBookTaxiSuccessAt &&
             Date.now() - sessionState.lastBookTaxiSuccessAt < 2 * 60 * 1000 &&
             !sessionState.pendingQuote &&
-            /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you)\b/i.test(lowerUserText) &&
+            /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you|no|nope|nothing|nothing else|no i'm good|no im good|i'm good|im good|all good|that's it|thats it)\b/i.test(lowerUserText) &&
             openaiWs &&
             openaiConnected
           ) {
@@ -3022,11 +3026,11 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
-            // Close OpenAI connection after delay to let goodbye audio finish
+            // Close OpenAI connection after extended delay to let full goodbye audio finish
             setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after post-booking goodbye`);
               openaiWs?.close();
-            }, 8000); // 8 second delay for full goodbye audio
+            }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
           }
@@ -5622,24 +5626,39 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
-          // Inject goodbye instruction so Ada says farewell
+          // Allow final goodbye to play even though callEnded=true
+          sessionState.finalGoodbyePending = true;
+          sessionState.discardCurrentResponseAudio = false;
+          sessionState.audioVerified = true;
+          sessionState.pendingAudioBuffer = [];
+          
+          // Pick a random WhatsApp tip for the full closing message
+          const closingWhatsappTips = [
+            "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+            "Next time, feel free to book your taxi using a WhatsApp voice message.",
+            "You can always book again by simply sending us a voice note on WhatsApp."
+          ];
+          const closingRandomTip = closingWhatsappTips[Math.floor(Math.random() * closingWhatsappTips.length)];
+          
+          // Inject full closing message with WhatsApp tip and demo sign-off
           openaiWs?.send(JSON.stringify({
             type: "conversation.item.create",
             item: {
               type: "message",
               role: "user",
-              content: [{ type: "input_text", text: "[SYSTEM: The customer is done. Say a brief, warm goodbye like 'Safe travels!' or 'Take care, bye!' - nothing more. Then stay silent.]" }]
+              content: [{ type: "input_text", text: `[SYSTEM: The customer is done. Say EXACTLY this closing message, then stay silent:
+"You'll receive the booking details and ride updates via WhatsApp. ${closingRandomTip} Thank you for trying the Taxibot demo, and have a safe journey."]` }]
             }
           }));
           
           // Trigger Ada to speak the goodbye
           safeResponseCreate(sessionState, "end_call_goodbye");
           
-          // Close OpenAI connection after delay to let goodbye audio finish
+          // Close OpenAI connection after extended delay to let full goodbye audio finish
           setTimeout(() => {
             console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
             openaiWs?.close();
-          }, 4000); // 4 second delay for goodbye audio
+          }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
           
           // Return early - don't trigger another response.create at the end
           return;
