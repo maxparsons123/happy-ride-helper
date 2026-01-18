@@ -636,7 +636,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
     console.log(`[${callId}] 🛡️ Fare quote protection activated for ${SUMMARY_PROTECTION_MS}ms`);
     
-    // Inject the fare/ETA message for Ada to speak
+    // Inject the fare/ETA message for Ada to speak - with explicit YES/NO handling instructions
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
       item: {
@@ -644,7 +644,14 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         role: "user",
         content: [{
           type: "input_text",
-          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer EXACTLY: "${message}". IMPORTANT: do NOT repeat pickup/destination/passengers again. Only say the fare/ETA and ask if they want to proceed. Then wait for a yes/no.`
+          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer EXACTLY: "${message}". IMPORTANT: do NOT repeat pickup/destination/passengers again. Only say the fare/ETA and ask if they want to proceed.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES / yeah / correct / confirm / go ahead / book it / please → IMMEDIATELY CALL book_taxi with action: "confirmed"
+- If they say NO / cancel / too expensive / nevermind → Say "No problem, is there anything else I can help you with?"
+- If unclear, ask: "Would you like me to book that for you?"
+
+DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" returns success.`
         }]
       }
     }));
@@ -653,7 +660,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `Say EXACTLY this quote: "${message}". Do NOT recap the journey details again (no pickup/destination/passengers). Ask one question: whether they want to proceed. Then wait for yes/no.`
+        instructions: `Say EXACTLY this quote: "${message}". Do NOT recap the journey details. Ask if they want to proceed. When they say yes, call book_taxi with action="confirmed". When they say no, ask if there's anything else you can help with.`
       }
     }));
     
