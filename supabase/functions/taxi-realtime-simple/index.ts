@@ -1726,7 +1726,7 @@ serve(async (req) => {
 
           // Startup echo is strongest at the beginning of TTS on phone lines.
           // Ignore barge-in checks briefly to avoid self-interruption.
-          const ignoreMs = sessionState.useRasaAudioProcessing ? 900 : 600;
+          const ignoreMs = sessionState.useRasaAudioProcessing ? 500 : 250;
           sessionState.bargeInIgnoreUntil = Date.now() + ignoreMs;
         }
         
@@ -1764,11 +1764,16 @@ serve(async (req) => {
         }
         break;
 
-      case "response.audio.done":
-        // Ada finished speaking - set echo guard window (800ms)
+      case "response.audio.done": {
+        // Ada finished speaking - set echo guard window
+        // Too-large echo guards clip the first part of the caller's reply (house numbers!),
+        // so keep this tight.
+        const echoGuardMs = sessionState.useRasaAudioProcessing ? 400 : 250;
+
         sessionState.isAdaSpeaking = false;
-        sessionState.echoGuardUntil = Date.now() + 800;
-        console.log(`[${sessionState.callId}] 🔇 Echo guard active for 800ms`);
+        sessionState.echoGuardUntil = Date.now() + echoGuardMs;
+        console.log(`[${sessionState.callId}] 🔇 Echo guard active for ${echoGuardMs}ms`);
+
         
         // HALF-DUPLEX: Flush buffered audio now that Ada stopped speaking
         if (sessionState.halfDuplex && sessionState.halfDuplexBuffer.length > 0) {
@@ -1818,6 +1823,7 @@ serve(async (req) => {
           sessionState.halfDuplexBuffer = [];
         }
         break;
+      }
 
       case "response.audio_transcript.delta": {
         // Stream assistant transcript to bridge
@@ -2259,7 +2265,7 @@ Do NOT say 'booked' until the tool returns success.]`
         const speechDuration = sessionState.speechStartTime 
           ? Date.now() - sessionState.speechStartTime 
           : 0;
-        const vadSilenceMs = sessionState.useRasaAudioProcessing ? 900 : 1500;
+        const vadSilenceMs = sessionState.useRasaAudioProcessing ? 900 : 2500;
         console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait ${vadSilenceMs}ms before responding`);
         sessionState.speechStopTime = Date.now();
         
