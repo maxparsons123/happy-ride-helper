@@ -860,8 +860,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       
       switch (data.type) {
         case "session.created":
-          // OpenAI session is ready - NOW send the greeting
-          console.log(`[${callId}] 📋 Session created - triggering greeting`);
+          // Session created - but wait for session.updated before greeting
+          console.log(`[${callId}] 📋 Session created - waiting for session.updated`);
+          break;
+          
+        case "session.updated":
+          // Session config applied - NOW send the greeting
+          console.log(`[${callId}] ✅ Session configured - triggering greeting`);
           sendGreeting();
           break;
 
