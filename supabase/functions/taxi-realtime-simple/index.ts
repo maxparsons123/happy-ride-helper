@@ -2195,13 +2195,16 @@ serve(async (req) => {
           const isWithinRepetitionWindow = sessionState.lastSpokenConfirmationAt && 
             (Date.now() - sessionState.lastSpokenConfirmationAt < recentConfirmationWindow);
           
-          // ✅ SKIP REPETITION DETECTION when Ada is giving the final summary (all fields complete)
-          // This prevents cancelling the legitimate booking summary after user provides last field (e.g. time)
+          // ✅ SKIP REPETITION DETECTION when Ada is giving the final summary
+          // This prevents cancelling the legitimate booking summary after user provides last field
+          // Also skip if we're at the summary/confirmed step or if it's clearly a summary phrase
           const allFieldsComplete = sessionState.booking.pickup && 
             sessionState.booking.destination && 
             (sessionState.booking.passengers !== null && sessionState.booking.passengers > 0);
-          const isSummaryContext = /^so\s+(that'?s|thats)|let me confirm|to confirm|your booking/i.test(lowerText);
-          const isLegitSummary = allFieldsComplete && isSummaryContext;
+          const isSummaryContext = /^so\s+(that'?s|thats)|let me confirm|to confirm|your booking|just to confirm/i.test(lowerText);
+          const atSummaryOrConfirmed = sessionState.bookingStep === "summary" || sessionState.bookingStep === "confirmed";
+          // Skip if: (all fields complete AND summary context) OR (at summary step AND summary context)
+          const isLegitSummary = (allFieldsComplete && isSummaryContext) || (atSummaryOrConfirmed && isSummaryContext);
           
           if (isWithinRepetitionWindow && sessionState.lastSpokenConfirmation && currentText.length > 20 && !isLegitSummary) {
             // Normalize for comparison - extract key address phrases
