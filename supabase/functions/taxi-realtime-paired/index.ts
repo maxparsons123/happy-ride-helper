@@ -618,7 +618,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         role: "user",
         content: [{
           type: "input_text",
-          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer exactly: "${message}" Then wait for their yes/no confirmation. Do NOT make up any different prices or times.`
+          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer EXACTLY: "${message}". IMPORTANT: do NOT repeat pickup/destination/passengers again. Only say the fare/ETA and ask if they want to proceed. Then wait for a yes/no.`
         }]
       }
     }));
@@ -627,7 +627,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `The dispatch system has provided a quote. Say this EXACTLY to the customer: "${message}" Then ask if they want to proceed. Wait for yes/no.`
+        instructions: `Say EXACTLY this quote: "${message}". Do NOT recap the journey details again (no pickup/destination/passengers). Ask one question: whether they want to proceed. Then wait for yes/no.`
       }
     }));
     
@@ -971,11 +971,19 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               : sessionState.booking.passengers;
             const resolvedPickupTime = toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime;
 
+            // Persist any provided details so subsequent tool calls (e.g. confirmed) include full booking info
+            if (resolvedPickup) sessionState.booking.pickup = resolvedPickup;
+            if (resolvedDestination) sessionState.booking.destination = resolvedDestination;
+            if (resolvedPassengers !== null && !Number.isNaN(resolvedPassengers)) {
+              sessionState.booking.passengers = resolvedPassengers;
+            }
+            if (resolvedPickupTime) sessionState.booking.pickupTime = resolvedPickupTime;
+
             // Prevent sending incomplete payloads (these cause duplicate/garbage quotes downstream)
             const missing: string[] = [];
-            if (!resolvedPickup) missing.push("pickup");
-            if (!resolvedDestination) missing.push("destination");
-            if (resolvedPassengers === null || Number.isNaN(resolvedPassengers)) missing.push("passengers");
+            if (!sessionState.booking.pickup) missing.push("pickup");
+            if (!sessionState.booking.destination) missing.push("destination");
+            if (sessionState.booking.passengers === null || Number.isNaN(sessionState.booking.passengers)) missing.push("passengers");
 
             // De-dupe: once quote requested/in-flight, don't re-send
             const QUOTE_DEDUPE_MS = 15000;
@@ -1073,11 +1081,30 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 break;
               }
 
+              // Also require the booking details to be present (avoid sending nulls on confirm)
+              if (missing.length > 0) {
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      status: "missing_fields",
+                      missing,
+                      message: `Cannot confirm booking yet. Missing: ${missing.join(", ")}. Ask for the missing info.`
+                    })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+
               await sendDispatchWebhook(sessionState, action, {
-                pickup: resolvedPickup,
-                destination: resolvedDestination,
-                passengers: resolvedPassengers,
-                pickup_time: resolvedPickupTime
+                pickup: sessionState.booking.pickup,
+                destination: sessionState.booking.destination,
+                passengers: sessionState.booking.passengers,
+                pickup_time: sessionState.booking.pickupTime
               });
 
               sessionState.bookingConfirmed = true;
