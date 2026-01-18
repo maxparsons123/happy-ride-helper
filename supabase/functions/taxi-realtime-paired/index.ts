@@ -1119,8 +1119,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
 
             } else if (action === "confirmed") {
+              console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingRef=${sessionState.pendingBookingRef})`);
+              
               // Only allow confirm after we asked fare confirmation
               if (!sessionState.awaitingConfirmation) {
+                console.log(`[${callId}] ⚠️ CONFIRMED blocked - not awaitingConfirmation`);
                 openaiWs!.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -1139,6 +1142,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
 
               // Also require the booking details to be present (avoid sending nulls on confirm)
               if (missing.length > 0) {
+                console.log(`[${callId}] ⚠️ CONFIRMED blocked - missing fields: ${missing.join(", ")}`);
                 openaiWs!.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -1156,12 +1160,14 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 break;
               }
 
+              console.log(`[${callId}] 📤 Sending CONFIRMED webhook...`);
               await sendDispatchWebhook(sessionState, action, {
                 pickup: sessionState.booking.pickup,
                 destination: sessionState.booking.destination,
                 passengers: sessionState.booking.passengers,
                 pickup_time: sessionState.booking.pickupTime
               });
+              console.log(`[${callId}] ✅ CONFIRMED webhook sent successfully`);
 
               sessionState.bookingConfirmed = true;
               sessionState.awaitingConfirmation = false;
