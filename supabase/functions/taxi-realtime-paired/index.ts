@@ -247,6 +247,8 @@ interface SessionState {
   echoGuardUntil: number;
   // Track when Ada last finished speaking (for echo detection)
   lastAdaFinishedSpeakingAt: number;
+  // Greeting protection: ignore inbound audio right after connect
+  greetingProtectionUntil: number;
   // Dispatch callback state
   pendingConfirmationCallback: string | null;
   pendingFare: string | null;
@@ -258,8 +260,12 @@ interface SessionState {
 // Echo guard duration in ms - blocks inbound audio briefly after Ada speaks
 const ECHO_GUARD_MS = 250;
 
+// Greeting protection window in ms - ignore early line noise so Ada's first prompt doesn't get cut off
+const GREETING_PROTECTION_MS = 3000;
+
 // Barge-in RMS thresholds to distinguish real speech from echo/noise
-const BARGE_IN_RMS_MIN = 650;
+// (Higher minimum reduces false barge-ins from background/line noise)
+const BARGE_IN_RMS_MIN = 1000;
 const BARGE_IN_RMS_MAX = 20000;
 
 // Whisper "phantom radio host" hallucinations - triggered by silence/static
@@ -339,6 +345,7 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     openAiResponseActive: false,
     echoGuardUntil: 0,
     lastAdaFinishedSpeakingAt: 0,
+    greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
     // Dispatch callback state
     pendingConfirmationCallback: null,
     pendingFare: null,
@@ -456,7 +463,8 @@ async function sendDispatchWebhook(
       gps_lat: null,
       gps_lon: null,
       // Booking details
-      passengers: bookingData.passengers || sessionState.booking.passengers || 1,
+      // IMPORTANT: do not default passengers to 1; it must be explicitly provided by the caller.
+      passengers: (bookingData.passengers ?? sessionState.booking.passengers ?? null),
       bags: 0,
       vehicle_type: "standard",
       vehicle_request: null,
@@ -996,6 +1004,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
         const audioBytes = event.data instanceof ArrayBuffer
           ? new Uint8Array(event.data)
           : event.data;
+
+        // GREETING PROTECTION: ignore early line noise so Ada doesn't get cut off
+        if (Date.now() < sessionState.greetingProtectionUntil) {
+          return;
+        }
 
         // ECHO GUARD: block audio briefly after Ada finishes speaking
         if (Date.now() < sessionState.echoGuardUntil) {
