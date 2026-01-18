@@ -1281,7 +1281,10 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           
         default:
           // Log unhandled events for debugging
-          if (data.type && !data.type.startsWith("input_audio_buffer") && !data.type.startsWith("rate_limits")) {
+          if (data.type === "response.done") {
+            // Log the full response.done to see why no audio
+            console.log(`[${callId}] 📨 response.done:`, JSON.stringify(data.response?.output || data.response?.status_details || "no details"));
+          } else if (data.type && !data.type.startsWith("input_audio_buffer") && !data.type.startsWith("rate_limits")) {
             console.log(`[${callId}] 📨 OpenAI event: ${data.type}`);
           }
           break;
