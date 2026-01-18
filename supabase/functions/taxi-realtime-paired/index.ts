@@ -302,13 +302,13 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   };
 
   // Connect to OpenAI Realtime
+  // Note: Deno WebSocket requires headers as second argument array for protocols,
+  // but OpenAI needs Authorization header. Use the URL with query param workaround
+  // or rely on the proper Deno fetch-based approach.
   try {
-    openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
-      }
-    });
+    // For Deno, we need to use a different approach - create WebSocket with protocols
+    const wsUrl = `${OPENAI_REALTIME_URL}`;
+    openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
   } catch (e) {
     console.error(`[${callId}] Failed to connect to OpenAI:`, e);
     socket.close();
