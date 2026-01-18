@@ -273,7 +273,7 @@ class TaxiBridgeV7:
     # FORMAT DETECTION
     # -------------------------------------------------------------------------
 
-    def _detect_format(self, frame_len: int) -> None:
+    async def _detect_format(self, frame_len: int) -> None:
         """Detect Asterisk audio format from frame size.
         
         Frame sizes for 20ms:
@@ -281,6 +281,8 @@ class TaxiBridgeV7:
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
+        old_codec = self.state.ast_codec
+        
         if frame_len == 160:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = ULAW_RATE
@@ -303,6 +305,17 @@ class TaxiBridgeV7:
 
         logger.info("[%s] 🔎 Detected: %s @ %dHz (%d bytes)", 
                    self.state.call_id, self.state.ast_codec, self.state.ast_rate, frame_len)
+        
+        # Notify edge function of format change
+        if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
+            await self.ws.send(json.dumps({
+                "type": "update_format",
+                "call_id": self.state.call_id,
+                "inbound_format": self.state.ast_codec,
+                "inbound_sample_rate": self.state.ast_rate,
+            }))
+            logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
@@ -530,7 +543,7 @@ class TaxiBridgeV7:
 
                 elif m_type == MSG_AUDIO:
                     if m_len != self.state.ast_frame_bytes:
-                        self._detect_format(m_len)
+                        await self._detect_format(m_len)
 
                     # Decode and process audio
                     linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload

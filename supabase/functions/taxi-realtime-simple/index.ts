@@ -1143,6 +1143,10 @@ interface SessionState {
   callerLastPickup: string | null;
   callerLastDestination: string | null;
 
+  // Inbound audio format from bridge: "ulaw" (8kHz), "slin" (8kHz), or "slin16" (16kHz)
+  inboundAudioFormat: "ulaw" | "slin" | "slin16";
+  inboundSampleRate: number; // 8000 or 16000
+
   // Rasa-style audio processing toggle
   useRasaAudioProcessing: boolean;
   callerTotalBookings: number;
@@ -5228,18 +5232,26 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             return; // Don't forward audio while Ada speaks in half-duplex mode
           }
 
-          // Bridge sends 8kHz µ-law, need to convert to 24kHz PCM16 for OpenAI
-          // NOTE: OpenAI Realtime API only accepts 24kHz
-          // Step 1: Decode µ-law to 16-bit PCM (8kHz)
-          const pcm16_8k = new Int16Array(audioData.length);
-          for (let i = 0; i < audioData.length; i++) {
-            const ulaw = ~audioData[i] & 0xFF;
-            const sign = (ulaw & 0x80) ? -1 : 1;
-            const exponent = (ulaw >> 4) & 0x07;
-            const mantissa = ulaw & 0x0F;
-            let sample = ((mantissa << 3) + 0x84) << exponent;
-            sample -= 0x84;
-            pcm16_8k[i] = sign * sample;
+          // Step 1: Decode audio to PCM16 based on inbound format
+          // Bridge can send: ulaw (8kHz), slin (8kHz PCM), or slin16 (16kHz PCM)
+          let pcmInput: Int16Array;
+          const inputSampleRate = state.inboundSampleRate;
+          
+          if (state.inboundAudioFormat === "ulaw") {
+            // Decode µ-law to 16-bit PCM (8kHz)
+            pcmInput = new Int16Array(audioData.length);
+            for (let i = 0; i < audioData.length; i++) {
+              const ulaw = ~audioData[i] & 0xFF;
+              const sign = (ulaw & 0x80) ? -1 : 1;
+              const exponent = (ulaw >> 4) & 0x07;
+              const mantissa = ulaw & 0x0F;
+              let sample = ((mantissa << 3) + 0x84) << exponent;
+              sample -= 0x84;
+              pcmInput[i] = sign * sample;
+            }
+          } else {
+            // slin or slin16: already PCM16, just read as Int16Array
+            pcmInput = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
           }
 
           // BARGE-IN (only in full-duplex mode): If Ada is currently speaking and we detect real user energy,
@@ -5255,11 +5267,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             
             if (!inEchoGuard) {
               let sumSq = 0;
-              for (let i = 0; i < pcm16_8k.length; i++) {
-                const s = pcm16_8k[i];
+              for (let i = 0; i < pcmInput.length; i++) {
+                const s = pcmInput[i];
                 sumSq += s * s;
               }
-              const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+              const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
 
               // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
               const isRealBargeIn = rms >= 650 && rms < 20000;
@@ -5288,26 +5300,35 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           }
 
           // Step 2: Upsample to 24kHz (OpenAI Realtime API requirement)
-          // RASA mode: 8kHz → 16kHz → 24kHz (two-stage upsampling for Whisper-like processing)
-          // Standard mode: 8kHz → 24kHz (direct 3x interpolation)
+          // Handle different input sample rates: 8kHz (ulaw/slin) or 16kHz (slin16)
           let pcm16_24k: Int16Array;
           
-          if (state.useRasaAudioProcessing) {
-            // RASA: Two-stage resampling (8kHz → 16kHz → 24kHz)
+          if (inputSampleRate === 16000) {
+            // 16kHz → 24kHz (1.5x using 3:2 ratio)
+            const outLen = Math.floor(pcmInput.length * 3 / 2);
+            pcm16_24k = new Int16Array(outLen);
+            for (let i = 0; i < outLen; i++) {
+              const srcIdx = (i * 2) / 3;
+              const idx0 = Math.floor(srcIdx);
+              const idx1 = Math.min(idx0 + 1, pcmInput.length - 1);
+              const frac = srcIdx - idx0;
+              pcm16_24k[i] = Math.round(pcmInput[idx0] * (1 - frac) + pcmInput[idx1] * frac);
+            }
+          } else if (state.useRasaAudioProcessing) {
+            // RASA mode: 8kHz → 16kHz → 24kHz (two-stage upsampling)
             // Stage 1: 8kHz → 16kHz (2x)
-            const pcm16_16k = new Int16Array(pcm16_8k.length * 2);
-            for (let i = 0; i < pcm16_8k.length - 1; i++) {
-              const s0 = pcm16_8k[i];
-              const s1 = pcm16_8k[i + 1];
+            const pcm16_16k = new Int16Array(pcmInput.length * 2);
+            for (let i = 0; i < pcmInput.length - 1; i++) {
+              const s0 = pcmInput[i];
+              const s1 = pcmInput[i + 1];
               pcm16_16k[i * 2] = s0;
               pcm16_16k[i * 2 + 1] = Math.round((s0 + s1) / 2);
             }
-            const last8k = pcm16_8k.length - 1;
-            pcm16_16k[last8k * 2] = pcm16_8k[last8k];
-            pcm16_16k[last8k * 2 + 1] = pcm16_8k[last8k];
+            const last8k = pcmInput.length - 1;
+            pcm16_16k[last8k * 2] = pcmInput[last8k];
+            pcm16_16k[last8k * 2 + 1] = pcmInput[last8k];
             
             // Stage 2: 16kHz → 24kHz (1.5x)
-            // Use ratio 3:2 - for every 2 input samples, output 3 samples
             const outLen = Math.floor(pcm16_16k.length * 3 / 2);
             pcm16_24k = new Int16Array(outLen);
             for (let i = 0; i < outLen; i++) {
@@ -5318,20 +5339,20 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               pcm16_24k[i] = Math.round(pcm16_16k[idx0] * (1 - frac) + pcm16_16k[idx1] * frac);
             }
           } else {
-            // Standard: Direct 8kHz → 24kHz (3x linear interpolation)
-            pcm16_24k = new Int16Array(pcm16_8k.length * 3);
-            for (let i = 0; i < pcm16_8k.length - 1; i++) {
-              const s0 = pcm16_8k[i];
-              const s1 = pcm16_8k[i + 1];
+            // Standard: 8kHz → 24kHz (3x linear interpolation)
+            pcm16_24k = new Int16Array(pcmInput.length * 3);
+            for (let i = 0; i < pcmInput.length - 1; i++) {
+              const s0 = pcmInput[i];
+              const s1 = pcmInput[i + 1];
               pcm16_24k[i * 3] = s0;
               pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
               pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
             }
             // Handle last sample
-            const lastIdx = pcm16_8k.length - 1;
-            pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
-            pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
-            pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+            const lastIdx = pcmInput.length - 1;
+            pcm16_24k[lastIdx * 3] = pcmInput[lastIdx];
+            pcm16_24k[lastIdx * 3 + 1] = pcmInput[lastIdx];
+            pcm16_24k[lastIdx * 3 + 2] = pcmInput[lastIdx];
           }
 
           // Step 3: Convert to base64
@@ -5395,6 +5416,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           speechStopTime: null,
           callEnded: false,
           finalGoodbyePending: false,
+          inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
+          inboundSampleRate: message.inbound_format === "slin16" ? 16000 : 8000,
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
@@ -5511,6 +5534,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              speechStopTime: null,
              callEnded: false,
              finalGoodbyePending: false,
+             inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
+             inboundSampleRate: message.inbound_format === "slin16" ? 16000 : 8000,
              useRasaAudioProcessing: message.rasa_audio_processing ?? false,
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
@@ -6415,6 +6440,19 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               console.error(`[${state?.callId}] Late phone lookup failed:`, e);
             }
           })();
+        }
+        return;
+      }
+
+      // Handle audio format update from bridge (ulaw, slin, slin16)
+      if (message.type === "update_format" && state) {
+        const newFormat = message.inbound_format as "ulaw" | "slin" | "slin16";
+        const newRate = message.inbound_sample_rate || (newFormat === "slin16" ? 16000 : 8000);
+        
+        if (newFormat && newFormat !== state.inboundAudioFormat) {
+          console.log(`[${state.callId}] 🔊 Audio format update: ${state.inboundAudioFormat}@${state.inboundSampleRate}Hz → ${newFormat}@${newRate}Hz`);
+          state.inboundAudioFormat = newFormat;
+          state.inboundSampleRate = newRate;
         }
         return;
       }
