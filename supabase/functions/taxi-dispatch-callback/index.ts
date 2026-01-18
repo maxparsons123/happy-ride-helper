@@ -406,7 +406,10 @@ serve(async (req) => {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ACTION: SAY - Make Ada say something (no response expected)
+    // ACTION: SAY - Make Ada say something (or bypass AI with direct TTS)
+    // Options:
+    //   bypass_ai: true  → Direct TTS synthesis, skips OpenAI completely
+    //   bypass_ai: false → Goes through OpenAI (default, may rephrase)
     // ═══════════════════════════════════════════════════════════════════
     if (action === "say") {
       if (!message) {
@@ -418,7 +421,9 @@ serve(async (req) => {
         });
       }
 
-      console.log(`[${call_id}] 📢 Dispatch saying: "${message}"`);
+      // Check if bypass_ai is requested
+      const bypassAi = (callback as any).bypass_ai === true;
+      console.log(`[${call_id}] 📢 Dispatch saying: "${message}" (bypass_ai=${bypassAi})`);
 
       // Add dispatch message to transcripts so polling can detect it
       const { data: callData } = await supabase
@@ -429,7 +434,7 @@ serve(async (req) => {
 
       const transcripts = (callData?.transcripts as any[]) || [];
       transcripts.push({
-        role: "dispatch",
+        role: bypassAi ? "dispatch_direct" : "dispatch",
         text: message,
         timestamp: new Date().toISOString()
       });
@@ -442,13 +447,17 @@ serve(async (req) => {
         })
         .eq("call_id", call_id);
 
+      // Choose event based on bypass_ai flag
+      const eventName = bypassAi ? "dispatch_say_direct" : "dispatch_say";
+      
       await supabase.channel(`dispatch_${call_id}`).send({
         type: "broadcast",
-        event: "dispatch_say",
+        event: eventName,
         payload: {
           call_id,
           action: "say",
           message,
+          bypass_ai: bypassAi,
           timestamp: new Date().toISOString()
         }
       });
@@ -457,7 +466,8 @@ serve(async (req) => {
         success: true,
         call_id,
         action: "say",
-        message: "Message sent to Ada"
+        bypass_ai: bypassAi,
+        message: bypassAi ? "Message sent directly to TTS (AI bypassed)" : "Message sent to Ada"
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
