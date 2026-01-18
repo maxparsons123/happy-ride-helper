@@ -994,6 +994,78 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms`);
             }
             
+            // AUTO-TRIGGER WEBHOOK: If Ada says "check the price" but the mini model didn't call the tool,
+            // automatically trigger the webhook. This works around mini model's weak tool calling.
+            const isCheckingPrice = (lower.includes("check") && lower.includes("price")) ||
+                                    (lower.includes("one moment") && lower.includes("price")) ||
+                                    (lower.includes("checking") && (lower.includes("fare") || lower.includes("price") || lower.includes("trip")));
+            
+            const hasRequiredFields = sessionState.booking.pickup && 
+                                      sessionState.booking.destination && 
+                                      sessionState.booking.passengers !== null;
+            
+            const QUOTE_DEDUPE_MS = 15000;
+            const recentlyRequestedQuote = sessionState.lastQuoteRequestedAt > 0 && 
+                                           (Date.now() - sessionState.lastQuoteRequestedAt) < QUOTE_DEDUPE_MS;
+            
+            if (isCheckingPrice && hasRequiredFields && !sessionState.quoteInFlight && 
+                !sessionState.awaitingConfirmation && !recentlyRequestedQuote && !sessionState.bookingConfirmed) {
+              console.log(`[${callId}] 🔄 AUTO-TRIGGER: Ada said she's checking price, sending webhook automatically`);
+              sessionState.quoteInFlight = true;
+              sessionState.lastQuoteRequestedAt = Date.now();
+              
+              // Send webhook in background
+              (async () => {
+                try {
+                  const result = await sendDispatchWebhook(sessionState, "request_quote", {
+                    pickup: sessionState.booking.pickup,
+                    destination: sessionState.booking.destination,
+                    passengers: sessionState.booking.passengers,
+                    time: sessionState.booking.pickupTime || "now"
+                  });
+                  console.log(`[${callId}] 📡 Auto-trigger webhook result:`, result);
+                  
+                  if (result.success && result.fare && result.eta) {
+                    // Store the quote and mark awaiting confirmation
+                    sessionState.pendingFare = result.fare;
+                    sessionState.pendingEta = result.eta;
+                    sessionState.awaitingConfirmation = true;
+                    sessionState.quoteInFlight = false;
+                    
+                    // Inject the quote for Ada to speak
+                    if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
+                      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                      
+                      sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                      
+                      const quoteMessage = `The trip fare will be ${result.fare}, and the estimated arrival time is ${result.eta}. Would you like me to confirm this booking?`;
+                      
+                      openaiWs.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "user", 
+                          content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Tell the customer: "${quoteMessage}". Do NOT repeat pickup/destination. Only say fare/ETA and ask to confirm.` }]
+                        }
+                      }));
+                      
+                      openaiWs.send(JSON.stringify({
+                        type: "response.create",
+                        response: {
+                          modalities: ["audio", "text"],
+                          instructions: `Say exactly: "${quoteMessage}"`
+                        }
+                      }));
+                    }
+                  }
+                } catch (e) {
+                  console.error(`[${callId}] Auto-trigger webhook error:`, e);
+                  sessionState.quoteInFlight = false;
+                }
+              })();
+            }
+            
             if (lower.includes("where would you like to be picked up") || lower.includes("pickup")) {
               sessionState.lastQuestionAsked = "pickup";
             } else if (lower.includes("where would you like to go") || lower.includes("destination") || lower.includes("where are you going")) {
