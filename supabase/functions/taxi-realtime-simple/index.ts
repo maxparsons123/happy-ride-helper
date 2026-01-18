@@ -6078,6 +6078,109 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           }));
         });
         
+        // === DIRECT TTS HANDLER - Bypasses AI completely ===
+        // When bypass_ai: true is sent, synthesize speech directly without OpenAI interpretation
+        dispatchChannel.on("broadcast", { event: "dispatch_say_direct" }, async (payload: any) => {
+          const { message: sayMessage } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH say_direct (BYPASS AI): "${sayMessage}"`);
+          
+          if (!sayMessage || isConnectionClosed) {
+            console.log(`[${callId}] ⚠️ Cannot process direct say - no message or connection closed`);
+            return;
+          }
+          
+          // Cancel any active AI response to prevent overlap
+          if (state?.openAiResponseActive && openaiWs && openaiConnected) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            state.discardCurrentResponseAudio = true;
+          }
+          
+          // Mark Ada as speaking (echo guard) even though this is direct TTS
+          if (state) {
+            state.isAdaSpeaking = true;
+            state.responseStartTime = Date.now();
+            state.bargeInIgnoreUntil = Date.now() + 500;
+          }
+          
+          try {
+            // Use OpenAI TTS API directly for PCM16 audio (matches bridge format)
+            const ttsResponse = await fetch("https://api.openai.com/v1/audio/speech", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                model: "tts-1", // Fast model for realtime
+                voice: state?.voice || "shimmer",
+                input: sayMessage,
+                response_format: "pcm" // 24kHz 16-bit PCM - matches bridge format
+              })
+            });
+            
+            if (!ttsResponse.ok) {
+              console.error(`[${callId}] ❌ Direct TTS failed: ${ttsResponse.status}`);
+              // Fallback to AI-based say
+              if (openaiWs && openaiConnected) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: `[DISPATCH]: Say exactly: "${sayMessage}"` }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+              }
+              return;
+            }
+            
+            const audioBuffer = await ttsResponse.arrayBuffer();
+            const audioData = new Uint8Array(audioBuffer);
+            
+            console.log(`[${callId}] 🔊 Direct TTS generated: ${audioData.length} bytes`);
+            
+            // Stream audio chunks to client (4800 bytes ≈ 100ms at 24kHz PCM16)
+            const chunkSize = 4800;
+            for (let i = 0; i < audioData.length; i += chunkSize) {
+              if (isConnectionClosed) break;
+              
+              const chunk = audioData.slice(i, Math.min(i + chunkSize, audioData.length));
+              // Convert to base64 for WebSocket JSON transport
+              const base64Chunk = btoa(String.fromCharCode(...chunk));
+              
+              socket.send(JSON.stringify({
+                type: "audio",
+                audio: base64Chunk
+              }));
+            }
+            
+            // Signal audio complete
+            socket.send(JSON.stringify({ type: "audio.done" }));
+            
+            console.log(`[${callId}] ✅ Direct TTS playback complete`);
+            
+            // Add to transcripts for logging (text includes source marker)
+            if (state) {
+              state.transcripts.push({
+                role: "assistant",
+                text: `[DIRECT TTS] ${sayMessage}`,
+                timestamp: new Date().toISOString()
+              });
+            }
+            
+          } catch (ttsError) {
+            console.error(`[${callId}] ❌ Direct TTS error:`, ttsError);
+          } finally {
+            // Reset speaking state
+            if (state) {
+              state.isAdaSpeaking = false;
+              state.echoGuardUntil = Date.now() + 400;
+            }
+          }
+        });
+        
         dispatchChannel.on("broadcast", { event: "dispatch_hangup" }, async () => {
           console.log(`[${callId}] 📥 DISPATCH hangup received`);
           if (isConnectionClosed) return;
