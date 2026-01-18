@@ -2947,6 +2947,14 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.audioVerified = true;
             sessionState.pendingAudioBuffer = [];
 
+            // Pick a random WhatsApp tip
+            const whatsappTips = [
+              "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+              "Next time, feel free to book your taxi using a WhatsApp voice message.",
+              "You can always book again by simply sending us a voice note on WhatsApp."
+            ];
+            const randomTip = whatsappTips[Math.floor(Math.random() * whatsappTips.length)];
+
             openaiWs.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -2956,7 +2964,8 @@ Do NOT say 'booked' until the tool returns success.]`
                   content: [
                     {
                       type: "input_text",
-                      text: "[SYSTEM: The customer said goodbye. Say 'Safe travels!' and nothing more. Then stay completely silent.]",
+                      text: `[SYSTEM: The customer is done. Say EXACTLY this closing message, then stay silent:
+"You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey."]`,
                     },
                   ],
                 },
@@ -2965,11 +2974,17 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
-            // Close OpenAI connection after delay to let goodbye audio finish
+            // Close OpenAI connection after extended delay to let full goodbye audio finish,
+            // then tell the bridge to hang up.
             setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after explicit goodbye`);
+              try {
+                socket.send(JSON.stringify({ type: "hangup", reason: "customer_goodbye" }));
+              } catch {
+                // ignore
+              }
               openaiWs?.close();
-            }, 3000); // 3 second delay for goodbye audio
+            }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
           }
@@ -3029,9 +3044,15 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
-            // Close OpenAI connection after extended delay to let full goodbye audio finish
+            // Close OpenAI connection after extended delay to let full goodbye audio finish,
+            // then tell the bridge to hang up.
             setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after post-booking goodbye`);
+              try {
+                socket.send(JSON.stringify({ type: "hangup", reason: "post_booking_goodbye" }));
+              } catch {
+                // ignore
+              }
               openaiWs?.close();
             }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
@@ -5662,9 +5683,15 @@ Do NOT say 'booked' until the tool returns success.]`
           // Trigger Ada to speak the goodbye
           safeResponseCreate(sessionState, "end_call_goodbye");
           
-          // Close OpenAI connection after extended delay to let full goodbye audio finish
+          // Close OpenAI connection after extended delay to let full goodbye audio finish,
+          // then tell the bridge to hang up.
           setTimeout(() => {
             console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
+            try {
+              socket.send(JSON.stringify({ type: "hangup", reason: "end_call" }));
+            } catch {
+              // ignore
+            }
             openaiWs?.close();
           }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
           
