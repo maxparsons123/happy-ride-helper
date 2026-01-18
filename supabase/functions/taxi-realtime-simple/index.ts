@@ -3111,11 +3111,16 @@ Do NOT say 'booked' until the tool returns success.]`
           // extract and ask for confirmation before getting fare quote
           
           // Quick check: does this look like a new booking with both addresses?
-          const hasPickupPhrase = /\b(from|pick\s*up|pickup|at|outside|near)\b/i.test(lowerUserText);
+          // NOTE: Be conservative here: false positives (e.g. "at 4.30") can cancel Ada mid-summary.
+          const hasPickupPhrase = /\b(from|pick\s*up|pickup|outside|near)\b/i.test(lowerUserText);
           const hasDestinationPhrase = /\b(to|going\s+to|destination|drop\s*off|dropoff)\b/i.test(lowerUserText);
           const isSubstantialMessage = lowerUserText.length > 15; // Must be substantial enough to contain addresses
-          
-          const mightBeNewBooking = !hasExistingBookingContext && 
+
+          // Only allow this auto-interrupt when we are early in the flow.
+          // If we're collecting passengers/time or summarizing, treat user speech as an answer — do not cancel Ada.
+          const allowAutoNewBookingInterrupt = sessionState.bookingStep === "pickup" || sessionState.bookingStep === "destination";
+
+          const mightBeNewBooking = allowAutoNewBookingInterrupt && !hasExistingBookingContext &&
             !isConfirmationPhrase &&
             !sessionState.newBookingPromptPending &&
             !sessionState.extractionInProgress &&
