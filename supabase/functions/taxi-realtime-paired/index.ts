@@ -253,6 +253,9 @@ interface SessionState {
   greetingProtectionUntil: number;
   // Summary protection: block interruptions while Ada is recapping/quoting
   summaryProtectionUntil: number;
+  // Final speech protection: absolutely no barge-in until Ada finishes the closing message
+  finalSpeechInProgress: boolean;
+  finalSpeechUntil: number;
   // Quote request de-dupe
   quoteInFlight: boolean;
   lastQuoteRequestedAt: number;
@@ -273,6 +276,9 @@ const GREETING_PROTECTION_MS = 3000;
 
 // Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
 const SUMMARY_PROTECTION_MS = 8000;
+
+// Final speech protection window in ms - prevent any interruption during Ada's closing message
+const FINAL_SPEECH_PROTECTION_MS = 20000;
 
 // While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
@@ -362,6 +368,8 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     lastAdaFinishedSpeakingAt: 0,
     greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
     summaryProtectionUntil: 0,
+    finalSpeechInProgress: false,
+    finalSpeechUntil: 0,
     quoteInFlight: false,
     lastQuoteRequestedAt: 0,
     // Dispatch callback state
@@ -717,9 +725,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
     
-    // Activate speech protection for booking confirmation - use longer window for goodbye
-    sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 1.5);
-    console.log(`[${callId}] 🛡️ Booking confirm protection activated for ${SUMMARY_PROTECTION_MS * 1.5}ms`);
+    // Activate speech protection for booking confirmation - use final-speech lock (no interruptions)
+    sessionState.finalSpeechInProgress = true;
+    sessionState.finalSpeechUntil = Date.now() + FINAL_SPEECH_PROTECTION_MS;
+    sessionState.summaryProtectionUntil = sessionState.finalSpeechUntil;
+    console.log(`[${callId}] 🛡️ Booking confirm protection activated for ${FINAL_SPEECH_PROTECTION_MS}ms`);
     
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
@@ -747,9 +757,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
-      // Protect this final message from being cut off
-      sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
-      console.log(`[${callId}] 🛡️ Dispatch hangup protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
+      // Protect this final message from being cut off (no interruptions)
+      sessionState.finalSpeechInProgress = true;
+      sessionState.finalSpeechUntil = Date.now() + FINAL_SPEECH_PROTECTION_MS;
+      sessionState.summaryProtectionUntil = sessionState.finalSpeechUntil;
+      console.log(`[${callId}] 🛡️ Dispatch hangup protection activated for ${FINAL_SPEECH_PROTECTION_MS}ms`);
       
       openaiWs.send(JSON.stringify({
         type: "conversation.item.create",
@@ -926,6 +938,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           }
           sessionState.openAiResponseActive = false;
           sessionState.openAiSpeechStartedAt = 0;
+
+          // If this was Ada's final closing message, allow barge-in again after she finishes
+          if (sessionState.finalSpeechInProgress) {
+            sessionState.finalSpeechInProgress = false;
+            sessionState.finalSpeechUntil = 0;
+            console.log(`[${callId}] 🛡️ Final speech completed`);
+          }
+
           // Set echo guard to block echo from speaker
           sessionState.lastAdaFinishedSpeakingAt = Date.now();
           sessionState.echoGuardUntil = Date.now() + ECHO_GUARD_MS;
@@ -1202,9 +1222,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               }
             }));
             
-            // Protect the goodbye from being cut off by noise/echo
-            sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
-            console.log(`[${callId}] 🛡️ End-call goodbye protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
+            // Protect the goodbye from being cut off by noise/echo (no interruptions)
+            sessionState.finalSpeechInProgress = true;
+            sessionState.finalSpeechUntil = Date.now() + FINAL_SPEECH_PROTECTION_MS;
+            sessionState.summaryProtectionUntil = sessionState.finalSpeechUntil;
+            console.log(`[${callId}] 🛡️ End-call goodbye protection activated for ${FINAL_SPEECH_PROTECTION_MS}ms`);
 
             // Let Ada say goodbye
             openaiWs!.send(JSON.stringify({
@@ -1259,6 +1281,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
 
         // GREETING PROTECTION: ignore early line noise so Ada doesn't get cut off
         if (Date.now() < sessionState.greetingProtectionUntil) {
+          return;
+        }
+
+        // FINAL SPEECH PROTECTION: absolutely no interruption during Ada's closing message
+        if (Date.now() < sessionState.finalSpeechUntil) {
           return;
         }
 
