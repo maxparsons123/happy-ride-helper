@@ -483,11 +483,25 @@ async function sendDispatchWebhook(
       return { success: false, error: `Webhook returned ${response.status}` };
     }
 
-    const data = await response.json();
+    // Many dispatch endpoints respond with plain text (e.g. "OK") or no body.
+    // In paired mode we mainly rely on the async callback, so we treat any 2xx as success.
+    let data: any = null;
+    try {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        data = text ? { text } : null;
+      }
+    } catch (e) {
+      console.log(`[${sessionState.callId}] ⚠️ Dispatch webhook response not JSON (ignored):`, e);
+    }
+
     return {
       success: true,
-      fare: data.fare || data.estimated_fare,
-      eta: data.eta || data.estimated_eta
+      fare: data?.fare || data?.estimated_fare,
+      eta: data?.eta || data?.estimated_eta
     };
   } catch (e) {
     console.error(`[${sessionState.callId}] Dispatch webhook error:`, e);
