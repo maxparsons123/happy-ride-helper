@@ -586,76 +586,75 @@ class TaxiBridgeV7:
         """Read AudioSocket frames from Asterisk and forward to AI."""
         try:
             while self.running and self.state.ws_connected:
-                # 🔥 FIXED: Early exit check before blocking read
+                # Early exit check before blocking read
                 if not self.running:
                     break
-                    
+
                 try:
-                header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
-                m_type = header[0]
-                m_len = struct.unpack(">H", header[1:3])[0]
-                payload = await self.reader.readexactly(m_len)
+                    header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
+                    m_type = header[0]
+                    m_len = struct.unpack(">H", header[1:3])[0]
+                    payload = await self.reader.readexactly(m_len)
 
-                if m_type == MSG_UUID:
-                    raw_hex = payload.hex()
-                    if len(raw_hex) >= 12:
-                        self.state.phone = raw_hex[-12:]
-                    logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
+                    if m_type == MSG_UUID:
+                        raw_hex = payload.hex()
+                        if len(raw_hex) >= 12:
+                            self.state.phone = raw_hex[-12:]
+                        logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
 
-                    # Send phone update
-                    if self.ws and self.state.ws_connected:
-                        await self.ws.send(json.dumps({
-                            "type": "update_phone",
-                            "call_id": self.state.call_id,
-                            "phone": self.state.phone,
-                            "user_phone": self.state.phone,
-                        }))
-                        logger.info("[%s] 📱 Phone update sent", self.state.call_id)
+                        # Send phone update
+                        if self.ws and self.state.ws_connected:
+                            await self.ws.send(json.dumps({
+                                "type": "update_phone",
+                                "call_id": self.state.call_id,
+                                "phone": self.state.phone,
+                                "user_phone": self.state.phone,
+                            }))
+                            logger.info("[%s] 📱 Phone update sent", self.state.call_id)
 
-                elif m_type == MSG_AUDIO:
-                    if m_len != self.state.ast_frame_bytes:
-                        await self._detect_format(m_len)
+                    elif m_type == MSG_AUDIO:
+                        if m_len != self.state.ast_frame_bytes:
+                            await self._detect_format(m_len)
 
-                    # Decode and process audio
-                    linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
-                    cleaned, self.state.last_gain = apply_noise_reduction(
-                        linear, self.state.last_gain
-                    )
+                        # Decode and process audio
+                        linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
+                        cleaned, self.state.last_gain = apply_noise_reduction(
+                            linear, self.state.last_gain
+                        )
 
-                    # Prepare for sending to AI
-                    if SEND_NATIVE_ULAW and self.state.ast_codec == "ulaw":
-                        audio_to_send = lin2ulaw(cleaned)
-                    else:
-                        # Resample from Asterisk rate to AI rate (24kHz)
-                        audio_to_send = resample_audio(cleaned, self.state.ast_rate, AI_RATE)
+                        # Prepare for sending to AI
+                        if SEND_NATIVE_ULAW and self.state.ast_codec == "ulaw":
+                            audio_to_send = lin2ulaw(cleaned)
+                        else:
+                            # Resample from Asterisk rate to AI rate (24kHz)
+                            audio_to_send = resample_audio(cleaned, self.state.ast_rate, AI_RATE)
 
-                    # Send to AI
-                    if self.state.ws_connected and self.ws:
-                        try:
-                            await self.ws.send(audio_to_send)
-                            self.state.binary_audio_count += 1
-                            self.state.last_ws_activity = time.time()
-                        except Exception:
-                            self.pending_audio_buffer.append(audio_to_send)
-                            raise
+                        # Send to AI
+                        if self.state.ws_connected and self.ws:
+                            try:
+                                await self.ws.send(audio_to_send)
+                                self.state.binary_audio_count += 1
+                                self.state.last_ws_activity = time.time()
+                            except Exception:
+                                self.pending_audio_buffer.append(audio_to_send)
+                                raise
 
-                elif m_type == MSG_HANGUP:
-                    logger.info("[%s] 📴 Hangup from Asterisk", self.state.call_id)
-                    await self.stop_call("Asterisk hangup")
+                    elif m_type == MSG_HANGUP:
+                        logger.info("[%s] 📴 Hangup from Asterisk", self.state.call_id)
+                        await self.stop_call("Asterisk hangup")
+                        return
+
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] ⏱️ Asterisk timeout", self.state.call_id)
+                    await self.stop_call("Asterisk timeout")
                     return
-
-            except asyncio.TimeoutError:
-                logger.warning("[%s] ⏱️ Asterisk timeout", self.state.call_id)
-                await self.stop_call("Asterisk timeout")
-                return
-            except asyncio.IncompleteReadError:
-                logger.info("[%s] 📴 Asterisk closed", self.state.call_id)
-                await self.stop_call("Asterisk closed")
-                return
+                except asyncio.IncompleteReadError:
+                    logger.info("[%s] 📴 Asterisk closed", self.state.call_id)
+                    await self.stop_call("Asterisk closed")
+                    return
                 except (ConnectionClosed, WebSocketException):
                     raise
                 except asyncio.CancelledError:
-                    # 🔥 FIXED: Handle task cancellation gracefully
                     logger.debug("[%s] Asterisk->AI task cancelled", self.state.call_id)
                     return
                 except Exception as e:
