@@ -1344,6 +1344,40 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 pickup_time: sessionState.booking.pickupTime
               });
               console.log(`[${callId}] ✅ CONFIRMED webhook sent successfully`);
+              
+              // POST confirmation to callback_url if provided (tells dispatch to book the driver)
+              // This matches taxi-realtime-simple behavior
+              if (sessionState.pendingConfirmationCallback) {
+                try {
+                  console.log(`[${callId}] 📡 POSTing confirmation to callback_url: ${sessionState.pendingConfirmationCallback}`);
+                  const confirmPayload = {
+                    call_id: callId,
+                    job_id: sessionState.dispatchJobId || null,
+                    action: "confirmed",
+                    response: "confirmed",  // C# bridge compatibility
+                    pickup: sessionState.booking.pickup,
+                    destination: sessionState.booking.destination,
+                    fare: sessionState.pendingFare,
+                    eta: sessionState.pendingEta,
+                    pickup_time: sessionState.booking.pickupTime || "ASAP",
+                    passengers: sessionState.booking.passengers || 1,
+                    customer_name: null,  // Not tracked in paired mode
+                    caller_phone: sessionState.callerPhone,
+                    booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
+                    timestamp: new Date().toISOString()
+                  };
+                  
+                  const confirmResp = await fetch(sessionState.pendingConfirmationCallback, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(confirmPayload)
+                  });
+                  
+                  console.log(`[${callId}] 📬 Callback response: ${confirmResp.status}`);
+                } catch (callbackErr) {
+                  console.error(`[${callId}] ⚠️ Callback POST failed:`, callbackErr);
+                }
+              }
 
               sessionState.bookingConfirmed = true;
               sessionState.awaitingConfirmation = false;
