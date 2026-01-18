@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-"""
-Taxi AI Asterisk Bridge v7.1 - MEMORY LEAK FIXES
-
-Key features:
-1. Direct connection to taxi-realtime-simple (no redirect function hop).
-2. Sends init IMMEDIATELY on connect (before phone number arrives).
-3. Phone number sent later via update_phone once UUID arrives.
-4. Native 8kHz µ-law send-path for faster, smaller audio frames.
-5. Smoother noise-gate + normalization tuned for soft consonants.
-6. Improved error handling and connection resilience.
-7. GCD-based resampling for precise audio conversion.
-
-Memory leak fixes in v7.1:
-- Bounded audio_queue (maxlen=200) to prevent unbounded growth
-- Early exit checks in all async loops
-- Clear ws reference after close to break circular references
-- Proper CancelledError handling in async tasks
-- Await task cancellation to prevent dangling tasks
-"""
+# Taxi AI Asterisk Bridge v7.1 - MEMORY LEAK FIXES
+#
+# Key features:
+# 1) Direct connection to taxi-realtime-simple (no redirect function hop)
+# 2) Sends init immediately on connect (before phone number arrives)
+# 3) Phone number sent later via update_phone once UUID arrives
+# 4) Native 8kHz µ-law send-path for faster, smaller audio frames
+# 5) Smoother noise-gate + normalization tuned for soft consonants
+# 6) Improved error handling and connection resilience
+# 7) GCD-based resampling for precise audio conversion
+#
+# Memory leak fixes in v7.1:
+# - Bounded audio_queue (maxlen=200) to prevent unbounded growth
+# - Early exit checks in all async loops
+# - Clear ws reference after close to break circular references
+# - Proper CancelledError handling in async tasks
+# - Await task cancellation to prevent dangling tasks
 
 import asyncio
 import base64
