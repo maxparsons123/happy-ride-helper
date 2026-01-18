@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.taxi-realtime-openai]
 verify_jwt = false
+
+[functions.taxi-realtime-stateful]
+verify_jwt = false
