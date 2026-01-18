@@ -139,11 +139,19 @@ Only after the checklist is 100% complete, say:
 "Alright, let me quickly summarize your booking. You'd like to be picked up at [pickup address], and travel to [destination address]. There will be [number] of passengers, and you'd like to be picked up [time]. Is that correct?"
 
 # PHASE 4: PRICING (State Lock)
-After 'Yes' to summary, say: "Great, one moment please while I check the trip price and estimated arrival time."
+After 'Yes' to summary, say EXACTLY: "Great, one moment please while I check the trip price."
 → CALL book_taxi(action='request_quote')
+→ Then STOP TALKING and WAIT SILENTLY. Do NOT speak again until you receive a [DISPATCH QUOTE RECEIVED] message.
 
-Once tool returns data, say ONLY:
-"The trip fare will be [price], and the estimated arrival time is [ETA]. Would you like me to confirm this booking for you?"
+🚨 CRITICAL PRICING RULE:
+- You do NOT know any prices. You CANNOT calculate fares.
+- You MUST wait for the dispatch system to tell you the price.
+- If you haven't received a [DISPATCH QUOTE RECEIVED] message, you DO NOT have a price.
+- NEVER say "the fare will be £X" unless you received that exact number from dispatch.
+- If asked about price before dispatch responds, say "I'm just checking that for you now."
+
+Once you receive [DISPATCH QUOTE RECEIVED] with the price, say ONLY:
+"The trip fare will be [price], and the estimated arrival time is [ETA]. Would you like me to confirm this booking?"
 🚫 RULE: Do NOT repeat addresses here. Focus only on Price and ETA.
 
 # PHASE 5: DISPATCH & CLOSE
@@ -330,6 +338,33 @@ function isPhantomHallucination(text: string): boolean {
   // Allow common accented characters but filter pure non-Latin
   const nonLatinRatio = (text.match(/[^\x00-\x7F\u00C0-\u017F]/g) || []).length / text.length;
   if (nonLatinRatio > 0.5 && text.length > 3) return true;
+  return false;
+}
+
+// Detect if Ada is hallucinating a price without having received one from dispatch
+function isPriceHallucination(text: string, hasPendingFare: boolean): boolean {
+  if (hasPendingFare) return false; // We have a real fare, so it's not hallucination
+  
+  const lower = text.toLowerCase();
+  // Check for price patterns (£X, X pounds, fare of, cost of, etc.)
+  const pricePatterns = [
+    /£\d+/,
+    /\d+\s*pounds?/,
+    /\d+\s*p\b/,
+    /fare\s+(is|will be|of)\s*£?\d+/,
+    /cost\s+(is|will be|of)\s*£?\d+/,
+    /price\s+(is|will be|of)\s*£?\d+/,
+    /that('s|ll be)\s*£?\d+/,
+    /around\s*£?\d+/,
+    /approximately\s*£?\d+/,
+    /about\s*£?\d+/,
+  ];
+  
+  for (const pattern of pricePatterns) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -897,12 +932,33 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "response.audio_transcript.delta":
-          // Track what Ada is saying (backup signal)
+          // Track what Ada is saying and check for price hallucination
           if (data.delta) {
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
             }
             sessionState.openAiResponseActive = true;
+            
+            // PRICE HALLUCINATION GUARD: If Ada mentions a price but we haven't received one from dispatch, cancel!
+            if (isPriceHallucination(data.delta, !!sessionState.pendingFare)) {
+              console.log(`[${callId}] 🚫 PRICE HALLUCINATION DETECTED: "${data.delta}" - cancelling response`);
+              openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs!.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // Inject a correction
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: "[SYSTEM]: You do NOT know the price yet. Say 'I'm just checking that for you now' and wait for dispatch." }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({
+                type: "response.create",
+                response: { modalities: ["audio", "text"], instructions: "Say: 'I'm just checking that for you now.'" }
+              }));
+            }
           }
           break;
 
