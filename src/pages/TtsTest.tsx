@@ -1,68 +1,91 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
-import { Volume2, Square, Play, Copy, Check } from "lucide-react";
+import { Volume2, Square, Play, Copy, Check, Loader2 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
+import { toast } from "sonner";
+
+// OpenAI TTS voices (same as used in production)
+const VOICES = [
+  { id: "shimmer", name: "Shimmer", description: "Warm, friendly female" },
+  { id: "alloy", name: "Alloy", description: "Neutral, balanced" },
+  { id: "echo", name: "Echo", description: "Warm male" },
+  { id: "fable", name: "Fable", description: "British, expressive" },
+  { id: "onyx", name: "Onyx", description: "Deep, authoritative male" },
+  { id: "nova", name: "Nova", description: "Friendly, upbeat female" },
+];
 
 export default function TtsTest() {
   const [text, setText] = useState("Hello, your taxi will arrive in 5 minutes at the front entrance.");
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedVoice, setSelectedVoice] = useState<string>("");
-  const [rate, setRate] = useState(1);
-  const [pitch, setPitch] = useState(1);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState("shimmer");
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null);
 
-  // Load available voices
-  useEffect(() => {
-    const loadVoices = () => {
-      const availableVoices = speechSynthesis.getVoices();
-      // Filter to English voices and sort by name
-      const englishVoices = availableVoices
-        .filter(v => v.lang.startsWith("en"))
-        .sort((a, b) => a.name.localeCompare(b.name));
-      setVoices(englishVoices.length > 0 ? englishVoices : availableVoices);
-      
-      // Select first voice if none selected
-      if (!selectedVoice && availableVoices.length > 0) {
-        const defaultVoice = englishVoices.find(v => v.default) || englishVoices[0] || availableVoices[0];
-        setSelectedVoice(defaultVoice?.name || "");
-      }
-    };
-
-    loadVoices();
-    speechSynthesis.onvoiceschanged = loadVoices;
-
-    return () => {
-      speechSynthesis.cancel();
-    };
-  }, []);
-
-  const speak = () => {
+  const playTts = async () => {
     if (!text.trim()) return;
     
-    speechSynthesis.cancel();
+    // Stop any current audio
+    if (audioElement) {
+      audioElement.pause();
+      audioElement.currentTime = 0;
+    }
     
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = voices.find(v => v.name === selectedVoice);
-    if (voice) utterance.voice = voice;
-    utterance.rate = rate;
-    utterance.pitch = pitch;
+    setIsLoading(true);
     
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-    
-    speechSynthesis.speak(utterance);
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/tts-preview`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+            "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ text, voice: selectedVoice }),
+        }
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "TTS request failed");
+      }
+
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      
+      audio.onplay = () => setIsPlaying(true);
+      audio.onended = () => {
+        setIsPlaying(false);
+        URL.revokeObjectURL(audioUrl);
+      };
+      audio.onerror = () => {
+        setIsPlaying(false);
+        toast.error("Failed to play audio");
+      };
+      
+      setAudioElement(audio);
+      await audio.play();
+    } catch (error) {
+      console.error("TTS error:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to generate speech");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const stop = () => {
-    speechSynthesis.cancel();
-    setIsSpeaking(false);
+    if (audioElement) {
+      audioElement.pause();
+      audioElement.currentTime = 0;
+      setIsPlaying(false);
+    }
   };
 
   const copyApiCall = () => {
@@ -86,7 +109,7 @@ export default function TtsTest() {
             <h1 className="text-xl font-semibold text-foreground">Ada Voice</h1>
             <nav className="flex gap-4">
               <NavLink to="/">Chat</NavLink>
-              <NavLink to="/voice">Voice</NavLink>
+              <NavLink to="/voice-test">Voice</NavLink>
               <NavLink to="/live">Live Calls</NavLink>
               <NavLink to="/tts-test">TTS Test</NavLink>
               <NavLink to="/agents">Agents</NavLink>
@@ -103,7 +126,7 @@ export default function TtsTest() {
               TTS Preview
             </CardTitle>
             <CardDescription>
-              Type text and preview how it sounds. Uses browser speech synthesis for instant preview.
+              Preview text with OpenAI voices (same as production). Test before sending to live calls.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -127,50 +150,33 @@ export default function TtsTest() {
                   <SelectValue placeholder="Select a voice" />
                 </SelectTrigger>
                 <SelectContent>
-                  {voices.map((voice) => (
-                    <SelectItem key={voice.name} value={voice.name}>
-                      {voice.name} ({voice.lang})
+                  {VOICES.map((voice) => (
+                    <SelectItem key={voice.id} value={voice.id}>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{voice.name}</span>
+                        <span className="text-muted-foreground text-sm">— {voice.description}</span>
+                      </div>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
 
-            {/* Rate & Pitch */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Speed: {rate.toFixed(1)}x</Label>
-                <Slider
-                  value={[rate]}
-                  onValueChange={([v]) => setRate(v)}
-                  min={0.5}
-                  max={2}
-                  step={0.1}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Pitch: {pitch.toFixed(1)}</Label>
-                <Slider
-                  value={[pitch]}
-                  onValueChange={([v]) => setPitch(v)}
-                  min={0.5}
-                  max={2}
-                  step={0.1}
-                />
-              </div>
-            </div>
-
             {/* Controls */}
             <div className="flex gap-3">
-              {isSpeaking ? (
+              {isPlaying ? (
                 <Button onClick={stop} variant="destructive" className="flex-1">
                   <Square className="h-4 w-4 mr-2" />
                   Stop
                 </Button>
               ) : (
-                <Button onClick={speak} className="flex-1" disabled={!text.trim()}>
-                  <Play className="h-4 w-4 mr-2" />
-                  Play
+                <Button onClick={playTts} className="flex-1" disabled={!text.trim() || isLoading}>
+                  {isLoading ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Play className="h-4 w-4 mr-2" />
+                  )}
+                  {isLoading ? "Generating..." : "Play"}
                 </Button>
               )}
               <Button onClick={copyApiCall} variant="outline">
