@@ -197,6 +197,111 @@ function detectLanguageFromPhone(phone: string | null): string | null {
 // Normalize to digits-only for DB lookups (callers/bookings use digits-only phone_number)
 const normalizePhone = (phone: string | null | undefined) => String(phone || "").replace(/\D/g, "");
 
+// --- Pickup Time Normalization ---
+// Converts natural language time expressions to YYYY-MM-DD HH:MM format using LLM
+async function normalizePickupTime(rawTime: string | null | undefined): Promise<string> {
+  // Handle ASAP cases immediately
+  if (!rawTime || rawTime.toLowerCase() === "now" || rawTime.toLowerCase() === "asap" || rawTime.trim() === "") {
+    return "ASAP";
+  }
+  
+  // Get current London time for reference
+  const now = new Date();
+  const londonFormatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+  const parts = londonFormatter.formatToParts(now);
+  const londonDate = `${parts.find(p => p.type === "year")?.value}-${parts.find(p => p.type === "month")?.value}-${parts.find(p => p.type === "day")?.value}`;
+  const londonTime = `${parts.find(p => p.type === "hour")?.value}:${parts.find(p => p.type === "minute")?.value}`;
+  const referenceDateTime = `${londonDate} ${londonTime}`;
+  
+  // Calculate current day of week for context
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const londonNow = new Date(now.toLocaleString("en-US", { timeZone: "Europe/London" }));
+  const currentDayName = dayNames[londonNow.getDay()];
+  
+  const systemPrompt = `You are a Temporal Normalization Specialist. Transform natural language time expressions into strictly formatted 24-hour timestamps.
+
+CONTEXT:
+- Reference datetime: ${referenceDateTime}
+- Current day: ${currentDayName}
+- Location: London/UK
+- Timezone: GMT/BST (Europe/London)
+
+OUTPUT FORMAT: YYYY-MM-DD HH:MM
+
+RULES:
+1. If calculated time is earlier than ${referenceDateTime}, increment the date (e.g., to tomorrow)
+2. Map 'now', 'asap', or empty values to 'ASAP'
+3. Return ONLY the formatted time string or 'ASAP'. No prose. No explanations.
+
+NORMALIZATION LOGIC:
+- "tonight" → today 21:00
+- "evening" → 19:00
+- "afternoon" → 15:00  
+- "morning" → 09:00
+- "tomorrow" → +24 hours from reference
+- "in X minutes" → reference + X minutes
+- "in X hours" → reference + X hours
+- "at Xam/pm" → convert to 24hr format
+- Weekday names → nearest upcoming instance (if "next Monday", use following week)
+
+EXAMPLES:
+- "in 15 minutes" with ref 14:48 → "${londonDate} 15:03"
+- "at 10am tomorrow" → next day 10:00
+- "monday evening" → nearest Monday 19:00
+- "1600 hours tomorrow" → next day 16:00`;
+
+  try {
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    if (!LOVABLE_API_KEY) {
+      console.warn("⚠️ LOVABLE_API_KEY not set - returning raw time");
+      return rawTime;
+    }
+    
+    const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${LOVABLE_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash-lite",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: rawTime }
+        ],
+        temperature: 0,
+        max_tokens: 50
+      })
+    });
+    
+    if (!response.ok) {
+      console.error(`Time normalization API error: ${response.status}`);
+      return rawTime;
+    }
+    
+    const data = await response.json();
+    const normalizedTime = data.choices?.[0]?.message?.content?.trim();
+    
+    if (normalizedTime) {
+      console.log(`🕐 Time normalized: "${rawTime}" → "${normalizedTime}"`);
+      return normalizedTime;
+    }
+    
+    return rawTime;
+  } catch (err) {
+    console.error("Time normalization failed:", err);
+    return rawTime;
+  }
+}
+
 // --- System Prompt ---
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -4521,6 +4626,11 @@ Do NOT say 'booked' until the tool returns success.]`
                 formattedPhone = formattedPhone.slice(1);
               }
               
+              // Normalize pickup time to YYYY-MM-DD HH:MM format
+              const rawPickupTime = sessionState.booking.pickup_time || args.pickup_time || "now";
+              const normalizedPickupTime = await normalizePickupTime(rawPickupTime);
+              console.log(`[${sessionState.callId}] 🕐 Pickup time: raw="${rawPickupTime}" → normalized="${normalizedPickupTime}"`);
+              
               const webhookPayload = {
                 job_id: jobId,
                 call_id: sessionState.callId,
@@ -4545,7 +4655,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 bags: finalBags,
                 vehicle_type: finalVehicleType,
                 vehicle_request: args.vehicle_request || null,
-                pickup_time: args.pickup_time || "now",
+                pickup_time: normalizedPickupTime,
                 special_requests: args.special_requests || null,
                 timestamp: new Date().toISOString()
               };
