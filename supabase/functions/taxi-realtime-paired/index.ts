@@ -251,6 +251,9 @@ interface SessionState {
   greetingProtectionUntil: number;
   // Summary protection: block interruptions while Ada is recapping/quoting
   summaryProtectionUntil: number;
+  // Quote request de-dupe
+  quoteInFlight: boolean;
+  lastQuoteRequestedAt: number;
   // Dispatch callback state
   pendingConfirmationCallback: string | null;
   pendingFare: string | null;
@@ -352,6 +355,8 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     lastAdaFinishedSpeakingAt: 0,
     greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
     summaryProtectionUntil: 0,
+    quoteInFlight: false,
+    lastQuoteRequestedAt: 0,
     // Dispatch callback state
     pendingConfirmationCallback: null,
     pendingFare: null,
@@ -627,6 +632,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     }));
     
     // Track that we're waiting for confirmation
+    sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
     sessionState.lastQuestionAsked = "confirmation";
   });
@@ -956,19 +962,84 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             openaiWs!.send(JSON.stringify({ type: "response.create" }));
             
           } else if (toolName === "book_taxi") {
-            const action = toolArgs.action as string;
-            
-            // Send webhook to dispatch system (async - they respond via callback)
-            await sendDispatchWebhook(sessionState, action, {
-              pickup: toolArgs.pickup || sessionState.booking.pickup,
-              destination: toolArgs.destination || sessionState.booking.destination,
-              passengers: toolArgs.passengers || sessionState.booking.passengers,
-              pickup_time: toolArgs.pickup_time || sessionState.booking.pickupTime
-            });
-            
-            // For request_quote: tell Ada to WAIT for dispatch callback - do NOT make up a price!
-            // The real price will arrive via dispatch_ask_confirm broadcast channel.
+            const action = String(toolArgs.action || "");
+
+            const resolvedPickup = toolArgs.pickup ? String(toolArgs.pickup) : sessionState.booking.pickup;
+            const resolvedDestination = toolArgs.destination ? String(toolArgs.destination) : sessionState.booking.destination;
+            const resolvedPassengers = (toolArgs.passengers !== undefined)
+              ? Number(toolArgs.passengers)
+              : sessionState.booking.passengers;
+            const resolvedPickupTime = toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime;
+
+            // Prevent sending incomplete payloads (these cause duplicate/garbage quotes downstream)
+            const missing: string[] = [];
+            if (!resolvedPickup) missing.push("pickup");
+            if (!resolvedDestination) missing.push("destination");
+            if (resolvedPassengers === null || Number.isNaN(resolvedPassengers)) missing.push("passengers");
+
+            // De-dupe: once quote requested/in-flight, don't re-send
+            const QUOTE_DEDUPE_MS = 15000;
+            const recentlyRequestedQuote = sessionState.lastQuoteRequestedAt > 0 && (Date.now() - sessionState.lastQuoteRequestedAt) < QUOTE_DEDUPE_MS;
+
             if (action === "request_quote") {
+              if (sessionState.bookingConfirmed) {
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({ success: false, status: "ignored", reason: "already_confirmed" })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+
+              if (sessionState.awaitingConfirmation || sessionState.quoteInFlight || recentlyRequestedQuote) {
+                console.log(`[${callId}] ⚠️ Ignoring duplicate request_quote (awaitingConfirmation=${sessionState.awaitingConfirmation}, quoteInFlight=${sessionState.quoteInFlight}, recently=${recentlyRequestedQuote})`);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({ success: true, status: "pending", message: "Quote already requested. Please wait." })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+
+              if (missing.length > 0) {
+                console.log(`[${callId}] ⚠️ Blocking request_quote - missing fields: ${missing.join(", ")}`);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      status: "missing_fields",
+                      missing,
+                      message: `Cannot request a quote yet. Missing: ${missing.join(", ")}. Ask the user for the missing info (one question only).`
+                    })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+
+              // Send webhook to dispatch system (async - they respond via callback)
+              sessionState.quoteInFlight = true;
+              sessionState.lastQuoteRequestedAt = Date.now();
+
+              await sendDispatchWebhook(sessionState, action, {
+                pickup: resolvedPickup,
+                destination: resolvedDestination,
+                passengers: resolvedPassengers,
+                pickup_time: resolvedPickupTime
+              });
+
+              // Tell Ada to WAIT for dispatch callback - do NOT make up a price!
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -977,14 +1048,38 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   output: JSON.stringify({
                     success: true,
                     status: "pending",
-                    message: "Quote request sent. WAIT SILENTLY for the fare and ETA - they will be provided to you shortly. Do NOT guess or make up any prices or times. Say 'One moment please while I get your quote' and then STOP SPEAKING until you receive the quote."
+                    message: "Quote request sent. Say 'One moment please while I get your quote' and then WAIT. Do NOT guess or invent any prices or times."
                   })
                 }
               }));
-              // Do NOT trigger response.create here - let Ada say "one moment" and wait
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              
+
             } else if (action === "confirmed") {
+              // Only allow confirm after we asked fare confirmation
+              if (!sessionState.awaitingConfirmation) {
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      status: "not_ready",
+                      message: "Do not confirm booking yet. You must wait for the quote and ask the customer to confirm."
+                    })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+
+              await sendDispatchWebhook(sessionState, action, {
+                pickup: resolvedPickup,
+                destination: resolvedDestination,
+                passengers: resolvedPassengers,
+                pickup_time: resolvedPickupTime
+              });
+
               sessionState.bookingConfirmed = true;
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -995,18 +1090,19 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 }
               }));
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
+
             } else {
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
                   type: "function_call_output",
                   call_id: data.call_id,
-                  output: JSON.stringify({ success: true })
+                  output: JSON.stringify({ success: false, status: "unknown_action" })
                 }
               }));
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
             }
-            
+
             await updateLiveCall(sessionState);
             
           } else if (toolName === "end_call") {
