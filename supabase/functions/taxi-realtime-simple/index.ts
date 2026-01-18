@@ -4694,7 +4694,8 @@ Do NOT say 'booked' until the tool returns success.]`
               }
               
               // Normalize pickup time to YYYY-MM-DD HH:MM format
-              const rawPickupTime = sessionState.booking.pickup_time || args.pickup_time || "now";
+              // Use finalPickupTime which includes Last-Word-Wins transcript extraction
+              const rawPickupTime = finalPickupTime || sessionState.booking.pickup_time || args.pickup_time || "now";
               const normalizedPickupTime = await normalizePickupTime(rawPickupTime);
               console.log(`[${sessionState.callId}] 🕐 Pickup time: raw="${rawPickupTime}" → normalized="${normalizedPickupTime}"`);
               
