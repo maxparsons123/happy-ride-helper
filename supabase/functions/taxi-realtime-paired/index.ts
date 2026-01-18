@@ -247,6 +247,12 @@ interface SessionState {
   echoGuardUntil: number;
   // Track when Ada last finished speaking (for echo detection)
   lastAdaFinishedSpeakingAt: number;
+  // Dispatch callback state
+  pendingConfirmationCallback: string | null;
+  pendingFare: string | null;
+  pendingEta: string | null;
+  awaitingConfirmation: boolean;
+  bookingRef: string | null;
 }
 
 // Echo guard duration in ms - blocks inbound audio briefly after Ada speaks
@@ -332,7 +338,13 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     bookingConfirmed: false,
     openAiResponseActive: false,
     echoGuardUntil: 0,
-    lastAdaFinishedSpeakingAt: 0
+    lastAdaFinishedSpeakingAt: 0,
+    // Dispatch callback state
+    pendingConfirmationCallback: null,
+    pendingFare: null,
+    pendingEta: null,
+    awaitingConfirmation: false,
+    bookingRef: null
   };
 }
 
@@ -490,6 +502,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   const sessionState = createSessionState(callId, callerPhone);
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
+  let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
@@ -501,6 +514,15 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     cleanedUp = true;
     
     console.log(`[${callId}] 🧹 Cleaning up connection`);
+    
+    // Unsubscribe from dispatch channel
+    if (dispatchChannel) {
+      try {
+        await dispatchChannel.unsubscribe();
+      } catch (e) {
+        console.error(`[${callId}] Error unsubscribing from dispatch channel:`, e);
+      }
+    }
     
     // Update final call state
     try {
@@ -519,6 +541,151 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       openaiWs.close();
     }
   };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Subscribe to dispatch callback channel (for fare/ETA responses from backend)
+  // ═══════════════════════════════════════════════════════════════════════════
+  dispatchChannel = supabase.channel(`dispatch_${callId}`);
+  
+  dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
+    const { message, fare, eta, eta_minutes, callback_url } = payload.payload || {};
+    console.log(`[${callId}] 📥 DISPATCH ask_confirm: fare=${fare}, eta=${eta_minutes || eta}, message="${message}"`);
+    
+    if (!message || !openaiWs || openaiWs.readyState !== WebSocket.OPEN || cleanedUp) {
+      console.log(`[${callId}] ⚠️ Cannot process dispatch ask_confirm - OpenAI not connected or cleaned up`);
+      return;
+    }
+    
+    // Store the callback URL for when customer confirms
+    sessionState.pendingConfirmationCallback = callback_url;
+    sessionState.pendingFare = fare;
+    sessionState.pendingEta = eta_minutes || eta;
+    
+    // Cancel any active response before injecting dispatch message
+    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+    openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    
+    // Inject the fare/ETA message for Ada to speak
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer exactly: "${message}" Then wait for their yes/no confirmation. Do NOT make up any different prices or times.`
+        }]
+      }
+    }));
+    
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `The dispatch system has provided a quote. Say this EXACTLY to the customer: "${message}" Then ask if they want to proceed. Wait for yes/no.`
+      }
+    }));
+    
+    // Track that we're waiting for confirmation
+    sessionState.awaitingConfirmation = true;
+    sessionState.lastQuestionAsked = "confirmation";
+  });
+  
+  dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
+    const { message: sayMessage } = payload.payload || {};
+    console.log(`[${callId}] 📥 DISPATCH say: "${sayMessage}"`);
+    
+    if (!sayMessage || !openaiWs || openaiWs.readyState !== WebSocket.OPEN || cleanedUp) {
+      return;
+    }
+    
+    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+    openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `[DISPATCH UPDATE]: Tell the customer: "${sayMessage}"` }]
+      }
+    }));
+    
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `Say this to the customer: "${sayMessage}"`
+      }
+    }));
+  });
+  
+  dispatchChannel.on("broadcast", { event: "dispatch_confirm" }, async (payload: any) => {
+    const { message: confirmMessage, booking_ref } = payload.payload || {};
+    console.log(`[${callId}] 📥 DISPATCH confirm: ref=${booking_ref}, "${confirmMessage}"`);
+    
+    if (!confirmMessage || !openaiWs || openaiWs.readyState !== WebSocket.OPEN || cleanedUp) {
+      return;
+    }
+    
+    sessionState.bookingConfirmed = true;
+    sessionState.bookingRef = booking_ref;
+    
+    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+    openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `[BOOKING CONFIRMED]: Tell the customer: "${confirmMessage}" Then say goodbye and end the call.` }]
+      }
+    }));
+    
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `The booking is confirmed! Say this to the customer: "${confirmMessage}" Then say goodbye warmly.`
+      }
+    }));
+  });
+  
+  dispatchChannel.on("broadcast", { event: "dispatch_hangup" }, async (payload: any) => {
+    const { message: hangupMessage } = payload.payload || {};
+    console.log(`[${callId}] 📥 DISPATCH hangup: "${hangupMessage}"`);
+    
+    if (hangupMessage && openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
+      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+      
+      openaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `[DISPATCH HANGUP]: Say this and end: "${hangupMessage}"` }]
+        }
+      }));
+      
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: `Say this to end the call: "${hangupMessage}"`
+        }
+      }));
+    }
+    
+    // Schedule cleanup after giving time for goodbye
+    setTimeout(() => cleanup(), 5000);
+  });
+  
+  // Subscribe to the channel
+  dispatchChannel.subscribe((status) => {
+    console.log(`[${callId}] 📡 Dispatch channel status: ${status}`);
+  });
 
   // Connect to OpenAI Realtime
   // Note: Deno WebSocket requires headers as second argument array for protocols,
