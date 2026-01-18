@@ -276,9 +276,9 @@ class CallEndedException(Exception):
 class CallState:
     call_id: str
     phone: str = "Unknown"
-    ast_codec: str = "ulaw"
-    ast_rate: int = 8000  # Sample rate for current codec
-    ast_frame_bytes: int = 160  # 160 bytes = 20ms at 8k µ-law
+    ast_codec: str = "slin16"  # Default to slin16 (16kHz signed linear)
+    ast_rate: int = 16000  # Sample rate for current codec
+    ast_frame_bytes: int = 640  # 640 bytes = 20ms at 16kHz slin16
     
     # Processing state
     last_gain: float = 1.0
@@ -475,7 +475,7 @@ class TaxiBridgeV7:
                 logger.error("[%s] ❌ Initial connection failed", self.state.call_id)
                 return
 
-            # EAGER INIT: start AI immediately
+            # EAGER INIT: start AI immediately with audio format info
             eager_init = {
                 "type": "init",
                 "call_id": self.state.call_id,
@@ -483,10 +483,13 @@ class TaxiBridgeV7:
                 "user_phone": "unknown",
                 "addressTtsSplicing": True,
                 "eager_init": True,
+                "inbound_format": self.state.ast_codec,  # ulaw, slin, or slin16
+                "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
             }
             await self.ws.send(json.dumps(eager_init))
             self.state.init_sent = True
-            logger.info("[%s] 🚀 Sent eager init", self.state.call_id)
+            logger.info("[%s] 🚀 Sent eager init (format=%s @ %dHz)", 
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
 
             # Main processing loop
             while self.running:
