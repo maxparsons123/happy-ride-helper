@@ -276,9 +276,9 @@ class CallEndedException(Exception):
 class CallState:
     call_id: str
     phone: str = "Unknown"
-    ast_codec: str = "slin16"  # Default to slin16 (16kHz signed linear)
-    ast_rate: int = 16000  # Sample rate for current codec
-    ast_frame_bytes: int = 640  # 640 bytes = 20ms at 16kHz slin16
+    ast_codec: str = "slin"  # Default to slin (8kHz signed linear) - most common
+    ast_rate: int = 8000  # Sample rate for current codec
+    ast_frame_bytes: int = 320  # 320 bytes = 20ms at 8kHz slin
     
     # Processing state
     last_gain: float = 1.0
@@ -714,9 +714,10 @@ class TaxiBridgeV7:
         bytes_played = 0
         buffer = bytearray()
 
-        bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-
         while self.running:
+            # Calculate bytes_per_sec dynamically (format can change mid-call)
+            bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+            
             # Drain queue to buffer
             while self.audio_queue:
                 buffer.extend(self.audio_queue.popleft())
