@@ -1948,7 +1948,15 @@ serve(async (req) => {
           const isWithinRepetitionWindow = sessionState.lastSpokenConfirmationAt && 
             (Date.now() - sessionState.lastSpokenConfirmationAt < recentConfirmationWindow);
           
-          if (isWithinRepetitionWindow && sessionState.lastSpokenConfirmation && currentText.length > 20) {
+          // ✅ SKIP REPETITION DETECTION when Ada is giving the final summary (all fields complete)
+          // This prevents cancelling the legitimate booking summary after user provides last field (e.g. time)
+          const allFieldsComplete = sessionState.booking.pickup && 
+            sessionState.booking.destination && 
+            (sessionState.booking.passengers !== null && sessionState.booking.passengers > 0);
+          const isSummaryContext = /^so\s+(that'?s|thats)|let me confirm|to confirm|your booking/i.test(lowerText);
+          const isLegitSummary = allFieldsComplete && isSummaryContext;
+          
+          if (isWithinRepetitionWindow && sessionState.lastSpokenConfirmation && currentText.length > 20 && !isLegitSummary) {
             // Normalize for comparison - extract key address phrases
             const normalizeForComparison = (text: string) => 
               text.toLowerCase()
