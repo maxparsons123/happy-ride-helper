@@ -243,6 +243,77 @@ interface SessionState {
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
+  // Echo guard: block audio forwarding for a short window after Ada finishes speaking
+  echoGuardUntil: number;
+  // Track when Ada last finished speaking (for echo detection)
+  lastAdaFinishedSpeakingAt: number;
+}
+
+// Echo guard duration in ms - blocks inbound audio briefly after Ada speaks
+const ECHO_GUARD_MS = 250;
+
+// Barge-in RMS thresholds to distinguish real speech from echo/noise
+const BARGE_IN_RMS_MIN = 650;
+const BARGE_IN_RMS_MAX = 20000;
+
+// Whisper "phantom radio host" hallucinations - triggered by silence/static
+const PHANTOM_PHRASES = [
+  "thanks for tuning in",
+  "thank you for tuning in",
+  "i'm your host",
+  "im your host",
+  "find me on facebook",
+  "find me on twitter",
+  "follow me on",
+  "thank you for watching",
+  "thanks for watching",
+  "subtitles by",
+  "please like and subscribe",
+  "like and subscribe",
+  "don't forget to subscribe",
+  "hit that subscribe button",
+  "leave a comment",
+  "see you next time",
+  "until next time",
+  "this has been",
+  "you've been listening to",
+  "you have been listening to",
+  "brought to you by",
+  "sponsored by",
+  "music playing",
+  "silence",
+  "inaudible",
+  "foreign language",
+  "[music]",
+  "[applause]",
+  "[laughter]",
+  // Non-English phantom phrases
+  "ondertitels",
+  "amara.org",
+  "次回へ続く", // Japanese "to be continued"
+  "ご視聴ありがとうございました",
+];
+
+function isPhantomHallucination(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  if (lower.length < 2) return true;
+  for (const phrase of PHANTOM_PHRASES) {
+    if (lower.includes(phrase.toLowerCase())) return true;
+  }
+  // Detect non-Latin scripts that are unlikely to be real user input for UK taxi booking
+  // Allow common accented characters but filter pure non-Latin
+  const nonLatinRatio = (text.match(/[^\x00-\x7F\u00C0-\u017F]/g) || []).length / text.length;
+  if (nonLatinRatio > 0.5 && text.length > 3) return true;
+  return false;
+}
+
+function computeRms(pcm: Int16Array): number {
+  if (pcm.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    sum += pcm[i] * pcm[i];
+  }
+  return Math.sqrt(sum / pcm.length);
 }
 
 // Create initial session state
@@ -259,7 +330,9 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     lastQuestionAsked: "none",
     conversationHistory: [],
     bookingConfirmed: false,
-    openAiResponseActive: false
+    openAiResponseActive: false,
+    echoGuardUntil: 0,
+    lastAdaFinishedSpeakingAt: 0
   };
 }
 
@@ -490,7 +563,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
           break;
 
         case "response.audio_transcript.done":
-          // Ada finished speaking - record in history
+          // Ada finished speaking - record in history and set echo guard
           if (data.transcript) {
             sessionState.conversationHistory.push({
               role: "assistant",
@@ -518,6 +591,9 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
             await updateLiveCall(sessionState);
           }
           sessionState.openAiResponseActive = false;
+          // Set echo guard to block echo from speaker
+          sessionState.lastAdaFinishedSpeakingAt = Date.now();
+          sessionState.echoGuardUntil = Date.now() + ECHO_GUARD_MS;
           break;
 
         case "input_audio_buffer.speech_started":
@@ -528,6 +604,13 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
             const userText = data.transcript.trim();
+            
+            // Filter out phantom hallucinations from Whisper
+            if (isPhantomHallucination(userText)) {
+              console.log(`[${callId}] 👻 Filtered phantom hallucination: "${userText}"`);
+              break;
+            }
+            
             console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
             // Add to history with context annotation
@@ -686,6 +769,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           ? new Uint8Array(event.data)
           : event.data;
 
+        // ECHO GUARD: block audio briefly after Ada finishes speaking
+        if (Date.now() < sessionState.echoGuardUntil) {
+          return; // Drop this audio frame (likely echo)
+        }
+
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
           let pcmInput: Int16Array;
 
@@ -694,6 +782,15 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           } else {
             // slin/slin16: already PCM16
             pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
+          }
+
+          // RMS-based barge-in detection: only forward audio that sounds like real speech
+          // If Ada is speaking (openAiResponseActive), require higher RMS to be a real barge-in
+          if (sessionState.openAiResponseActive) {
+            const rms = computeRms(pcmInput);
+            if (rms < BARGE_IN_RMS_MIN || rms > BARGE_IN_RMS_MAX) {
+              return; // Not real speech, likely echo or noise
+            }
           }
 
           const pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
