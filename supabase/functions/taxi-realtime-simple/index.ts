@@ -1251,6 +1251,8 @@ interface SessionState {
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
+  // Timestamp when call started - used for greeting protection window
+  callStartedAt: number;
   // Allow exactly one final assistant response (the goodbye) after callEnded=true.
   // Without this, the response.created handler will immediately cancel the goodbye.
   finalGoodbyePending: boolean;
@@ -5599,6 +5601,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             if (inStartupEchoGuard || !state.openAiResponseActive) {
               return;
             }
+            
+            // GREETING PROTECTION: Don't allow barge-in during the first 3 seconds of the call
+            // This prevents phone line connection noise from cancelling the greeting
+            const callAgeMs = Date.now() - state.callStartedAt;
+            if (callAgeMs < 3000) {
+              // Drop audio silently during greeting protection window
+              return;
+            }
 
             let sumSq = 0;
             for (let i = 0; i < pcmInput.length; i++) {
@@ -5607,8 +5617,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             }
             const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
 
-            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
-            const isRealBargeIn = rms >= 650 && rms < 20000;
+            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <1000)
+            // Raised threshold from 650 to 1000 to reduce false barge-ins from phone line noise
+            const isRealBargeIn = rms >= 1000 && rms < 20000;
 
             if (isRealBargeIn) {
               console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
@@ -5745,6 +5756,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           speechStartTime: null,
           speechStopTime: null,
           callEnded: false,
+          callStartedAt: Date.now(),
           finalGoodbyePending: false,
           inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
           inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
@@ -5867,6 +5879,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              speechStartTime: null,
              speechStopTime: null,
              callEnded: false,
+             callStartedAt: Date.now(),
              finalGoodbyePending: false,
              inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
              inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
