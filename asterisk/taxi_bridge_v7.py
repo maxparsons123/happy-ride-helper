@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Taxi AI Asterisk Bridge v7.0 - OPTIMIZED FOR INSTANT GREETING
+Taxi AI Asterisk Bridge v7.1 - MEMORY LEAK FIXES
 
 Key features:
 1. Direct connection to taxi-realtime-simple (no redirect function hop).
@@ -11,11 +11,12 @@ Key features:
 6. Improved error handling and connection resilience.
 7. GCD-based resampling for precise audio conversion.
 
-Changes from v6:
-- Uses dataclass for cleaner state management
-- Improved exception handling with specific error types
-- Better reconnect delay calculation
-- Enhanced logging with consistent formatting
+Memory leak fixes in v7.1:
+- Bounded audio_queue (maxlen=200) to prevent unbounded growth
+- Early exit checks in all async loops
+- Clear ws reference after close to break circular references
+- Proper CancelledError handling in async tasks
+- Await task cancellation to prevent dangling tasks
 """
 
 import asyncio
@@ -305,7 +306,8 @@ class TaxiBridgeV7:
         self.running: bool = True
         
         self.state = CallState(call_id=f"ast-{int(time.time() * 1000)}")
-        self.audio_queue: Deque[bytes] = deque()
+        # 🔥 FIXED: Bounded queue to prevent memory leaks during disconnections
+        self.audio_queue: Deque[bytes] = deque(maxlen=200)
         self.pending_audio_buffer: Deque[bytes] = deque(maxlen=100)
 
     # -------------------------------------------------------------------------
@@ -455,11 +457,16 @@ class TaxiBridgeV7:
 
     async def heartbeat_loop(self) -> None:
         """Periodic heartbeat logging."""
-        while self.running:
-            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-            age = time.time() - self.state.last_ws_activity
-            status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
-            logger.info("[%s] 💓 %s (%.1fs)", self.state.call_id, status, age)
+        try:
+            while self.running:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                if not self.running:  # 🔥 FIXED: Early exit check after sleep
+                    break
+                age = time.time() - self.state.last_ws_activity
+                status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
+                logger.info("[%s] 💓 %s (%.1fs)", self.state.call_id, status, age)
+        except asyncio.CancelledError:
+            logger.debug("[%s] Heartbeat task cancelled", self.state.call_id)
 
     async def run(self) -> None:
         """Main bridge loop."""
@@ -535,22 +542,35 @@ class TaxiBridgeV7:
             logger.error("[%s] ❌ Error: %s", self.state.call_id, e)
         finally:
             self.running = False
-            playback_task.cancel()
-            heartbeat_task.cancel()
+            # 🔥 FIXED: Proper task cancellation - cancel then await
+            tasks_to_cancel = [playback_task, heartbeat_task]
+            for task in tasks_to_cancel:
+                if not task.done():
+                    task.cancel()
+            # Wait for cancellation to complete
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
             logger.info("[%s] 📊 Frames sent: %d", 
                        self.state.call_id, self.state.binary_audio_count)
             await self.cleanup()
 
     async def cleanup(self) -> None:
         """Clean up resources."""
+        # 🔥 FIXED: Clear queues to release memory
+        self.audio_queue.clear()
+        self.pending_audio_buffer.clear()
+        
         try:
             if self.ws:
                 await self.ws.close()
         except Exception:
             pass
+        # 🔥 FIXED: Clear reference to break circular refs
+        self.ws = None
+        
         try:
-            self.writer.close()
-            await self.writer.wait_closed()
+            if not self.writer.is_closing():
+                self.writer.close()
+                await self.writer.wait_closed()
         except Exception:
             pass
 
@@ -560,8 +580,13 @@ class TaxiBridgeV7:
 
     async def asterisk_to_ai(self) -> None:
         """Read AudioSocket frames from Asterisk and forward to AI."""
-        while self.running and self.state.ws_connected:
-            try:
+        try:
+            while self.running and self.state.ws_connected:
+                # 🔥 FIXED: Early exit check before blocking read
+                if not self.running:
+                    break
+                    
+                try:
                 header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
                 m_type = header[0]
                 m_len = struct.unpack(">H", header[1:3])[0]
@@ -623,12 +648,18 @@ class TaxiBridgeV7:
                 logger.info("[%s] 📴 Asterisk closed", self.state.call_id)
                 await self.stop_call("Asterisk closed")
                 return
-            except (ConnectionClosed, WebSocketException):
-                raise
-            except Exception as e:
-                logger.error("[%s] ❌ asterisk_to_ai error: %s", self.state.call_id, e)
-                await self.stop_call("asterisk_to_ai error")
-                return
+                except (ConnectionClosed, WebSocketException):
+                    raise
+                except asyncio.CancelledError:
+                    # 🔥 FIXED: Handle task cancellation gracefully
+                    logger.debug("[%s] Asterisk->AI task cancelled", self.state.call_id)
+                    return
+                except Exception as e:
+                    logger.error("[%s] ❌ asterisk_to_ai error: %s", self.state.call_id, e)
+                    await self.stop_call("asterisk_to_ai error")
+                    return
+        except asyncio.CancelledError:
+            logger.debug("[%s] Asterisk->AI task cancelled (outer)", self.state.call_id)
 
     # -------------------------------------------------------------------------
     # AI → QUEUE
@@ -639,6 +670,10 @@ class TaxiBridgeV7:
         audio_count = 0
         try:
             async for message in self.ws:
+                # 🔥 FIXED: Early exit check to prevent processing after stop
+                if not self.running:
+                    break
+                    
                 self.state.last_ws_activity = time.time()
 
                 # Binary audio (TTS from AI - resample to Asterisk rate)
@@ -699,6 +734,9 @@ class TaxiBridgeV7:
             raise
         except (ConnectionClosed, WebSocketException):
             raise
+        except asyncio.CancelledError:
+            # 🔥 FIXED: Handle task cancellation gracefully
+            logger.debug("[%s] AI->Queue task cancelled", self.state.call_id)
         except Exception as e:
             logger.error("[%s] ❌ ai_to_queue error: %s", self.state.call_id, e)
         finally:
@@ -714,40 +752,48 @@ class TaxiBridgeV7:
         bytes_played = 0
         buffer = bytearray()
 
-        while self.running:
-            # Calculate bytes_per_sec dynamically (format can change mid-call)
-            bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-            
-            # Drain queue to buffer
-            while self.audio_queue:
-                buffer.extend(self.audio_queue.popleft())
+        try:
+            while self.running:
+                # Calculate bytes_per_sec dynamically (format can change mid-call)
+                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                
+                # Drain queue to buffer
+                while self.audio_queue:
+                    buffer.extend(self.audio_queue.popleft())
 
-            # Pace output to real-time
-            expected_time = start_time + (bytes_played / max(bytes_per_sec, 1))
-            delay = expected_time - time.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
+                # Pace output to real-time
+                expected_time = start_time + (bytes_played / max(bytes_per_sec, 1))
+                delay = expected_time - time.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
-            # Get next frame
-            if len(buffer) >= self.state.ast_frame_bytes:
-                chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                del buffer[:self.state.ast_frame_bytes]
-            else:
-                chunk = self._silence()
+                # 🔥 FIXED: Early exit check after sleep
+                if not self.running:
+                    break
 
-            # Send to Asterisk
-            try:
-                self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
-                await self.writer.drain()
-                bytes_played += len(chunk)
-            except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                await self.stop_call("Asterisk disconnected")
-                return
-            except Exception as e:
-                logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                await self.stop_call("Write failed")
-                return
+                # Get next frame
+                if len(buffer) >= self.state.ast_frame_bytes:
+                    chunk = bytes(buffer[:self.state.ast_frame_bytes])
+                    del buffer[:self.state.ast_frame_bytes]
+                else:
+                    chunk = self._silence()
+
+                # Send to Asterisk
+                try:
+                    self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
+                    await self.writer.drain()
+                    bytes_played += len(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
+                    await self.stop_call("Asterisk disconnected")
+                    return
+                except Exception as e:
+                    logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
+                    await self.stop_call("Write failed")
+                    return
+        except asyncio.CancelledError:
+            # 🔥 FIXED: Handle task cancellation gracefully
+            logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
 
     def _silence(self) -> bytes:
         """Generate one frame of silence."""
@@ -767,7 +813,7 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.0 - instant greeting ready",
+        "🚀 Taxi Bridge v7.1 - memory leak fixes",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
     ]
