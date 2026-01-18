@@ -1585,7 +1585,8 @@ serve(async (req) => {
 
         // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
         // We'll trigger the correct response once extraction completes
-        if (sessionState.extractionInProgress) {
+        // EXCEPTION: Allow final goodbye response through even if extraction is running
+        if (sessionState.extractionInProgress && !sessionState.finalGoodbyePending) {
           console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - extraction in progress`);
           openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
           sessionState.discardCurrentResponseAudio = true;
