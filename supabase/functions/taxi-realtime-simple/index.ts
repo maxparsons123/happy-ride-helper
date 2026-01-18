@@ -1252,6 +1252,9 @@ interface SessionState {
   lastSpokenQuestion: string | null;
   lastSpokenQuestionAt: number | null;
 
+  // MULTI-QUESTION GUARD: prevents "... destination? ... passengers?" in one assistant turn
+  lastMultiQuestionFixAt: number | null;
+
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
     totalTranscripts: number;
@@ -1854,6 +1857,91 @@ serve(async (req) => {
           // If Ada just spoke a confirmation and is now saying something similar, cancel it
           const currentText = sessionState.transcripts[sessionState.assistantTranscriptIndex!]?.text || "";
           const lowerText = currentText.toLowerCase();
+
+          // --- MULTI-QUESTION GUARD: Prevent Ada from asking multiple questions in one response ---
+          // Example bad: "And what's your destination? How many people are travelling?"
+          // Example bad: "And what's your destination and how many people are travelling?"
+          const multiQuestionCooldownMs = 8000;
+          const isWithinMultiFixCooldown =
+            sessionState.lastMultiQuestionFixAt !== null &&
+            Date.now() - sessionState.lastMultiQuestionFixAt < multiQuestionCooldownMs;
+
+          if (!isWithinMultiFixCooldown && currentText.length > 25) {
+            const isSummaryLike = /summari[sz]e|summary|let me quickly summarize|alright, let me/i.test(lowerText);
+            const isPricingLike = /fare|estimated arrival|eta|would you like me to confirm/i.test(lowerText);
+
+            if (!isSummaryLike && !isPricingLike) {
+              const questionWordMatches =
+                lowerText.match(/\b(where|when|what|which|how many|how much)\b/g) || [];
+              const questionMarkCount = (currentText.match(/\?/g) || []).length;
+
+              if (questionMarkCount >= 2 || questionWordMatches.length >= 2) {
+                let firstQuestion = "";
+
+                if (currentText.includes("?")) {
+                  firstQuestion = currentText.split("?")[0].trim() + "?";
+                } else {
+                  // Find start of 2nd question word and cut there
+                  const re = /\b(where|when|what|which|how many|how much)\b/g;
+                  const indices: number[] = [];
+                  let m: RegExpExecArray | null;
+                  while ((m = re.exec(lowerText)) !== null) {
+                    indices.push(m.index);
+                    if (indices.length >= 2) break;
+                  }
+                  if (indices.length >= 2) {
+                    firstQuestion = currentText.slice(0, indices[1]).trim();
+                    firstQuestion = firstQuestion.replace(/\s+(and|then)\s*$/i, "").trim();
+                    if (!firstQuestion.endsWith("?")) firstQuestion = firstQuestion + "?";
+                  }
+                }
+
+                // Only intervene if we have a usable first question OR the model clearly emitted 2 question marks.
+                if (firstQuestion || questionMarkCount >= 2) {
+                  console.log(`[${sessionState.callId}] 🛑 MULTI-QUESTION detected; cancelling and forcing single-question re-ask`);
+                  console.log(`[${sessionState.callId}] 🛑 Current: "${currentText.substring(0, 120)}"`);
+                  if (firstQuestion) console.log(`[${sessionState.callId}] ✅ Keeping: "${firstQuestion}"`);
+
+                  sessionState.lastMultiQuestionFixAt = Date.now();
+
+                  // Cancel the response + discard audio
+                  sessionState.discardCurrentResponseAudio = true;
+                  sessionState.pendingAudioBuffer = [];
+
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                  }
+                  openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+                  // Remove the bad transcript
+                  if (sessionState.assistantTranscriptIndex !== null) {
+                    sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+                    sessionState.assistantTranscriptIndex = null;
+                  }
+
+                  const forcedQuestion = firstQuestion || "Please ask only one question.";
+                  openaiWs?.send(
+                    JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [
+                          {
+                            type: "input_text",
+                            text: `[SYSTEM: ONE QUESTION RULE VIOLATION. Ask ONLY this question, exactly as written, and nothing else: "${forcedQuestion}" Then STOP and wait silently.]`,
+                          },
+                        ],
+                      },
+                    })
+                  );
+
+                  safeResponseCreate(sessionState, "multi-question-guard-reask");
+                  break;
+                }
+              }
+            }
+          }
           
           // Check for repetition within 10 seconds of last spoken confirmation
           const recentConfirmationWindow = 10000; // 10 seconds
@@ -5587,6 +5675,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastPassengerMismatchAt: null,
           lastSpokenQuestion: null,
           lastSpokenQuestionAt: null,
+          lastMultiQuestionFixAt: null,
         };
         
         preConnected = true;
@@ -5708,6 +5797,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastPassengerMismatchAt: null,
             lastSpokenQuestion: null,
             lastSpokenQuestionAt: null,
+            lastMultiQuestionFixAt: null,
           };
         }
         
