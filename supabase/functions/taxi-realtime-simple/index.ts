@@ -8,8 +8,16 @@ const corsHeaders = {
 
 // --- Configuration ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+// Validate required environment variables at startup
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing required environment variables: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set");
+}
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY not set - voice functionality will fail");
+}
 
 // DEMO MODE: force the simple demo script every call (ignore caller history, active bookings, and modifications)
 const DEMO_SIMPLE_MODE = true;
@@ -310,6 +318,7 @@ const TOOLS = [
 
 // --- STT Corrections ---
 // Phonetic fixes for common telephony mishearings
+// Keys are stored in lowercase for O(1) lookup
 const STT_CORRECTIONS: Record<string, string> = {
   // Cancel intent variations (telephony noise triggers these)
   "come to sleep": "cancel it",
@@ -599,13 +608,26 @@ function isHallucination(text: string): boolean {
   return false;
 }
 
+// Pre-compiled regex pattern for O(1) STT correction lookups (built once at module load)
+// This avoids creating new RegExp objects on every transcript, dramatically reducing latency
+const STT_CORRECTION_PATTERN = new RegExp(
+  `\\b(${Object.keys(STT_CORRECTIONS).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'gi'
+);
+
+// Pre-built lowercase lookup map for O(1) correction retrieval
+const STT_CORRECTIONS_LOWER = new Map(
+  Object.entries(STT_CORRECTIONS).map(([k, v]) => [k.toLowerCase(), v])
+);
+
 function correctTranscript(text: string): string {
-  let corrected = text.toLowerCase();
-  for (const [bad, good] of Object.entries(STT_CORRECTIONS)) {
-    if (corrected.includes(bad)) {
-      corrected = corrected.replace(new RegExp(bad, "gi"), good);
-    }
-  }
+  if (!text || text.length === 0) return "";
+  
+  // Single-pass replacement using pre-compiled pattern
+  const corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
+    return STT_CORRECTIONS_LOWER.get(matched.toLowerCase()) || matched;
+  });
+  
   // Capitalize first letter and return
   return corrected.charAt(0).toUpperCase() + corrected.slice(1);
 }
@@ -998,18 +1020,25 @@ const Ada = {
       }
       
       // PASSENGERS changes
-      // "change to 3 passengers", "actually 4 people", "there's 2 of us"
+      // "change to 3 passengers", "actually 4 people", "there's 2 of us", "make it three passengers"
+      // Word-to-number mapping for spoken numbers
+      const wordToNum: Record<string, number> = {
+        one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8
+      };
+      
       const passengersPatterns = [
-        /(?:change|update)\s+(?:to\s+)?(\d+)\s+(?:passengers?|people|persons?)/i,
-        /(?:actually|no)\s+(\d+)\s+(?:passengers?|people|persons?)/i,
-        /(?:there(?:'s| is| are)|we(?:'re| are))\s+(\d+)\s+(?:of\s+us|people|passengers?)/i,
-        /(\d+)\s+(?:passengers?|people)\s+(?:instead|now)/i,
+        /(?:change|update|make\s+it)\s+(?:to\s+)?(\d+|one|two|three|four|five|six|seven|eight)\s+(?:passengers?|people|persons?)/i,
+        /(?:actually|no)\s+(\d+|one|two|three|four|five|six|seven|eight)\s+(?:passengers?|people|persons?)/i,
+        /(?:there(?:'s| is| are)|we(?:'re| are))\s+(\d+|one|two|three|four|five|six|seven|eight)\s+(?:of\s+us|people|passengers?)/i,
+        /(\d+|one|two|three|four|five|six|seven|eight)\s+(?:passengers?|people)\s+(?:instead|now)/i,
       ];
       
       for (const pattern of passengersPatterns) {
         const match = text.match(pattern);
         if (match && match[1]) {
-          const num = parseInt(match[1], 10);
+          // Convert word to number if needed
+          const val = match[1].toLowerCase();
+          const num = wordToNum[val] ?? parseInt(val, 10);
           if (num >= 1 && num <= 8) {
             return { field: "passengers", value: String(num), isModification: true };
           }
