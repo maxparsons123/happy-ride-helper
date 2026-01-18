@@ -2407,15 +2407,20 @@ Do NOT say 'booked' until the tool returns success.]`
             // Mark that we just injected a mismatch prompt to prevent loop
             sessionState.lastPassengerMismatchAt = Date.now();
             
-            // Cancel any in-flight response
-            if (sessionState.openAiResponseActive && openaiWs && openaiConnected) {
+            // Prevent any auto-VAD response from leaking partial speech while we force the mismatch prompt.
+            sessionState.discardCurrentResponseAudio = true;
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+
+            // Cancel anything already in-flight and clear audio to avoid competing responses.
+            // (Even if no response is active yet, cancel is safe and keeps the flow deterministic.)
+            if (openaiWs && openaiConnected) {
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             }
             
             // Inject system message to handle the mismatch gracefully
             if (openaiWs && openaiConnected && !sessionState.callEnded) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-              
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -2429,6 +2434,7 @@ Do NOT say 'booked' until the tool returns success.]`
               }));
               
               sessionState.lastQuestionType = "passengers"; // Still need passengers
+              sessionState.lastQuestionAt = Date.now();
               safeResponseCreate(sessionState, "address-vs-passenger-mismatch");
             }
             
