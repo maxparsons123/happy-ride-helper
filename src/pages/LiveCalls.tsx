@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2, Receipt } from "lucide-react";
+import { Phone, PhoneOff, MapPin, Users, Clock, DollarSign, Radio, Volume2, VolumeX, ArrowLeft, CheckCircle2, XCircle, Loader2, User, History, Bot, AlertCircle, Trash2, Receipt, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 import { LiveCallsSettings } from "@/components/LiveCallsSettings";
 
@@ -830,6 +830,13 @@ export default function LiveCalls() {
                 </SelectContent>
               </Select>
             )}
+
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/tts-test">
+                <MessageSquare className="w-4 h-4 mr-2" />
+                TTS Test
+              </Link>
+            </Button>
 
             <Badge variant="outline" className="text-green-400 border-green-400">
               <span className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
