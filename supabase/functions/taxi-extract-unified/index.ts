@@ -98,10 +98,15 @@ EXTRACTION RULES (NEW BOOKING)
    - 'in X minutes' → calculate from current time
    - Time in past → assume tomorrow
 
-6. **Passengers vs Luggage**:
+6. **Passengers (CRITICAL - DO NOT ASSUME)**:
+   - ONLY set number_of_passengers if user EXPLICITLY states a number
    - "two passengers" → passengers = 2
-   - "two bags/suitcases" → luggage = "2 bags"
+   - If user has NOT mentioned passengers → number_of_passengers = null (NOT 1!)
+   - DO NOT default to 1. Leave null if unknown.
    - Context matters: answer to "how many passengers?" → passengers
+
+7. **Luggage**:
+   - "two bags/suitcases" → luggage = "2 bags"
 
 7. **Vehicle Types**:
    - saloon, estate, MPV, minibus, 6-seater, 8-seater
@@ -251,7 +256,7 @@ IMPORTANT: Luggage ALWAYS has priority over special_requests.
 PASSENGERS RULES
 ==================================================
 If user mentions passengers → update number_of_passengers
-If NOT mentioned → keep existing: ${existingBooking.passengers || 1}
+If NOT mentioned → keep existing: ${existingBooking.passengers ?? 'null'}
 
 ==================================================
 INTERMEDIATE STOP / VIA RULES
