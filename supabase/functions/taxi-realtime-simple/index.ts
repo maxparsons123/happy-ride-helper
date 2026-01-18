@@ -1170,7 +1170,6 @@ interface SessionState {
   // Echo guard / barge-in: track when Ada is speaking to ignore audio feedback
   isAdaSpeaking: boolean;
   echoGuardUntil: number; // timestamp until which to ignore audio
-  echoRmsGateUntil: number; // timestamp until which we apply RMS filtering to reduce loudspeaker echo
   responseStartTime: number; // timestamp when current AI response started (for initial echo guard)
   bargeInIgnoreUntil: number; // timestamp until which we ignore barge-in checks (startup echo)
   openAiResponseActive: boolean; // true between response.created and response.done
@@ -1775,11 +1774,9 @@ serve(async (req) => {
         // Too-large echo guards clip the first part of the caller's reply (house numbers!),
         // so keep this tight.
         const echoGuardMs = sessionState.useRasaAudioProcessing ? 400 : 250;
-        const echoRmsGateMs = sessionState.useRasaAudioProcessing ? 2500 : 2000;
 
         sessionState.isAdaSpeaking = false;
         sessionState.echoGuardUntil = Date.now() + echoGuardMs;
-        sessionState.echoRmsGateUntil = Date.now() + echoRmsGateMs;
         console.log(`[${sessionState.callId}] 🔇 Echo guard active for ${echoGuardMs}ms`);
 
         
@@ -5427,7 +5424,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
           echoGuardUntil: 0,
-          echoRmsGateUntil: 0,
           responseStartTime: 0,
           bargeInIgnoreUntil: 0,
           openAiResponseActive: false,
@@ -5546,7 +5542,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
             echoGuardUntil: 0,
-            echoRmsGateUntil: 0,
             responseStartTime: 0,
             bargeInIgnoreUntil: 0,
             openAiResponseActive: false,
