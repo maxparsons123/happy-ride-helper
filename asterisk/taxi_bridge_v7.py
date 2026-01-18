@@ -64,14 +64,16 @@ MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
-# Audio processing - tuned for soft consonants
-NOISE_GATE_THRESHOLD = 25
+# Audio processing - DISABLED for cleaner STT
+# OpenAI Whisper handles noise well, noise reduction was muting speech
+ENABLE_NOISE_REDUCTION = False  # Set True to re-enable
+NOISE_GATE_THRESHOLD = 15       # Lower threshold if enabled
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 60
 TARGET_RMS = 2500
-MAX_GAIN = 3.0
-MIN_GAIN = 0.8
-GAIN_SMOOTHING_FACTOR = 0.2
+MAX_GAIN = 2.0                  # Less aggressive gain
+MIN_GAIN = 0.9
+GAIN_SMOOTHING_FACTOR = 0.1
 
 # Asterisk message types
 MSG_HANGUP = 0x00
@@ -140,7 +142,11 @@ def lin2ulaw(pcm_bytes: bytes) -> bytes:
 
 
 def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[bytes, float]:
-    """Noise reduction tuned for soft consonants."""
+    """Noise reduction - can be disabled for cleaner STT."""
+    if not ENABLE_NOISE_REDUCTION:
+        # Pass through raw audio - Whisper handles noise well
+        return audio_bytes, last_gain
+    
     if not audio_bytes or len(audio_bytes) < 4:
         return audio_bytes, last_gain
 
@@ -157,11 +163,11 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
         knee_low = NOISE_GATE_THRESHOLD
         knee_high = NOISE_GATE_THRESHOLD * 3
         gain_curve = np.clip((abs_audio - knee_low) / (knee_high - knee_low), 0.0, 1.0)
-        gain_curve = 0.15 + 0.85 * gain_curve
+        gain_curve = 0.3 + 0.7 * gain_curve  # Less aggressive floor (was 0.15)
         audio_np *= gain_curve
     else:
         mask = np.abs(audio_np) < NOISE_GATE_THRESHOLD
-        audio_np[mask] *= 0.1
+        audio_np[mask] *= 0.3  # Less aggressive (was 0.1)
 
     # RMS-based auto-gain with smoothing
     rms = float(np.sqrt(np.mean(audio_np ** 2))) if audio_np.size else 0.0
