@@ -243,6 +243,8 @@ interface SessionState {
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
+  // Track when Ada started speaking (ms since epoch) to prevent echo-triggered barge-in
+  openAiSpeechStartedAt: number;
   // Echo guard: block audio forwarding for a short window after Ada finishes speaking
   echoGuardUntil: number;
   // Track when Ada last finished speaking (for echo detection)
@@ -270,6 +272,9 @@ const GREETING_PROTECTION_MS = 3000;
 
 // Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
 const SUMMARY_PROTECTION_MS = 8000;
+
+// While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
+const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
 // Barge-in RMS thresholds to distinguish real speech from echo/noise
 // (Higher minimum reduces false barge-ins from background/line noise)
@@ -351,6 +356,7 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
+    openAiSpeechStartedAt: 0,
     echoGuardUntil: 0,
     lastAdaFinishedSpeakingAt: 0,
     greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
@@ -819,18 +825,28 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       
       switch (data.type) {
         case "response.audio.delta":
-          // Forward audio to client
-          if (data.delta && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-              type: "audio",
-              audio: data.delta
-            }));
+          // Forward audio to client (and mark that Ada is speaking)
+          if (data.delta) {
+            if (!sessionState.openAiResponseActive) {
+              sessionState.openAiSpeechStartedAt = Date.now();
+            }
+            sessionState.openAiResponseActive = true;
+
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({
+                type: "audio",
+                audio: data.delta
+              }));
+            }
           }
           break;
 
         case "response.audio_transcript.delta":
-          // Track what Ada is saying
+          // Track what Ada is saying (backup signal)
           if (data.delta) {
+            if (!sessionState.openAiResponseActive) {
+              sessionState.openAiSpeechStartedAt = Date.now();
+            }
             sessionState.openAiResponseActive = true;
           }
           break;
@@ -883,6 +899,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
             await updateLiveCall(sessionState);
           }
           sessionState.openAiResponseActive = false;
+          sessionState.openAiSpeechStartedAt = 0;
           // Set echo guard to block echo from speaker
           sessionState.lastAdaFinishedSpeakingAt = Date.now();
           sessionState.echoGuardUntil = Date.now() + ECHO_GUARD_MS;
@@ -1233,8 +1250,16 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           }
 
           // RMS-based barge-in detection: only forward audio that sounds like real speech
-          // If Ada is speaking (openAiResponseActive), require higher RMS to be a real barge-in
+          // If Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off,
+          // then require RMS within a sane window to be treated as a real barge-in.
           if (sessionState.openAiResponseActive) {
+            const sinceSpeakStart = sessionState.openAiSpeechStartedAt
+              ? (Date.now() - sessionState.openAiSpeechStartedAt)
+              : 0;
+            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+              return;
+            }
+
             const rms = computeRms(pcmInput);
             if (rms < BARGE_IN_RMS_MIN || rms > BARGE_IN_RMS_MAX) {
               return; // Not real speech, likely echo or noise
