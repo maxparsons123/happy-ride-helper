@@ -1016,48 +1016,67 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               
               // Send webhook in background
               (async () => {
+                const AUTO_QUOTE_TIMEOUT_MS = 30000;
+
                 try {
                   const result = await sendDispatchWebhook(sessionState, "request_quote", {
                     pickup: sessionState.booking.pickup,
                     destination: sessionState.booking.destination,
                     passengers: sessionState.booking.passengers,
-                    time: sessionState.booking.pickupTime || "now"
+                    pickup_time: sessionState.booking.pickupTime || "ASAP",
+                    // (kept for compatibility with some downstream dispatch systems)
+                    time: sessionState.booking.pickupTime || "ASAP"
                   });
+
                   console.log(`[${callId}] 📡 Auto-trigger webhook result:`, result);
-                  
-                  if (result.success && result.fare && result.eta) {
-                    // Store the quote and mark awaiting confirmation
+
+                  if (!result.success) {
+                    console.error(`[${callId}] ❌ Auto-trigger dispatch webhook failed: ${result.error || "unknown_error"}`);
+                    sessionState.quoteInFlight = false;
+                    return;
+                  }
+
+                  // Most dispatch systems respond asynchronously via taxi-dispatch-callback.
+                  // Only inject a quote immediately if we actually got fare/eta in the HTTP response.
+                  if (result.fare && result.eta) {
                     sessionState.pendingFare = result.fare;
                     sessionState.pendingEta = result.eta;
                     sessionState.awaitingConfirmation = true;
                     sessionState.quoteInFlight = false;
-                    
-                    // Inject the quote for Ada to speak
+
                     if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
                       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                      
+
                       sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-                      
+
                       const quoteMessage = `The trip fare will be ${result.fare}, and the estimated arrival time is ${result.eta}. Would you like me to confirm this booking?`;
-                      
+
                       openaiWs.send(JSON.stringify({
                         type: "conversation.item.create",
                         item: {
                           type: "message",
-                          role: "user", 
+                          role: "user",
                           content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Tell the customer: "${quoteMessage}". Do NOT repeat pickup/destination. Only say fare/ETA and ask to confirm.` }]
                         }
                       }));
-                      
+
                       openaiWs.send(JSON.stringify({
                         type: "response.create",
-                        response: {
-                          modalities: ["audio", "text"],
-                          instructions: `Say exactly: "${quoteMessage}"`
-                        }
+                        response: { modalities: ["audio", "text"], instructions: `Say exactly: "${quoteMessage}"` }
                       }));
                     }
+                  } else {
+                    console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback...`);
+
+                    // Safety: if callback never arrives, allow a retry later.
+                    setTimeout(() => {
+                      if (cleanedUp) return;
+                      if (sessionState.quoteInFlight && !sessionState.awaitingConfirmation && !sessionState.pendingFare) {
+                        console.log(`[${callId}] ⏰ Auto-trigger quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - clearing quoteInFlight to allow retry`);
+                        sessionState.quoteInFlight = false;
+                      }
+                    }, AUTO_QUOTE_TIMEOUT_MS);
                   }
                 } catch (e) {
                   console.error(`[${callId}] Auto-trigger webhook error:`, e);
