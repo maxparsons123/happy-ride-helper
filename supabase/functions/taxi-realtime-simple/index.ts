@@ -1208,6 +1208,7 @@ interface SessionState {
   // e.g., user gives address when asked about passengers
   lastQuestionType: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null;
   lastQuestionAt: number | null;
+  lastPassengerMismatchAt: number | null; // Prevent double-asking passengers due to mismatch loop
 
   // STT Accuracy Metrics (for A/B testing audio processing modes)
   sttMetrics: {
@@ -2393,11 +2394,18 @@ Do NOT say 'booked' until the tool returns success.]`
           const isPassengerCount = /^(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\.?$/i.test(lowerUserText.trim()) ||
             /\b(just me|myself|alone|one person|two people|three people|four people|us|passengers?)\b/i.test(lowerUserText);
           
-          if (isRecentQuestion && sessionState.lastQuestionType === "passengers" && isAddressLike && !isPassengerCount) {
+          // Prevent double-asking passengers due to mismatch loop
+          const recentPassengerMismatchInjection = sessionState.lastPassengerMismatchAt && 
+            (Date.now() - sessionState.lastPassengerMismatchAt < 15000); // 15 second cooldown
+          
+          if (isRecentQuestion && sessionState.lastQuestionType === "passengers" && isAddressLike && !isPassengerCount && !recentPassengerMismatchInjection) {
             console.log(`[${sessionState.callId}] 🔄 ADDRESS-VS-PASSENGER MISMATCH: User gave address "${userText}" when asked about passengers`);
             
             // Store the address as potential destination correction
             const mismatchedAddress = userText;
+            
+            // Mark that we just injected a mismatch prompt to prevent loop
+            sessionState.lastPassengerMismatchAt = Date.now();
             
             // Cancel any in-flight response
             if (sessionState.openAiResponseActive && openaiWs && openaiConnected) {
@@ -2415,7 +2423,7 @@ Do NOT say 'booked' until the tool returns success.]`
                   role: "user",
                   content: [{
                     type: "input_text",
-                    text: `[SYSTEM: The user said "${mismatchedAddress}" but you asked about passengers. Treat this as out-of-order info. DO NOT repeat the address back and DO NOT ask "is that where you'd like to go?". Just acknowledge briefly (e.g., "Got it.") and ask ONLY ONE question: "How many people will be travelling?"]`,
+                    text: `[SYSTEM: The user said "${mismatchedAddress}" but you asked about passengers. Note this info and ask ONLY: "How many people will be travelling?". NO filler words, NO "Got it".]`,
                   }],
                 },
               }));
@@ -5456,6 +5464,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           },
           lastQuestionType: null,
           lastQuestionAt: null,
+          lastPassengerMismatchAt: null,
         };
         
         preConnected = true;
@@ -5574,6 +5583,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             },
             lastQuestionType: null,
             lastQuestionAt: null,
+            lastPassengerMismatchAt: null,
           };
         }
         
