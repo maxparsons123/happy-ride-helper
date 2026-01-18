@@ -576,19 +576,46 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
     try {
-      const data = JSON.parse(event.data);
-      
-      if (data.type === "audio" && data.audio) {
-        // Forward audio to OpenAI
+      // Handle binary audio data from Python bridge
+      if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+        const audioBytes = event.data instanceof ArrayBuffer 
+          ? new Uint8Array(event.data) 
+          : event.data;
+        
+        // Convert to base64 for OpenAI
+        const base64Audio = btoa(String.fromCharCode(...audioBytes));
+        
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
-            audio: data.audio
+            audio: base64Audio
           }));
         }
-      } else if (data.type === "hangup") {
-        console.log(`[${callId}] Client requested hangup`);
-        cleanup();
+        return;
+      }
+      
+      // Handle string messages (JSON)
+      if (typeof event.data === "string") {
+        const data = JSON.parse(event.data);
+        
+        if (data.type === "audio" && data.audio) {
+          // Forward audio to OpenAI (already base64)
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: data.audio
+            }));
+          }
+        } else if (data.type === "init" || data.type === "update_phone") {
+          // Handle init/phone updates
+          if (data.phone && data.phone !== "unknown") {
+            callerPhone = data.phone;
+            console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
+          }
+        } else if (data.type === "hangup") {
+          console.log(`[${callId}] Client requested hangup`);
+          cleanup();
+        }
       }
     } catch (e) {
       console.error(`[${callId}] Error processing client message:`, e);
