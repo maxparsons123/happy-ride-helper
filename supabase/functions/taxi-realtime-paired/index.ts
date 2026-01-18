@@ -800,26 +800,17 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
     greetingSent = true;
     
-    console.log(`[${callId}] 🎙️ Sending initial greeting (conversation.item.create + response.create)...`);
+    console.log(`[${callId}] 🎙️ Sending initial greeting via response.create only...`);
     
     const greetingText = "Hello, this is Ada from Ridenow Cars. Where can I pick you up from today?";
     
-    // Step 1: Inject system prompt as conversation item
-    openaiWs!.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "[SYSTEM: Call connected. Say your greeting now.]" }]
-      }
-    }));
-    
-    // Step 2: Force response with exact greeting
+    // Simple approach: just request a response with specific instructions
+    // Don't inject conversation items - let the model generate from session instructions
     openaiWs!.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["text", "audio"],
-        instructions: `Say this EXACTLY (do not change, shorten, or ADD to it): "${greetingText}" - STOP IMMEDIATELY after the question mark. Wait for the user's response.`
+        modalities: ["audio", "text"],  // Audio first - prioritize voice output
+        instructions: `Greet the caller. Say exactly: "${greetingText}"`
       }
     }));
     
