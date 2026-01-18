@@ -175,41 +175,80 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
 
 
 def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample audio between sample rates using GCD-based polyphase method.
-    
-    Handles common telephony conversions:
-    - 8kHz <-> 24kHz (ratio 3:1)
-    - 16kHz <-> 24kHz (ratio 3:2)
+    """Resample PCM16 audio between common telephony sample rates.
+
+    Goal: keep TTS crisp (good downsampling) while keeping latency low (fast upsampling).
+
+    Supported fast paths:
+    - 8kHz  -> 24kHz : 3x linear interpolation (fast)
+    - 16kHz -> 24kHz : 3:2 linear interpolation (fast)
+
+    Quality-preserving paths:
+    - 24kHz -> 8kHz  : polyphase low-pass (resample_poly)
+    - 24kHz -> 16kHz : polyphase (2/3)
     """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
-    
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-    if audio_np.size == 0:
+
+    x = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    if x.size == 0:
         return b""
-    
-    # Find GCD for polyphase resampling
+
+    # --- Fast upsampling paths (avoid heavy filters on the hot path) ---
+    if from_rate == 8000 and to_rate == 24000:
+        # 3x linear interpolation
+        n = x.size
+        out = np.empty(n * 3, dtype=np.float32)
+        out[0::3] = x
+        if n > 1:
+            x0 = x[:-1]
+            x1 = x[1:]
+            d = x1 - x0
+            out[1:-2:3] = x0 + d / 3.0
+            out[2:-1:3] = x0 + (2.0 * d) / 3.0
+            # last sample
+            out[-2:] = x[-1]
+        else:
+            out[:] = x[0]
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    if from_rate == 16000 and to_rate == 24000:
+        # 3:2 linear interpolation
+        out_len = int(np.floor(x.size * 3 / 2))
+        if out_len <= 0:
+            return b""
+        i = np.arange(out_len, dtype=np.float32)
+        src = (i * 2.0) / 3.0
+        idx0 = np.floor(src).astype(np.int32)
+        idx1 = np.minimum(idx0 + 1, x.size - 1)
+        frac = src - idx0
+        out = x[idx0] * (1.0 - frac) + x[idx1] * frac
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    # --- Quality downsampling paths (avoid aliasing / muffled speech) ---
+    if from_rate == 24000 and to_rate == 8000:
+        out = resample_poly(x, up=1, down=3)
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    if from_rate == 24000 and to_rate == 16000:
+        out = resample_poly(x, up=2, down=3)
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    if from_rate == 16000 and to_rate == 8000:
+        out = resample_poly(x, up=1, down=2)
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    if from_rate == 8000 and to_rate == 16000:
+        out = resample_poly(x, up=2, down=1)
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    # Fallback (should be rare)
     from math import gcd
     g = gcd(from_rate, to_rate)
     up = to_rate // g
     down = from_rate // g
-    
-    # Use scipy for non-integer ratios, simple method for integer
-    if up == 1:
-        # Pure downsampling by integer factor
-        trim_len = (len(audio_np) // down) * down
-        audio_np = audio_np[:trim_len]
-        resampled = audio_np.reshape(-1, down).mean(axis=1)
-    elif down == 1:
-        # Pure upsampling by integer factor
-        resampled = np.repeat(audio_np, up)
-    else:
-        # Non-integer ratio (e.g., 24kHz <-> 16kHz = 3:2)
-        # Use scipy polyphase for quality
-        resampled = resample_poly(audio_np, up, down)
-    
-    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-    return resampled.tobytes()
+    out = resample_poly(x, up=up, down=down)
+    return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
 # =============================================================================
