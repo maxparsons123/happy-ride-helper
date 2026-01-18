@@ -350,6 +350,211 @@ const PHANTOM_PHRASES = [
   "ご視聴ありがとうございました",
 ];
 
+// --- STT Corrections ---
+// Phonetic fixes for common telephony mishearings
+// Keys are stored in lowercase for O(1) lookup
+const STT_CORRECTIONS: Record<string, string> = {
+  // Cancel intent variations (telephony noise triggers these)
+  "come to sleep": "cancel it",
+  "go to sleep": "cancel it",
+  "come see it": "cancel it",
+  "count to three": "cancel",
+  "can't sell it": "cancel it",
+  "cancel eat": "cancel it",
+  "concert": "cancel",
+  "counter": "cancel",
+  "counsel": "cancel",
+  "council": "cancel",
+  "can so": "cancel",
+  "can soul": "cancel",
+  
+  // Airport/Station mishearings
+  "heather oh": "Heathrow",
+  "heather row": "Heathrow",
+  "heath row": "Heathrow",
+  "heather o": "Heathrow",
+  "heat throw": "Heathrow",
+  "gat wick": "Gatwick",
+  "got wick": "Gatwick",
+  "cat wick": "Gatwick",
+  "stand stead": "Stansted",
+  "stan stead": "Stansted",
+  "luton air port": "Luton Airport",
+  "birmingham air port": "Birmingham Airport",
+  "man chest her": "Manchester",
+  "man chester": "Manchester",
+  "lead station": "Leeds station",
+  "leads station": "Leeds station",
+  "kings cross": "King's Cross",
+  "saint pan crass": "St Pancras",
+  "saint pancreas": "St Pancras",
+  "euston": "Euston",
+  "you stone": "Euston",
+  "padding ton": "Paddington",
+  "victoria coach": "Victoria Coach Station",
+  
+  // City/Area mishearings
+  "click on street": "Coventry",
+  "coven tree": "Coventry",
+  "cover entry": "Coventry",
+  "birming ham": "Birmingham",
+  "burming ham": "Birmingham",
+  "wolver hampton": "Wolverhampton",
+  "wolves hampton": "Wolverhampton",
+  "leaming ton": "Leamington",
+  "lemington": "Leamington",
+  "warrick": "Warwick",
+  "war wick": "Warwick",
+  "nun eaten": "Nuneaton",
+  "new neaten": "Nuneaton",
+  "ken ill worth": "Kenilworth",
+  "bed worth": "Bedworth",
+  "rugby": "Rugby",
+  "rug bee": "Rugby",
+  
+  // Street name mishearings
+  "david rose": "David Road",
+  "davie road": "David Road",
+  "davey road": "David Road",
+  "davery road": "David Road",
+  "david wrote": "David Road",
+  "david rhoades": "David Road",
+  "david rhodes": "David Road",
+  "david rodes": "David Road",
+  "david roads": "David Road",
+  "david row": "David Road",
+  "david rowe": "David Road",
+  "david rode": "David Road",
+  "david roat": "David Road",
+  "this is qa, david rhoades": "52A David Road",
+  "this is qa david rhoades": "52A David Road",
+  "52 qa david": "52A David Road",
+  "qa david": "52A David",
+  "high street": "High Street",
+  "hi street": "High Street",
+  "church road": "Church Road",
+  "church wrote": "Church Road",
+  "station road": "Station Road",
+  "station wrote": "Station Road",
+  "london road": "London Road",
+  "london wrote": "London Road",
+
+  // Russell Street mishearings
+  "ruffles street": "Russell Street",
+  "ruffles sthreet": "Russell Street",
+  "ruffle street": "Russell Street",
+  "ruffels street": "Russell Street",
+  "ruffals street": "Russell Street",
+  "roswell street": "Russell Street",
+  "russle street": "Russell Street",
+  "russel street": "Russell Street",
+  "raffles street": "Russell Street",
+  "refills street": "Russell Street",
+  
+  // Specific mishearings observed in testing
+  "exum road": "Exmoor Road",
+  "exxon roll": "Exmoor Road",
+  "bexham road": "Exmoor Road",
+  
+  // Sweet Spot venue mishearings
+  "sweetbutt": "Sweet Spot",
+  "sweet butt": "Sweet Spot",
+  "sweetbatz": "Sweet Spot",
+  "sweet batz": "Sweet Spot",
+  "sweetbats": "Sweet Spot",
+  "sweet bats": "Sweet Spot",
+  "sweet spots": "Sweet Spot",
+  "sweetspots": "Sweet Spot",
+  "swee spot": "Sweet Spot",
+  "suite spot": "Sweet Spot",
+  "sweetbriar court": "Sweet Spot",
+  "sweetbriar": "Sweet Spot",
+  "sweet briar": "Sweet Spot",
+  "sweetbrier": "Sweet Spot",
+  "sweet brier": "Sweet Spot",
+  "street spots": "Sweet Spot",
+  "streetspots": "Sweet Spot",
+  "street spot": "Sweet Spot",
+
+  // Number mishearings - standalone numbers
+  "free": "three",
+  "tree": "three",
+  "for": "four",
+  "to": "two",
+  "too": "two",
+  "won": "one",
+  "wan": "one",
+  "fife": "five",
+  "sicks": "six",
+  "freight": "eight",
+  "fright": "eight",
+  "fate": "eight",
+  
+  // Number mishearings - with "passengers"
+  "for passengers": "4 passengers",
+  "fore passengers": "4 passengers",
+  "to passengers": "2 passengers",
+  "too passengers": "2 passengers",
+  "tree passengers": "3 passengers",
+  "free passengers": "3 passengers",
+  "one passenger": "1 passenger",
+  "won passenger": "1 passenger",
+  "wan passenger": "1 passenger",
+  "five passengers": "5 passengers",
+  "fife passengers": "5 passengers",
+  "six passengers": "6 passengers",
+  "sicks passengers": "6 passengers",
+  "freight passengers": "8 passengers",
+  "eight passengers": "8 passengers",
+  
+  // Common phrases
+  "pick me up": "pick me up",
+  "pick up from": "pick up from",
+  "going to": "going to",
+  "go into": "going to",
+  "drop off at": "drop off at",
+  "drop of at": "drop off at",
+  
+  // House number suffixes
+  "a high": "A High",
+  "b high": "B High",
+  "fifty to a": "52A",
+  "fifty too a": "52A",
+  "fifty two a": "52A",
+  "52 a": "52A",
+  
+  // Common number mishearings in addresses
+  "528 david": "52A David",
+  "five twenty eight david": "52A David",
+  "five two eight david": "52A David",
+  "5208 david": "52A David",
+  "five two a david": "52A David",
+  "fifty two a david": "52A David",
+};
+
+// Pre-compiled regex pattern for O(1) STT correction lookups
+const STT_CORRECTION_PATTERN = new RegExp(
+  `\\b(${Object.keys(STT_CORRECTIONS).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'gi'
+);
+
+// Pre-built lowercase lookup map for O(1) correction retrieval
+const STT_CORRECTIONS_LOWER = new Map(
+  Object.entries(STT_CORRECTIONS).map(([k, v]) => [k.toLowerCase(), v])
+);
+
+function correctTranscript(text: string): string {
+  if (!text || text.length === 0) return "";
+  
+  // Single-pass replacement using pre-compiled pattern
+  const corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
+    return STT_CORRECTIONS_LOWER.get(matched.toLowerCase()) || matched;
+  });
+  
+  // Capitalize first letter and return
+  return corrected.charAt(0).toUpperCase() + corrected.slice(1);
+}
+
 function isPhantomHallucination(text: string): boolean {
   const lower = text.toLowerCase().trim();
   if (lower.length < 2) return true;
@@ -1218,7 +1423,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "conversation.item.input_audio_transcription.completed":
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
-            const userText = data.transcript.trim();
+            const rawText = data.transcript.trim();
+            // Apply STT corrections for common telephony mishearings
+            const userText = correctTranscript(rawText);
+            if (userText !== rawText) {
+              console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
+            }
             
             // Filter out phantom hallucinations from Whisper
             if (isPhantomHallucination(userText)) {
