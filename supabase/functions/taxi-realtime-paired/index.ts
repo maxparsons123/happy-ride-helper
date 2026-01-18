@@ -1338,7 +1338,26 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
 
             } else if (action === "confirmed") {
-              console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingRef=${sessionState.pendingBookingRef})`);
+              console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingConfirmed=${sessionState.bookingConfirmed}, bookingRef=${sessionState.pendingBookingRef})`);
+              
+              // GUARD: Prevent duplicate confirmations - check this FIRST before any webhook
+              if (sessionState.bookingConfirmed) {
+                console.log(`[${callId}] ⚠️ CONFIRMED blocked - already confirmed (duplicate call)`);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: true,
+                      status: "already_confirmed",
+                      message: "Booking already confirmed. Do not confirm again. Say goodbye and end the call."
+                    })
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
               
               // Only allow confirm after we asked fare confirmation
               if (!sessionState.awaitingConfirmation) {
@@ -1358,6 +1377,9 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 openaiWs!.send(JSON.stringify({ type: "response.create" }));
                 break;
               }
+              
+              // Set confirmed flag IMMEDIATELY to prevent race conditions
+              sessionState.bookingConfirmed = true;
 
               // Also require the booking details to be present (avoid sending nulls on confirm)
               if (missing.length > 0) {
@@ -1422,7 +1444,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 }
               }
 
-              sessionState.bookingConfirmed = true;
+              // bookingConfirmed already set at top of this block to prevent race conditions
               sessionState.awaitingConfirmation = false;
               sessionState.quoteInFlight = false;
               openaiWs!.send(JSON.stringify({
