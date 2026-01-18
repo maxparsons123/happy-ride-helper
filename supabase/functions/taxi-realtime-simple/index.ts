@@ -2527,6 +2527,14 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.audioVerified = true;
             sessionState.pendingAudioBuffer = [];
 
+            // Pick a random WhatsApp tip
+            const whatsappTips = [
+              "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+              "Next time, feel free to book your taxi using a WhatsApp voice message.",
+              "You can always book again by simply sending us a voice note on WhatsApp."
+            ];
+            const randomTip = whatsappTips[Math.floor(Math.random() * whatsappTips.length)];
+
             openaiWs.send(
               JSON.stringify({
                 type: "conversation.item.create",
@@ -2536,7 +2544,8 @@ Do NOT say 'booked' until the tool returns success.]`
                   content: [
                     {
                       type: "input_text",
-                      text: "[SYSTEM: The customer is done and is thanking you. Say 'Safe travels!' and nothing more. Then stay completely silent.]",
+                      text: `[SYSTEM: The customer is done. Say EXACTLY this closing message, then stay silent:
+"You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey."]`,
                     },
                   ],
                 },
@@ -2549,7 +2558,7 @@ Do NOT say 'booked' until the tool returns success.]`
             setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after post-booking goodbye`);
               openaiWs?.close();
-            }, 3000); // 3 second delay for goodbye audio
+            }, 8000); // 8 second delay for full goodbye audio
             
             break;
           }
