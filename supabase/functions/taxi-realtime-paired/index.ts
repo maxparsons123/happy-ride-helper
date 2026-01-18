@@ -393,7 +393,7 @@ async function updateLiveCall(sessionState: SessionState) {
   }
 }
 
-// Send dispatch webhook
+// Send dispatch webhook - matches taxi-realtime-simple format
 async function sendDispatchWebhook(
   sessionState: SessionState,
   action: string,
@@ -409,16 +409,63 @@ async function sendDispatchWebhook(
   }
 
   try {
+    // Generate a unique job ID
+    const jobId = crypto.randomUUID();
+    
+    // Format phone number (remove + prefix if present)
+    const formattedPhone = sessionState.callerPhone.replace(/^\+/, "");
+    
+    // Build user transcripts from conversation history
+    const userTranscripts = sessionState.conversationHistory
+      .filter(msg => msg.role === "user")
+      .map(msg => ({
+        text: msg.content.replace(/^\[CONTEXT:.*?\]\s*/i, ""), // Remove context prefix
+        timestamp: new Date(msg.timestamp).toISOString()
+      }));
+    
+    // Match the taxi-realtime-simple webhook payload format
+    const webhookPayload = {
+      job_id: jobId,
+      call_id: sessionState.callId,
+      caller_phone: formattedPhone,
+      caller_name: null, // Not tracked in paired mode yet
+      // Normalized/validated addresses
+      ada_pickup: bookingData.pickup || sessionState.booking.pickup,
+      ada_destination: bookingData.destination || sessionState.booking.destination,
+      // Raw caller addresses (what they actually said) - same as ada_ for now
+      callers_pickup: null,
+      callers_dropoff: null,
+      // Nearest place flags
+      nearest_pickup: null,
+      nearest_dropoff: null,
+      // Raw STT transcripts from this call
+      user_transcripts: userTranscripts,
+      // GPS location (not tracked in paired mode)
+      gps_lat: null,
+      gps_lon: null,
+      // Booking details
+      passengers: bookingData.passengers || sessionState.booking.passengers || 1,
+      bags: 0,
+      vehicle_type: "standard",
+      vehicle_request: null,
+      pickup_time: bookingData.pickup_time || sessionState.booking.pickupTime || "ASAP",
+      special_requests: null,
+      timestamp: new Date().toISOString()
+    };
+    
+    console.log(`[${sessionState.callId}] 📡 Sending webhook (${action}):`, JSON.stringify(webhookPayload).substring(0, 200));
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
     const response = await fetch(DISPATCH_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action,
-        call_id: sessionState.callId,
-        caller_phone: sessionState.callerPhone,
-        ...bookingData
-      })
+      body: JSON.stringify(webhookPayload),
+      signal: controller.signal
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return { success: false, error: `Webhook returned ${response.status}` };
