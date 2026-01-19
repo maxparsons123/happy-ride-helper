@@ -530,6 +530,25 @@ NEVER swap fields. Trust the question context.
 const TOOLS = [
   {
     type: "function",
+    name: "sync_booking_data",
+    description: "ALWAYS call this after the user provides any booking information. Saves user answers to the correct field.",
+    parameters: {
+      type: "object",
+      properties: {
+        pickup: { type: "string", description: "Pickup address if the user just provided it" },
+        destination: { type: "string", description: "Destination address if the user just provided it" },
+        passengers: { type: "integer", description: "Number of passengers if the user just provided it" },
+        pickup_time: { type: "string", description: "Pickup time if the user just provided it (e.g., 'now', '3pm')" },
+        last_question_asked: { 
+          type: "string", 
+          enum: ["pickup", "destination", "passengers", "time", "confirmation", "none"],
+          description: "What question you are about to ask NEXT"
+        }
+      }
+    }
+  },
+  {
+    type: "function",
     name: "save_customer_name",
     description: "Save customer name when caller provides it.",
     parameters: { 
@@ -541,7 +560,7 @@ const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Used to get quotes or finalize bookings.",
+    description: "Used to get quotes or finalize bookings. Only call this AFTER all 4 fields are collected.",
     parameters: {
       type: "object",
       properties: {
