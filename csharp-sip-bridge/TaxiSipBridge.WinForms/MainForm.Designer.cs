@@ -74,7 +74,7 @@ partial class MainForm
             Font = new Font("Segoe UI", 10F, FontStyle.Bold)
         };
         btnStartStop.FlatAppearance.BorderSize = 0;
-        btnStartStop.Click += btnStartStop_Click;
+        btnStartStop.Click += this.btnStartStop_Click;
 
         // Mic Test Button
         btnMicTest = new Button
@@ -89,7 +89,7 @@ partial class MainForm
             Font = new Font("Segoe UI", 10F, FontStyle.Bold)
         };
         btnMicTest.FlatAppearance.BorderSize = 0;
-        btnMicTest.Click += btnMicTest_Click;
+        btnMicTest.Click += this.btnMicTest_Click;
 
         grpConfig.Controls.AddRange(new Control[] {
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
@@ -146,7 +146,7 @@ partial class MainForm
             ForeColor = Color.White
         };
         btnClearLogs.FlatAppearance.BorderSize = 0;
-        btnClearLogs.Click += btnClearLogs_Click;
+        btnClearLogs.Click += this.btnClearLogs_Click;
 
         btnCopyLogs = new Button
         {
@@ -159,7 +159,7 @@ partial class MainForm
             ForeColor = Color.White
         };
         btnCopyLogs.FlatAppearance.BorderSize = 0;
-        btnCopyLogs.Click += btnCopyLogs_Click;
+        btnCopyLogs.Click += this.btnCopyLogs_Click;
 
         grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs, btnCopyLogs });
 
