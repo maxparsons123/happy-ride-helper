@@ -15,7 +15,7 @@ public class SipAutoAnswer : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
     private AdaAudioClient? _adaClient;
-    private VoIPMediaSession? _currentMediaSession;
+    private RTPSession? _currentRtpSession;
     private CancellationTokenSource? _callCts;
     private volatile bool _isInCall = false;
     private volatile bool _disposed = false;
@@ -119,17 +119,26 @@ public class SipAutoAnswer : IDisposable
         OnCallStarted?.Invoke(callId, caller);
 
         uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
-        VoIPMediaSession? rtpSession = null;
+        RTPSession? rtpSession = null;
 
         try
         {
-            // Create VoIPMediaSession - use default constructor for SIPSorcery 6.x
-            // This auto-negotiates codecs from the incoming INVITE's SDP
-            rtpSession = new VoIPMediaSession();
+            // Create RTP session with PCMU format for G.711 µ-law
+            rtpSession = new RTPSession(false, false, false);
+            
+            // Add PCMU audio track (G.711 µ-law, 8kHz, payload type 0)
+            var pcmuFormat = new SDPAudioVideoMediaFormat(
+                SDPWellKnownMediaFormatsEnum.PCMU);
+            var audioTrack = new MediaStreamTrack(
+                SDPMediaTypesEnum.audio,
+                false,
+                new List<SDPAudioVideoMediaFormat> { pcmuFormat });
+            rtpSession.addTrack(audioTrack);
+            
             rtpSession.AcceptRtpFromAny = true;
-            _currentMediaSession = rtpSession;
+            _currentRtpSession = rtpSession;
 
-            // Accept the call - this creates the UAS transaction
+            // Accept the call
             var uas = ua.AcceptCall(req);
 
             // Send 180 Ringing
@@ -143,8 +152,19 @@ public class SipAutoAnswer : IDisposable
 
             await Task.Delay(300, cts.Token);
 
-            // Answer the call with our media session
-            bool answered = await ua.Answer(uas, rtpSession);
+            // Set remote SDP from the INVITE
+            if (req.Body != null)
+            {
+                var remoteSdp = SDP.ParseSDPDescription(req.Body);
+                rtpSession.SetRemoteDescription(SdpType.offer, remoteSdp);
+                Log($"📋 [{callId}] Remote SDP set");
+            }
+
+            // Create our SDP answer
+            var localSdp = rtpSession.CreateAnswer(null);
+            
+            // Answer the call
+            bool answered = await ua.Answer(uas, localSdp.ToString());
 
             if (!answered)
             {
@@ -152,8 +172,9 @@ public class SipAutoAnswer : IDisposable
                 return;
             }
 
+            // Start RTP session
             await rtpSession.Start();
-            Log($"✅ [{callId}] Call answered");
+            Log($"✅ [{callId}] Call answered, RTP started");
 
             // Connect to Ada
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
@@ -168,7 +189,7 @@ public class SipAutoAnswer : IDisposable
 
             await _adaClient.ConnectAsync(caller, cts.Token);
 
-            // Flush initial packets
+            // Flush initial RTP packets (connection noise)
             int flushCount = 0;
             const int FLUSH_PACKETS = 25;
 
@@ -216,13 +237,8 @@ public class SipAutoAnswer : IDisposable
                         var frame = _adaClient?.GetNextMuLawFrame();
                         if (frame != null && rtpSession != null)
                         {
-                            rtpSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
-                                frame,
-                                rtpTimestamp,
-                                0,
-                                0
-                            );
+                            // Send µ-law audio as RTP
+                            rtpSession.SendAudio((uint)(20 * 8), frame);
 
                             rtpTimestamp += 160;
                             nextFrame = sw.ElapsedMilliseconds + 20;
@@ -274,7 +290,7 @@ public class SipAutoAnswer : IDisposable
                 }
                 catch { }
             }
-            _currentMediaSession = null;
+            _currentRtpSession = null;
 
             if (_callCts == cts)
             {
@@ -313,10 +329,10 @@ public class SipAutoAnswer : IDisposable
             _userAgent.OnIncomingCall -= OnIncomingCallAsync;
         }
 
-        if (_currentMediaSession != null)
+        if (_currentRtpSession != null)
         {
-            try { _currentMediaSession.Close("stopping"); } catch { }
-            _currentMediaSession = null;
+            try { _currentRtpSession.Close("stopping"); } catch { }
+            _currentRtpSession = null;
         }
 
         if (_sipTransport != null)
