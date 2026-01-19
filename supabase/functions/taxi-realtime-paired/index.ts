@@ -98,17 +98,83 @@ function pcm16ToBase64(pcm: Int16Array): string {
 }
 
 
-// System prompt - same as taxi-realtime-simple (NO ADDRESS VERIFICATION)
-const SYSTEM_PROMPT = `
+// Multilingual greetings - keyed by ISO 639-1 language code
+const GREETINGS: Record<string, { greeting: string; pickupQuestion: string }> = {
+  en: {
+    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started.",
+    pickupQuestion: "Where would you like to be picked up?"
+  },
+  es: {
+    greeting: "Hola, bienvenido a la demostración de Taxibot. Soy Ada, tu asistente de reservas de taxi. Estoy aquí para hacer que reservar un taxi sea rápido y fácil para ti. Así que, empecemos.",
+    pickupQuestion: "¿Dónde le gustaría que le recojamos?"
+  },
+  fr: {
+    greeting: "Bonjour et bienvenue sur la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour vous faciliter la réservation. Alors, commençons.",
+    pickupQuestion: "Où souhaitez-vous être pris en charge?"
+  },
+  de: {
+    greeting: "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Taxibuchung schnell und einfach zu machen. Also, fangen wir an.",
+    pickupQuestion: "Wo möchten Sie abgeholt werden?"
+  },
+  it: {
+    greeting: "Ciao e benvenuto alla demo di Taxibot. Sono Ada, la tua assistente per le prenotazioni taxi. Sono qui per rendere la prenotazione di un taxi facile e veloce. Quindi, iniziamo.",
+    pickupQuestion: "Dove desidera essere prelevato?"
+  },
+  pt: {
+    greeting: "Olá e bem-vindo à demonstração do Taxibot. Sou a Ada, sua assistente de reservas de táxi. Estou aqui para tornar a reserva de táxi rápida e fácil para você. Então, vamos começar.",
+    pickupQuestion: "Onde gostaria de ser apanhado?"
+  },
+  nl: {
+    greeting: "Hallo en welkom bij de Taxibot demo. Ik ben Ada, je taxi-reserveringsassistent. Ik ben hier om het boeken van een taxi snel en gemakkelijk te maken. Laten we beginnen.",
+    pickupQuestion: "Waar wilt u opgehaald worden?"
+  },
+  pl: {
+    greeting: "Cześć i witaj w demo Taxibot. Jestem Ada, twoja asystentka rezerwacji taksówek. Jestem tutaj, aby ułatwić ci rezerwację taksówki. Więc zaczynajmy.",
+    pickupQuestion: "Gdzie chciałbyś być odebrany?"
+  },
+  ar: {
+    greeting: "مرحباً بك في عرض تاكسي بوت التجريبي. أنا آدا، مساعدتك لحجز التاكسي. أنا هنا لجعل حجز التاكسي سريعاً وسهلاً. لنبدأ.",
+    pickupQuestion: "من أين تريد أن نأخذك؟"
+  },
+  hi: {
+    greeting: "नमस्ते और टैक्सीबॉट डेमो में आपका स्वागत है। मैं एडा हूं, आपकी टैक्सी बुकिंग सहायक। मैं यहां टैक्सी बुक करना आपके लिए जल्दी और आसान बनाने के लिए हूं। तो, चलिए शुरू करते हैं।",
+    pickupQuestion: "आप कहाँ से पिकअप होना चाहेंगे?"
+  },
+  ur: {
+    greeting: "سلام اور ٹیکسی بوٹ ڈیمو میں خوش آمدید۔ میں آڈا ہوں، آپ کی ٹیکسی بکنگ اسسٹنٹ۔ میں یہاں آپ کے لیے ٹیکسی بک کرنا آسان بنانے کے لیے ہوں۔ تو، چلیں شروع کرتے ہیں۔",
+    pickupQuestion: "آپ کہاں سے اٹھائے جانا چاہتے ہیں؟"
+  },
+  auto: {
+    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started.",
+    pickupQuestion: "Where would you like to be picked up?"
+  }
+};
+
+// Build language-aware system prompt
+function buildSystemPrompt(language: string): string {
+  const isAuto = language === "auto";
+  const langInstruction = isAuto
+    ? `
+# LANGUAGE - AUTO-DETECT MODE
+- You will AUTOMATICALLY detect and respond in the caller's language.
+- When the caller speaks, identify their language and respond in the SAME language.
+- Maintain consistent language throughout the call once detected.
+- If you cannot determine the language, default to English.
+- Be natural and fluent in the detected language.
+`
+    : `
+# LANGUAGE - ${language.toUpperCase()} MODE
+- You MUST speak in ${language === "en" ? "British English" : language} at all times.
+- ${language === "en" ? "Use British spelling and vocabulary: 'colour' not 'color', 'travelling' not 'traveling'." : "Be natural and fluent in this language."}
+- Currency is pounds (£), not dollars.
+`;
+
+  return `
 # IDENTITY
 You are Ada, the professional taxi booking assistant for the Taxibot demo.
 Voice: Warm, clear, professionally casual. Speak at a SLOWER, relaxed pace - not rushed.
 
-# LANGUAGE
-- You MUST speak in British English at all times.
-- Use British spelling and vocabulary: "colour" not "color", "travelling" not "traveling", "centre" not "center".
-- Use British phrases: "straightaway" not "right away", "lovely" not "great", "brilliant" not "awesome".
-- Currency is pounds (£), not dollars.
+${langInstruction}
 
 # SPEAKING STYLE
 - Speak slowly and clearly, with natural pauses between sentences.
@@ -130,41 +196,38 @@ You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [
 - Wait for a user response before asking the next question.
 
 # PHASE 1: THE WELCOME (Play immediately)
-"Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started."
+Greet the caller warmly in the appropriate language.
 
 # PHASE 2: SEQUENTIAL GATHERING (Strict Order)
 Follow this order exactly. Only move to the next if you have the current answer:
-1. "Where would you like to be picked up?" → Wait for answer
-2. "And what is your destination?" → Wait for answer
-3. "How many people will be travelling?" → Wait for answer, then say "Lovely, [X] passengers."
-4. "When do you need the taxi?" → Wait for answer (Default to 'Now' if ASAP)
+1. Ask for pickup location → Wait for answer
+2. Ask for destination → Wait for answer
+3. Ask for passenger count → Wait for answer, then acknowledge briefly
+4. Ask for pickup time → Wait for answer (Default to 'Now' if ASAP)
 
-🚨 ACKNOWLEDGE PASSENGER COUNT: After user says a number, briefly confirm: "Lovely, [X] passengers."
-Then ask: "And when do you need the taxi?"
+🚨 ACKNOWLEDGE PASSENGER COUNT: After user says a number, briefly confirm the count.
+Then ask about the time.
 
 🚨 CRITICAL: NEVER ASK USER TO CONFIRM/REPEAT AN ADDRESS 🚨
-🚫 DO NOT say "Could you please confirm the pickup address?"
-🚫 DO NOT say "Could you confirm the destination?"
-🚫 DO NOT say "Is that the correct address?"
-🚫 DO NOT say "I need to confirm the pickup location"
+🚫 DO NOT ask "Could you please confirm the pickup address?"
+🚫 DO NOT ask "Could you confirm the destination?"
+🚫 DO NOT ask "Is that the correct address?"
 🚫 DO NOT confirm or repeat back each answer individually (except passengers).
-🚫 DO NOT say "So you want to go to X?" after they give an address.
 🚫 DO NOT combine multiple questions into one sentence.
 ✅ For addresses: move immediately to the next question with no filler.
-✅ For passengers: briefly acknowledge "Lovely, X passengers" then ask about time.
+✅ For passengers: briefly acknowledge then ask about time.
 ✅ Save full confirmations for the Summary phase.
 ✅ ACCEPT ANY ADDRESS AS-IS - do NOT ask for house numbers, postcodes, or more details.
 ✅ Accept business names, landmarks, partial addresses, and place names immediately.
-✅ If user gives an address, TRUST IT and move on. Do not ask them to repeat it.
 
 # PHASE 3: THE SUMMARY (Gate Keeper)
-Only after the checklist is 100% complete, say:
-"Alright, let me quickly summarize your booking. You'd like to be picked up at [pickup address], and travel to [destination address]. There will be [number] of passengers, and you'd like to be picked up [time]. Is that correct?"
+Only after the checklist is 100% complete, summarize the booking in the caller's language:
+Pickup address, destination address, number of passengers, pickup time. Ask if correct.
 
 # PHASE 4: PRICING (State Lock)
 🚨🚨🚨 MANDATORY FUNCTION CALL 🚨🚨🚨
 When user confirms summary with 'Yes', you MUST:
-1. Say EXACTLY: "Great, one moment please while I check the trip price."
+1. Say you're checking the price (in the caller's language)
 2. IMMEDIATELY call the book_taxi function with action='request_quote'
 3. You CANNOT check the price without calling book_taxi(action='request_quote')
 4. If you don't call the function, you will NEVER get a price
@@ -174,7 +237,7 @@ The book_taxi(action='request_quote') function sends the request to dispatch.
 Without calling it, there is no way to get a price quote.
 
 After calling book_taxi(action='request_quote'):
-→ Say ONLY: "One moment please while I check that for you."
+→ Say you're checking (one moment please) in caller's language
 → Then STOP TALKING COMPLETELY.
 → WAIT IN COMPLETE SILENCE until you receive a [DISPATCH QUOTE RECEIVED] message.
 → Do NOT make up any prices. Do NOT estimate any ETAs. Do NOT guess.
@@ -185,51 +248,27 @@ After calling book_taxi(action='request_quote'):
 - You MUST wait for the external dispatch system to provide the price.
 - The ONLY way you will know a price is when you receive a [DISPATCH QUOTE RECEIVED] message.
 - Until that message arrives, you know NOTHING about the fare.
-- If you say ANY number as a price before receiving [DISPATCH QUOTE RECEIVED], YOU ARE WRONG.
-- NEVER say "the fare will be", "that will cost", "the price is" until dispatch tells you.
-- If user asks about price before dispatch responds, say ONLY: "I'm just checking that for you now, one moment."
 
-⏳ SILENCE IS REQUIRED:
-After saying "One moment please while I check that for you", be COMPLETELY SILENT.
-Do not speak. Do not guess. Do not estimate. Just wait.
-The dispatch system will send you the real price via [DISPATCH QUOTE RECEIVED].
-
-Once you receive [DISPATCH QUOTE RECEIVED] with the ACTUAL price, say ONLY:
-"The trip fare will be [EXACT price from dispatch], and the estimated arrival time is [EXACT ETA from dispatch]. Would you like to go ahead and book that?"
-🚫 RULE: Do NOT repeat addresses here. Focus only on Price and ETA.
-🚫 RULE: The price and ETA MUST be the exact values from the [DISPATCH QUOTE RECEIVED] message.
-🚫 RULE: Do NOT call book_taxi(action='confirmed') yet - WAIT for user's explicit YES/NO response.
+Once you receive [DISPATCH QUOTE RECEIVED] with the ACTUAL price:
+State the exact fare and ETA from dispatch, ask if they want to proceed. Do NOT repeat addresses.
 
 # PHASE 5: DISPATCH & CLOSE - WAIT FOR EXPLICIT CONFIRMATION
-🚨🚨🚨 CRITICAL: YOU MUST WAIT FOR USER TO SAY YES OR NO 🚨🚨🚨
+After asking if they want to book, WAIT for user response:
 
-After asking "Would you like to go ahead and book that?", WAIT for user response:
-
-IF USER SAYS YES (yes, yeah, yep, sure, go ahead, book it, confirm, please):
-1. Say: "Perfect, I'm booking that for you now. You'll receive the details via WhatsApp."
+IF USER SAYS YES:
+1. Confirm you're booking, mention WhatsApp confirmation
 2. IMMEDIATELY call book_taxi(action='confirmed')
-3. Then say goodbye and call end_call()
+3. Say goodbye and call end_call()
 
-IF USER SAYS NO (no, nope, not now, forget it, never mind, actually no):
+IF USER SAYS NO:
 1. IMMEDIATELY call cancel_booking
-2. Say: "No problem, I've cancelled that. Is there anything else I can help with?"
+2. Ask if there's anything else you can help with
 3. If user says no again, say goodbye and call end_call()
 
-🚫 NEVER call book_taxi(action='confirmed') until user explicitly says YES to the price/ETA confirmation
-🚫 NEVER assume "yes" - wait for their actual response
-
-Choose ONE closing randomly after confirmation:
-- "Just so you know, you can also book a taxi by sending us a WhatsApp voice note."
-- "Next time, feel free to book your taxi using a WhatsApp voice message."
-- "You can always book again by simply sending us a voice note on WhatsApp."
-
-Final Sign-off: "Thank you for trying the Taxibot demo, and have a safe journey."
-→ CALL end_call()
-
 # CANCELLATION
-If user says "cancel", "never mind", "forget it", or "no" to booking confirmation:
+If user says "cancel", "never mind", "forget it":
 → CALL cancel_booking
-Say: "No problem, I've cancelled that. Is there anything else I can help with?"
+Ask if there's anything else you can help with.
 
 # NAME HANDLING
 If caller says their name → CALL save_customer_name
@@ -240,10 +279,7 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER move to Summary until all 4 checklist items are filled.
 ❌ NEVER repeat addresses after the summary is confirmed.
 ❌ NEVER ask for house numbers, postcodes, or more details on ANY address.
-❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address.
-❌ NEVER ask for "more details" or "could you be more specific".
-✅ Accept ANY address exactly as spoken - street names, business names, landmarks, partial addresses.
-✅ If user says "High Street" or "Tesco" or "the hospital" - accept it immediately.
+✅ Accept ANY address exactly as spoken.
 ✅ Move to the next question immediately after receiving any address.
 
 # CONTEXT PAIRING (CRITICAL)
@@ -254,6 +290,7 @@ When the user responds, ALWAYS check what question you just asked them:
 - If you asked for TIME and they respond → it's the pickup time
 NEVER swap fields. Trust the question context.
 `;
+}
 
 // Tools - same as taxi-realtime-simple
 const TOOLS = [
@@ -301,6 +338,7 @@ const TOOLS = [
 interface SessionState {
   callId: string;
   callerPhone: string;
+  language: string; // ISO 639-1 code or "auto" for auto-detect
   booking: {
     pickup: string | null;
     destination: string | null;
@@ -841,10 +879,11 @@ function computeRms(pcm: Int16Array): number {
 }
 
 // Create initial session state
-function createSessionState(callId: string, callerPhone: string): SessionState {
+function createSessionState(callId: string, callerPhone: string, language: string): SessionState {
   return {
     callId,
     callerPhone,
+    language,
     booking: {
       pickup: null,
       destination: null,
@@ -895,7 +934,8 @@ If the user's next response contains location/address/place info and last_questi
 NEVER swap fields. Trust the question context.
 `;
 
-  messages.push({ role: "system", content: SYSTEM_PROMPT + stateContext });
+  const systemPrompt = buildSystemPrompt(sessionState.language);
+  messages.push({ role: "system", content: systemPrompt + stateContext });
   
   // Add last 6 conversation turns for context (3 exchanges)
   const recentHistory = sessionState.conversationHistory.slice(-6);
@@ -1088,10 +1128,10 @@ async function sendDispatchWebhook(
 }
 
 // Handle WebSocket connection
-async function handleConnection(socket: WebSocket, callId: string, callerPhone: string) {
-  console.log(`[${callId}] 🎯 PAIRED MODE: New connection from ${callerPhone}`);
+async function handleConnection(socket: WebSocket, callId: string, callerPhone: string, language: string) {
+  console.log(`[${callId}] 🎯 PAIRED MODE: New connection from ${callerPhone} (language: ${language})`);
   
-  const sessionState = createSessionState(callId, callerPhone);
+  const sessionState = createSessionState(callId, callerPhone, language);
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
@@ -1363,17 +1403,23 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     greetingAttempts++;
     greetingSent = true;
     
-    console.log(`[${callId}] 🎙️ Sending initial greeting (attempt ${greetingAttempts})...`);
+    console.log(`[${callId}] 🎙️ Sending initial greeting (attempt ${greetingAttempts}, language: ${sessionState.language})...`);
     
-    const greetingText = "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?";
+    // Get language-specific greeting or fall back to English for auto-detect
+    const langData = GREETINGS[sessionState.language] || GREETINGS["en"];
+    const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
+    
+    // For auto-detect mode, let the AI decide based on first user response
+    const greetingInstruction = sessionState.language === "auto"
+      ? `Greet the caller warmly in English first (they may switch languages). Say exactly: "${greetingText}". After greeting, pay attention to what language they respond in and switch to match them.`
+      : `Greet the caller. Say exactly: "${greetingText}"`;
     
     // Simple approach: just request a response with specific instructions
-    // Don't inject conversation items - let the model generate from session instructions
     openaiWs!.send(JSON.stringify({
       type: "response.create",
       response: {
         modalities: ["audio", "text"],  // Audio first - prioritize voice output
-        instructions: `Greet the caller. Say exactly: "${greetingText}"`
+        instructions: greetingInstruction
       }
     }));
     
@@ -1403,18 +1449,26 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime`);
     
     // Configure session with context-pairing system
+    const systemPrompt = buildSystemPrompt(sessionState.language);
+    
+    // Build Whisper prompt - only add English-specific hints if not auto-detect
+    const whisperPrompt = sessionState.language === "auto" 
+      ? "Taxi booking. Addresses, street names, numbers, passenger count."
+      : sessionState.language === "en"
+        ? "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination. UK addresses."
+        : "Taxi booking. Addresses, street names, numbers, passenger count.";
+    
     const sessionConfig = {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
         voice: VOICE,
-        instructions: SYSTEM_PROMPT + `\n\n[CALL CONTEXT]\nCall ID: ${callId}\nCaller: ${callerPhone}`,
+        instructions: systemPrompt + `\n\n[CALL CONTEXT]\nCall ID: ${callId}\nCaller: ${callerPhone}\nLanguage: ${sessionState.language}`,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
         input_audio_transcription: { 
           model: "whisper-1",
-          // Prompt hint helps Whisper recognize place names and taxi terminology
-          prompt: "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination."
+          prompt: whisperPrompt
         },
         turn_detection: {
           type: "server_vad",
@@ -2488,10 +2542,12 @@ Deno.serve(async (req) => {
   if (upgrade.toLowerCase() === "websocket") {
     const callId = url.searchParams.get("call_id") || `paired-${Date.now()}`;
     const callerPhone = url.searchParams.get("caller_phone") || "unknown";
+    // Language: "auto" for auto-detect, or ISO 639-1 code (en, es, fr, de, etc.)
+    const language = url.searchParams.get("language") || "auto";
     
     const { socket, response } = Deno.upgradeWebSocket(req);
     
-    handleConnection(socket, callId, callerPhone);
+    handleConnection(socket, callId, callerPhone, language);
     
     return response;
   }
