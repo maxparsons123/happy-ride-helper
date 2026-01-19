@@ -888,12 +888,14 @@ async function sendDispatchWebhook(
   // Retry logic like simple version - more reliable
   const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 1000;
+  // Some dispatch systems can be slow to respond; since the real quote arrives asynchronously via callback,
+  // we mainly need the POST to go through reliably.
+  const TIMEOUT_MS = 30000;
   
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const controller = new AbortController();
-      // Longer timeout: 10s (was 5s) to handle slow dispatch systems
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
       console.log(`[${callId}] 📡 Webhook attempt ${attempt}/${MAX_RETRIES}...`);
       const response = await fetch(DISPATCH_WEBHOOK_URL, {
@@ -951,7 +953,7 @@ async function sendDispatchWebhook(
         continue;
       }
       
-      return { success: false, error: isTimeout ? "Webhook timeout after 10s" : errMsg };
+      return { success: false, error: isTimeout ? `Webhook timeout after ${Math.round(TIMEOUT_MS / 1000)}s` : errMsg };
     }
   }
   
@@ -1812,12 +1814,45 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               sessionState.quoteInFlight = true;
               sessionState.lastQuoteRequestedAt = Date.now();
 
-              await sendDispatchWebhook(sessionState, action, {
+              const webhookResult = await sendDispatchWebhook(sessionState, action, {
                 pickup: resolvedPickup,
                 destination: resolvedDestination,
                 passengers: resolvedPassengers,
                 pickup_time: resolvedPickupTime
               });
+
+              // If the dispatch system is unreachable, DON'T enter silence mode (otherwise the call sounds "stuck").
+              // Let Ada inform the caller once and allow a retry.
+              if (!webhookResult.success) {
+                console.error(`[${callId}] ❌ Dispatch webhook failed - not entering silence mode: ${webhookResult.error || "unknown_error"}`);
+                sessionState.quoteInFlight = false;
+                sessionState.waitingForQuoteSilence = false;
+                sessionState.saidOneMoment = false;
+
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: data.call_id,
+                    output: JSON.stringify({
+                      success: false,
+                      status: "dispatch_unreachable",
+                      error: webhookResult.error || "dispatch_unreachable",
+                      message: "Dispatch pricing system did not respond. Apologize briefly and ask if you'd like to try again."
+                    })
+                  }
+                }));
+
+                openaiWs!.send(JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio", "text"],
+                    instructions: "Say ONLY: 'Sorry, I'm having trouble getting the fare right now. Would you like me to try again?' Then STOP and WAIT for their answer."
+                  }
+                }));
+
+                break;
+              }
 
               // Set silence mode - Ada must not speak again until fare arrives
               sessionState.waitingForQuoteSilence = true;
