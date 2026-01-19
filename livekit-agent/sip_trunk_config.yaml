@@ -1,0 +1,45 @@
+# LiveKit SIP Trunk Configuration
+# This configures how SIP calls are routed to LiveKit rooms
+#
+# Deploy this using LiveKit CLI:
+#   livekit-cli sip trunk create --from-file sip_trunk_config.yaml
+#
+# Or via LiveKit Cloud dashboard
+
+# Inbound SIP Trunk - receives calls from your SIP provider
+inbound_trunk:
+  name: "taxi-inbound"
+  # Your SIP provider's allowed IPs (comma-separated)
+  # Example for Twilio, Telnyx, etc.
+  allowed_addresses:
+    - "0.0.0.0/0"  # Allow all for testing - RESTRICT in production!
+  
+  # Numbers this trunk handles (E.164 format)
+  # numbers:
+  #   - "+441onal..."
+  
+  # Authentication (if your provider requires it)
+  # auth_username: "your_sip_username"
+  # auth_password: "your_sip_password"
+
+# Dispatch Rule - routes inbound calls to rooms
+dispatch_rules:
+  - name: "taxi-calls"
+    # Match all inbound calls
+    rule:
+      # Route to a room named after the call ID
+      dispatchRuleDirect:
+        roomName: "taxi-${call.id}"
+        pin: ""
+    
+    # Metadata passed to the room (available in agent)
+    metadata:
+      service: "taxi-booking"
+      trunk: "livekit-sip"
+
+# Alternative: Route to a specific room for all calls
+# dispatch_rules:
+#   - name: "taxi-shared"
+#     rule:
+#       dispatchRuleDirect:
+#         roomName: "taxi-main"
