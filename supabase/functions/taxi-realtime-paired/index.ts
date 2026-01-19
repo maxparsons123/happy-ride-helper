@@ -272,8 +272,8 @@ const TOOLS = [
       type: "object",
       properties: {
         action: { type: "string", enum: ["request_quote", "confirmed"], description: "Use 'request_quote' first to get fare/ETA, then 'confirmed' after user accepts." },
-        pickup: { type: "string", description: "Pickup address" },
-        destination: { type: "string", description: "Destination address" },
+        pickup: { type: "string", description: "COMPLETE pickup address exactly as the user said it. Include house number, street name, and any other details they provided. E.g. 'Number 1, Lifford Lane' NOT just 'Number 1'." },
+        destination: { type: "string", description: "COMPLETE destination address exactly as the user said it. Include all details they provided. E.g. 'Birmingham New Street Station' NOT just 'New Street'." },
         passengers: { type: "integer", minimum: 1, description: "Number of passengers" },
         time: { type: "string", description: "When taxi is needed (e.g., 'now', '3pm')" }
       },
