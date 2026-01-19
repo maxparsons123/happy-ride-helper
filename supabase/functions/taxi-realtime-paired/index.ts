@@ -2554,6 +2554,41 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   instructions: "Say ONLY: 'One moment please while I check that for you.' Then STOP COMPLETELY. Say nothing else."
                 }
               }));
+              
+              // TIMEOUT FALLBACK: If fare doesn't arrive within 15 seconds, break silence and apologize
+              const quoteTimeoutMs = 15000;
+              setTimeout(() => {
+                if (sessionState.waitingForQuoteSilence && !sessionState.awaitingConfirmation && !cleanedUp) {
+                  console.log(`[${callId}] ⏰ QUOTE TIMEOUT: No fare received after ${quoteTimeoutMs}ms - breaking silence`);
+                  
+                  // Clear silence mode
+                  sessionState.waitingForQuoteSilence = false;
+                  sessionState.saidOneMoment = false;
+                  sessionState.quoteInFlight = false;
+                  
+                  // Tell Ada to apologize and offer to retry
+                  if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                    openaiWs.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[QUOTE TIMEOUT] The dispatch system didn't respond in time. Apologize briefly and ask if they'd like you to try again. Say: "I'm sorry, I'm having trouble getting the fare right now. Would you like me to try again?" If they say yes, call book_taxi with action="request_quote" again.`
+                        }]
+                      }
+                    }));
+                    openaiWs.send(JSON.stringify({ 
+                      type: "response.create",
+                      response: {
+                        modalities: ["audio", "text"],
+                        instructions: "Say: 'I'm sorry, I'm having trouble getting the fare right now. Would you like me to try again?' Then wait for their answer."
+                      }
+                    }));
+                  }
+                }
+              }, quoteTimeoutMs);
 
             } else if (action === "confirmed") {
               console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingConfirmed=${sessionState.bookingConfirmed}, bookingRef=${sessionState.pendingBookingRef})`);
