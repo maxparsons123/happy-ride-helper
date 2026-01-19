@@ -56,14 +56,22 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
 # Audio rates
 ULAW_RATE = 8000    # µ-law telephony (8kHz)
-SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
+SLIN16_RATE = 16000 # slin16 = signed linear 16kHz (PREFERRED for best STT)
 AI_RATE = 24000     # OpenAI TTS
 
-# Send native 8kHz µ-law to edge function (faster, lower latency)
-SEND_NATIVE_ULAW = True
+# Audio quality settings
+# PREFER_SLIN16: When True, optimizes for 16kHz audio (better consonant recognition)
+PREFER_SLIN16 = True
+
+# Pre-emphasis coefficient for boosting high frequencies (consonants)
+# Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
+PRE_EMPHASIS_COEFF = float(os.environ.get("PRE_EMPHASIS_COEFF", "0.95"))
+
+# Send native format to edge function (edge handles resampling to 24kHz)
+SEND_NATIVE_FORMAT = True
 
 # Reconnection settings
-MAX_RECONNECT_ATTEMPTS = 3
+MAX_RECONNECT_ATTEMPTS = 5  # Increased for mobile network resilience
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
@@ -251,9 +259,10 @@ class CallEndedException(Exception):
 class CallState:
     call_id: str
     phone: str = "Unknown"
-    ast_codec: str = "slin"  # Default to slin (8kHz signed linear) - most common
-    ast_rate: int = 8000  # Sample rate for current codec
-    ast_frame_bytes: int = 320  # 320 bytes = 20ms at 8kHz slin
+    # Default to slin16 (16kHz) for best STT quality - auto-detects from frame size
+    ast_codec: str = "slin16"
+    ast_rate: int = SLIN16_RATE
+    ast_frame_bytes: int = 640  # 640 bytes = 20ms at 16kHz slin16
     
     # Processing state
     last_gain: float = 1.0
@@ -279,7 +288,7 @@ class TaxiBridgeV7:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.running: bool = True
         
-        self.state = CallState(call_id=f"ast-{int(time.time() * 1000)}")
+        self.state = CallState(call_id=f"paired-{int(time.time() * 1000)}")
         # 🔥 FIXED: Bounded queue to prevent memory leaks during disconnections
         self.audio_queue: Deque[bytes] = deque(maxlen=200)
         self.pending_audio_buffer: Deque[bytes] = deque(maxlen=100)
@@ -293,33 +302,39 @@ class TaxiBridgeV7:
         
         Frame sizes for 20ms:
         - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
-        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
+        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02) ← OPTIMAL
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
         old_codec = self.state.ast_codec
         
-        if frame_len == 160:
-            self.state.ast_codec = "ulaw"
-            self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = 160
-        elif frame_len == 640:
-            # slin16 = 16kHz signed linear
+        if frame_len == 640:
+            # slin16 = 16kHz signed linear - OPTIMAL for STT
             self.state.ast_codec = "slin16"
             self.state.ast_rate = SLIN16_RATE
             self.state.ast_frame_bytes = 640
+            logger.info("[%s] ✅ OPTIMAL: slin16 @ 16kHz (best STT quality)", self.state.call_id)
         elif frame_len == 320:
-            # slin = 8kHz signed linear (not slin16!)
+            # slin = 8kHz signed linear
             self.state.ast_codec = "slin"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 320
-        else:
-            # Fallback: assume µ-law
+            logger.info("[%s] 🔎 Detected: slin @ 8kHz (consider slin16 for better STT)", self.state.call_id)
+        elif frame_len == 160:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = 160
+            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz (consider slin16 for better STT)", self.state.call_id)
+        else:
+            # Fallback: assume format based on size
+            if frame_len > 400:
+                self.state.ast_codec = "slin16"
+                self.state.ast_rate = SLIN16_RATE
+            else:
+                self.state.ast_codec = "slin"
+                self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = frame_len
-
-        logger.info("[%s] 🔎 Detected: %s @ %dHz (%d bytes)", 
-                   self.state.call_id, self.state.ast_codec, self.state.ast_rate, frame_len)
+            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
+                          self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
         
         # Notify edge function of format change
         if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
@@ -586,8 +601,10 @@ class TaxiBridgeV7:
                         if m_len != self.state.ast_frame_bytes:
                             await self._detect_format(m_len)
 
-                        # Decode and process audio
+                        # Decode µ-law to linear PCM if needed
                         linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
+                        
+                        # Optional noise reduction (disabled by default - Whisper handles noise well)
                         cleaned, self.state.last_gain = apply_noise_reduction(
                             linear, self.state.last_gain
                         )
@@ -595,16 +612,19 @@ class TaxiBridgeV7:
                         # Apply pre-emphasis to boost consonants before STT
                         # This helps OpenAI distinguish 'S' vs 'F' sounds (Russell vs Ruffles)
                         pcm_array = np.frombuffer(cleaned, dtype=np.int16).astype(np.float32)
-                        emphasized = apply_pre_emphasis(pcm_array, coeff=0.95)
+                        emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
                         cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
 
-                        # Prepare for sending to AI
-                        # IMPORTANT: Send audio at the native Asterisk rate.
-                        # The backend will handle resampling (8/16kHz -> 24kHz) before OpenAI.
-                        if SEND_NATIVE_ULAW and self.state.ast_codec == "ulaw":
-                            audio_to_send = lin2ulaw(cleaned)
+                        # Send audio in native format - edge function handles resampling to 24kHz
+                        # slin16 (16kHz) is preferred as it preserves more high-frequency content
+                        if SEND_NATIVE_FORMAT:
+                            if self.state.ast_codec == "ulaw":
+                                audio_to_send = lin2ulaw(cleaned)
+                            else:
+                                # slin/slin16 PCM16 passthrough (8kHz or 16kHz)
+                                audio_to_send = cleaned
                         else:
-                            # slin/slin16 PCM16 passthrough (8kHz or 16kHz)
+                            # Always send PCM16 (convert µ-law to linear)
                             audio_to_send = cleaned
                         # Send to AI
                         if self.state.ws_connected and self.ws:
@@ -793,9 +813,12 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.1 - memory leak fixes",
+        "🚀 Taxi Bridge v7.3 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
+        f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
+        f"   Preferred codec: slin16 @ 16kHz (auto-detected from Asterisk)",
+        f"   Resampling: resample_poly (preserves high-frequency transients)",
     ]
     for line in startup_lines:
         print(line, flush=True)
