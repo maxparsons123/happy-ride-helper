@@ -1508,6 +1508,43 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Keep-alive heartbeat to prevent WebSocket idle timeout during long silences
+  // (e.g., waiting for user confirmation after fare quote)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const KEEPALIVE_INTERVAL_MS = 15000; // Send heartbeat every 15 seconds
+  let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+  
+  keepaliveInterval = setInterval(() => {
+    if (cleanedUp || socket.readyState !== WebSocket.OPEN) {
+      if (keepaliveInterval) {
+        clearInterval(keepaliveInterval);
+        keepaliveInterval = null;
+      }
+      return;
+    }
+    
+    try {
+      socket.send(JSON.stringify({
+        type: "keepalive",
+        timestamp: Date.now(),
+        call_id: callId
+      }));
+    } catch (e) {
+      console.error(`[${callId}] ⚠️ Keepalive send failed:`, e);
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+  
+  // Clear keepalive on cleanup
+  const originalCleanup = cleanup;
+  const cleanupWithKeepalive = async () => {
+    if (keepaliveInterval) {
+      clearInterval(keepaliveInterval);
+      keepaliveInterval = null;
+    }
+    await originalCleanup();
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Subscribe to dispatch callback channel (for fare/ETA responses from backend)
   // ═══════════════════════════════════════════════════════════════════════════
   dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -1687,7 +1724,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     }
     
     // Schedule cleanup after giving time for goodbye
-    setTimeout(() => cleanup(), 12000);
+    setTimeout(() => cleanupWithKeepalive(), 12000);
   });
   
   // Subscribe to the channel
@@ -2769,7 +2806,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
               try {
                 socket.send(JSON.stringify({ type: "hangup", reason: toolArgs.reason }));
               } catch { /* ignore */ }
-              cleanup();
+              cleanupWithKeepalive();
             }, 18000);
           }
           break;
@@ -2819,7 +2856,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
   openaiWs.onclose = () => {
     console.log(`[${callId}] OpenAI WebSocket closed`);
-    cleanup();
+    cleanupWithKeepalive();
   };
 
   // Client WebSocket handlers
@@ -2926,9 +2963,12 @@ Do NOT skip any part. Say ALL of it warmly.]`
           if (typeof data.inbound_sample_rate === "number") {
             inboundSampleRate = data.inbound_sample_rate;
           }
+        } else if (data.type === "keepalive_ack") {
+          // Bridge acknowledged our keepalive - connection is alive
+          // (no action needed, just confirms the connection is healthy)
         } else if (data.type === "hangup") {
           console.log(`[${callId}] Client requested hangup`);
-          cleanup();
+          cleanupWithKeepalive();
         }
       }
     } catch (e) {
@@ -2942,7 +2982,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
   socket.onclose = () => {
     console.log(`[${callId}] Client WebSocket closed`);
-    cleanup();
+    cleanupWithKeepalive();
   };
 }
 
