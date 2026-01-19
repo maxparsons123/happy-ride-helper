@@ -22,7 +22,7 @@ public partial class MainForm : Form
         txtSipPort.Text = "5060";
         txtSipUser.Text = "max201";
         txtSipPassword.Text = "qwe70954504118";
-        txtWebSocketUrl.Text = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime";
+        txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
         cmbTransport.SelectedIndex = 0; // UDP
     }
 
