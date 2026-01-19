@@ -3,13 +3,14 @@ using System.Diagnostics;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// SIP endpoint that auto-answers calls and bridges audio to Ada via NAudio.
-/// MEMORY LEAK FIXES: Proper disposal of all resources, event unsubscription.
+/// FIXES: Proper SIP registration with realm, VoIPMediaSession constructor for SIPSorcery 6.x
 /// </summary>
 public class SipAutoAnswer : IDisposable
 {
@@ -59,12 +60,21 @@ public class SipAutoAnswer : IDisposable
                 break;
         }
 
+        // FIX: Proper SIP registration with explicit realm and registrar host to avoid 401 errors
+        var sipUri = SIPURI.ParseSIPURIRelax($"sip:{_config.SipUser}@{_config.SipServer}");
+        
         _regUserAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            _config.SipUser,
-            _config.SipPassword,
-            _config.SipServer,
-            120);
+            null,                    // outbound proxy
+            sipUri,                  // SIP URI to register
+            _config.SipUser,         // auth username
+            _config.SipPassword,     // auth password
+            _config.SipServer,       // realm (domain for auth)
+            null,                    // custom contact URI
+            120,                     // registration expiry in seconds
+            null,                    // custom headers
+            null,                    // auth username override (null = use SipUser)
+            _config.SipServer);      // registrar host
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
         _regUserAgent.RegistrationFailed += OnRegistrationFailure;
@@ -85,7 +95,8 @@ public class SipAutoAnswer : IDisposable
 
     private void OnRegistrationFailure(SIPURI uri, SIPResponse? resp, string err)
     {
-        Log($"❌ Registration failed: {err}");
+        var statusCode = resp?.StatusCode.ToString() ?? "no response";
+        Log($"❌ Registration failed: {err} (Status: {statusCode})");
         IsRegistered = false;
         OnRegistrationFailed?.Invoke(err);
     }
@@ -116,47 +127,57 @@ public class SipAutoAnswer : IDisposable
         _isInCall = true;
         var callId = Guid.NewGuid().ToString("N")[..8];
         
-        // MEMORY LEAK FIX: Create new CTS for this call
         _callCts = new CancellationTokenSource();
         var cts = _callCts;
 
         OnCallStarted?.Invoke(callId, caller);
 
-        // RTP setup
         uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
         VoIPMediaSession? rtpSession = null;
         
         try
         {
-            rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+            // FIX: Use MediaEndPoints constructor for SIPSorcery 6.x
+            // The session will auto-negotiate PCMU codec
+            var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
+            rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
             _currentMediaSession = rtpSession;
 
+            // Accept the incoming call
             var uas = ua.AcceptCall(req);
 
-            // Send ringing
+            // Send 180 Ringing
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
                 await _sipTransport!.SendResponseAsync(ringing);
                 Log($"☎️ [{callId}] Ringing...");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log($"⚠️ [{callId}] Failed to send ringing: {ex.Message}");
+            }
 
+            // Brief delay before answering
             await Task.Delay(300, cts.Token);
 
-            // Answer
+            // Answer the call with the RTP session
+            Log($"🔄 [{callId}] Attempting to answer...");
             bool answered = await ua.Answer(uas, rtpSession);
+            
             if (!answered)
             {
-                Log($"❌ [{callId}] Failed to answer");
+                Log($"❌ [{callId}] Failed to answer - check SDP negotiation");
+                Log($"   Local SDP: {rtpSession.CreateOffer(null)?.ToString() ?? "null"}");
                 return;
             }
 
+            // Start the RTP session
             await rtpSession.Start();
-            Log($"✅ [{callId}] Call answered");
+            Log($"✅ [{callId}] Call answered, RTP active");
 
-            // Connect to Ada
+            // Connect to Ada WebSocket
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
@@ -169,7 +190,7 @@ public class SipAutoAnswer : IDisposable
 
             await _adaClient.ConnectAsync(caller, cts.Token);
 
-            // Flush initial packets
+            // Flush initial RTP packets (connection noise)
             int flushCount = 0;
             const int FLUSH_PACKETS = 25;
 
@@ -254,10 +275,8 @@ public class SipAutoAnswer : IDisposable
         {
             Log($"📴 [{callId}] Call ended - cleaning up");
             
-            // Hangup SIP
             try { ua.Hangup(); } catch { }
             
-            // MEMORY LEAK FIX: Properly dispose Ada client
             if (_adaClient != null)
             {
                 try
@@ -269,7 +288,6 @@ public class SipAutoAnswer : IDisposable
                 _adaClient = null;
             }
             
-            // MEMORY LEAK FIX: Close VoIPMediaSession
             if (rtpSession != null)
             {
                 try
@@ -280,7 +298,6 @@ public class SipAutoAnswer : IDisposable
             }
             _currentMediaSession = null;
             
-            // MEMORY LEAK FIX: Dispose call CTS
             if (_callCts == cts)
             {
                 try { _callCts?.Dispose(); } catch { }
@@ -304,10 +321,8 @@ public class SipAutoAnswer : IDisposable
         
         Log("🛑 Stopping...");
         
-        // Cancel any ongoing call
         try { _callCts?.Cancel(); } catch { }
         
-        // MEMORY LEAK FIX: Unsubscribe from events before stopping
         if (_regUserAgent != null)
         {
             _regUserAgent.RegistrationSuccessful -= OnRegistrationSuccess;
@@ -320,14 +335,12 @@ public class SipAutoAnswer : IDisposable
             _userAgent.OnIncomingCall -= OnIncomingCallAsync;
         }
         
-        // MEMORY LEAK FIX: Close current media session
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("stopping"); } catch { }
             _currentMediaSession = null;
         }
         
-        // MEMORY LEAK FIX: Shutdown transport and dispose channels
         if (_sipTransport != null)
         {
             try { _sipTransport.Shutdown(); } catch { }
@@ -343,7 +356,6 @@ public class SipAutoAnswer : IDisposable
         
         Stop();
         
-        // MEMORY LEAK FIX: Dispose Ada client if still active
         try
         {
             _adaClient?.Dispose();
@@ -351,7 +363,6 @@ public class SipAutoAnswer : IDisposable
         }
         catch { }
         
-        // MEMORY LEAK FIX: Dispose CTS
         try
         {
             _callCts?.Dispose();
