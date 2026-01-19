@@ -43,13 +43,22 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 # =============================================================================
 # Load from bridge-config.json if available, otherwise use defaults
 import os
-try:
-    with open(os.path.join(os.path.dirname(__file__), '..', 'bridge-config.json')) as f:
-        _config = json.load(f)
-        WS_URL = _config.get('edge_functions', {}).get('taxi_realtime_simple_ws', 
-            "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple")
-except (FileNotFoundError, json.JSONDecodeError):
-    WS_URL = os.environ.get("WS_URL", "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple")
+
+# Prefer explicit WS_URL env var, then bridge-config.json, with paired as default.
+WS_URL = os.environ.get("WS_URL")
+if not WS_URL:
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "..", "bridge-config.json")) as f:
+            _config = json.load(f)
+            edge = _config.get("edge_functions", {})
+            WS_URL = (
+                edge.get("taxi_realtime_paired_ws")
+                or edge.get("taxi_realtime_ws")
+                or edge.get("taxi_realtime_simple_ws")
+                or "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
+            )
+    except (FileNotFoundError, json.JSONDecodeError):
+        WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
@@ -364,8 +373,15 @@ class TaxiBridgeV7:
                     logger.info("[%s] 🔄 Reconnecting in %.1fs", self.state.call_id, delay)
                     await asyncio.sleep(delay)
 
+                # Less aggressive pinging to reduce disconnects under load
                 self.ws = await asyncio.wait_for(
-                    websockets.connect(target_url, ping_interval=5, ping_timeout=10),
+                    websockets.connect(
+                        target_url,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        close_timeout=5,
+                        max_queue=32,
+                    ),
                     timeout=10.0,
                 )
                 self.state.current_ws_url = target_url
