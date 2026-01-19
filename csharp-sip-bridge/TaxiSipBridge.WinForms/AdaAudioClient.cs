@@ -9,12 +9,14 @@ namespace TaxiSipBridge;
 /// <summary>
 /// NAudio-based client for Ada AI interaction.
 /// Captures audio from microphone or SIP, sends to Ada, plays responses through speakers.
+/// MEMORY LEAK FIXES: Bounded queues, proper disposal, explicit cleanup.
 /// </summary>
 public class AdaAudioClient : IDisposable
 {
     private readonly string _wsUrl;
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
+    private bool _disposed = false;
 
     // NAudio playback (24kHz PCM16 mono from Ada)
     private WaveOutEvent? _waveOut;
@@ -24,9 +26,9 @@ public class AdaAudioClient : IDisposable
     private WaveInEvent? _waveIn;
     private bool _isRecording = false;
 
-    // Audio queues
+    // Audio queues - BOUNDED to prevent memory leaks
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
-    private const int MaxQueueFrames = 250;
+    private const int MAX_QUEUE_FRAMES = 500; // ~10 seconds at 20ms/frame
 
     // Fade-in to prevent pops
     private bool _needsFadeIn = true;
@@ -51,21 +53,24 @@ public class AdaAudioClient : IDisposable
     /// </summary>
     public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
     {
+        if (_disposed) throw new ObjectDisposedException(nameof(AdaAudioClient));
+        
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         // Initialize playback (24kHz mono PCM16 - Ada's output format)
+        // MEMORY LEAK FIX: Bound buffer and enable discard on overflow
         var playbackFormat = new WaveFormat(24000, 16, 1);
         _playbackBuffer = new BufferedWaveProvider(playbackFormat)
         {
-            BufferDuration = TimeSpan.FromSeconds(5),
-            DiscardOnBufferOverflow = true
+            BufferDuration = TimeSpan.FromSeconds(3), // Reduced from 5s
+            DiscardOnBufferOverflow = true // CRITICAL: Prevent unbounded growth
         };
 
         _waveOut = new WaveOutEvent { DesiredLatency = 100 };
         _waveOut.Init(_playbackBuffer);
         _waveOut.Play();
 
-        Log("🔊 Audio playback initialized (24kHz)");
+        Log("🔊 Audio playback initialized (24kHz, bounded buffer)");
 
         // Connect WebSocket
         _ws = new ClientWebSocket();
@@ -86,6 +91,7 @@ public class AdaAudioClient : IDisposable
     /// </summary>
     public void StartMicrophoneCapture(int deviceIndex = 0)
     {
+        if (_disposed) return;
         if (_isRecording) return;
 
         // Capture at 24kHz to match Ada's expected input
@@ -110,11 +116,19 @@ public class AdaAudioClient : IDisposable
     {
         if (!_isRecording) return;
 
-        _waveIn?.StopRecording();
-        _waveIn?.Dispose();
-        _waveIn = null;
+        try
+        {
+            if (_waveIn != null)
+            {
+                _waveIn.DataAvailable -= OnMicrophoneData; // MEMORY LEAK FIX: Unsubscribe first
+                _waveIn.StopRecording();
+                _waveIn.Dispose();
+                _waveIn = null;
+            }
+        }
+        catch { }
+        
         _isRecording = false;
-
         Log("🎤 Microphone capture stopped");
     }
 
@@ -124,7 +138,9 @@ public class AdaAudioClient : IDisposable
     /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
+        if (_disposed) return;
         if (_ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
 
         byte[] audioToSend;
 
@@ -148,11 +164,16 @@ public class AdaAudioClient : IDisposable
             audio = base64
         });
 
-        await _ws.SendAsync(
-            new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-            WebSocketMessageType.Text,
-            true,
-            _cts?.Token ?? CancellationToken.None);
+        try
+        {
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
     }
 
     /// <summary>
@@ -161,7 +182,9 @@ public class AdaAudioClient : IDisposable
     /// </summary>
     public async Task SendMuLawAsync(byte[] ulawData)
     {
+        if (_disposed) return;
         if (_ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
 
         // Decode µ-law to PCM16
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
@@ -180,11 +203,16 @@ public class AdaAudioClient : IDisposable
             audio = base64
         });
 
-        await _ws.SendAsync(
-            new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-            WebSocketMessageType.Text,
-            true,
-            _cts?.Token ?? CancellationToken.None);
+        try
+        {
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
     }
 
     /// <summary>
@@ -203,8 +231,17 @@ public class AdaAudioClient : IDisposable
     /// </summary>
     public int PendingFrameCount => _outboundQueue.Count;
 
+    /// <summary>
+    /// Clear all pending audio frames (useful when call ends).
+    /// </summary>
+    public void ClearPendingFrames()
+    {
+        while (_outboundQueue.TryDequeue(out _)) { }
+    }
+
     private void OnMicrophoneData(object? sender, WaveInEventArgs e)
     {
+        if (_disposed) return;
         if (e.BytesRecorded == 0) return;
 
         var data = new byte[e.BytesRecorded];
@@ -216,9 +253,9 @@ public class AdaAudioClient : IDisposable
 
     private async Task ReceiveLoopAsync()
     {
-        var buffer = new byte[1024 * 128];
+        var buffer = new byte[1024 * 64]; // Reduced from 128KB
 
-        while (_ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
+        while (!_disposed && _ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
         {
             try
             {
@@ -240,6 +277,11 @@ public class AdaAudioClient : IDisposable
             {
                 break;
             }
+            catch (WebSocketException ex)
+            {
+                Log($"⚠️ WebSocket error: {ex.Message}");
+                break;
+            }
             catch (Exception ex)
             {
                 Log($"⚠️ Receive error: {ex.Message}");
@@ -252,6 +294,8 @@ public class AdaAudioClient : IDisposable
 
     private void ProcessMessage(string json)
     {
+        if (_disposed) return;
+        
         try
         {
             using var doc = JsonDocument.Parse(json);
@@ -337,6 +381,8 @@ public class AdaAudioClient : IDisposable
 
     private void ProcessAdaAudio(byte[] pcm24kBytes)
     {
+        if (_disposed) return;
+        
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
         // Apply fade-in to prevent pops
@@ -351,7 +397,7 @@ public class AdaAudioClient : IDisposable
             _needsFadeIn = false;
         }
 
-        // Play through speakers (24kHz)
+        // Play through speakers (24kHz) - buffer handles overflow via DiscardOnBufferOverflow
         var playbackBytes = AudioCodecs.ShortsToBytes(pcm24k);
         _playbackBuffer?.AddSamples(playbackBytes, 0, playbackBytes.Length);
 
@@ -365,47 +411,94 @@ public class AdaAudioClient : IDisposable
             int len = Math.Min(160, ulaw.Length - i);
             var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
+            
+            // MEMORY LEAK FIX: Bound queue size - drop oldest if full
+            if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+            {
+                _outboundQueue.TryDequeue(out _);
+            }
             _outboundQueue.Enqueue(frame);
-        }
-
-        // Trim queue if too long
-        while (_outboundQueue.Count > MaxQueueFrames)
-        {
-            _outboundQueue.TryDequeue(out _);
         }
     }
 
     private void Log(string message)
     {
+        if (_disposed) return;
         OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {message}");
     }
 
     public async Task DisconnectAsync()
     {
-        _cts?.Cancel();
+        if (_disposed) return;
+        
+        // Cancel ongoing operations first
+        try { _cts?.Cancel(); } catch { }
 
+        // Close WebSocket gracefully
         if (_ws?.State == WebSocketState.Open)
         {
             try
             {
-                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
+                using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", closeCts.Token);
             }
             catch { }
         }
 
+        // Stop microphone
         StopMicrophoneCapture();
 
-        _waveOut?.Stop();
-        _waveOut?.Dispose();
-        _waveOut = null;
+        // MEMORY LEAK FIX: Stop and dispose WaveOut properly
+        try
+        {
+            if (_waveOut != null)
+            {
+                _waveOut.Stop();
+                _waveOut.Dispose();
+                _waveOut = null;
+            }
+        }
+        catch { }
 
-        _ws?.Dispose();
-        _ws = null;
+        // Clear playback buffer reference
+        _playbackBuffer = null;
+
+        // MEMORY LEAK FIX: Dispose WebSocket
+        try
+        {
+            _ws?.Dispose();
+            _ws = null;
+        }
+        catch { }
+
+        // Clear audio queue
+        ClearPendingFrames();
     }
 
     public void Dispose()
     {
-        DisconnectAsync().Wait(1000);
-        _cts?.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+        
+        // Synchronous cleanup
+        try { _cts?.Cancel(); } catch { }
+        
+        StopMicrophoneCapture();
+        
+        try
+        {
+            _waveOut?.Stop();
+            _waveOut?.Dispose();
+        }
+        catch { }
+        
+        try { _ws?.Dispose(); } catch { }
+        
+        // MEMORY LEAK FIX: Dispose CancellationTokenSource
+        try { _cts?.Dispose(); } catch { }
+        
+        ClearPendingFrames();
+        
+        GC.SuppressFinalize(this);
     }
 }
