@@ -8,6 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TaxiSipBridge</AssemblyName>
     <RootNamespace>TaxiSipBridge</RootNamespace>
+    <!-- Disable auto-include so we can explicitly list files -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,7 +18,6 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
-  <!-- Explicitly include all source files -->
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="MainForm.cs" />
