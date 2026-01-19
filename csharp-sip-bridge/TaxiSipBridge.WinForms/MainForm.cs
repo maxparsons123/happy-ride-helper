@@ -4,8 +4,8 @@ public partial class MainForm : Form
 {
     private SipAutoAnswer? _sipBridge;
     private AdaAudioClient? _micClient;
-    private bool _isRunning = false;
-    private bool _isMicMode = false;
+    private volatile bool _isRunning = false;
+    private volatile bool _isMicMode = false;
 
     public MainForm()
     {
@@ -43,6 +43,7 @@ public partial class MainForm : Form
     {
         try
         {
+            // Validate config
             var config = new SipAdaBridgeConfig
             {
                 SipServer = txtSipServer.Text.Trim(),
@@ -52,6 +53,12 @@ public partial class MainForm : Form
                 AdaWsUrl = txtWebSocketUrl.Text.Trim(),
                 Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
             };
+
+            if (!config.IsValid(out var error))
+            {
+                MessageBox.Show(error, "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
             _sipBridge = new SipAutoAnswer(config);
             _sipBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
@@ -118,9 +125,12 @@ public partial class MainForm : Form
 
     private void StopMicMode()
     {
-        _micClient?.StopMicrophoneCapture();
-        _micClient?.Dispose();
-        _micClient = null;
+        if (_micClient != null)
+        {
+            _micClient.StopMicrophoneCapture();
+            _micClient.Dispose();
+            _micClient = null;
+        }
 
         _isMicMode = false;
         btnMicTest.Text = "🎤 Test with Mic";
@@ -136,9 +146,12 @@ public partial class MainForm : Form
 
     private void Stop()
     {
-        _sipBridge?.Stop();
-        _sipBridge?.Dispose();
-        _sipBridge = null;
+        if (_sipBridge != null)
+        {
+            _sipBridge.Stop();
+            _sipBridge.Dispose();
+            _sipBridge = null;
+        }
 
         _isRunning = false;
         btnStartStop.Text = "▶ Start SIP";
@@ -183,8 +196,15 @@ public partial class MainForm : Form
 
     private void AddLog(string message)
     {
+        // MEMORY LEAK FIX: Bound log size
         if (lstLogs.Items.Count > 500)
-            lstLogs.Items.RemoveAt(0);
+        {
+            // Remove oldest 100 items at once for efficiency
+            for (int i = 0; i < 100 && lstLogs.Items.Count > 0; i++)
+            {
+                lstLogs.Items.RemoveAt(0);
+            }
+        }
 
         lstLogs.Items.Add(message);
         lstLogs.TopIndex = lstLogs.Items.Count - 1;
@@ -192,16 +212,18 @@ public partial class MainForm : Form
 
     private void AddTranscript(string transcript)
     {
-        // Show in a distinct way
         AddLog($"💬 {transcript}");
     }
 
     private void SafeInvoke(Action action)
     {
+        if (IsDisposed) return;
+        
         if (InvokeRequired)
         {
             try { Invoke(action); }
             catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
         }
         else
         {

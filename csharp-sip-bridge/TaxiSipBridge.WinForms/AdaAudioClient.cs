@@ -16,7 +16,7 @@ public class AdaAudioClient : IDisposable
     private readonly string _wsUrl;
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
-    private bool _disposed = false;
+    private volatile bool _disposed = false;
 
     // NAudio playback (24kHz PCM16 mono from Ada)
     private WaveOutEvent? _waveOut;
@@ -24,7 +24,7 @@ public class AdaAudioClient : IDisposable
 
     // NAudio recording (for microphone test mode)
     private WaveInEvent? _waveIn;
-    private bool _isRecording = false;
+    private volatile bool _isRecording = false;
 
     // Audio queues - BOUNDED to prevent memory leaks
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
@@ -62,7 +62,7 @@ public class AdaAudioClient : IDisposable
         var playbackFormat = new WaveFormat(24000, 16, 1);
         _playbackBuffer = new BufferedWaveProvider(playbackFormat)
         {
-            BufferDuration = TimeSpan.FromSeconds(3), // Reduced from 5s
+            BufferDuration = TimeSpan.FromSeconds(3),
             DiscardOnBufferOverflow = true // CRITICAL: Prevent unbounded growth
         };
 
@@ -120,7 +120,7 @@ public class AdaAudioClient : IDisposable
         {
             if (_waveIn != null)
             {
-                _waveIn.DataAvailable -= OnMicrophoneData; // MEMORY LEAK FIX: Unsubscribe first
+                _waveIn.DataAvailable -= OnMicrophoneData;
                 _waveIn.StopRecording();
                 _waveIn.Dispose();
                 _waveIn = null;
@@ -253,7 +253,7 @@ public class AdaAudioClient : IDisposable
 
     private async Task ReceiveLoopAsync()
     {
-        var buffer = new byte[1024 * 64]; // Reduced from 128KB
+        var buffer = new byte[1024 * 64];
 
         while (!_disposed && _ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
         {
