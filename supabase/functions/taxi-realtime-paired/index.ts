@@ -604,6 +604,11 @@ interface SessionState {
   pendingEta: string | null;
   awaitingConfirmation: boolean;
   bookingRef: string | null;
+  // If post-confirmation speech needs to be sent but an OpenAI response is still active, queue it here.
+  pendingPostConfirmResponse?: {
+    modalities: Array<"audio" | "text">;
+    instructions: string;
+  };
   // Flag to silence Ada after she says "one moment" until fare arrives
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
@@ -2113,6 +2118,20 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Set echo guard to block echo from speaker
           sessionState.lastAdaFinishedSpeakingAt = Date.now();
           sessionState.echoGuardUntil = Date.now() + ECHO_GUARD_MS;
+
+          // If we queued a post-confirmation goodbye response (because OpenAI was still mid-response), send it now.
+          if (
+            sessionState.pendingPostConfirmResponse &&
+            sessionState.bookingConfirmed &&
+            openaiWs &&
+            openaiWs.readyState === WebSocket.OPEN &&
+            !cleanedUp
+          ) {
+            const queued = sessionState.pendingPostConfirmResponse;
+            sessionState.pendingPostConfirmResponse = undefined;
+            console.log(`[${callId}] 🚀 Flushing queued post-confirmation goodbye response`);
+            openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
+          }
           break;
 
         case "input_audio_buffer.speech_started":
@@ -2647,20 +2666,27 @@ Then IMMEDIATELY call end_call().`
                 }
               }));
               
-              // CRITICAL: Request response with explicit audio modalities to ensure Ada speaks
-              console.log(`[${callId}] 🎙️ Requesting goodbye audio response from OpenAI`);
-              openaiWs!.send(JSON.stringify({ 
-                type: "response.create",
-                response: {
-                  modalities: ["audio", "text"],
-                  instructions: `You MUST now say the full closing script warmly:
-1. "${closingScript.confirmation}"
-2. "${closingScript.whatsappDetails}"
-3. "${randomTip}"
-4. "${closingScript.goodbye}"
+              const postConfirmResponse = {
+                modalities: ["audio", "text"] as Array<"audio" | "text">,
+                instructions: `You MUST now say the full closing script warmly:
+ 1. "${closingScript.confirmation}"
+ 2. "${closingScript.whatsappDetails}"
+ 3. "${randomTip}"
+ 4. "${closingScript.goodbye}"
 Then call end_call() with reason="booking_complete".`
-                }
-              }));
+              };
+
+              if (sessionState.openAiResponseActive) {
+                console.log(`[${callId}] ⏳ OpenAI response active - queueing post-confirmation goodbye response`);
+                sessionState.pendingPostConfirmResponse = postConfirmResponse;
+              } else {
+                // CRITICAL: Request response with explicit audio modalities to ensure Ada speaks
+                console.log(`[${callId}] 🎙️ Requesting goodbye audio response from OpenAI`);
+                openaiWs!.send(JSON.stringify({
+                  type: "response.create",
+                  response: postConfirmResponse
+                }));
+              }
 
             } else {
               openaiWs!.send(JSON.stringify({
@@ -2728,6 +2754,26 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }, 18000);
           }
           break;
+
+        case "response.done": {
+          // A response finished (text-only or otherwise). Clear active flag and flush any queued goodbye.
+          sessionState.openAiResponseActive = false;
+          sessionState.openAiSpeechStartedAt = 0;
+
+          if (
+            sessionState.pendingPostConfirmResponse &&
+            sessionState.bookingConfirmed &&
+            openaiWs &&
+            openaiWs.readyState === WebSocket.OPEN &&
+            !cleanedUp
+          ) {
+            const queued = sessionState.pendingPostConfirmResponse;
+            sessionState.pendingPostConfirmResponse = undefined;
+            console.log(`[${callId}] 🚀 Flushing queued post-confirmation goodbye response (on response.done)`);
+            openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
+          }
+          break;
+        }
 
         case "error":
           console.error(`[${callId}] ❌ OpenAI error:`, data.error);
