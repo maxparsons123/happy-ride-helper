@@ -167,7 +167,7 @@ public class SipAutoAnswer : IDisposable
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-            ua.OnCallHungup += (d) =>
+            ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
                 Log($"📴 [{callId}] Caller hung up");
                 try { cts.Cancel(); } catch { }
