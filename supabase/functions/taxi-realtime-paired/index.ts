@@ -625,6 +625,79 @@ function isPriceOrEtaHallucination(text: string, hasPendingFare: boolean): boole
   return false;
 }
 
+// Detect address corrections in user speech (e.g., "It's 52A David Road", "No, it should be...", "Actually...")
+interface AddressCorrection {
+  type: "pickup" | "destination" | null;
+  address: string;
+}
+
+function detectAddressCorrection(text: string, currentPickup: string | null, currentDestination: string | null): AddressCorrection {
+  const lower = text.toLowerCase();
+  
+  // Correction trigger phrases
+  const correctionPhrases = [
+    /^it'?s\s+(.+)/i,                          // "It's 52A David Road"
+    /^no[,\s]+it'?s\s+(.+)/i,                  // "No, it's..."
+    /^actually[,\s]+(.+)/i,                    // "Actually 52A David Road"
+    /^i meant\s+(.+)/i,                        // "I meant 52A..."
+    /^i said\s+(.+)/i,                         // "I said 52A..."
+    /^should be\s+(.+)/i,                      // "Should be 52A..."
+    /^it should be\s+(.+)/i,                   // "It should be..."
+    /^sorry[,\s]+(.+)/i,                       // "Sorry, 52A David Road"
+    /^correction[:\s]+(.+)/i,                  // "Correction: 52A..."
+    /^the (?:pickup|address) is\s+(.+)/i,     // "The pickup is..."
+    /^(?:no[,\s]+)?that'?s\s+(.+)/i,          // "That's 52A..." or "No, that's 52A..."
+  ];
+  
+  let extractedAddress: string | null = null;
+  
+  for (const pattern of correctionPhrases) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      extractedAddress = match[1].trim();
+      // Remove trailing punctuation
+      extractedAddress = extractedAddress.replace(/[.,!?]+$/, '').trim();
+      break;
+    }
+  }
+  
+  if (!extractedAddress || extractedAddress.length < 3) {
+    return { type: null, address: "" };
+  }
+  
+  // Determine if this is correcting pickup or destination
+  // Check for explicit field mentions
+  if (lower.includes("pickup") || lower.includes("pick up") || lower.includes("from")) {
+    return { type: "pickup", address: extractedAddress };
+  }
+  if (lower.includes("destination") || lower.includes("to") || lower.includes("going to") || lower.includes("drop")) {
+    return { type: "destination", address: extractedAddress };
+  }
+  
+  // If current pickup exists and the correction seems similar to it, it's likely a pickup correction
+  if (currentPickup) {
+    const pickupLower = currentPickup.toLowerCase();
+    const correctionLower = extractedAddress.toLowerCase();
+    // Check if they share common words (street name, etc.)
+    const pickupWords = pickupLower.split(/\s+/).filter(w => w.length > 2);
+    const correctionWords = correctionLower.split(/\s+/).filter(w => w.length > 2);
+    const commonWords = pickupWords.filter(w => correctionWords.some(cw => cw.includes(w) || w.includes(cw)));
+    if (commonWords.length > 0) {
+      return { type: "pickup", address: extractedAddress };
+    }
+  }
+  
+  // Default: if we have a pickup but no destination, assume it's still about pickup
+  // If we have both, it's more likely a pickup correction (more common)
+  if (currentPickup && !currentDestination) {
+    return { type: "pickup", address: extractedAddress };
+  }
+  
+  // Default to pickup correction if uncertain
+  return { type: "pickup", address: extractedAddress };
+}
+
+
 function computeRms(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
   let sum = 0;
@@ -1491,7 +1564,57 @@ Otherwise, say goodbye warmly and call end_call().`
             
             console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
-            // Add to history with context annotation
+            // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
+            const correction = detectAddressCorrection(
+              userText, 
+              sessionState.booking.pickup, 
+              sessionState.booking.destination
+            );
+            
+            if (correction.type && correction.address) {
+              const oldValue = correction.type === "pickup" 
+                ? sessionState.booking.pickup 
+                : sessionState.booking.destination;
+              
+              console.log(`[${callId}] 🔄 ADDRESS CORRECTION DETECTED: ${correction.type} "${oldValue}" → "${correction.address}"`);
+              
+              // Update the booking state immediately
+              if (correction.type === "pickup") {
+                sessionState.booking.pickup = correction.address;
+              } else {
+                sessionState.booking.destination = correction.address;
+              }
+              
+              // Add to history with correction annotation
+              sessionState.conversationHistory.push({
+                role: "user",
+                content: `[CORRECTION: User corrected ${correction.type} to "${correction.address}"] ${userText}`,
+                timestamp: Date.now()
+              });
+              
+              // Tell OpenAI about the correction so Ada acknowledges it
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[ADDRESS CORRECTION] The user just corrected their ${correction.type} address to: "${correction.address}". 
+                    
+IMPORTANT: Update your understanding. The ${correction.type} is now "${correction.address}" (not the previous value).
+DO NOT ask them to confirm this change - just acknowledge briefly and continue to the next step.
+Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              
+              await updateLiveCall(sessionState);
+              break; // Correction handled, don't run normal context pairing
+            }
+            
+            // Add to history with context annotation (normal flow)
             sessionState.conversationHistory.push({
               role: "user",
               content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
