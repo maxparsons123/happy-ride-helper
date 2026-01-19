@@ -123,14 +123,9 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // Create VoIPMediaSession - use constructor with answer codecs
-            var pcmuFormat = new SDPMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU);
-            mediaSession = new VoIPMediaSession(
-                new MediaEndPoints(),
-                new IPAddress(0),  // bind to any
-                0,                 // auto port
-                null,              // external IP
-                new[] { pcmuFormat }); // answer with PCMU only
+            // Create VoIPMediaSession - default constructor auto-negotiates codecs
+            // PCMU (G.711 µ-law) is the default and most common codec
+            mediaSession = new VoIPMediaSession();
             mediaSession.AcceptRtpFromAny = true;
             _currentMediaSession = mediaSession;
 
