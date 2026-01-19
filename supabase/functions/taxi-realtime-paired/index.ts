@@ -607,6 +607,90 @@ function normalizeAddressForDispatch(addr: string): string {
   return normalized.replace(/\s+/g, " ").trim();
 }
 
+// Transcript-based fallback: extract full address from user transcripts if Ada's tool call truncated
+// E.g., Ada says "52A" but user said "Number 52A, David Road" -> returns "52A David Road"
+function extractFullAddressFromTranscripts(
+  truncatedAddr: string,
+  transcripts: Array<{ text: string; timestamp: string }>,
+  fieldType: "pickup" | "destination"
+): string {
+  if (!truncatedAddr || !transcripts || transcripts.length === 0) {
+    return truncatedAddr;
+  }
+  
+  const truncatedLower = truncatedAddr.toLowerCase().replace(/^number\s+/i, "").replace(/^no\.?\s+/i, "").trim();
+  
+  // If the address already looks complete (has number + street), don't modify
+  // A complete address typically has a number followed by words
+  if (/^\d+[a-z]?\s+\w+\s+\w+/i.test(truncatedAddr)) {
+    return truncatedAddr;
+  }
+  
+  // Look for transcripts that start with or contain the truncated part
+  for (const transcript of transcripts) {
+    const text = transcript.text.trim();
+    // Skip correction markers and very short responses
+    if (text.startsWith("[CORRECTION") || text.length < 5) continue;
+    
+    // Normalize the transcript text
+    const normalizedText = text
+      .replace(/^number\s+/i, "")
+      .replace(/^no\.?\s+/i, "")
+      .replace(/\.$/, "") // Remove trailing period
+      .trim();
+    
+    const normalizedLower = normalizedText.toLowerCase();
+    
+    // Check if this transcript contains the truncated address at the start
+    if (normalizedLower.startsWith(truncatedLower)) {
+      // The transcript has more info than what Ada extracted
+      if (normalizedText.length > truncatedAddr.length) {
+        console.log(`[Transcript Fallback] Expanded "${truncatedAddr}" to "${normalizedText}" from transcript`);
+        return normalizedText;
+      }
+    }
+    
+    // Also check if the truncated part appears anywhere in the transcript
+    // This handles cases like "52A" appearing in "Number 52A, David Road"
+    const truncatedPattern = new RegExp(`\\b${truncatedLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[,\\s]`, 'i');
+    if (truncatedPattern.test(normalizedLower + " ")) {
+      // Extract everything from the match point
+      const matchIndex = normalizedLower.indexOf(truncatedLower);
+      if (matchIndex !== -1) {
+        const fullAddress = normalizedText.substring(matchIndex).replace(/^,\s*/, "").trim();
+        if (fullAddress.length > truncatedAddr.length && /\s/.test(fullAddress)) {
+          console.log(`[Transcript Fallback] Expanded "${truncatedAddr}" to "${fullAddress}" from transcript (partial match)`);
+          return fullAddress;
+        }
+      }
+    }
+  }
+  
+  // For pickup, check the first few transcripts; for destination, check after pickup
+  const searchRange = fieldType === "pickup" ? transcripts.slice(0, 2) : transcripts.slice(1, 4);
+  for (const transcript of searchRange) {
+    const text = transcript.text.trim();
+    if (text.startsWith("[CORRECTION") || text.length < 5) continue;
+    
+    // Check if this looks like a full address (has number + street name pattern)
+    const addressPattern = /^(?:number\s+)?(?:no\.?\s+)?(\d+[a-z]?)[,\s]+([a-z][a-z\s]+)/i;
+    const match = text.match(addressPattern);
+    if (match) {
+      const houseNum = match[1].toLowerCase();
+      const streetPart = match[2].trim();
+      
+      // If the truncated address is just the house number, use the full address from transcript
+      if (truncatedLower === houseNum || truncatedLower.startsWith(houseNum)) {
+        const fullAddress = `${match[1]} ${streetPart}`.replace(/\.$/, "").trim();
+        console.log(`[Transcript Fallback] Matched house number "${truncatedAddr}" to full address "${fullAddress}"`);
+        return fullAddress;
+      }
+    }
+  }
+  
+  return truncatedAddr;
+}
+
 function isPhantomHallucination(text: string): boolean {
   const lower = text.toLowerCase().trim();
   if (lower.length < 2) return true;
@@ -880,6 +964,21 @@ async function sendDispatchWebhook(
       timestamp: new Date(msg.timestamp).toISOString()
     }));
   
+  // Get raw addresses from Ada's tool call / session state
+  let rawPickup = String(bookingData.pickup || sessionState.booking.pickup || "");
+  let rawDestination = String(bookingData.destination || sessionState.booking.destination || "");
+  
+  // Apply transcript-based fallback if addresses look truncated (missing street name)
+  const expandedPickup = extractFullAddressFromTranscripts(rawPickup, userTranscripts, "pickup");
+  const expandedDestination = extractFullAddressFromTranscripts(rawDestination, userTranscripts, "destination");
+  
+  if (expandedPickup !== rawPickup) {
+    console.log(`[${callId}] 🔧 Transcript fallback expanded pickup: "${rawPickup}" → "${expandedPickup}"`);
+  }
+  if (expandedDestination !== rawDestination) {
+    console.log(`[${callId}] 🔧 Transcript fallback expanded destination: "${rawDestination}" → "${expandedDestination}"`);
+  }
+  
   // Match the taxi-realtime-simple webhook payload format
   const webhookPayload = {
     job_id: jobId,
@@ -890,8 +989,8 @@ async function sendDispatchWebhook(
     call_action: action,
     confirmation_state: action,
     booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
-    ada_pickup: normalizeAddressForDispatch(String(bookingData.pickup || sessionState.booking.pickup || "")),
-    ada_destination: normalizeAddressForDispatch(String(bookingData.destination || sessionState.booking.destination || "")),
+    ada_pickup: normalizeAddressForDispatch(expandedPickup),
+    ada_destination: normalizeAddressForDispatch(expandedDestination),
     callers_pickup: null,
     callers_dropoff: null,
     nearest_pickup: null,
