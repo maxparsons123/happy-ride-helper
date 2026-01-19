@@ -2440,6 +2440,15 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               // Set lastQuestionAsked to "none" to prevent looping back to booking questions
               sessionState.lastQuestionAsked = "none";
               
+              // Select a random WhatsApp tip for variety
+              const whatsappTips = [
+                "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+                "Next time, feel free to book your taxi using a WhatsApp voice message.",
+                "You can always book again by simply sending us a voice note on WhatsApp.",
+                "Remember, you can also send us a WhatsApp voice message anytime to book a taxi."
+              ];
+              const randomTip = whatsappTips[Math.floor(Math.random() * whatsappTips.length)];
+              
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -2448,7 +2457,12 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   output: JSON.stringify({ 
                     success: true, 
                     status: "confirmed",
-                    message: "Booking confirmed! Say ONLY: 'Perfect, your booking is confirmed. You'll receive details via WhatsApp. Thank you for using Taxibot demo, have a safe journey.' Then IMMEDIATELY call end_call()."
+                    message: `Booking confirmed! Deliver the FULL closing script in order:
+1. "Perfect, thank you. I'm making the booking now."
+2. "You'll receive the booking details and ride updates via WhatsApp."
+3. "${randomTip}"
+4. "Thank you for trying the Taxibot demo, and have a safe journey!"
+Then IMMEDIATELY call end_call().`
                   })
                 }
               }));
@@ -2506,7 +2520,15 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
             console.log(`[${callId}] 🛡️ End-call goodbye protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
 
-            // Let Ada say goodbye
+            // Let Ada say the full closing script
+            const closingTips = [
+              "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+              "Next time, feel free to book your taxi using a WhatsApp voice message.",
+              "You can always book again by simply sending us a voice note on WhatsApp.",
+              "Remember, you can also send us a WhatsApp voice message anytime to book a taxi."
+            ];
+            const closingTip = closingTips[Math.floor(Math.random() * closingTips.length)];
+            
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -2514,7 +2536,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 role: "user",
                 content: [{
                   type: "input_text",
-                  text: "[SYSTEM: Say a warm goodbye. Mention they'll receive booking details via WhatsApp. Thank them for using Taxibot demo.]"
+                  text: `[SYSTEM: Deliver the FULL closing script in this exact order:
+1. "You'll receive the booking details and ride updates via WhatsApp."
+2. "${closingTip}"
+3. "Thank you for trying the Taxibot demo, and have a safe journey!"
+Do NOT skip any part. Say ALL of it warmly.]`
                 }]
               }
             }));
