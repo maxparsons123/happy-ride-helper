@@ -6,16 +6,12 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
+using SIPSorcery.SDP;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
-/// <summary>
-/// SIP-to-Ada bridge that uses raw WebSocket communication (for simpler audio protocol).
-/// This is an alternative to SipAutoAnswer that sends raw µ-law audio directly.
-/// MEMORY LEAK FIXES: Bounded queues, proper disposal, event cleanup.
-/// </summary>
 public class SipAdaBridge : IDisposable
 {
     private readonly SipAdaBridgeConfig _config;
@@ -24,17 +20,12 @@ public class SipAdaBridge : IDisposable
     private SIPUserAgent? _userAgent;
     private volatile bool _disposed = false;
 
-    // Frame-based queue for proper 20ms timing (each frame = 160 bytes µ-law)
     private readonly ConcurrentQueue<byte[]> _outboundFrames = new();
-
-    // Max frames to buffer (~5 seconds = 250 frames at 20ms each)
     private const int MAX_OUTBOUND_FRAMES = 250;
 
-    // Audio fade-in state to smooth response boundaries and prevent "pop" glitches
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
 
-    // Audio monitor for debugging (plays outbound audio through speakers)
     public AudioMonitor? AudioMonitor { get; set; }
 
     public event Action? OnRegistered;
@@ -115,7 +106,6 @@ public class SipAdaBridge : IDisposable
         Log($"📞 [{callId}] Call from {caller}");
         OnCallStarted?.Invoke(callId, caller);
 
-        // Clear any stale audio from previous call
         while (_outboundFrames.TryDequeue(out _)) { }
         _needsFadeIn = true;
 
@@ -130,12 +120,16 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            rtpSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+            var nullEndPoints = new MediaEndPoints 
+            { 
+                AudioSource = null, 
+                AudioSink = null 
+            };
+            rtpSession = new VoIPMediaSession(nullEndPoints);
             rtpSession.AcceptRtpFromAny = true;
 
             var uas = ua.AcceptCall(req);
 
-            // Send ringing
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
@@ -160,7 +154,7 @@ public class SipAdaBridge : IDisposable
             ws = new ClientWebSocket();
             cts = new CancellationTokenSource();
 
-            ua.OnCallHungup += (d) =>
+            ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
                 Log($"📕 [{callId}] Caller hung up");
                 OnCallEnded?.Invoke(callId);
@@ -173,7 +167,6 @@ public class SipAdaBridge : IDisposable
             await ws.ConnectAsync(wsUri, cts.Token);
             Log($"🟢 [{callId}] WS Connected");
 
-            // SIP → WS (Caller → AI)
             rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
@@ -202,7 +195,6 @@ public class SipAdaBridge : IDisposable
                     CancellationToken.None);
             };
 
-            // WS → Queue (AI → Buffer)
             _ = Task.Run(async () =>
             {
                 var buffer = new byte[1024 * 64];
@@ -271,7 +263,6 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             }, cts.Token);
 
-            // Buffer → SIP (AI → Caller)
             _ = Task.Run(async () =>
             {
                 var stopwatch = Stopwatch.StartNew();
@@ -334,7 +325,6 @@ public class SipAdaBridge : IDisposable
             
             try { ua.Hangup(); } catch { }
             
-            // MEMORY LEAK FIX: Close WebSocket properly
             if (ws != null)
             {
                 try
@@ -349,16 +339,13 @@ public class SipAdaBridge : IDisposable
                 try { ws.Dispose(); } catch { }
             }
             
-            // MEMORY LEAK FIX: Close RTP session
             if (rtpSession != null)
             {
                 try { rtpSession.Close("call ended"); } catch { }
             }
             
-            // MEMORY LEAK FIX: Dispose CTS
             try { cts?.Dispose(); } catch { }
             
-            // Clear outbound queue
             while (_outboundFrames.TryDequeue(out _)) { }
             
             OnCallEnded?.Invoke(callId);
@@ -371,7 +358,6 @@ public class SipAdaBridge : IDisposable
         
         var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
 
-        // Apply fade-in on first chunk
         if (_needsFadeIn && pcm24.Length > 0)
         {
             int fadeLen = Math.Min(FadeInSamples, pcm24.Length);
@@ -392,7 +378,6 @@ public class SipAdaBridge : IDisposable
             var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
             
-            // MEMORY LEAK FIX: Bound queue
             if (_outboundFrames.Count >= MAX_OUTBOUND_FRAMES)
             {
                 _outboundFrames.TryDequeue(out _);
@@ -413,7 +398,6 @@ public class SipAdaBridge : IDisposable
         
         Log("🛑 Bridge stopping...");
         
-        // MEMORY LEAK FIX: Unsubscribe from events
         if (_regUserAgent != null)
         {
             _regUserAgent.RegistrationSuccessful -= OnRegistrationSuccess;
@@ -428,7 +412,6 @@ public class SipAdaBridge : IDisposable
         
         try { _sipTransport?.Shutdown(); } catch { }
         
-        // Clear audio queue
         while (_outboundFrames.TryDequeue(out _)) { }
         
         Log("🛑 Bridge stopped");
@@ -440,8 +423,6 @@ public class SipAdaBridge : IDisposable
         _disposed = true;
         
         Stop();
-        
-        // Dispose audio monitor if we own it
         AudioMonitor?.Dispose();
         
         GC.SuppressFinalize(this);

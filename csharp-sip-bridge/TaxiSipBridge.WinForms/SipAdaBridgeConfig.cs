@@ -1,53 +1,20 @@
 namespace TaxiSipBridge;
 
-/// <summary>
-/// Transport protocol for SIP connections.
-/// </summary>
 public enum SipTransportType 
 { 
     UDP, 
     TCP 
 }
 
-/// <summary>
-/// Configuration for the SIP-to-Ada bridge.
-/// </summary>
 public class SipAdaBridgeConfig
 {
-    /// <summary>
-    /// SIP server hostname or IP address.
-    /// </summary>
     public string SipServer { get; set; } = "206.189.123.28";
-    
-    /// <summary>
-    /// SIP server port (typically 5060 for UDP/TCP, 5061 for TLS).
-    /// </summary>
     public int SipPort { get; set; } = 5060;
-    
-    /// <summary>
-    /// SIP username for registration.
-    /// </summary>
     public string SipUser { get; set; } = "max201";
-    
-    /// <summary>
-    /// SIP password for registration.
-    /// </summary>
     public string SipPassword { get; set; } = "qwe70954504118";
-    
-    /// <summary>
-    /// WebSocket URL for Ada AI connection.
-    /// Use taxi-realtime-paired for full Ada AI (OpenAI Realtime API).
-    /// </summary>
     public string AdaWsUrl { get; set; } = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
-    
-    /// <summary>
-    /// Transport protocol (UDP or TCP).
-    /// </summary>
     public SipTransportType Transport { get; set; } = SipTransportType.UDP;
-    
-    /// <summary>
-    /// Validate the configuration.
-    /// </summary>
+
     public bool IsValid(out string error)
     {
         if (string.IsNullOrWhiteSpace(SipServer))
