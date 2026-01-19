@@ -2625,6 +2625,8 @@ Then IMMEDIATELY call end_call().`
               }));
               
               // CRITICAL: Inject system message to prevent AI from looping back to booking questions
+              console.log(`[${callId}] 📢 Injecting POST-CONFIRMATION mode and triggering goodbye response`);
+              
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -2645,7 +2647,20 @@ Then IMMEDIATELY call end_call().`
                 }
               }));
               
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              // CRITICAL: Request response with explicit audio modalities to ensure Ada speaks
+              console.log(`[${callId}] 🎙️ Requesting goodbye audio response from OpenAI`);
+              openaiWs!.send(JSON.stringify({ 
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `You MUST now say the full closing script warmly:
+1. "${closingScript.confirmation}"
+2. "${closingScript.whatsappDetails}"
+3. "${randomTip}"
+4. "${closingScript.goodbye}"
+Then call end_call() with reason="booking_complete".`
+                }
+              }));
 
             } else {
               openaiWs!.send(JSON.stringify({
