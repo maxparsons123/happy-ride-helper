@@ -2211,10 +2211,32 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               if (sessionState.booking.passengers === null) {
                 const v = findLatestUserValue("passengers");
                 if (v) {
-                  const match = v.match(/\b(\d+)\b/);
-                  if (match) {
-                    sessionState.booking.passengers = parseInt(match[1], 10);
-                    console.log(`[${callId}] 📍 Backfilled passengers from user context: ${sessionState.booking.passengers}`);
+                  // Word-to-number mapping for spoken passenger counts
+                  const wordToNum: Record<string, number> = {
+                    one: 1, two: 2, three: 3, four: 4, five: 5,
+                    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+                  };
+                  
+                  const lowerV = v.toLowerCase().trim();
+                  let parsedCount: number | null = null;
+                  
+                  // First try digit match
+                  const digitMatch = v.match(/\b(\d+)\b/);
+                  if (digitMatch) {
+                    parsedCount = parseInt(digitMatch[1], 10);
+                  } else {
+                    // Try word match (e.g., "three" → 3)
+                    for (const [word, num] of Object.entries(wordToNum)) {
+                      if (lowerV === word || lowerV.includes(word)) {
+                        parsedCount = num;
+                        break;
+                      }
+                    }
+                  }
+                  
+                  if (parsedCount !== null && parsedCount > 0 && parsedCount <= 20) {
+                    sessionState.booking.passengers = parsedCount;
+                    console.log(`[${callId}] 📍 Backfilled passengers from user context: ${sessionState.booking.passengers} (raw: "${v}")`);
                   }
                 }
               }
