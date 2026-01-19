@@ -11,7 +11,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Optional
 from dotenv import load_dotenv
 import aiohttp
 
@@ -146,151 +146,80 @@ async def send_dispatch_webhook(state: BookingState, action: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def create_booking_tools(state: BookingState):
-    """Create function tools for booking flow"""
+class TaxiBookingTools(llm.FunctionContext):
+    """Function tools for taxi booking - using decorator pattern"""
     
-    async def request_quote(pickup: str, destination: str, passengers: int = 1, pickup_time: str = "ASAP") -> str:
-        """Request a fare quote from the dispatch system.
-        
-        Args:
-            pickup: FULL pickup address with house number AND street name
-            destination: FULL destination address with house number AND street name  
-            passengers: Number of passengers (default 1)
-            pickup_time: When to pickup - 'ASAP', 'now', or specific time
-        """
-        state.pickup = pickup
-        state.destination = destination
-        state.passengers = passengers
-        state.pickup_time = pickup_time
+    def __init__(self, state: BookingState):
+        super().__init__()
+        self._state = state
+    
+    @llm.ai_callable(description="Request a fare quote from the dispatch system. Use after collecting pickup, destination, and passengers.")
+    async def request_quote(
+        self,
+        pickup: Annotated[str, llm.TypeInfo(description="FULL pickup address with house number AND street name. NEVER omit the street name.")],
+        destination: Annotated[str, llm.TypeInfo(description="FULL destination address with house number AND street name. NEVER omit the street name.")],
+        passengers: Annotated[int, llm.TypeInfo(description="Number of passengers")] = 1,
+        pickup_time: Annotated[str, llm.TypeInfo(description="When to pickup - 'ASAP', 'now', or a specific time")] = "ASAP",
+    ) -> str:
+        """Request a fare quote from the dispatch system."""
+        self._state.pickup = pickup
+        self._state.destination = destination
+        self._state.passengers = passengers
+        self._state.pickup_time = pickup_time
         
         logger.info(f"Requesting quote: {pickup} -> {destination}, {passengers} passengers")
         
-        result = await send_dispatch_webhook(state, "request_quote")
+        result = await send_dispatch_webhook(self._state, "request_quote")
         
         if result.get("success") and result.get("data"):
             data = result["data"]
-            state.fare = data.get("fare", "5.00")
-            state.eta = data.get("eta_minutes", "10")
-            state.booking_ref = data.get("booking_ref")
-            return f"Quote received: £{state.fare} fare, driver arriving in {state.eta} minutes."
+            self._state.fare = data.get("fare", "5.00")
+            self._state.eta = data.get("eta_minutes", "10")
+            self._state.booking_ref = data.get("booking_ref")
+            return f"Quote received: £{self._state.fare} fare, driver arriving in {self._state.eta} minutes."
         else:
             # Fallback if webhook fails
-            state.fare = "5.00"
-            state.eta = "10"
-            return f"Quote received: £{state.fare} fare, driver arriving in {state.eta} minutes."
+            self._state.fare = "5.00"
+            self._state.eta = "10"
+            return f"Quote received: £{self._state.fare} fare, driver arriving in {self._state.eta} minutes."
     
-    async def confirm_booking() -> str:
-        """Confirm the booking after customer agrees to the fare and ETA."""
-        if not state.pickup or not state.destination:
+    @llm.ai_callable(description="Confirm the booking after the customer agrees to the fare and ETA. Only call after customer explicitly confirms.")
+    async def confirm_booking(self) -> str:
+        """Confirm the booking after customer agrees."""
+        if not self._state.pickup or not self._state.destination:
             return "Cannot confirm - missing pickup or destination address."
         
-        state.confirmed = True
-        logger.info(f"Confirming booking: {state.pickup} -> {state.destination}")
+        self._state.confirmed = True
+        logger.info(f"Confirming booking: {self._state.pickup} -> {self._state.destination}")
         
-        result = await send_dispatch_webhook(state, "confirmed")
+        result = await send_dispatch_webhook(self._state, "confirmed")
         
         if result.get("success") and result.get("data"):
             data = result["data"]
-            state.booking_ref = data.get("booking_ref", state.booking_ref)
-            return f"Booking confirmed! Reference number: {state.booking_ref or 'pending'}. Your driver will arrive in approximately {state.eta} minutes."
+            self._state.booking_ref = data.get("booking_ref", self._state.booking_ref)
+            return f"Booking confirmed! Reference: {self._state.booking_ref or 'pending'}. Driver arriving in {self._state.eta} minutes."
         else:
-            return f"Booking confirmed! Your driver will arrive in approximately {state.eta} minutes."
+            return f"Booking confirmed! Your driver will arrive in approximately {self._state.eta} minutes."
     
-    async def save_customer_name(name: str) -> str:
-        """Save the customer's name if they provide it.
-        
-        Args:
-            name: The customer's name
-        """
-        state.caller_name = name
+    @llm.ai_callable(description="Save the customer's name if they provide it during the conversation.")
+    async def save_customer_name(
+        self,
+        name: Annotated[str, llm.TypeInfo(description="The customer's name")],
+    ) -> str:
+        """Save the customer's name."""
+        self._state.caller_name = name
         logger.info(f"Customer name saved: {name}")
         return f"Thank you, {name}."
     
-    async def end_call(reason: str = "completed") -> str:
-        """End the call gracefully.
-        
-        Args:
-            reason: Why the call is ending - 'completed', 'cancelled', 'no_answer', etc.
-        """
+    @llm.ai_callable(description="End the call gracefully. Use after booking is confirmed or if customer wants to cancel.")
+    async def end_call(
+        self,
+        reason: Annotated[str, llm.TypeInfo(description="Why the call is ending: completed, cancelled, no_answer, or error")] = "completed",
+    ) -> str:
+        """End the call gracefully."""
         logger.info(f"Call ending: {reason}")
-        await send_dispatch_webhook(state, f"call_ended_{reason}")
+        await send_dispatch_webhook(self._state, f"call_ended_{reason}")
         return "Goodbye!"
-    
-    # Define the tools with proper schemas
-    tools = [
-        llm.FunctionTool(
-            name="request_quote",
-            description="Request a fare quote from the dispatch system. Use this after collecting pickup, destination, and passengers.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "pickup": {
-                        "type": "string",
-                        "description": "FULL pickup address with house number AND street name. NEVER omit the street name."
-                    },
-                    "destination": {
-                        "type": "string",
-                        "description": "FULL destination address with house number AND street name. NEVER omit the street name."
-                    },
-                    "passengers": {
-                        "type": "integer",
-                        "description": "Number of passengers",
-                        "default": 1
-                    },
-                    "pickup_time": {
-                        "type": "string",
-                        "description": "When to pickup - 'ASAP', 'now', or a specific time",
-                        "default": "ASAP"
-                    }
-                },
-                "required": ["pickup", "destination"]
-            },
-            callable=request_quote
-        ),
-        llm.FunctionTool(
-            name="confirm_booking",
-            description="Confirm the booking after the customer agrees to the fare and ETA. Only call this after the customer explicitly confirms.",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "required": []
-            },
-            callable=confirm_booking
-        ),
-        llm.FunctionTool(
-            name="save_customer_name",
-            description="Save the customer's name if they provide it during the conversation.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The customer's name"
-                    }
-                },
-                "required": ["name"]
-            },
-            callable=save_customer_name
-        ),
-        llm.FunctionTool(
-            name="end_call",
-            description="End the call gracefully. Use after booking is confirmed or if customer wants to cancel.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Why the call is ending",
-                        "enum": ["completed", "cancelled", "no_answer", "error"]
-                    }
-                },
-                "required": ["reason"]
-            },
-            callable=end_call
-        ),
-    ]
-    
-    return tools
 
 
 def prewarm(proc: JobProcess):
@@ -325,10 +254,10 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"Participant joined: {participant.identity}")
     
-    # Create booking tools
-    tools = create_booking_tools(state)
+    # Create booking tools with state
+    tools = TaxiBookingTools(state)
     
-    # Create the voice pipeline agent with OpenAI Realtime
+    # Create the voice pipeline agent
     agent = VoicePipelineAgent(
         vad=ctx.proc.userdata["vad"],
         stt=openai.STT(
@@ -347,7 +276,7 @@ async def entrypoint(ctx: JobContext):
             role="system",
             text=SYSTEM_PROMPT,
         ),
-        fnc_ctx=llm.FunctionContext(tools),
+        fnc_ctx=tools,
         # Tuning for telephony
         min_endpointing_delay=0.5,  # Wait 500ms of silence before responding
         allow_interruptions=True,
