@@ -60,21 +60,13 @@ public class SipAutoAnswer : IDisposable
                 break;
         }
 
-        // FIX: Proper SIP registration with explicit realm and registrar host to avoid 401 errors
-        var sipUri = SIPURI.ParseSIPURIRelax($"sip:{_config.SipUser}@{_config.SipServer}");
-        
+        // Original simple registration that was working
         _regUserAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            null,                    // outbound proxy
-            sipUri,                  // SIP URI to register
-            _config.SipUser,         // auth username
-            _config.SipPassword,     // auth password
-            _config.SipServer,       // realm (domain for auth)
-            null,                    // custom contact URI
-            120,                     // registration expiry in seconds
-            null,                    // custom headers
-            null,                    // auth username override (null = use SipUser)
-            _config.SipServer);      // registrar host
+            _config.SipUser,
+            _config.SipPassword,
+            _config.SipServer,
+            120);
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
         _regUserAgent.RegistrationFailed += OnRegistrationFailure;
