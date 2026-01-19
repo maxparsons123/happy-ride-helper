@@ -148,7 +148,20 @@ partial class MainForm
         btnClearLogs.FlatAppearance.BorderSize = 0;
         btnClearLogs.Click += btnClearLogs_Click;
 
-        grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs });
+        btnCopyLogs = new Button
+        {
+            Text = "📋 Copy Logs",
+            Location = new Point(120, 300),
+            Size = new Size(110, 28),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(0, 123, 255),
+            ForeColor = Color.White
+        };
+        btnCopyLogs.FlatAppearance.BorderSize = 0;
+        btnCopyLogs.Click += btnCopyLogs_Click;
+
+        grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs, btnCopyLogs });
 
         // Add all to form
         this.Controls.AddRange(new Control[] { grpConfig, grpStatus, grpLogs });
@@ -165,6 +178,7 @@ partial class MainForm
     private Button btnStartStop;
     private Button btnMicTest;
     private Button btnClearLogs;
+    private Button btnCopyLogs;
     private Label lblStatus;
     private Label lblActiveCall;
     private Label lblCallId;

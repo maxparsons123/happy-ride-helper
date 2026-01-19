@@ -236,6 +236,31 @@ public partial class MainForm : Form
         lstLogs.Items.Clear();
     }
 
+    private void btnCopyLogs_Click(object sender, EventArgs e)
+    {
+        if (lstLogs.Items.Count == 0)
+        {
+            MessageBox.Show("No logs to copy.", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var lines = new System.Text.StringBuilder();
+        foreach (var item in lstLogs.Items)
+        {
+            lines.AppendLine(item.ToString());
+        }
+
+        try
+        {
+            Clipboard.SetText(lines.ToString());
+            MessageBox.Show($"Copied {lstLogs.Items.Count} log lines to clipboard!", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to copy: {ex.Message}", "Copy Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (_isRunning) Stop();
