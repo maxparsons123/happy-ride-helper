@@ -389,6 +389,18 @@ export default function VoiceTest() {
     };
   }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents, rawPassthroughMode, rawPassthroughEndpoint]);
 
+  // Internal stop without state dependency issues
+  const stopRecordingInternal = useCallback(() => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.disconnect();
+      workletNodeRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+  }, []);
+
   const disconnect = useCallback(() => {
     manualDisconnectRef.current = true;
     reconnectAttemptsRef.current = 0;
@@ -404,18 +416,6 @@ export default function VoiceTest() {
     wsRef.current = null;
     isConnectingRef.current = false;
   }, [cleanupAudio, stopRecordingInternal]);
-
-  // Internal stop without state dependency issues
-  const stopRecordingInternal = useCallback(() => {
-    if (workletNodeRef.current) {
-      workletNodeRef.current.disconnect();
-      workletNodeRef.current = null;
-    }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      mediaStreamRef.current = null;
-    }
-  }, []);
 
   const startRecording = useCallback(async () => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
