@@ -594,6 +594,19 @@ function correctTranscript(text: string): string {
   return corrected.charAt(0).toUpperCase() + corrected.slice(1);
 }
 
+// Remove "Number" prefix from addresses (e.g., "Number 1, Lifford Lane" -> "1 Lifford Lane")
+function normalizeAddressForDispatch(addr: string): string {
+  if (!addr) return "";
+  // Remove "Number" prefix (case-insensitive) followed by digits
+  // "Number 1, Lifford Lane" -> "1 Lifford Lane"
+  // "number 52" -> "52"
+  let normalized = addr.replace(/^number\s+/i, "");
+  // Also handle "No." and "No " prefixes
+  normalized = normalized.replace(/^no\.?\s+/i, "");
+  // Clean up any double spaces and trim
+  return normalized.replace(/\s+/g, " ").trim();
+}
+
 function isPhantomHallucination(text: string): boolean {
   const lower = text.toLowerCase().trim();
   if (lower.length < 2) return true;
@@ -871,8 +884,8 @@ async function sendDispatchWebhook(
     call_action: action,
     confirmation_state: action,
     booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
-    ada_pickup: bookingData.pickup || sessionState.booking.pickup,
-    ada_destination: bookingData.destination || sessionState.booking.destination,
+    ada_pickup: normalizeAddressForDispatch(String(bookingData.pickup || sessionState.booking.pickup || "")),
+    ada_destination: normalizeAddressForDispatch(String(bookingData.destination || sessionState.booking.destination || "")),
     callers_pickup: null,
     callers_dropoff: null,
     nearest_pickup: null,
