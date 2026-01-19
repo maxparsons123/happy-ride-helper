@@ -170,17 +170,29 @@ After calling book_taxi(action='request_quote'):
 - If asked about price before dispatch responds, say "I'm just checking that for you now."
 
 Once you receive [DISPATCH QUOTE RECEIVED] with the price, say ONLY:
-"The trip fare will be [price], and the estimated arrival time is [ETA]. Would you like me to confirm this booking?"
+"The trip fare will be [price], and the estimated arrival time is [ETA]. Would you like to go ahead and book that?"
 🚫 RULE: Do NOT repeat addresses here. Focus only on Price and ETA.
+🚫 RULE: Do NOT call book_taxi(action='confirmed') yet - WAIT for user's explicit YES/NO response.
 
-# PHASE 5: DISPATCH & CLOSE
-🚨🚨🚨 MANDATORY FUNCTION CALL 🚨🚨🚨
-After user says 'Yes' to price confirmation, you MUST:
-1. Say: "Perfect, thank you. I'm making the booking now. You'll receive the booking details and ride updates via WhatsApp."
+# PHASE 5: DISPATCH & CLOSE - WAIT FOR EXPLICIT CONFIRMATION
+🚨🚨🚨 CRITICAL: YOU MUST WAIT FOR USER TO SAY YES OR NO 🚨🚨🚨
+
+After asking "Would you like to go ahead and book that?", WAIT for user response:
+
+IF USER SAYS YES (yes, yeah, yep, sure, go ahead, book it, confirm, please):
+1. Say: "Perfect, I'm booking that for you now. You'll receive the details via WhatsApp."
 2. IMMEDIATELY call book_taxi(action='confirmed')
-3. Without calling the function, the booking is NOT finalized!
+3. Then say goodbye and call end_call()
 
-Choose ONE closing randomly:
+IF USER SAYS NO (no, nope, not now, forget it, never mind, actually no):
+1. IMMEDIATELY call cancel_booking
+2. Say: "No problem, I've cancelled that. Is there anything else I can help with?"
+3. If user says no again, say goodbye and call end_call()
+
+🚫 NEVER call book_taxi(action='confirmed') until user explicitly says YES to the price/ETA confirmation
+🚫 NEVER assume "yes" - wait for their actual response
+
+Choose ONE closing randomly after confirmation:
 - "Just so you know, you can also book a taxi by sending us a WhatsApp voice note."
 - "Next time, feel free to book your taxi using a WhatsApp voice message."
 - "You can always book again by simply sending us a voice note on WhatsApp."
@@ -189,9 +201,9 @@ Final Sign-off: "Thank you for trying the Taxibot demo, and have a safe journey.
 → CALL end_call()
 
 # CANCELLATION
-If user says "cancel", "never mind", "forget it":
+If user says "cancel", "never mind", "forget it", or "no" to booking confirmation:
 → CALL cancel_booking
-Say: "No problem, I've cancelled that. Is there anything else?"
+Say: "No problem, I've cancelled that. Is there anything else I can help with?"
 
 # NAME HANDLING
 If caller says their name → CALL save_customer_name
@@ -1352,6 +1364,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                     sessionState.pendingEta = result.eta;
                     sessionState.awaitingConfirmation = true;
                     sessionState.quoteInFlight = false;
+                    // Set lastQuestionAsked to confirmation so we know we're waiting for YES/NO
+                    sessionState.lastQuestionAsked = "confirmation";
 
                     if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
                       openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -1359,20 +1373,20 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
 
                       sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
 
-                      const quoteMessage = `The trip fare will be ${result.fare}, and the estimated arrival time is ${result.eta}. Would you like me to confirm this booking?`;
+                      const quoteMessage = `The trip fare will be ${result.fare}, and the estimated arrival time is ${result.eta}. Would you like to go ahead and book that?`;
 
                       openaiWs.send(JSON.stringify({
                         type: "conversation.item.create",
                         item: {
                           type: "message",
                           role: "user",
-                          content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Tell the customer: "${quoteMessage}". Do NOT repeat pickup/destination. Only say fare/ETA and ask to confirm.` }]
+                          content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Say to the customer: "${quoteMessage}". Then WAIT for their YES or NO answer. Do NOT call book_taxi until they explicitly say yes.` }]
                         }
                       }));
 
                       openaiWs.send(JSON.stringify({
                         type: "response.create",
-                        response: { modalities: ["audio", "text"], instructions: `Say exactly: "${quoteMessage}"` }
+                        response: { modalities: ["audio", "text"], instructions: `Say exactly: "${quoteMessage}" - then STOP and WAIT for user response.` }
                       }));
                     }
                   } else {
@@ -1402,8 +1416,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               sessionState.lastQuestionAsked = "passengers";
             } else if (lower.includes("when") || lower.includes("what time") || lower.includes("now or later")) {
               sessionState.lastQuestionAsked = "time";
-            } else if (lower.includes("confirm") || lower.includes("book that")) {
+            } else if (lower.includes("would you like to go ahead") || lower.includes("book that") || 
+                       lower.includes("confirm this") || lower.includes("like me to book")) {
               sessionState.lastQuestionAsked = "confirmation";
+              console.log(`[${callId}] 🎯 Confirmation question detected - waiting for YES/NO`);
             }
             
             console.log(`[${callId}] 📝 Context: lastQuestionAsked = ${sessionState.lastQuestionAsked}`);
