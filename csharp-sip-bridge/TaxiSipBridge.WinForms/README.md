@@ -1,6 +1,14 @@
 # Taxi AI SIP Bridge - Windows Desktop
 
-A Windows Forms desktop application using SIPSorcery that bridges SIP calls to the Ada AI taxi booking assistant.
+A Windows Forms desktop application using **SIPSorcery** + **NAudio** that auto-answers SIP calls and connects them to Ada AI.
+
+## Features
+
+- **Auto-Answer SIP Calls**: Registers with your SIP server and automatically answers incoming calls
+- **NAudio Integration**: Full audio capture/playback using NAudio
+- **Microphone Test Mode**: Test Ada directly with your microphone (no SIP phone needed!)
+- **Real-time Transcripts**: See what you and Ada are saying
+- **Speaker Playback**: Hear Ada's voice through your speakers
 
 ## Quick Start
 
@@ -21,14 +29,35 @@ Or build a standalone executable:
 dotnet publish -c Release -r win-x64 --self-contained
 ```
 
-The executable will be in `bin/Release/net8.0-windows/win-x64/publish/TaxiSipBridge.exe`
+## Two Modes of Operation
 
-## Features
+### 1. SIP Auto-Answer Mode (Production)
+Click **▶ Start SIP** to:
+1. Register with your SIP server (Asterisk, FreeSWITCH, etc.)
+2. Wait for incoming calls
+3. Auto-answer and connect caller to Ada
+4. Bridge audio bidirectionally
 
-- **SIP Registration**: Connects to any SIP server (Asterisk, FreeSWITCH, etc.)
-- **Real-time Audio**: Streams audio to Ada AI via WebSocket
-- **Audio Monitor**: Optional local playback for debugging
-- **Live Logs**: See all SIP/RTP/WebSocket activity
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  SIP Phone  │────▶│ TaxiSipBridge.exe│────▶│ taxi-realtime   │
+│  (Caller)   │◀────│   Auto-Answer    │◀────│ (Ada AI)        │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+```
+
+### 2. Microphone Test Mode (Development)
+Click **🎤 Test with Mic** to:
+1. Connect directly to Ada via WebSocket
+2. Capture audio from your microphone
+3. Play Ada's responses through speakers
+4. No SIP setup required!
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ Microphone  │────▶│ TaxiSipBridge.exe│────▶│ taxi-realtime   │
+│  + Speaker  │◀────│   NAudio Client  │◀────│ (Ada AI)        │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+```
 
 ## Configuration
 
@@ -39,50 +68,69 @@ The executable will be in `bin/Release/net8.0-windows/win-x64/publish/TaxiSipBri
 | Transport | UDP or TCP | UDP |
 | Username | SIP extension/username | max201 |
 | Password | SIP password | (configured) |
-| WebSocket | Ada AI endpoint | taxi-realtime-paired |
-
-## Architecture
-
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  SIP Phone  │────▶│ TaxiSipBridge.exe│────▶│ taxi-realtime   │
-│  (Zoiper)   │◀────│   (SIPSorcery)   │◀────│ (Ada AI)        │
-└─────────────┘     └──────────────────┘     └─────────────────┘
-      SIP/RTP              Audio              WebSocket
-    (µ-law 8kHz)         Conversion         (PCM16 24kHz)
-```
+| Ada URL | Ada AI WebSocket endpoint | taxi-realtime-paired |
 
 ## Audio Flow
 
-1. **Inbound (Caller → AI)**:
-   - RTP µ-law 8kHz from SIP
-   - Sent as binary to WebSocket
-   - Ada processes via OpenAI Realtime API
+### Inbound (Caller → Ada)
+```
+RTP µ-law 8kHz → Decode → Resample 24kHz → WebSocket → Ada
+```
 
-2. **Outbound (AI → Caller)**:
-   - PCM16 24kHz from Ada
-   - Resampled to 8kHz
-   - Encoded to µ-law
-   - Sent as RTP packets
+### Outbound (Ada → Caller)
+```
+Ada → WebSocket PCM 24kHz → Resample 8kHz → Encode µ-law → RTP
+```
+
+### Microphone Mode
+```
+Mic 24kHz → WebSocket → Ada → Speaker 24kHz
+```
+
+## Project Structure
+
+```
+TaxiSipBridge.WinForms/
+├── Program.cs              # Entry point
+├── MainForm.cs             # UI logic
+├── MainForm.Designer.cs    # UI layout
+├── SipAutoAnswer.cs        # SIP handling + auto-answer
+├── AdaAudioClient.cs       # WebSocket + NAudio integration
+├── SipAdaBridge.cs         # Legacy bridge (alternative)
+├── AudioMonitor.cs         # Debug audio playback
+└── TaxiSipBridge.WinForms.csproj
+```
+
+## Dependencies
+
+- [SIPSorcery](https://github.com/sipsorcery-org/sipsorcery) - SIP/RTP stack
+- [NAudio](https://github.com/naudio/NAudio) - Audio capture/playback
 
 ## Troubleshooting
 
 ### No Registration
 - Check SIP server IP and credentials
 - Verify firewall allows UDP/5060
-- Try TCP transport if UDP blocked
+- Try TCP transport
 
-### No Audio
-- Enable "Monitor Audio" checkbox to hear Ada locally
+### No Audio in SIP Mode
 - Check logs for RTP packet flow
 - Verify WebSocket connection succeeds
+- Ensure SIP server uses PCMU (G.711 µ-law)
 
-### Call Drops
-- Check logs for WebSocket errors
-- Ensure stable internet connection
-- Verify SIP server allows long calls
+### Microphone Not Working
+- Check Windows audio permissions
+- Verify default recording device
+- Try a different audio device index
 
-## Dependencies
+### Call Auto-Rejects
+- Only one call at a time is supported
+- Wait for current call to end
 
-- [SIPSorcery](https://github.com/sipsorcery-org/sipsorcery) - SIP/RTP stack
-- [NAudio](https://github.com/naudio/NAudio) - Audio playback for monitoring
+## Example Usage
+
+1. **Start the app** → Click **▶ Start SIP**
+2. **Wait for registration** → Status shows "✓ Registered"
+3. **Make a call** from Zoiper/Asterisk to your SIP extension
+4. **App auto-answers** → You hear Ada's greeting
+5. **Talk to Ada** → Book a taxi!

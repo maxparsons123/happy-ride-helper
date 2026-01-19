@@ -2,22 +2,19 @@ namespace TaxiSipBridge;
 
 public partial class MainForm : Form
 {
-    private SipAdaBridge? _bridge;
-    private AudioMonitor? _audioMonitor;
+    private SipAutoAnswer? _sipBridge;
+    private AdaAudioClient? _micClient;
     private bool _isRunning = false;
+    private bool _isMicMode = false;
 
     public MainForm()
     {
         InitializeComponent();
         LoadSettings();
-        
-        // Initialize audio monitor
-        _audioMonitor = new AudioMonitor();
     }
 
     private void LoadSettings()
     {
-        // Load from app settings or use defaults
         txtSipServer.Text = "206.189.123.28";
         txtSipPort.Text = "5060";
         txtSipUser.Text = "max201";
@@ -29,16 +26,20 @@ public partial class MainForm : Form
     private void btnStartStop_Click(object sender, EventArgs e)
     {
         if (_isRunning)
-        {
-            StopBridge();
-        }
+            Stop();
         else
-        {
-            StartBridge();
-        }
+            StartSipMode();
     }
 
-    private void StartBridge()
+    private void btnMicTest_Click(object sender, EventArgs e)
+    {
+        if (_isMicMode)
+            StopMicMode();
+        else
+            StartMicMode();
+    }
+
+    private void StartSipMode()
     {
         try
         {
@@ -52,55 +53,101 @@ public partial class MainForm : Form
                 Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
             };
 
-            _bridge = new SipAdaBridge(config);
-            
-            // Attach audio monitor
-            _bridge.AudioMonitor = _audioMonitor;
+            _sipBridge = new SipAutoAnswer(config);
+            _sipBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
+            _sipBridge.OnRegistered += () => SafeInvoke(() => SetStatus("✓ Registered - Waiting for calls", Color.Green));
+            _sipBridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
+            _sipBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
+            _sipBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
+            _sipBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
 
-            // Subscribe to events with UI thread marshaling
-            _bridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
-            _bridge.OnRegistered += () => SafeInvoke(() => SetStatus("✓ Registered", Color.Green));
-            _bridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ Registration Failed: {err}", Color.Red));
-            _bridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
-            _bridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
-
-            _bridge.Start();
+            _sipBridge.Start();
 
             _isRunning = true;
-            btnStartStop.Text = "⏹ Stop Bridge";
+            btnStartStop.Text = "⏹ Stop SIP";
             btnStartStop.BackColor = Color.FromArgb(220, 53, 69);
-            SetStatus("Starting...", Color.Orange);
+            btnMicTest.Enabled = false;
+            SetStatus("Starting SIP...", Color.Orange);
             SetConfigEnabled(false);
 
-            AddLog("🚀 Bridge started");
+            AddLog("🚕 SIP Auto-Answer mode started");
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to start bridge: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show($"Failed to start: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             AddLog($"❌ Error: {ex.Message}");
         }
     }
 
-    private void StopBridge()
+    private async void StartMicMode()
     {
         try
         {
-            _bridge?.Stop();
-            _bridge?.Dispose();
-            _bridge = null;
+            _micClient = new AdaAudioClient(txtWebSocketUrl.Text.Trim());
+            _micClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+            _micClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+            _micClient.OnConnected += () => SafeInvoke(() =>
+            {
+                SetStatus("🎤 Microphone Test - Speak to Ada!", Color.Green);
+                lblActiveCall.Text = "🎤 Mic Test Active";
+                lblActiveCall.ForeColor = Color.Green;
+            });
+            _micClient.OnDisconnected += () => SafeInvoke(() =>
+            {
+                SetStatus("Disconnected", Color.Gray);
+                StopMicMode();
+            });
 
-            _isRunning = false;
-            btnStartStop.Text = "▶ Start Bridge";
-            btnStartStop.BackColor = Color.FromArgb(40, 167, 69);
-            SetStatus("Stopped", Color.Gray);
-            SetConfigEnabled(true);
+            await _micClient.ConnectAsync("mic-test");
+            _micClient.StartMicrophoneCapture();
 
-            AddLog("🛑 Bridge stopped");
+            _isMicMode = true;
+            btnMicTest.Text = "⏹ Stop Mic";
+            btnMicTest.BackColor = Color.FromArgb(220, 53, 69);
+            btnStartStop.Enabled = false;
+            SetConfigEnabled(false);
+
+            AddLog("🎤 Microphone test mode - speak to Ada!");
         }
         catch (Exception ex)
         {
-            AddLog($"❌ Stop error: {ex.Message}");
+            MessageBox.Show($"Failed to start mic: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            AddLog($"❌ Error: {ex.Message}");
         }
+    }
+
+    private void StopMicMode()
+    {
+        _micClient?.StopMicrophoneCapture();
+        _micClient?.Dispose();
+        _micClient = null;
+
+        _isMicMode = false;
+        btnMicTest.Text = "🎤 Test with Mic";
+        btnMicTest.BackColor = Color.FromArgb(0, 123, 255);
+        btnStartStop.Enabled = true;
+        SetStatus("Ready", Color.Gray);
+        SetConfigEnabled(true);
+        lblActiveCall.Text = "No active call";
+        lblActiveCall.ForeColor = Color.Gray;
+
+        AddLog("🎤 Microphone test stopped");
+    }
+
+    private void Stop()
+    {
+        _sipBridge?.Stop();
+        _sipBridge?.Dispose();
+        _sipBridge = null;
+
+        _isRunning = false;
+        btnStartStop.Text = "▶ Start SIP";
+        btnStartStop.BackColor = Color.FromArgb(40, 167, 69);
+        btnMicTest.Enabled = true;
+        SetStatus("Stopped", Color.Gray);
+        SetConfigEnabled(true);
+
+        AddLog("🛑 SIP stopped");
     }
 
     private void OnCallStarted(string callId, string caller)
@@ -108,15 +155,14 @@ public partial class MainForm : Form
         lblActiveCall.Text = $"📞 {caller}";
         lblActiveCall.ForeColor = Color.Green;
         lblCallId.Text = $"ID: {callId}";
-        AddLog($"📞 Call started: {caller} ({callId})");
+        AddLog($"📞 AUTO-ANSWERED: {caller}");
     }
 
     private void OnCallEnded(string callId)
     {
-        lblActiveCall.Text = "No active call";
+        lblActiveCall.Text = "Waiting for calls...";
         lblActiveCall.ForeColor = Color.Gray;
         lblCallId.Text = "";
-        AddLog($"📴 Call ended: {callId}");
     }
 
     private void SetStatus(string status, Color color)
@@ -137,28 +183,25 @@ public partial class MainForm : Form
 
     private void AddLog(string message)
     {
-        // Limit log entries
         if (lstLogs.Items.Count > 500)
-        {
             lstLogs.Items.RemoveAt(0);
-        }
 
         lstLogs.Items.Add(message);
         lstLogs.TopIndex = lstLogs.Items.Count - 1;
+    }
+
+    private void AddTranscript(string transcript)
+    {
+        // Show in a distinct way
+        AddLog($"💬 {transcript}");
     }
 
     private void SafeInvoke(Action action)
     {
         if (InvokeRequired)
         {
-            try
-            {
-                Invoke(action);
-            }
-            catch (ObjectDisposedException)
-            {
-                // Form was closed
-            }
+            try { Invoke(action); }
+            catch (ObjectDisposedException) { }
         }
         else
         {
@@ -171,22 +214,10 @@ public partial class MainForm : Form
         lstLogs.Items.Clear();
     }
 
-    private void chkAudioMonitor_CheckedChanged(object sender, EventArgs e)
-    {
-        if (_audioMonitor != null)
-        {
-            _audioMonitor.IsEnabled = chkAudioMonitor.Checked;
-            AddLog(chkAudioMonitor.Checked ? "🔊 Audio monitor enabled" : "🔇 Audio monitor disabled");
-        }
-    }
-
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (_isRunning)
-        {
-            StopBridge();
-        }
-        _audioMonitor?.Dispose();
+        if (_isRunning) Stop();
+        if (_isMicMode) StopMicMode();
         base.OnFormClosing(e);
     }
 }
