@@ -2878,9 +2878,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
           return; // Drop this audio frame (likely echo)
         }
 
-        // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting
+        // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
+        // IMPORTANT: once Ada has FINISHED speaking the fare quote and we're awaiting a YES/NO,
+        // we must allow user audio through immediately; otherwise the user's "yes" gets dropped
+        // and Ada appears unresponsive.
         if (Date.now() < sessionState.summaryProtectionUntil) {
-          return; // Drop - Ada is delivering summary, do not interrupt
+          const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
+          if (sessionState.openAiResponseActive || !awaitingYesNo) {
+            return; // Drop - Ada is delivering summary/quote (or we're not in confirmation yet)
+          }
         }
 
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
