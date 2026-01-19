@@ -1436,15 +1436,40 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               break;
             }
             
-            // POST-CONFIRMATION GUARD: After booking is confirmed, ignore all user input
-            // except explicit cancellation or "something else" requests
+            // POST-CONFIRMATION GUARD: After booking is confirmed, enter open conversation mode
+            // Only respond to specific requests, otherwise let Ada say goodbye
             if (sessionState.bookingConfirmed) {
               const lower = userText.toLowerCase();
-              const isRelevant = lower.includes("cancel") || lower.includes("else") || 
-                                 lower.includes("another") || lower.includes("new booking");
-              if (!isRelevant) {
-                console.log(`[${callId}] 🛡️ Post-confirmation guard: ignoring input "${userText}"`);
-                break;
+              const isNewBookingRequest = lower.includes("new booking") || lower.includes("another taxi") || 
+                                          lower.includes("book another") || lower.includes("different pickup");
+              const isCancellation = lower.includes("cancel");
+              
+              if (isNewBookingRequest) {
+                // Allow new booking - this will need a reset flow
+                console.log(`[${callId}] 🔄 Post-confirmation: new booking request detected`);
+              } else if (isCancellation) {
+                console.log(`[${callId}] ❌ Post-confirmation: cancellation request detected`);
+              } else {
+                // Block looping back to booking questions - inject open conversation context
+                console.log(`[${callId}] 🛡️ Post-confirmation guard: "${userText}" - sending open conversation response`);
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[POST-CONFIRMATION REMINDER] The booking is ALREADY CONFIRMED. User said: "${userText}". 
+Do NOT ask "shall I book that taxi?" - it's ALREADY DONE.
+Do NOT ask for pickup/destination/passengers - we HAVE all that.
+If this sounds like they want something else, ask "Is there anything else I can help with?"
+Otherwise, say goodbye warmly and call end_call().`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break; // Don't process further
               }
             }
             
@@ -1734,6 +1759,9 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               // Protect goodbye speech from interruption
               sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
               
+              // Set lastQuestionAsked to "none" to prevent looping back to booking questions
+              sessionState.lastQuestionAsked = "none";
+              
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -1746,6 +1774,28 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   })
                 }
               }));
+              
+              // CRITICAL: Inject system message to prevent AI from looping back to booking questions
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[POST-CONFIRMATION MODE ACTIVE] The booking is NOW CONFIRMED and COMPLETE. 
+                    
+🚨 CRITICAL RULES:
+- Do NOT ask "shall I book that taxi?" - it's ALREADY BOOKED
+- Do NOT ask for pickup, destination, passengers, or time - we HAVE all that
+- Do NOT loop back to any booking questions
+- If user speaks, respond with ONLY brief open conversation (e.g., "Is there anything else I can help with?")
+- You are now in GOODBYE/OPEN CONVERSATION mode, NOT booking mode
+- Your next action should be to say goodbye and call end_call()`
+                  }]
+                }
+              }));
+              
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
 
             } else {
