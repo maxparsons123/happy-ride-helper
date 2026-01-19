@@ -123,9 +123,14 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // Create VoIPMediaSession - default constructor auto-negotiates codecs
-            // PCMU (G.711 µ-law) is the default and most common codec
-            mediaSession = new VoIPMediaSession();
+            // Create VoIPMediaSession with null audio endpoints (no local audio devices)
+            // We're bridging SIP <-> WebSocket, not playing to speakers
+            var nullEndPoints = new MediaEndPoints 
+            { 
+                AudioSource = null, 
+                AudioSink = null 
+            };
+            mediaSession = new VoIPMediaSession(nullEndPoints);
             mediaSession.AcceptRtpFromAny = true;
             _currentMediaSession = mediaSession;
 
