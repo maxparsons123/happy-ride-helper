@@ -1999,49 +1999,99 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                                     (lower.includes("one moment") && lower.includes("price")) ||
                                     (lower.includes("checking") && (lower.includes("fare") || lower.includes("price") || lower.includes("trip")));
             
-            // FALLBACK: If sessionState.booking is empty, try to extract from recent Ada summary
-            // Look for pattern: "picked up at X, and travel to Y. There will be N passengers"
+            // FALLBACK: If booking state is still missing, backfill ONLY from user-provided context.
+            // Never parse Ada's own summaries (they can be wrong and then "stick" into state).
             if (!sessionState.booking.pickup || !sessionState.booking.destination || sessionState.booking.passengers === null) {
-              // Search recent conversation history for Ada's summary
-              const recentAdaMessages = sessionState.conversationHistory
-                .filter(m => m.role === "assistant")
-                .slice(-3)
-                .map(m => m.content)
-                .join(" ");
-              
-              // Extract pickup: "picked up at X" or "pickup at X"
-              const pickupMatch = recentAdaMessages.match(/(?:picked up at|pickup at|pick you up at)\s+([^,]+?)(?:,|\.|\s+and)/i);
-              if (pickupMatch && !sessionState.booking.pickup) {
-                sessionState.booking.pickup = pickupMatch[1].trim();
-                console.log(`[${callId}] 📍 Extracted pickup from summary: ${sessionState.booking.pickup}`);
+              const findLatestUserValue = (
+                field: "pickup" | "destination" | "passengers" | "time"
+              ): string | null => {
+                for (let i = sessionState.conversationHistory.length - 1; i >= 0; i--) {
+                  const m = sessionState.conversationHistory[i];
+                  if (m.role !== "user") continue;
+
+                  const c = String(m.content || "");
+
+                  // Correction annotation has highest priority
+                  const corr = c.match(/\[CORRECTION: User corrected (pickup|destination) to \"([^\"]+)\"\]/i);
+                  if (corr && corr[1].toLowerCase() === field) {
+                    return corr[2].trim();
+                  }
+
+                  // Context paired user answer
+                  const ctx = c.match(/\[CONTEXT: Ada asked about ([^\]]+)\]\s*(.+)$/i);
+                  if (ctx) {
+                    const ctxField = ctx[1].trim().toLowerCase();
+                    const answer = ctx[2].trim();
+                    if (ctxField === field) return answer;
+                  }
+                }
+
+                return null;
+              };
+
+              const cleanFieldValue = (s: string): string => {
+                return s
+                  .replace(
+                    /^\s*(?:from|pickup(?: address)? is|pickup is|pickup|destination(?: address)? is|destination is|destination|going to|to|it's|it is|is|at)\b[\s,:-]+/i,
+                    ""
+                  )
+                  .replace(/[.?!,]+$/g, "")
+                  .trim();
+              };
+
+              if (!sessionState.booking.pickup) {
+                const v = findLatestUserValue("pickup");
+                if (v) {
+                  sessionState.booking.pickup = cleanFieldValue(v);
+                  console.log(`[${callId}] 📍 Backfilled pickup from user context: ${sessionState.booking.pickup}`);
+                }
               }
-              
-              // Extract destination: "travel to X" or "going to X" or "destination X"
-              const destMatch = recentAdaMessages.match(/(?:travel to|going to|destination)\s+([^.]+?)(?:\.|There will)/i);
-              if (destMatch && !sessionState.booking.destination) {
-                sessionState.booking.destination = destMatch[1].trim();
-                console.log(`[${callId}] 📍 Extracted destination from summary: ${sessionState.booking.destination}`);
+
+              if (!sessionState.booking.destination) {
+                const v = findLatestUserValue("destination");
+                if (v) {
+                  sessionState.booking.destination = cleanFieldValue(v);
+                  console.log(`[${callId}] 📍 Backfilled destination from user context: ${sessionState.booking.destination}`);
+                }
               }
-              
-              // Extract passengers: "N passengers" or "There will be N"
-              const passengersMatch = recentAdaMessages.match(/(?:there will be|there's|there are)\s+(\d+)\s+passenger/i) ||
-                                      recentAdaMessages.match(/(\d+)\s+passenger/i);
-              if (passengersMatch && sessionState.booking.passengers === null) {
-                sessionState.booking.passengers = parseInt(passengersMatch[1], 10);
-                console.log(`[${callId}] 📍 Extracted passengers from summary: ${sessionState.booking.passengers}`);
+
+              if (sessionState.booking.passengers === null) {
+                const v = findLatestUserValue("passengers");
+                if (v) {
+                  const match = v.match(/\b(\d+)\b/);
+                  if (match) {
+                    sessionState.booking.passengers = parseInt(match[1], 10);
+                    console.log(`[${callId}] 📍 Backfilled passengers from user context: ${sessionState.booking.passengers}`);
+                  }
+                }
               }
-              
-              // Extract time: "picked up now" or "at X pm/am"
-              const timeMatch = recentAdaMessages.match(/(?:picked up|pickup)\s+(now|immediately|straightaway|right away|\d+(?::\d+)?\s*(?:am|pm)?)/i);
-              if (timeMatch && !sessionState.booking.pickupTime) {
-                sessionState.booking.pickupTime = timeMatch[1].trim();
-                console.log(`[${callId}] 📍 Extracted time from summary: ${sessionState.booking.pickupTime}`);
+
+              if (!sessionState.booking.pickupTime) {
+                const v = findLatestUserValue("time");
+                if (v) {
+                  const lowerTime = v.toLowerCase();
+                  if (
+                    lowerTime.includes("now") ||
+                    lowerTime.includes("asap") ||
+                    lowerTime.includes("right away") ||
+                    lowerTime.includes("immediately") ||
+                    lowerTime.includes("straightaway")
+                  ) {
+                    sessionState.booking.pickupTime = "ASAP";
+                  } else {
+                    sessionState.booking.pickupTime = cleanFieldValue(v);
+                  }
+                  console.log(`[${callId}] 📍 Backfilled time from user context: ${sessionState.booking.pickupTime}`);
+                }
               }
             }
             
-            const hasRequiredFields = sessionState.booking.pickup && 
-                                      sessionState.booking.destination && 
-                                      sessionState.booking.passengers !== null;
+            const hasRequiredFields = Boolean(
+              sessionState.booking.pickup &&
+              sessionState.booking.destination &&
+              sessionState.booking.passengers !== null &&
+              !Number.isNaN(sessionState.booking.passengers)
+            );
             
             console.log(`[${callId}] 🔍 Auto-trigger check: isCheckingPrice=${isCheckingPrice}, hasRequiredFields=${hasRequiredFields}, pickup=${sessionState.booking.pickup}, dest=${sessionState.booking.destination}, pax=${sessionState.booking.passengers}`);
             
