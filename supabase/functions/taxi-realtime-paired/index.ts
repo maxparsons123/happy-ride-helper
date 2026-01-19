@@ -272,8 +272,8 @@ const TOOLS = [
       type: "object",
       properties: {
         action: { type: "string", enum: ["request_quote", "confirmed"], description: "Use 'request_quote' first to get fare/ETA, then 'confirmed' after user accepts." },
-        pickup: { type: "string", description: "COMPLETE pickup address exactly as the user said it. Include house number, street name, and any other details they provided. E.g. 'Number 1, Lifford Lane' NOT just 'Number 1'." },
-        destination: { type: "string", description: "COMPLETE destination address exactly as the user said it. Include all details they provided. E.g. 'Birmingham New Street Station' NOT just 'New Street'." },
+        pickup: { type: "string", description: "FULL pickup address with house number AND street name. NEVER omit the street name. Example: user says '52A David Road' -> pickup='52A David Road'. WRONG: '52A' alone." },
+        destination: { type: "string", description: "FULL destination address with number AND street name. NEVER omit the street name. Example: user says '7 Russell Street' -> destination='7 Russell Street'. WRONG: '7' alone." },
         passengers: { type: "integer", minimum: 1, description: "Number of passengers" },
         time: { type: "string", description: "When taxi is needed (e.g., 'now', '3pm')" }
       },
@@ -702,6 +702,12 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   }
   
   if (!extractedAddress || extractedAddress.length < 3) {
+    return { type: null, address: "" };
+  }
+  
+  // Filter out confirmation phrases that are NOT addresses
+  const confirmationPhrases = ["correct", "right", "yes", "yeah", "yep", "sure", "fine", "ok", "okay", "good", "great", "perfect", "lovely", "brilliant"];
+  if (confirmationPhrases.includes(extractedAddress.toLowerCase())) {
     return { type: null, address: "" };
   }
   
