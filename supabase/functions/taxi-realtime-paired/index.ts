@@ -24,7 +24,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // OpenAI Realtime API config
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
-const VOICE = "shimmer";
+const VOICE = "fable"; // British, expressive voice
 
 // ---------------------------------------------------------------------------
 // Audio helpers (mirror taxi-realtime-simple behavior)
