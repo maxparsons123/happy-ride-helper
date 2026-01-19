@@ -1148,6 +1148,126 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   return { type: "pickup", address: extractedAddress };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// "TRUST ADA'S FIRST ECHO" MODE
+// When Ada immediately acknowledges an address (e.g., "Got it, 18 Exmoor Road"),
+// extract that as the canonical value. Ada's interpretation is often more accurate
+// than raw STT transcripts because she has context and UK address knowledge.
+// ═══════════════════════════════════════════════════════════════════════════════
+interface AdaEchoExtraction {
+  type: "pickup" | "destination" | null;
+  address: string;
+}
+
+function extractAdaFirstEcho(
+  adaTranscript: string,
+  lastQuestionAsked: string
+): AdaEchoExtraction {
+  const lower = adaTranscript.toLowerCase();
+  
+  // SKIP summaries - only trust immediate acknowledgments
+  const isSummary = lower.includes("let me confirm") ||
+                    lower.includes("to confirm") ||
+                    lower.includes("so that's") ||
+                    lower.includes("summarize") ||
+                    lower.includes("your booking") ||
+                    lower.includes("booking details");
+  
+  if (isSummary) {
+    return { type: null, address: "" };
+  }
+  
+  // Immediate acknowledgment patterns for PICKUP
+  const pickupPatterns = [
+    /got it[,.]?\s+(?:picking you up (?:from|at)\s+)?([^,.]+?)(?:\s+for your pickup|\s+as your pickup|\s+for pickup|[,.]|\s+and\s+)/i,
+    /(?:your )?pickup (?:is|will be|address is)\s+([^,.]+?)(?:[,.]|\s+and\s+)/i,
+    /picking you up (?:from|at)\s+([^,.]+?)(?:[,.]|\s+and\s+)/i,
+    /thank you[,.]?\s+(?:picking you up (?:from|at)\s+)?([^,.]+?)(?:\s+for your pickup|\s+as your pickup|[,.]|\s+and\s+)/i,
+    /perfect[,.]?\s+([^,.]+?)(?:\s+for your pickup|\s+as pickup|[,.]|\s+and\s+)/i,
+    /lovely[,.]?\s+([^,.]+?)(?:\s+for your pickup|\s+as pickup|[,.]|\s+and\s+)/i,
+  ];
+  
+  // Immediate acknowledgment patterns for DESTINATION
+  const destinationPatterns = [
+    /(?:your )?destination (?:is|will be)\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /(?:going|heading|travelling?) to\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /(?:drop(?:ping)? you (?:off )?at|to)\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /thank you[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+    /got it[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+  ];
+  
+  // Determine which field to extract based on lastQuestionAsked context
+  let patterns: RegExp[] = [];
+  let fieldType: "pickup" | "destination" | null = null;
+  
+  if (lastQuestionAsked === "pickup") {
+    patterns = pickupPatterns;
+    fieldType = "pickup";
+  } else if (lastQuestionAsked === "destination") {
+    patterns = destinationPatterns;
+    fieldType = "destination";
+  } else {
+    // Check both if context is unclear
+    for (const p of pickupPatterns) {
+      const match = adaTranscript.match(p);
+      if (match && match[1]) {
+        const addr = cleanAdaEchoAddress(match[1]);
+        if (isValidAddress(addr)) {
+          return { type: "pickup", address: addr };
+        }
+      }
+    }
+    for (const p of destinationPatterns) {
+      const match = adaTranscript.match(p);
+      if (match && match[1]) {
+        const addr = cleanAdaEchoAddress(match[1]);
+        if (isValidAddress(addr)) {
+          return { type: "destination", address: addr };
+        }
+      }
+    }
+    return { type: null, address: "" };
+  }
+  
+  // Try each pattern
+  for (const p of patterns) {
+    const match = adaTranscript.match(p);
+    if (match && match[1]) {
+      const addr = cleanAdaEchoAddress(match[1]);
+      if (isValidAddress(addr)) {
+        return { type: fieldType, address: addr };
+      }
+    }
+  }
+  
+  return { type: null, address: "" };
+}
+
+function cleanAdaEchoAddress(raw: string): string {
+  return raw
+    .replace(/^\s*(?:from|at|to|is|it's|it is)\s+/i, "")
+    .replace(/\s*(?:for your|as your|for the|is your).*$/i, "")
+    .replace(/[.?!,]+$/g, "")
+    .trim();
+}
+
+function isValidAddress(addr: string): boolean {
+  if (!addr || addr.length < 3) return false;
+  const lower = addr.toLowerCase();
+  
+  // Must have address keyword OR house number
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park"];
+  const hasKeyword = addressKeywords.some(kw => lower.includes(kw));
+  const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(addr) || /\s\d+[a-zA-Z]?$/.test(addr);
+  
+  // Filter out question fragments
+  if (lower.includes("what") || lower.includes("where") || lower.includes("how many")) {
+    return false;
+  }
+  
+  return hasKeyword || hasHouseNumber;
+}
+
 
 function computeRms(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
@@ -1991,6 +2111,34 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (isSummary) {
               sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
               console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms`);
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // "TRUST ADA'S FIRST ECHO" MODE
+            // When Ada immediately acknowledges an address, use HER interpretation
+            // as the canonical value (she's often more accurate than raw STT).
+            // Only applies to immediate echoes, NOT summaries.
+            // ═══════════════════════════════════════════════════════════════════
+            if (!isSummary) {
+              const adaEcho = extractAdaFirstEcho(data.transcript, sessionState.lastQuestionAsked);
+              if (adaEcho.type && adaEcho.address) {
+                const currentValue = adaEcho.type === "pickup" 
+                  ? sessionState.booking.pickup 
+                  : sessionState.booking.destination;
+                
+                // Only update if different from current value (prevents loops)
+                if (currentValue !== adaEcho.address) {
+                  console.log(`[${callId}] 🎯 ADA FIRST ECHO: Trusting Ada's interpretation for ${adaEcho.type}: "${currentValue}" → "${adaEcho.address}"`);
+                  
+                  if (adaEcho.type === "pickup") {
+                    sessionState.booking.pickup = adaEcho.address;
+                  } else {
+                    sessionState.booking.destination = adaEcho.address;
+                  }
+                  
+                  await updateLiveCall(sessionState);
+                }
+              }
             }
             
             // AUTO-TRIGGER WEBHOOK: If Ada says "check the price" but the mini model didn't call the tool,
