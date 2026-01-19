@@ -9,6 +9,8 @@
     <ApplicationIcon></ApplicationIcon>
     <AssemblyName>TaxiSipBridge</AssemblyName>
     <RootNamespace>TaxiSipBridge</RootNamespace>
+    <Version>2.0.0</Version>
+    <Description>Taxi AI SIP Bridge - Auto-answers SIP calls and bridges to Ada AI</Description>
   </PropertyGroup>
 
   <ItemGroup>

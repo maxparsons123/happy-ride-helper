@@ -20,8 +20,8 @@ public class SipAutoAnswer : IDisposable
     private AdaAudioClient? _adaClient;
     private VoIPMediaSession? _currentMediaSession;
     private CancellationTokenSource? _callCts;
-    private bool _isInCall = false;
-    private bool _disposed = false;
+    private volatile bool _isInCall = false;
+    private volatile bool _disposed = false;
 
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
@@ -143,7 +143,7 @@ public class SipAutoAnswer : IDisposable
             }
             catch { }
 
-            await Task.Delay(300, cts.Token); // Brief ring
+            await Task.Delay(300, cts.Token);
 
             // Answer
             bool answered = await ua.Answer(uas, rtpSession);
@@ -161,10 +161,6 @@ public class SipAutoAnswer : IDisposable
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-            // MEMORY LEAK FIX: Store event handler reference for cleanup
-            Action<string>? adaSpeakingHandler = t => { };
-            _adaClient.OnAdaSpeaking += adaSpeakingHandler;
-
             ua.OnCallHungup += (d) =>
             {
                 Log($"📴 [{callId}] Caller hung up");
@@ -178,8 +174,7 @@ public class SipAutoAnswer : IDisposable
             const int FLUSH_PACKETS = 25;
 
             // SIP → Ada (caller voice to AI)
-            // MEMORY LEAK FIX: Store handler for potential cleanup
-            RtpPacketReceivedHandler rtpHandler = async (ep, mt, rtp) =>
+            rtpSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio) return;
                 if (cts.Token.IsCancellationRequested) return;
@@ -200,7 +195,6 @@ public class SipAutoAnswer : IDisposable
                 catch (OperationCanceledException) { }
                 catch { }
             };
-            rtpSession.OnRtpPacketReceived += rtpHandler;
 
             // Ada → SIP (AI voice to caller)
             _ = Task.Run(async () =>
@@ -250,9 +244,6 @@ public class SipAutoAnswer : IDisposable
             {
                 await Task.Delay(500, cts.Token);
             }
-
-            // MEMORY LEAK FIX: Unsubscribe from RTP events
-            rtpSession.OnRtpPacketReceived -= rtpHandler;
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -300,9 +291,6 @@ public class SipAutoAnswer : IDisposable
             OnCallEnded?.Invoke(callId);
         }
     }
-
-    // Delegate type for RTP handler
-    private delegate void RtpPacketReceivedHandler(IPEndPoint ep, SDPMediaTypesEnum mt, RTPPacket rtp);
 
     private void Log(string msg)
     {
