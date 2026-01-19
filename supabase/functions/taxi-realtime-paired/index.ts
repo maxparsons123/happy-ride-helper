@@ -2224,6 +2224,47 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               break; // Correction handled, don't run normal context pairing
             }
             
+            // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
+            if (sessionState.lastQuestionAsked === "passengers") {
+              // Check if response looks like an address rather than a number
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
+              const isJustNumber = /^[1-9]$|^1[0-9]$|^20$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(userText.trim());
+              
+              if (looksLikeAddress && !hasNumber && !isJustNumber) {
+                console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
+                
+                // Store the address for later (might be a correction they want to make)
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                // Force immediate re-prompt for passengers
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[PASSENGER CLARIFICATION NEEDED] You asked for the number of passengers, but the user said: "${userText}" which sounds like an address.
+
+DO NOT interpret this as passenger count. Politely clarify:
+- Acknowledge you might have misheard
+- Ask specifically for the NUMBER of passengers traveling
+- Keep it brief: "Sorry, I missed that. How many passengers will be traveling?"
+
+Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=NOT YET SET`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break; // Don't run normal context pairing
+              }
+            }
+            
             // Add to history with context annotation (normal flow)
             sessionState.conversationHistory.push({
               role: "user",
