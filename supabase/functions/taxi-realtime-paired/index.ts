@@ -1660,18 +1660,64 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               })();
             }
             
-            if (lower.includes("where would you like to be picked up") || lower.includes("pickup")) {
-              sessionState.lastQuestionAsked = "pickup";
-            } else if (lower.includes("where would you like to go") || lower.includes("destination") || lower.includes("where are you going")) {
-              sessionState.lastQuestionAsked = "destination";
-            } else if (lower.includes("how many") || lower.includes("passengers") || lower.includes("people")) {
-              sessionState.lastQuestionAsked = "passengers";
-            } else if (lower.includes("when") || lower.includes("what time") || lower.includes("now or later")) {
-              sessionState.lastQuestionAsked = "time";
-            } else if (lower.includes("would you like to go ahead") || lower.includes("book that") || 
-                       lower.includes("confirm this") || lower.includes("like me to book")) {
-              sessionState.lastQuestionAsked = "confirmation";
-              console.log(`[${callId}] 🎯 Confirmation question detected - waiting for YES/NO`);
+            // Detect what question Ada asked - look for QUESTION PATTERNS, not just keywords
+            // This ensures we track the actual question, not just mentions of words
+            const questionPatterns = {
+              pickup: [
+                /where would you like to be picked up/i,
+                /where are you\?/i,
+                /pickup location/i,
+                /where shall I pick you up/i,
+                /what.s your pickup/i
+              ],
+              destination: [
+                /what is your destination/i,
+                /where would you like to go/i,
+                /where are you going/i,
+                /where to\?/i,
+                /what.s your destination/i,
+                /and your destination/i
+              ],
+              passengers: [
+                /how many people/i,
+                /how many passengers/i,
+                /how many will be travelling/i,
+                /number of passengers/i
+              ],
+              time: [
+                /when do you need/i,
+                /what time/i,
+                /when would you like/i,
+                /now or later/i
+              ],
+              confirmation: [
+                /would you like to go ahead/i,
+                /like me to book/i,
+                /shall I book/i,
+                /confirm this/i,
+                /is that correct/i
+              ]
+            };
+            
+            // Find the LAST question asked in the transcript
+            let lastMatchedQuestion: SessionState["lastQuestionAsked"] = sessionState.lastQuestionAsked;
+            let lastMatchIndex = -1;
+            
+            for (const [questionType, patterns] of Object.entries(questionPatterns)) {
+              for (const pattern of patterns) {
+                const match = lower.match(pattern);
+                if (match && match.index !== undefined && match.index > lastMatchIndex) {
+                  lastMatchIndex = match.index;
+                  lastMatchedQuestion = questionType as SessionState["lastQuestionAsked"];
+                }
+              }
+            }
+            
+            if (lastMatchIndex >= 0 && lastMatchedQuestion !== sessionState.lastQuestionAsked) {
+              sessionState.lastQuestionAsked = lastMatchedQuestion;
+              if (lastMatchedQuestion === "confirmation") {
+                console.log(`[${callId}] 🎯 Confirmation question detected - waiting for YES/NO`);
+              }
             }
             
             console.log(`[${callId}] 📝 Context: lastQuestionAsked = ${sessionState.lastQuestionAsked}`);
