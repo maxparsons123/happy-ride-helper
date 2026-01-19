@@ -124,8 +124,6 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // Create VoIPMediaSession with null audio endpoints (no local audio devices)
-            // We're bridging SIP <-> WebSocket, not playing to speakers
             var nullEndPoints = new MediaEndPoints 
             { 
                 AudioSource = null, 
@@ -135,10 +133,8 @@ public class SipAutoAnswer : IDisposable
             mediaSession.AcceptRtpFromAny = true;
             _currentMediaSession = mediaSession;
 
-            // Accept the call - creates UAS transaction
             var uas = ua.AcceptCall(req);
 
-            // Send 180 Ringing
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
@@ -149,7 +145,6 @@ public class SipAutoAnswer : IDisposable
 
             await Task.Delay(300, cts.Token);
 
-            // Answer the call with our media session
             bool answered = await ua.Answer(uas, mediaSession);
 
             if (!answered)
@@ -158,11 +153,9 @@ public class SipAutoAnswer : IDisposable
                 return;
             }
 
-            // Start RTP session
             await mediaSession.Start();
             Log($"✅ [{callId}] Call answered, RTP started");
 
-            // Connect to Ada
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
@@ -175,11 +168,9 @@ public class SipAutoAnswer : IDisposable
 
             await _adaClient.ConnectAsync(caller, cts.Token);
 
-            // Flush initial RTP packets (connection noise)
             int flushCount = 0;
             const int FLUSH_PACKETS = 25;
 
-            // SIP → Ada (caller voice to AI)
             mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio) return;
@@ -202,7 +193,6 @@ public class SipAutoAnswer : IDisposable
                 catch { }
             };
 
-            // Ada → SIP (AI voice to caller)
             _ = Task.Run(async () =>
             {
                 var sw = Stopwatch.StartNew();
@@ -223,16 +213,15 @@ public class SipAutoAnswer : IDisposable
                         var frame = _adaClient?.GetNextMuLawFrame();
                         if (frame != null && mediaSession != null)
                         {
-                            // SendRtpRaw: mediaType, payload, timestamp, markerBit, payloadType
                             mediaSession.SendRtpRaw(
                                 SDPMediaTypesEnum.audio,
                                 frame,
                                 rtpTimestamp,
-                                0,  // marker bit
-                                0   // PCMU payload type
+                                0,
+                                0
                             );
 
-                            rtpTimestamp += 160; // 20ms at 8kHz
+                            rtpTimestamp += 160;
                             nextFrame = sw.ElapsedMilliseconds + 20;
                         }
                         else
@@ -246,7 +235,6 @@ public class SipAutoAnswer : IDisposable
                 }
             }, cts.Token);
 
-            // Wait for call to end
             while (!cts.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
             {
                 await Task.Delay(500, cts.Token);
@@ -276,11 +264,7 @@ public class SipAutoAnswer : IDisposable
 
             if (mediaSession != null)
             {
-                try
-                {
-                    mediaSession.Close("call ended");
-                }
-                catch { }
+                try { mediaSession.Close("call ended"); } catch { }
             }
             _currentMediaSession = null;
 
@@ -342,19 +326,8 @@ public class SipAutoAnswer : IDisposable
 
         Stop();
 
-        try
-        {
-            _adaClient?.Dispose();
-            _adaClient = null;
-        }
-        catch { }
-
-        try
-        {
-            _callCts?.Dispose();
-            _callCts = null;
-        }
-        catch { }
+        try { _adaClient?.Dispose(); _adaClient = null; } catch { }
+        try { _callCts?.Dispose(); _callCts = null; } catch { }
 
         GC.SuppressFinalize(this);
     }
