@@ -1622,13 +1622,18 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       }
     }
     
-    // Unsubscribe from dispatch channel
+    // Unsubscribe AND REMOVE dispatch channel to prevent memory leaks
+    // CRITICAL: removeChannel() is required to fully purge the channel from Supabase's
+    // internal tracking. Without it, channels accumulate and cause server flooding.
     if (dispatchChannel) {
       try {
         await dispatchChannel.unsubscribe();
+        supabase.removeChannel(dispatchChannel);
+        console.log(`[${callId}] 🧹 Dispatch channel cleaned up`);
       } catch (e) {
-        console.error(`[${callId}] Error unsubscribing from dispatch channel:`, e);
+        console.error(`[${callId}] Error cleaning up dispatch channel:`, e);
       }
+      dispatchChannel = null;
     }
     
     // Update final call state
