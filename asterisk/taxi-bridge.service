@@ -15,7 +15,7 @@ RestartSec=5
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
-Environment=WS_URL=wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired
+Environment=WS_URL=wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired
 
 # Logging
 StandardOutput=journal
