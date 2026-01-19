@@ -323,6 +323,10 @@ interface SessionState {
   pendingEta: string | null;
   awaitingConfirmation: boolean;
   bookingRef: string | null;
+  // Flag to silence Ada after she says "one moment" until fare arrives
+  waitingForQuoteSilence: boolean;
+  // Track if Ada already said "one moment" for this quote request
+  saidOneMoment: boolean;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -753,7 +757,9 @@ function createSessionState(callId: string, callerPhone: string): SessionState {
     pendingFare: null,
     pendingEta: null,
     awaitingConfirmation: false,
-    bookingRef: null
+    bookingRef: null,
+    waitingForQuoteSilence: false,
+    saidOneMoment: false
   };
 }
 
@@ -1031,6 +1037,11 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     sessionState.pendingEta = eta_minutes || eta;
     sessionState.pendingBookingRef = booking_ref || null;
     
+    // CLEAR THE SILENCE FLAG - we have the fare now, Ada can speak again!
+    sessionState.waitingForQuoteSilence = false;
+    sessionState.saidOneMoment = false;
+    console.log(`[${callId}] 🔊 Silence mode CLEARED - fare received, Ada can speak`);
+    
     // Cancel any active response before injecting dispatch message
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
     openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
@@ -1273,6 +1284,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
           
         case "response.created":
+          // SILENCE MODE GUARD: If we're waiting for a quote, cancel any new responses
+          if (sessionState.waitingForQuoteSilence && sessionState.saidOneMoment) {
+            console.log(`[${callId}] 🤫 BLOCKING new response - in silence mode waiting for fare`);
+            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+            break;
+          }
           console.log(`[${callId}] 🎤 Response started`);
           break;
           
@@ -1314,19 +1331,26 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs!.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
               
-              // Inject a correction - be very forceful
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: "[SYSTEM ERROR]: You made up a price or ETA. You do NOT know the fare or arrival time yet. Say ONLY: 'I'm just checking that for you now' and then STOP TALKING completely. Wait in silence for dispatch." }]
-                }
-              }));
-              openaiWs!.send(JSON.stringify({
-                type: "response.create",
-                response: { modalities: ["audio", "text"], instructions: "Say ONLY: 'I'm just checking that for you now.' Then STOP. Do not say anything else." }
-              }));
+              // If we're already in silence mode, don't inject another "checking" response - just stay silent
+              if (sessionState.waitingForQuoteSilence) {
+                console.log(`[${callId}] 🤫 Already in silence mode - NOT injecting correction, staying quiet`);
+              } else {
+                // Inject a correction - be very forceful
+                sessionState.waitingForQuoteSilence = true;
+                sessionState.saidOneMoment = true;
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: "[SYSTEM ERROR]: You made up a price or ETA. You do NOT know the fare or arrival time yet. Say ONLY: 'I'm just checking that for you now' and then STOP TALKING completely. Wait in silence for dispatch." }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({
+                  type: "response.create",
+                  response: { modalities: ["audio", "text"], instructions: "Say ONLY: 'I'm just checking that for you now.' Then STOP. Do not say anything else." }
+                }));
+              }
             }
           }
           break;
@@ -1342,6 +1366,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             
             console.log(`[${callId}] 🤖 Ada: "${data.transcript.substring(0, 80)}..."`);
             
+            // SILENCE MODE CHECK: If Ada just said "one moment", block any further responses
+            const transcriptLower = data.transcript.toLowerCase();
+            if (sessionState.waitingForQuoteSilence && 
+                (transcriptLower.includes("one moment") || transcriptLower.includes("checking") || transcriptLower.includes("let me check"))) {
+              console.log(`[${callId}] 🤫 Ada said "one moment" - entering STRICT SILENCE MODE until fare arrives`);
+              // Cancel any pending response to ensure complete silence
+              openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+              break; // Don't process further - just stay silent
+            }
             // Detect what question was asked based on content
             const lower = data.transcript.toLowerCase();
             
@@ -1786,7 +1819,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 pickup_time: resolvedPickupTime
               });
 
-              // Tell Ada to WAIT SILENTLY for dispatch callback - do NOT make up a price or ETA!
+              // Set silence mode - Ada must not speak again until fare arrives
+              sessionState.waitingForQuoteSilence = true;
+              sessionState.saidOneMoment = true;
+
+              // Tell Ada to say "one moment" ONCE and then be completely silent
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -1794,12 +1831,20 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   call_id: data.call_id,
                   output: JSON.stringify({
                     success: true,
-                    status: "pending",
-                    message: "Quote request sent to dispatch. Say ONLY 'One moment please while I check the price' then STOP TALKING COMPLETELY. Do NOT say any fare amount. Do NOT say any ETA or minutes. Do NOT guess. WAIT IN COMPLETE SILENCE until you receive a [DISPATCH QUOTE RECEIVED] message with the real price."
+                    status: "waiting_for_dispatch",
+                    message: "Say EXACTLY: 'One moment please while I check that for you.' Then STOP. Do NOT speak again. Do NOT guess prices or ETAs. Wait for [DISPATCH QUOTE RECEIVED]."
                   })
                 }
               }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              
+              // Create ONE response for "one moment" then enter silence mode
+              openaiWs!.send(JSON.stringify({ 
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: "Say ONLY: 'One moment please while I check that for you.' Then STOP COMPLETELY. Say nothing else."
+                }
+              }));
 
             } else if (action === "confirmed") {
               console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingConfirmed=${sessionState.bookingConfirmed}, bookingRef=${sessionState.pendingBookingRef})`);
