@@ -21,7 +21,9 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="MainForm.cs" />
-    <Compile Include="MainForm.Designer.cs" />
+    <Compile Include="MainForm.Designer.cs">
+      <DependentUpon>MainForm.cs</DependentUpon>
+    </Compile>
     <Compile Include="SipAutoAnswer.cs" />
     <Compile Include="AdaAudioClient.cs" />
     <Compile Include="AudioCodecs.cs" />
