@@ -1107,6 +1107,16 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     
     console.log(`[${callId}] 🧹 Cleaning up connection`);
     
+    // Clear greeting timers
+    if (greetingFallbackTimer) {
+      clearTimeout(greetingFallbackTimer);
+      greetingFallbackTimer = null;
+    }
+    if (greetingVerifyTimer) {
+      clearTimeout(greetingVerifyTimer);
+      greetingVerifyTimer = null;
+    }
+    
     // Unsubscribe from dispatch channel
     if (dispatchChannel) {
       try {
@@ -1339,12 +1349,21 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // OpenAI WebSocket handlers
   // Flag to prevent duplicate greetings
   let greetingSent = false;
+  let greetingAttempts = 0;
+  const MAX_GREETING_ATTEMPTS = 3;
+  let greetingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  let greetingVerifyTimer: ReturnType<typeof setTimeout> | null = null;
   
   const sendGreeting = () => {
-    if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+      console.log(`[${callId}] ⚠️ sendGreeting skipped: sent=${greetingSent}, wsOpen=${openaiWs?.readyState === WebSocket.OPEN}`);
+      return;
+    }
+    
+    greetingAttempts++;
     greetingSent = true;
     
-    console.log(`[${callId}] 🎙️ Sending initial greeting via response.create only...`);
+    console.log(`[${callId}] 🎙️ Sending initial greeting (attempt ${greetingAttempts})...`);
     
     const greetingText = "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?";
     
@@ -1359,7 +1378,26 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     }));
     
     sessionState.lastQuestionAsked = "pickup";
+    
+    // Set up verification timer - if no audio within 3s, retry greeting
+    if (greetingVerifyTimer) clearTimeout(greetingVerifyTimer);
+    greetingVerifyTimer = setTimeout(() => {
+      // Check if we've received any audio response for greeting
+      if (!sessionState.openAiResponseActive && greetingAttempts < MAX_GREETING_ATTEMPTS) {
+        console.log(`[${callId}] ⚠️ No greeting audio after 3s - retrying (attempt ${greetingAttempts + 1})`);
+        greetingSent = false; // Allow retry
+        sendGreeting();
+      }
+    }, 3000);
   };
+  
+  // Fallback: if session.updated never arrives, send greeting after 2 seconds
+  greetingFallbackTimer = setTimeout(() => {
+    if (!greetingSent && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+      console.log(`[${callId}] ⏰ Fallback: session.updated not received, sending greeting anyway`);
+      sendGreeting();
+    }
+  }, 2000);
 
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime`);
@@ -1409,6 +1447,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "session.updated":
           // Session config applied - NOW send the greeting (with tiny delay for stability)
           console.log(`[${callId}] ✅ Session configured - triggering greeting in 200ms`);
+          // Clear the fallback timer since we received session.updated properly
+          if (greetingFallbackTimer) {
+            clearTimeout(greetingFallbackTimer);
+            greetingFallbackTimer = null;
+          }
           setTimeout(() => sendGreeting(), 200);
           break;
           
@@ -1432,6 +1475,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
               console.log(`[${callId}] 🔊 First audio chunk received`);
+              
+              // Clear greeting verify timer since we got audio successfully
+              if (greetingVerifyTimer) {
+                clearTimeout(greetingVerifyTimer);
+                greetingVerifyTimer = null;
+              }
             }
             sessionState.openAiResponseActive = true;
 
