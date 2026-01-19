@@ -1440,10 +1440,6 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       clearTimeout(greetingFallbackTimer);
       greetingFallbackTimer = null;
     }
-    if (greetingVerifyTimer) {
-      clearTimeout(greetingVerifyTimer);
-      greetingVerifyTimer = null;
-    }
     
     // Save preferred_language to callers table
     if (callerPhone && callerPhone !== "unknown" && sessionState.language && sessionState.language !== "auto") {
@@ -1692,10 +1688,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // OpenAI WebSocket handlers
   // Flag to prevent duplicate greetings
   let greetingSent = false;
-  let greetingAttempts = 0;
-  const MAX_GREETING_ATTEMPTS = 3;
+  let greetingAudioReceived = false; // Track if we actually got audio for the greeting
   let greetingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-  let greetingVerifyTimer: ReturnType<typeof setTimeout> | null = null;
   
   const sendGreeting = () => {
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
@@ -1703,19 +1697,19 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       return;
     }
     
-    greetingAttempts++;
     greetingSent = true;
     
-    console.log(`[${callId}] 🎙️ Sending initial greeting (attempt ${greetingAttempts}, language: ${sessionState.language})...`);
+    console.log(`[${callId}] 🎙️ Sending initial greeting (language: ${sessionState.language})...`);
     
     // Get language-specific greeting or fall back to English for auto-detect
     const langData = GREETINGS[sessionState.language] || GREETINGS["en"];
     const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
     
     // For auto-detect mode, let the AI decide based on first user response
+    // CRITICAL: Tell Ada to NOT repeat the pickup question - she should say it ONCE only
     const greetingInstruction = sessionState.language === "auto"
-      ? `Greet the caller warmly in English first (they may switch languages). Say exactly: "${greetingText}". After greeting, pay attention to what language they respond in and switch to match them.`
-      : `Greet the caller. Say exactly: "${greetingText}"`;
+      ? `Greet the caller warmly in English. Say EXACTLY this (do NOT repeat or rephrase): "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again. If they respond in another language, switch to match them for your NEXT response.`
+      : `Greet the caller. Say EXACTLY this (do NOT add anything extra): "${greetingText}". Then WAIT for their response.`;
     
     // Simple approach: just request a response with specific instructions
     openaiWs!.send(JSON.stringify({
@@ -1727,17 +1721,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     }));
     
     sessionState.lastQuestionAsked = "pickup";
-    
-    // Set up verification timer - if no audio within 3s, retry greeting
-    if (greetingVerifyTimer) clearTimeout(greetingVerifyTimer);
-    greetingVerifyTimer = setTimeout(() => {
-      // Check if we've received any audio response for greeting
-      if (!sessionState.openAiResponseActive && greetingAttempts < MAX_GREETING_ATTEMPTS) {
-        console.log(`[${callId}] ⚠️ No greeting audio after 3s - retrying (attempt ${greetingAttempts + 1})`);
-        greetingSent = false; // Allow retry
-        sendGreeting();
-      }
-    }, 3000);
+    console.log(`[${callId}] ✅ Greeting sent - will NOT retry`);
   };
   
   // Fallback: if session.updated never arrives, send greeting after 2 seconds
@@ -1832,12 +1816,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
               console.log(`[${callId}] 🔊 First audio chunk received`);
-              
-              // Clear greeting verify timer since we got audio successfully
-              if (greetingVerifyTimer) {
-                clearTimeout(greetingVerifyTimer);
-                greetingVerifyTimer = null;
-              }
+              greetingAudioReceived = true; // Mark that greeting audio was received
             }
             sessionState.openAiResponseActive = true;
 
