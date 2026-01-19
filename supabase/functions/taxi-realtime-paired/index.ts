@@ -247,6 +247,143 @@ const GREETINGS: Record<string, { greeting: string; pickupQuestion: string }> = 
   }
 };
 
+// Multilingual closing scripts - keyed by ISO 639-1 language code
+const CLOSING_SCRIPTS: Record<string, { 
+  confirmation: string;
+  whatsappDetails: string;
+  whatsappTips: string[];
+  goodbye: string;
+}> = {
+  en: {
+    confirmation: "Perfect, thank you. I'm making the booking now.",
+    whatsappDetails: "You'll receive the booking details and ride updates via WhatsApp.",
+    whatsappTips: [
+      "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+      "Next time, feel free to book your taxi using a WhatsApp voice message.",
+      "You can always book again by simply sending us a voice note on WhatsApp.",
+      "Remember, you can also send us a WhatsApp voice message anytime to book a taxi."
+    ],
+    goodbye: "Thank you for trying the Taxibot demo, and have a safe journey!"
+  },
+  es: {
+    confirmation: "Perfecto, gracias. Estoy haciendo la reserva ahora.",
+    whatsappDetails: "Recibirás los detalles de la reserva y actualizaciones del viaje por WhatsApp.",
+    whatsappTips: [
+      "Por cierto, también puedes reservar un taxi enviándonos una nota de voz por WhatsApp.",
+      "La próxima vez, siéntete libre de reservar tu taxi usando un mensaje de voz de WhatsApp.",
+      "Siempre puedes reservar de nuevo simplemente enviándonos una nota de voz por WhatsApp.",
+      "Recuerda, también puedes enviarnos un mensaje de voz de WhatsApp en cualquier momento para reservar un taxi."
+    ],
+    goodbye: "¡Gracias por probar la demo de Taxibot, y que tengas un buen viaje!"
+  },
+  fr: {
+    confirmation: "Parfait, merci. Je fais la réservation maintenant.",
+    whatsappDetails: "Vous recevrez les détails de la réservation et les mises à jour du trajet par WhatsApp.",
+    whatsappTips: [
+      "Sachez que vous pouvez aussi réserver un taxi en nous envoyant une note vocale WhatsApp.",
+      "La prochaine fois, n'hésitez pas à réserver votre taxi avec un message vocal WhatsApp.",
+      "Vous pouvez toujours réserver à nouveau en nous envoyant simplement une note vocale sur WhatsApp.",
+      "N'oubliez pas, vous pouvez aussi nous envoyer un message vocal WhatsApp à tout moment pour réserver un taxi."
+    ],
+    goodbye: "Merci d'avoir essayé la démo Taxibot, et bon voyage!"
+  },
+  de: {
+    confirmation: "Perfekt, danke. Ich mache jetzt die Buchung.",
+    whatsappDetails: "Sie erhalten die Buchungsdetails und Fahrt-Updates per WhatsApp.",
+    whatsappTips: [
+      "Übrigens können Sie auch ein Taxi buchen, indem Sie uns eine WhatsApp-Sprachnachricht senden.",
+      "Beim nächsten Mal können Sie gerne Ihr Taxi per WhatsApp-Sprachnachricht buchen.",
+      "Sie können jederzeit wieder buchen, indem Sie uns einfach eine Sprachnachricht auf WhatsApp senden.",
+      "Denken Sie daran, Sie können uns auch jederzeit eine WhatsApp-Sprachnachricht senden, um ein Taxi zu buchen."
+    ],
+    goodbye: "Vielen Dank, dass Sie die Taxibot-Demo ausprobiert haben, und gute Fahrt!"
+  },
+  it: {
+    confirmation: "Perfetto, grazie. Sto facendo la prenotazione ora.",
+    whatsappDetails: "Riceverai i dettagli della prenotazione e gli aggiornamenti del viaggio via WhatsApp.",
+    whatsappTips: [
+      "Sappi che puoi anche prenotare un taxi inviandoci una nota vocale su WhatsApp.",
+      "La prossima volta, sentiti libero di prenotare il tuo taxi usando un messaggio vocale WhatsApp.",
+      "Puoi sempre prenotare di nuovo semplicemente inviandoci una nota vocale su WhatsApp.",
+      "Ricorda, puoi anche inviarci un messaggio vocale WhatsApp in qualsiasi momento per prenotare un taxi."
+    ],
+    goodbye: "Grazie per aver provato la demo di Taxibot, e buon viaggio!"
+  },
+  pt: {
+    confirmation: "Perfeito, obrigado. Estou fazendo a reserva agora.",
+    whatsappDetails: "Você receberá os detalhes da reserva e atualizações da viagem pelo WhatsApp.",
+    whatsappTips: [
+      "Saiba que você também pode reservar um táxi enviando-nos uma nota de voz pelo WhatsApp.",
+      "Da próxima vez, sinta-se à vontade para reservar seu táxi usando uma mensagem de voz do WhatsApp.",
+      "Você sempre pode reservar novamente simplesmente nos enviando uma nota de voz no WhatsApp.",
+      "Lembre-se, você também pode nos enviar uma mensagem de voz do WhatsApp a qualquer momento para reservar um táxi."
+    ],
+    goodbye: "Obrigado por experimentar a demo do Taxibot, e boa viagem!"
+  },
+  nl: {
+    confirmation: "Perfect, bedankt. Ik maak nu de boeking.",
+    whatsappDetails: "Je ontvangt de boekingsdetails en rit-updates via WhatsApp.",
+    whatsappTips: [
+      "Wist je dat je ook een taxi kunt boeken door ons een WhatsApp-spraakbericht te sturen?",
+      "De volgende keer kun je gerust je taxi boeken met een WhatsApp-spraakbericht.",
+      "Je kunt altijd opnieuw boeken door ons gewoon een spraakbericht op WhatsApp te sturen.",
+      "Onthoud, je kunt ons ook altijd een WhatsApp-spraakbericht sturen om een taxi te boeken."
+    ],
+    goodbye: "Bedankt voor het proberen van de Taxibot demo, en goede reis!"
+  },
+  pl: {
+    confirmation: "Świetnie, dziękuję. Robię teraz rezerwację.",
+    whatsappDetails: "Otrzymasz szczegóły rezerwacji i aktualizacje przejazdu przez WhatsApp.",
+    whatsappTips: [
+      "Możesz też zamówić taksówkę, wysyłając nam wiadomość głosową na WhatsApp.",
+      "Następnym razem możesz zamówić taksówkę za pomocą wiadomości głosowej WhatsApp.",
+      "Zawsze możesz ponownie zamówić, po prostu wysyłając nam notatkę głosową na WhatsApp.",
+      "Pamiętaj, że możesz też w każdej chwili wysłać nam wiadomość głosową WhatsApp, aby zamówić taksówkę."
+    ],
+    goodbye: "Dziękujemy za wypróbowanie demo Taxibot i życzymy bezpiecznej podróży!"
+  },
+  ar: {
+    confirmation: "ممتاز، شكراً لك. أقوم بالحجز الآن.",
+    whatsappDetails: "ستتلقى تفاصيل الحجز وتحديثات الرحلة عبر واتساب.",
+    whatsappTips: [
+      "يمكنك أيضاً حجز تاكسي عن طريق إرسال رسالة صوتية لنا على واتساب.",
+      "في المرة القادمة، يمكنك حجز تاكسي باستخدام رسالة صوتية على واتساب.",
+      "يمكنك دائماً الحجز مرة أخرى بإرسال ملاحظة صوتية لنا على واتساب.",
+      "تذكر، يمكنك أيضاً إرسال رسالة صوتية على واتساب في أي وقت لحجز تاكسي."
+    ],
+    goodbye: "شكراً لتجربة عرض تاكسي بوت، ورحلة آمنة!"
+  },
+  hi: {
+    confirmation: "बढ़िया, धन्यवाद। मैं अभी बुकिंग कर रहा हूं।",
+    whatsappDetails: "आपको व्हाट्सएप पर बुकिंग विवरण और राइड अपडेट मिलेंगे।",
+    whatsappTips: [
+      "आप व्हाट्सएप पर हमें वॉइस नोट भेजकर भी टैक्सी बुक कर सकते हैं।",
+      "अगली बार, व्हाट्सएप वॉइस मैसेज का उपयोग करके अपनी टैक्सी बुक करें।",
+      "आप व्हाट्सएप पर हमें वॉइस नोट भेजकर कभी भी दोबारा बुक कर सकते हैं।",
+      "याद रखें, आप टैक्सी बुक करने के लिए कभी भी हमें व्हाट्सएप वॉइस मैसेज भेज सकते हैं।"
+    ],
+    goodbye: "टैक्सीबॉट डेमो आज़माने के लिए धन्यवाद, और सुरक्षित यात्रा!"
+  },
+  ur: {
+    confirmation: "بہت اچھا، شکریہ۔ میں ابھی بکنگ کر رہا ہوں۔",
+    whatsappDetails: "آپ کو واٹس ایپ پر بکنگ کی تفصیلات اور سواری کی تازہ کاری ملے گی۔",
+    whatsappTips: [
+      "آپ ہمیں واٹس ایپ پر وائس نوٹ بھیج کر بھی ٹیکسی بک کر سکتے ہیں۔",
+      "اگلی بار، واٹس ایپ وائس میسج استعمال کرکے اپنی ٹیکسی بک کریں۔",
+      "آپ واٹس ایپ پر ہمیں وائس نوٹ بھیج کر کبھی بھی دوبارہ بک کر سکتے ہیں۔",
+      "یاد رکھیں، آپ ٹیکسی بک کرنے کے لیے کسی بھی وقت ہمیں واٹس ایپ وائس میسج بھیج سکتے ہیں۔"
+    ],
+    goodbye: "ٹیکسی بوٹ ڈیمو آزمانے کا شکریہ، اور محفوظ سفر!"
+  }
+};
+
+// Get closing script for a language (with English fallback)
+function getClosingScript(language: string): typeof CLOSING_SCRIPTS["en"] {
+  // For auto-detect, we'll rely on the AI's detected language - use English as base
+  const lang = language === "auto" ? "en" : language;
+  return CLOSING_SCRIPTS[lang] || CLOSING_SCRIPTS["en"];
+}
+
 // Build language-aware system prompt
 function buildSystemPrompt(language: string): string {
   const isAuto = language === "auto";
@@ -2440,14 +2577,14 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               // Set lastQuestionAsked to "none" to prevent looping back to booking questions
               sessionState.lastQuestionAsked = "none";
               
-              // Select a random WhatsApp tip for variety
-              const whatsappTips = [
-                "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
-                "Next time, feel free to book your taxi using a WhatsApp voice message.",
-                "You can always book again by simply sending us a voice note on WhatsApp.",
-                "Remember, you can also send us a WhatsApp voice message anytime to book a taxi."
-              ];
-              const randomTip = whatsappTips[Math.floor(Math.random() * whatsappTips.length)];
+              // Get language-aware closing script
+              const closingScript = getClosingScript(sessionState.language);
+              const randomTip = closingScript.whatsappTips[Math.floor(Math.random() * closingScript.whatsappTips.length)];
+              
+              // For auto-detect mode, instruct AI to use the language it detected during the call
+              const langInstruction = sessionState.language === "auto" 
+                ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller. Translate naturally if needed."
+                : "";
               
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -2457,11 +2594,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   output: JSON.stringify({ 
                     success: true, 
                     status: "confirmed",
-                    message: `Booking confirmed! Deliver the FULL closing script in order:
-1. "Perfect, thank you. I'm making the booking now."
-2. "You'll receive the booking details and ride updates via WhatsApp."
+                    message: `Booking confirmed! ${langInstruction} Deliver the FULL closing script in order:
+1. "${closingScript.confirmation}"
+2. "${closingScript.whatsappDetails}"
 3. "${randomTip}"
-4. "Thank you for trying the Taxibot demo, and have a safe journey!"
+4. "${closingScript.goodbye}"
 Then IMMEDIATELY call end_call().`
                   })
                 }
@@ -2520,14 +2657,14 @@ Then IMMEDIATELY call end_call().`
             sessionState.summaryProtectionUntil = Date.now() + (SUMMARY_PROTECTION_MS * 2);
             console.log(`[${callId}] 🛡️ End-call goodbye protection activated for ${SUMMARY_PROTECTION_MS * 2}ms`);
 
-            // Let Ada say the full closing script
-            const closingTips = [
-              "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
-              "Next time, feel free to book your taxi using a WhatsApp voice message.",
-              "You can always book again by simply sending us a voice note on WhatsApp.",
-              "Remember, you can also send us a WhatsApp voice message anytime to book a taxi."
-            ];
-            const closingTip = closingTips[Math.floor(Math.random() * closingTips.length)];
+            // Let Ada say the full closing script in the caller's language
+            const endClosingScript = getClosingScript(sessionState.language);
+            const endClosingTip = endClosingScript.whatsappTips[Math.floor(Math.random() * endClosingScript.whatsappTips.length)];
+            
+            // For auto-detect mode, instruct AI to use the language it detected during the call
+            const endLangInstruction = sessionState.language === "auto" 
+              ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller. Translate naturally if needed."
+              : "";
             
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
@@ -2536,10 +2673,10 @@ Then IMMEDIATELY call end_call().`
                 role: "user",
                 content: [{
                   type: "input_text",
-                  text: `[SYSTEM: Deliver the FULL closing script in this exact order:
-1. "You'll receive the booking details and ride updates via WhatsApp."
-2. "${closingTip}"
-3. "Thank you for trying the Taxibot demo, and have a safe journey!"
+                  text: `[SYSTEM: ${endLangInstruction} Deliver the FULL closing script in this exact order:
+1. "${endClosingScript.whatsappDetails}"
+2. "${endClosingTip}"
+3. "${endClosingScript.goodbye}"
 Do NOT skip any part. Say ALL of it warmly.]`
                 }]
               }
