@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.1 - MEMORY LEAK FIXES
+# Taxi AI Asterisk Bridge v7.3 - HIGH-FIDELITY AUDIO
 #
 # Key features:
-# 1) Direct connection to taxi-realtime-simple (no redirect function hop)
+# 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
 # 2) Sends init immediately on connect (before phone number arrives)
 # 3) Phone number sent later via update_phone once UUID arrives
 # 4) Native 8kHz µ-law send-path for faster, smaller audio frames
-# 5) Smoother noise-gate + normalization tuned for soft consonants
+# 5) Pre-emphasis filter for consonant clarity (prevents 'Russell' → 'Ruffles')
 # 6) Improved error handling and connection resilience
-# 7) GCD-based resampling for precise audio conversion
+# 7) resample_poly for ALL audio paths (no more linear interpolation)
 #
-# Memory leak fixes in v7.1:
+# v7.3 Audio Quality Fixes:
+# - Replaced linear interpolation with resample_poly for upsampling
+# - Added pre-emphasis filter (coeff=0.95) to boost high-frequency consonants
+# - Preserves transients for better STT accuracy on 'S', 'T', 'F' sounds
+#
+# Memory leak fixes (from v7.1):
 # - Bounded audio_queue (maxlen=200) to prevent unbounded growth
 # - Early exit checks in all async loops
 # - Clear ws reference after close to break circular references
@@ -179,18 +184,25 @@ def apply_noise_reduction(audio_bytes: bytes, last_gain: float = 1.0) -> Tuple[b
     return audio_np.tobytes(), current_gain
 
 
-def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Resample PCM16 audio between common telephony sample rates.
+def apply_pre_emphasis(audio_np: np.ndarray, coeff: float = 0.95) -> np.ndarray:
+    """Pre-emphasis filter to boost high frequencies (consonants like 'S', 'T', 'F').
+    
+    This is a standard telephony technique to help STT distinguish consonants
+    that get attenuated in low-bandwidth audio (e.g., 'Russell' vs 'Ruffles').
+    """
+    if audio_np.size == 0:
+        return audio_np
+    return np.append(audio_np[0], audio_np[1:] - coeff * audio_np[:-1])
 
-    Goal: keep TTS crisp (good downsampling) while keeping latency low (fast upsampling).
 
-    Supported fast paths:
-    - 8kHz  -> 24kHz : 3x linear interpolation (fast)
-    - 16kHz -> 24kHz : 3:2 linear interpolation (fast)
+def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int, 
+                   apply_pre_emph: bool = False) -> bytes:
+    """Resample PCM16 audio using high-quality polyphase filtering.
 
-    Quality-preserving paths:
-    - 24kHz -> 8kHz  : polyphase low-pass (resample_poly)
-    - 24kHz -> 16kHz : polyphase (2/3)
+    v7.3: Now uses resample_poly for ALL directions to preserve high-frequency
+    transients (consonants). Linear interpolation was causing 'S' → 'F' errors.
+    
+    Optional pre-emphasis can boost consonants before STT processing.
     """
     if from_rate == to_rate or not audio_bytes:
         return audio_bytes
@@ -199,59 +211,17 @@ def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int) -> bytes:
     if x.size == 0:
         return b""
 
-    # --- Fast upsampling paths (avoid heavy filters on the hot path) ---
-    if from_rate == 8000 and to_rate == 24000:
-        # 3x linear interpolation
-        n = x.size
-        out = np.empty(n * 3, dtype=np.float32)
-        out[0::3] = x
-        if n > 1:
-            x0 = x[:-1]
-            x1 = x[1:]
-            d = x1 - x0
-            out[1:-2:3] = x0 + d / 3.0
-            out[2:-1:3] = x0 + (2.0 * d) / 3.0
-            # last sample
-            out[-2:] = x[-1]
-        else:
-            out[:] = x[0]
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+    # Apply pre-emphasis if requested (boosts high frequencies for STT)
+    if apply_pre_emph:
+        x = apply_pre_emphasis(x)
 
-    if from_rate == 16000 and to_rate == 24000:
-        # 3:2 linear interpolation
-        out_len = int(np.floor(x.size * 3 / 2))
-        if out_len <= 0:
-            return b""
-        i = np.arange(out_len, dtype=np.float32)
-        src = (i * 2.0) / 3.0
-        idx0 = np.floor(src).astype(np.int32)
-        idx1 = np.minimum(idx0 + 1, x.size - 1)
-        frac = src - idx0
-        out = x[idx0] * (1.0 - frac) + x[idx1] * frac
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
-
-    # --- Quality downsampling paths (avoid aliasing / muffled speech) ---
-    if from_rate == 24000 and to_rate == 8000:
-        out = resample_poly(x, up=1, down=3)
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
-
-    if from_rate == 24000 and to_rate == 16000:
-        out = resample_poly(x, up=2, down=3)
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
-
-    if from_rate == 16000 and to_rate == 8000:
-        out = resample_poly(x, up=1, down=2)
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
-
-    if from_rate == 8000 and to_rate == 16000:
-        out = resample_poly(x, up=2, down=1)
-        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
-
-    # Fallback (should be rare)
+    # Use resample_poly for ALL rate conversions - preserves high-frequency transients
     from math import gcd
     g = gcd(from_rate, to_rate)
     up = to_rate // g
     down = from_rate // g
+    
+    # resample_poly applies a high-quality FIR anti-aliasing filter
     out = resample_poly(x, up=up, down=down)
     return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
@@ -621,6 +591,12 @@ class TaxiBridgeV7:
                         cleaned, self.state.last_gain = apply_noise_reduction(
                             linear, self.state.last_gain
                         )
+
+                        # Apply pre-emphasis to boost consonants before STT
+                        # This helps OpenAI distinguish 'S' vs 'F' sounds (Russell vs Ruffles)
+                        pcm_array = np.frombuffer(cleaned, dtype=np.int16).astype(np.float32)
+                        emphasized = apply_pre_emphasis(pcm_array, coeff=0.95)
+                        cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
 
                         # Prepare for sending to AI
                         # IMPORTANT: Send audio at the native Asterisk rate.
