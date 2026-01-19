@@ -1600,6 +1600,27 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
   let inboundSampleRate = 8000;
+  
+  // MEMORY LEAK FIX: Track all active timers for cleanup
+  const activeTimers = new Set<ReturnType<typeof setTimeout>>();
+  
+  // Tracked setTimeout that auto-clears on cleanup
+  const trackedTimeout = (fn: () => void, ms: number): ReturnType<typeof setTimeout> => {
+    const id = setTimeout(() => {
+      activeTimers.delete(id);
+      fn();
+    }, ms);
+    activeTimers.add(id);
+    return id;
+  };
+  
+  // Clear a tracked timer early if needed
+  const clearTrackedTimeout = (id: ReturnType<typeof setTimeout> | null) => {
+    if (id) {
+      clearTimeout(id);
+      activeTimers.delete(id);
+    }
+  };
 
   // Cleanup function
   const cleanup = async () => {
@@ -1607,6 +1628,13 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     cleanedUp = true;
     
     console.log(`[${callId}] 🧹 Cleaning up connection`);
+    
+    // MEMORY LEAK FIX: Clear ALL tracked timers first
+    console.log(`[${callId}] 🧹 Clearing ${activeTimers.size} tracked timers`);
+    for (const timerId of activeTimers) {
+      clearTimeout(timerId);
+    }
+    activeTimers.clear();
     
     // Clear greeting timers
     if (greetingFallbackTimer) {
@@ -1878,7 +1906,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     }
     
     // Schedule cleanup after giving time for goodbye
-    setTimeout(() => cleanupWithKeepalive(), 12000);
+    // MEMORY LEAK FIX: Use tracked timeout
+    trackedTimeout(() => cleanupWithKeepalive(), 12000);
   });
   
   // Subscribe to the channel
@@ -1940,7 +1969,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   };
   
   // Fallback: if session.updated never arrives, send greeting after 2 seconds
-  greetingFallbackTimer = setTimeout(() => {
+  // MEMORY LEAK FIX: Use tracked timeout and store reference for cleanup
+  greetingFallbackTimer = trackedTimeout(() => {
     if (!greetingSent && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       console.log(`[${callId}] ⏰ Fallback: session.updated not received, sending greeting anyway`);
       sendGreeting();
@@ -2008,7 +2038,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             clearTimeout(greetingFallbackTimer);
             greetingFallbackTimer = null;
           }
-          setTimeout(() => sendGreeting(), 200);
+          // MEMORY LEAK FIX: Use tracked timeout for greeting stabilization
+          trackedTimeout(() => sendGreeting(), 200);
           break;
           
         case "response.created":
@@ -2345,7 +2376,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                     console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback...`);
 
                     // Safety: if callback never arrives, allow a retry later.
-                    setTimeout(() => {
+                    // MEMORY LEAK FIX: Use tracked timeout
+                    trackedTimeout(() => {
                       if (cleanedUp) return;
                       if (sessionState.quoteInFlight && !sessionState.awaitingConfirmation && !sessionState.pendingFare) {
                         console.log(`[${callId}] ⏰ Auto-trigger quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - clearing quoteInFlight to allow retry`);
@@ -2810,8 +2842,9 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               }));
               
               // TIMEOUT FALLBACK: If fare doesn't arrive within 15 seconds, break silence and apologize
+              // MEMORY LEAK FIX: Use tracked timeout so it's cleared on cleanup
               const quoteTimeoutMs = 15000;
-              setTimeout(() => {
+              trackedTimeout(() => {
                 if (sessionState.waitingForQuoteSilence && !sessionState.awaitingConfirmation && !cleanedUp) {
                   console.log(`[${callId}] ⏰ QUOTE TIMEOUT: No fare received after ${quoteTimeoutMs}ms - breaking silence`);
                   
@@ -3091,7 +3124,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
             
             // Give extra time so the final message isn't truncated before hangup
             // Must be >= protection window (SUMMARY_PROTECTION_MS * 2 = 16s) + buffer
-            setTimeout(() => {
+            // MEMORY LEAK FIX: Use tracked timeout so it's cleared on cleanup
+            trackedTimeout(() => {
               try {
                 socket.send(JSON.stringify({ type: "hangup", reason: toolArgs.reason }));
               } catch { /* ignore */ }
