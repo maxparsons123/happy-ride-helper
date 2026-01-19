@@ -82,6 +82,11 @@ export default function VoiceTest() {
   const isConnectingRef = useRef(false); // Guard double-connect
   const audioSentRef = useRef(false); // Track if audio was actually sent
 
+  // Auto-reconnect (for unstable networks)
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const manualDisconnectRef = useRef(false);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -233,6 +238,13 @@ export default function VoiceTest() {
       return;
     }
 
+    // Clear any pending reconnect
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    manualDisconnectRef.current = false;
+
     isConnectingRef.current = true;
     setStatus("connecting");
     addMessage("Connecting to taxi AI...", "system");
@@ -247,28 +259,30 @@ export default function VoiceTest() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
-      ws.onopen = () => {
-        console.log("WebSocket opened");
-        const agentName = agents.find(a => a.slug === selectedAgent)?.name || selectedAgent;
-        addMessage(`Connected, initializing session with ${agentName}...`, "system");
-        
-        const initPayload: Record<string, unknown> = {
-          type: "init",
-          call_id: "voice-test-" + Date.now(),
-          addressTtsSplicing: true,
-          agent: selectedAgent,
-          voice: selectedVoice,
-          useUnifiedExtraction: false,
-        };
-        
-        // Add raw passthrough mode settings
-        if (rawPassthroughMode && rawPassthroughEndpoint.trim()) {
-          initPayload.bookingMode = "raw";
-          initPayload.rawPassthroughEndpoint = rawPassthroughEndpoint.trim();
-        }
-        
-        ws.send(JSON.stringify(initPayload));
+    ws.onopen = () => {
+      console.log("WebSocket opened");
+      reconnectAttemptsRef.current = 0; // reset after a successful open
+
+      const agentName = agents.find((a) => a.slug === selectedAgent)?.name || selectedAgent;
+      addMessage(`Connected, initializing session with ${agentName}...`, "system");
+
+      const initPayload: Record<string, unknown> = {
+        type: "init",
+        call_id: "voice-test-" + Date.now(),
+        addressTtsSplicing: true,
+        agent: selectedAgent,
+        voice: selectedVoice,
+        useUnifiedExtraction: false,
       };
+
+      // Add raw passthrough mode settings
+      if (rawPassthroughMode && rawPassthroughEndpoint.trim()) {
+        initPayload.bookingMode = "raw";
+        initPayload.rawPassthroughEndpoint = rawPassthroughEndpoint.trim();
+      }
+
+      ws.send(JSON.stringify(initPayload));
+    };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -331,15 +345,41 @@ export default function VoiceTest() {
       }
     };
 
-    ws.onclose = () => {
-      console.log("WebSocket closed");
+    ws.onclose = (ev) => {
+      console.log("WebSocket closed", ev.code, ev.reason);
       setStatus("disconnected");
       setIsSpeaking(false);
       setIsRecording(false);
       isConnectingRef.current = false;
+      wsRef.current = null;
+
       addMessage("Disconnected", "system");
       setVoiceStatus("Connect first...");
       cleanupAudio();
+
+      // Auto-reconnect unless user explicitly disconnected
+      if (manualDisconnectRef.current) return;
+
+      const MAX_RECONNECTS = 5;
+      reconnectAttemptsRef.current += 1;
+      const attempt = reconnectAttemptsRef.current;
+
+      if (attempt > MAX_RECONNECTS) {
+        addMessage("Connection is unstable. Please press Connect to try again.", "system");
+        return;
+      }
+
+      const delayMs = Math.min(10000, 1000 * Math.pow(2, attempt - 1));
+      addMessage(`Connection lost — reconnecting in ${(delayMs / 1000).toFixed(1)}s (attempt ${attempt}/${MAX_RECONNECTS})...`, "system");
+      setVoiceStatus("Reconnecting...");
+
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        connect();
+      }, delayMs);
     };
 
     ws.onerror = (error) => {
@@ -350,13 +390,20 @@ export default function VoiceTest() {
   }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents, rawPassthroughMode, rawPassthroughEndpoint]);
 
   const disconnect = useCallback(() => {
+    manualDisconnectRef.current = true;
+    reconnectAttemptsRef.current = 0;
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
     stopRecordingInternal();
     setIsSpeaking(false);
     cleanupAudio();
     wsRef.current?.close();
     wsRef.current = null;
     isConnectingRef.current = false;
-  }, [cleanupAudio]);
+  }, [cleanupAudio, stopRecordingInternal]);
 
   // Internal stop without state dependency issues
   const stopRecordingInternal = useCallback(() => {
