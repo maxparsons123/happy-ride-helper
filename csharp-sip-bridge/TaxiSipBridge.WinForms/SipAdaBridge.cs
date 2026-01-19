@@ -20,8 +20,8 @@ public class SipAdaBridgeConfig
     public int SipPort { get; set; } = 5060;
     public string SipUser { get; set; } = "max201";
     public string SipPassword { get; set; } = "qwe70954504118";
-    // Use taxi-passthrough-ws for native 8kHz µ-law (Deepgram nova-2-phonecall optimized)
-    public string AdaWsUrl { get; set; } = "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-passthrough-ws";
+    // Use taxi-realtime-paired for full Ada AI (OpenAI Realtime API)
+    public string AdaWsUrl { get; set; } = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
     public SipTransportType Transport { get; set; } = SipTransportType.UDP;
 }
 
