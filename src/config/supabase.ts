@@ -18,7 +18,7 @@ export const getEdgeFunctionUrl = (functionName: string) =>
   `${SUPABASE_URL}/functions/v1/${functionName}`;
 
 export const getEdgeFunctionWsUrl = (functionName: string) => 
-  `wss://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/${functionName}`;
+  `wss://${SUPABASE_PROJECT_ID}.functions.supabase.co/functions/v1/${functionName}`;
 
 // Commonly used function URLs
 export const TAXI_REALTIME_WS_URL = getEdgeFunctionWsUrl("taxi-realtime");
