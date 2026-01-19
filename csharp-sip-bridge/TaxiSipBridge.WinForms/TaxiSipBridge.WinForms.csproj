@@ -6,17 +6,27 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon></ApplicationIcon>
     <AssemblyName>TaxiSipBridge</AssemblyName>
     <RootNamespace>TaxiSipBridge</RootNamespace>
-    <Version>2.0.0</Version>
-    <Description>Taxi AI SIP Bridge - Auto-answers SIP calls and bridges to Ada AI</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="SIPSorcery" Version="6.2.4" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="1.4.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <!-- Explicitly include all source files -->
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="MainForm.cs" />
+    <Compile Include="MainForm.Designer.cs" />
+    <Compile Include="SipAutoAnswer.cs" />
+    <Compile Include="AdaAudioClient.cs" />
+    <Compile Include="AudioCodecs.cs" />
+    <Compile Include="AudioMonitor.cs" />
+    <Compile Include="SipAdaBridgeConfig.cs" />
+    <Compile Include="SipAdaBridge.cs" />
   </ItemGroup>
 
 </Project>
