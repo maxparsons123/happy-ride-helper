@@ -70,7 +70,9 @@ AI_RATE = 24000     # OpenAI TTS
 
 # Audio quality settings
 # PREFER_SLIN16: When True, optimizes for 16kHz audio (better consonant recognition)
-PREFER_SLIN16 = True
+# STABILITY NOTE: Set to False for more stable connections - slin16 creates 4x more data
+# and requires heavier DSP processing which can cause disconnects under load.
+PREFER_SLIN16 = os.environ.get("PREFER_SLIN16", "false").lower() == "true"
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -268,10 +270,11 @@ class CallEndedException(Exception):
 class CallState:
     call_id: str
     phone: str = "Unknown"
-    # Default to slin16 (16kHz) for best STT quality - auto-detects from frame size
-    ast_codec: str = "slin16"
-    ast_rate: int = SLIN16_RATE
-    ast_frame_bytes: int = 640  # 640 bytes = 20ms at 16kHz slin16
+    # Default to ulaw (8kHz) for stability - auto-detects actual format from frame size
+    # slin16 gives better STT but causes more disconnects under load
+    ast_codec: str = "ulaw"
+    ast_rate: int = ULAW_RATE
+    ast_frame_bytes: int = 160  # 160 bytes = 20ms at 8kHz ulaw
     
     # Processing state
     last_gain: float = 1.0
