@@ -33,6 +33,24 @@ const INITIAL_BOOKING: BookingState = {
   status: "collecting",
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableInvokeError = (err: unknown) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = msg.toLowerCase();
+  return (
+    m.includes("fetch") ||
+    m.includes("network") ||
+    m.includes("timeout") ||
+    m.includes("temporarily") ||
+    m.includes("econnreset") ||
+    m.includes("502") ||
+    m.includes("503") ||
+    m.includes("504") ||
+    m.includes("429")
+  );
+};
+
 export function TaxiChatbot() {
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
   const [booking, setBooking] = useState<BookingState>(INITIAL_BOOKING);
@@ -54,57 +72,81 @@ export function TaxiChatbot() {
     setIsLoading(true);
 
     try {
+      if (typeof navigator !== "undefined" && "onLine" in navigator && !navigator.onLine) {
+        throw new Error("You appear to be offline. Please check your internet connection and try again.");
+      }
+
       // Build message history for the AI (excluding the initial greeting)
       const messageHistory = [...messages.slice(1), userMsg].map((m) => ({
         role: m.role,
         content: m.content,
       }));
 
-      const { data, error } = await supabase.functions.invoke("taxi-chat", {
-        body: {
-          messages: messageHistory,
-          currentBooking: booking,
-        },
-      });
+      const MAX_ATTEMPTS = 3;
+      let lastErr: Error | null = null;
 
-      if (error) {
-        throw new Error(error.message);
-      }
-
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      // Update booking state with extracted info
-      setBooking((prev) => ({
-        pickup: data.pickup || prev.pickup,
-        destination: data.destination || prev.destination,
-        passengers: data.passengers ? Number(data.passengers) : prev.passengers,
-        status: data.status || prev.status,
-      }));
-
-      // Add AI response to messages
-      const assistantMsg: Message = {
-        role: "assistant",
-        content: data.response,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-
-      // Show toast on booking confirmation
-      if (data.status === "confirmed") {
-        toast({
-          title: "Booking Confirmed! 🚕",
-          description: "Your taxi is on its way.",
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const { data, error } = await supabase.functions.invoke("taxi-chat", {
+          body: {
+            messages: messageHistory,
+            currentBooking: booking,
+          },
         });
+
+        const invocationError =
+          error ?? (data?.error ? new Error(typeof data.error === "string" ? data.error : JSON.stringify(data.error)) : null);
+
+        if (!invocationError) {
+          // Update booking state with extracted info
+          setBooking((prev) => ({
+            pickup: data.pickup || prev.pickup,
+            destination: data.destination || prev.destination,
+            passengers: data.passengers ? Number(data.passengers) : prev.passengers,
+            status: data.status || prev.status,
+          }));
+
+          // Add AI response to messages
+          const assistantMsg: Message = {
+            role: "assistant",
+            content: data.response,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+
+          // Show toast on booking confirmation
+          if (data.status === "confirmed") {
+            toast({
+              title: "Booking Confirmed! 🚕",
+              description: "Your taxi is on its way.",
+            });
+          }
+
+          return;
+        }
+
+        lastErr = invocationError;
+
+        const shouldRetry = attempt < MAX_ATTEMPTS && isRetryableInvokeError(invocationError);
+        console.warn(
+          `taxi-chat invoke failed (attempt ${attempt}/${MAX_ATTEMPTS}) - retry=${shouldRetry}`,
+          invocationError,
+        );
+
+        if (!shouldRetry) break;
+
+        // Exponential backoff: 500ms, 1000ms
+        await sleep(500 * Math.pow(2, attempt - 1));
       }
+
+      throw lastErr ?? new Error("Failed to send message");
     } catch (error) {
       console.error("Chat error:", error);
       const errorMessage = error instanceof Error ? error.message : "Failed to send message";
       toast({
-        title: "Error",
+        title: "Connection issue",
         description: errorMessage,
         variant: "destructive",
       });
+
       // Add a fallback message
       setMessages((prev) => [
         ...prev,
