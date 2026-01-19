@@ -55,10 +55,10 @@ if not WS_URL:
                 edge.get("taxi_realtime_paired_ws")
                 or edge.get("taxi_realtime_ws")
                 or edge.get("taxi_realtime_simple_ws")
-                or "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+                or "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
             )
     except (FileNotFoundError, json.JSONDecodeError):
-        WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+        WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
