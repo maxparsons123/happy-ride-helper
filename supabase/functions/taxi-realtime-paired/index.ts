@@ -813,6 +813,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "street spots": "Sweet Spot",
   "streetspots": "Sweet Spot",
   "street spot": "Sweet Spot",
+  "sweets puffs": "Sweet Spot",
+  "sweetspuffs": "Sweet Spot",
+  "sweets puff": "Sweet Spot",
+  "sweet puffs": "Sweet Spot",
+  "sweet puff": "Sweet Spot",
+  "sweets spot": "Sweet Spot",
+  "sweetsspot": "Sweet Spot",
 
   // Number mishearings - standalone numbers
   "free": "three",
