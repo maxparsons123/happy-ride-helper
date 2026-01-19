@@ -120,12 +120,12 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            var nullEndPoints = new MediaEndPoints 
+            var mediaEndPoints = new MediaEndPoints 
             { 
                 AudioSource = null, 
                 AudioSink = null 
             };
-            rtpSession = new VoIPMediaSession(nullEndPoints);
+            rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
 
             var uas = ua.AcceptCall(req);
