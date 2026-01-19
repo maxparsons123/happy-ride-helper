@@ -1089,8 +1089,30 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   }
   
   // Filter out confirmation phrases that are NOT addresses
-  const confirmationPhrases = ["correct", "right", "yes", "yeah", "yep", "sure", "fine", "ok", "okay", "good", "great", "perfect", "lovely", "brilliant"];
-  if (confirmationPhrases.includes(extractedAddress.toLowerCase())) {
+  // Check if the extracted text STARTS WITH a confirmation word (handles "correct, Jeff", "right then", etc.)
+  const confirmationPhrases = ["correct", "right", "yes", "yeah", "yep", "sure", "fine", "ok", "okay", "good", "great", "perfect", "lovely", "brilliant", "that's right", "that's correct"];
+  const lowerExtracted = extractedAddress.toLowerCase();
+  
+  // Check if it's exactly a confirmation phrase OR starts with one followed by comma/space/punctuation
+  for (const phrase of confirmationPhrases) {
+    if (lowerExtracted === phrase || 
+        lowerExtracted.startsWith(phrase + ",") || 
+        lowerExtracted.startsWith(phrase + " ") ||
+        lowerExtracted.startsWith(phrase + ".") ||
+        lowerExtracted.startsWith(phrase + "!")) {
+      return { type: null, address: "" };
+    }
+  }
+  
+  // Also filter out if it's just a name (likely user saying "yes, [name]" or "correct, [name]")
+  // Names are typically short and don't contain address keywords
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park"];
+  const hasAddressKeyword = addressKeywords.some(kw => lowerExtracted.includes(kw));
+  const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(extractedAddress) || /\d+[a-zA-Z]?$/.test(extractedAddress);
+  
+  // If no address keywords and no house number, it's probably not a real address
+  if (!hasAddressKeyword && !hasHouseNumber && extractedAddress.split(/\s+/).length <= 2) {
+    // Could be "correct, Jeff" or similar - reject it
     return { type: null, address: "" };
   }
   
