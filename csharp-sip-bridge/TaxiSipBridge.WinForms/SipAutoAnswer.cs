@@ -137,15 +137,28 @@ public class SipAutoAnswer : IDisposable
         
         try
         {
-            // FIX: Use MediaEndPoints constructor for SIPSorcery 6.x
-            // The session will auto-negotiate PCMU codec
+            // FIX: Create VoIPMediaSession with explicit audio format for PCMU (G.711 μ-law)
+            var audioFormat = new AudioFormat(AudioCodecsEnum.PCMU, 0, 8000, 1);
+            var audioFormats = new List<AudioFormat> { audioFormat };
             var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
-            rtpSession = new VoIPMediaSession(mediaEndPoints);
+            
+            rtpSession = new VoIPMediaSession(
+                mediaEndPoints,
+                new IPAddress(0),  // bind address (any)
+                0,                 // bind port (auto)
+                null,              // external IP
+                new SDPMediaFormat[] { new SDPMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU) });
+            
             rtpSession.AcceptRtpFromAny = true;
             _currentMediaSession = rtpSession;
 
-            // Accept the incoming call
+            // Accept the incoming call and get UAS transaction
             var uas = ua.AcceptCall(req);
+            if (uas == null)
+            {
+                Log($"❌ [{callId}] AcceptCall returned null");
+                return;
+            }
 
             // Send 180 Ringing
             try
