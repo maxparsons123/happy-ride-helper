@@ -27,6 +27,103 @@ const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-
 const VOICE = "shimmer";
 
 // ---------------------------------------------------------------------------
+// Phone Number to Language Mapping (match taxi-realtime-simple)
+// ---------------------------------------------------------------------------
+const COUNTRY_CODE_TO_LANGUAGE: Record<string, string> = {
+  // English
+  "+44": "en", // UK
+  "+1": "en",  // USA/Canada
+  "+61": "en", // Australia
+  "+64": "en", // New Zealand
+  "+353": "en", // Ireland
+  // Spanish
+  "+34": "es", // Spain
+  "+52": "es", // Mexico
+  "+54": "es", // Argentina
+  "+56": "es", // Chile
+  "+57": "es", // Colombia
+  "+51": "es", // Peru
+  // French
+  "+33": "fr", // France
+  "+32": "fr", // Belgium
+  "+41": "fr", // Switzerland
+  // German
+  "+49": "de", // Germany
+  "+43": "de", // Austria
+  // Italian
+  "+39": "it", // Italy
+  // Portuguese
+  "+351": "pt", // Portugal
+  "+55": "pt", // Brazil
+  // Polish
+  "+48": "pl", // Poland
+  // Romanian
+  "+40": "ro", // Romania
+  // Dutch
+  "+31": "nl", // Netherlands
+  // Arabic
+  "+966": "ar", // Saudi Arabia
+  "+971": "ar", // UAE
+  "+20": "ar",  // Egypt
+  // Hindi
+  "+91": "hi", // India
+  // Urdu
+  "+92": "ur", // Pakistan
+  // Chinese
+  "+86": "zh", // China
+  "+852": "zh", // Hong Kong
+  // Japanese
+  "+81": "ja", // Japan
+  // Korean
+  "+82": "ko", // South Korea
+  // Turkish
+  "+90": "tr", // Turkey
+  // Russian
+  "+7": "ru", // Russia
+  // Greek
+  "+30": "el", // Greece
+};
+
+// Detect language from phone number country code
+function detectLanguageFromPhone(phone: string | null): string | null {
+  if (!phone) return null;
+
+  // Clean the phone number
+  let cleaned = phone.replace(/\s+/g, "").replace(/-/g, "");
+
+  // Common normalizations: 00CC... → +CC...
+  if (cleaned.startsWith("00")) {
+    cleaned = "+" + cleaned.slice(2);
+  }
+
+  // +0CC... → +CC...
+  if (/^\+0\d/.test(cleaned)) {
+    cleaned = "+" + cleaned.slice(2);
+  }
+
+  // Only attempt country-code matching on E.164-like numbers
+  if (!cleaned.startsWith("+")) {
+    return null;
+  }
+
+  // Try longer codes first (e.g., +353 before +3)
+  const sortedCodes = Object.keys(COUNTRY_CODE_TO_LANGUAGE).sort((a, b) => b.length - a.length);
+
+  for (const code of sortedCodes) {
+    if (cleaned.startsWith(code)) {
+      return COUNTRY_CODE_TO_LANGUAGE[code];
+    }
+  }
+
+  return null;
+}
+
+// Normalize phone number for database lookups
+function normalizePhone(phone: string): string {
+  return phone.replace(/\s+/g, "").replace(/-/g, "").replace(/^\+/, "");
+}
+
+// ---------------------------------------------------------------------------
 // Audio helpers (mirror taxi-realtime-simple behavior)
 // OpenAI Realtime requires PCM16 @ 24kHz for input_audio_buffer.append.
 // Our bridge can send: ulaw (8kHz), slin (8kHz PCM16), slin16 (16kHz PCM16)
@@ -1131,7 +1228,61 @@ async function sendDispatchWebhook(
 async function handleConnection(socket: WebSocket, callId: string, callerPhone: string, language: string) {
   console.log(`[${callId}] 🎯 PAIRED MODE: New connection from ${callerPhone} (language: ${language})`);
   
-  const sessionState = createSessionState(callId, callerPhone, language);
+  // Determine effective language:
+  // 1. If explicit language passed (not "auto"), use it
+  // 2. Otherwise, look up caller's preferred_language from database
+  // 3. Fall back to phone-based country code detection
+  // 4. Default to "auto" (auto-detect from speech)
+  let effectiveLanguage = language;
+  let callerName: string | null = null;
+  let callerLastPickup: string | null = null;
+  let callerLastDestination: string | null = null;
+  let callerTotalBookings = 0;
+  
+  if (callerPhone && callerPhone !== "unknown") {
+    try {
+      const phoneKey = normalizePhone(callerPhone);
+      console.log(`[${callId}] 🔍 Fast caller lookup for: ${phoneKey}`);
+      
+      const { data: callerData } = await supabase
+        .from("callers")
+        .select("name, last_pickup, last_destination, total_bookings, preferred_language")
+        .eq("phone_number", phoneKey)
+        .maybeSingle();
+      
+      if (callerData) {
+        callerName = callerData.name || null;
+        callerLastPickup = callerData.last_pickup || null;
+        callerLastDestination = callerData.last_destination || null;
+        callerTotalBookings = callerData.total_bookings || 0;
+        
+        // Use preferred_language from DB if available (overrides phone-based detection)
+        if (callerData.preferred_language && (language === "auto" || !language)) {
+          effectiveLanguage = callerData.preferred_language;
+          console.log(`[${callId}] 🌐 Using saved preferred language: ${callerData.preferred_language}`);
+        }
+        
+        console.log(`[${callId}] 👤 Fast lookup found: ${callerName || 'no name'}, ${callerTotalBookings} bookings`);
+      }
+    } catch (e) {
+      console.error(`[${callId}] Failed to lookup caller:`, e);
+    }
+    
+    // If still "auto" and no saved preference, try phone-based detection
+    if (effectiveLanguage === "auto" || !effectiveLanguage) {
+      const phoneLanguage = detectLanguageFromPhone(callerPhone);
+      if (phoneLanguage) {
+        effectiveLanguage = phoneLanguage;
+        console.log(`[${callId}] 🌐 Detected language from phone: ${phoneLanguage}`);
+      } else {
+        effectiveLanguage = "auto"; // Fall back to auto-detect
+      }
+    }
+  }
+  
+  console.log(`[${callId}] 🌐 Effective language: ${effectiveLanguage}`);
+  
+  const sessionState = createSessionState(callId, callerPhone, effectiveLanguage);
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
@@ -1155,6 +1306,21 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     if (greetingVerifyTimer) {
       clearTimeout(greetingVerifyTimer);
       greetingVerifyTimer = null;
+    }
+    
+    // Save preferred_language to callers table
+    if (callerPhone && callerPhone !== "unknown" && sessionState.language && sessionState.language !== "auto") {
+      const phoneKey = normalizePhone(callerPhone);
+      try {
+        await supabase.from("callers").upsert({
+          phone_number: phoneKey,
+          preferred_language: sessionState.language,
+          updated_at: new Date().toISOString()
+        }, { onConflict: "phone_number" });
+        console.log(`[${callId}] 🌐 Saved preferred language: ${sessionState.language}`);
+      } catch (e) {
+        console.error(`[${callId}] Failed to save preferred language:`, e);
+      }
     }
     
     // Unsubscribe from dispatch channel
