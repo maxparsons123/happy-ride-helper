@@ -2025,6 +2025,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   greetingFallbackTimer = trackedTimeout(() => {
     if (!greetingSent && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       console.log(`[${callId}] ⏰ Fallback: session.updated not received, sending greeting anyway`);
+      // Even if session.updated doesn't arrive, unblock the client UI.
+      sendSessionReady();
       sendGreeting();
     }
   }, 2000);
@@ -2032,6 +2034,21 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // Ensure we follow the Realtime protocol correctly:
   // send session.update ONLY AFTER receiving session.created.
   let sessionUpdateSent = false;
+
+  // VoiceTest (browser) expects a "session_ready" message to flip from connecting → connected.
+  let sessionReadySent = false;
+  const sendSessionReady = () => {
+    if (sessionReadySent || cleanedUp) return;
+    if (socket.readyState !== WebSocket.OPEN) return;
+    sessionReadySent = true;
+    try {
+      socket.send(JSON.stringify({ type: "session_ready", pipeline: "paired" }));
+      console.log(`[${callId}] ✅ session_ready sent to client`);
+    } catch (e) {
+      console.error(`[${callId}] Failed to send session_ready:`, e);
+    }
+  };
+
   const sendSessionUpdate = () => {
     if (sessionUpdateSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
     sessionUpdateSent = true;
@@ -2095,6 +2112,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "session.updated":
           // Session config applied - NOW send the greeting (with tiny delay for stability)
           console.log(`[${callId}] ✅ Session configured - triggering greeting in 200ms`);
+
+          // Tell the client it's safe to start recording / showing "connected".
+          // Also clear stale audio to reduce phantom Whisper transcriptions.
+          try {
+            openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          } catch {
+            // ignore
+          }
+          sendSessionReady();
+
           // Clear the fallback timer since we received session.updated properly
           if (greetingFallbackTimer) {
             clearTimeout(greetingFallbackTimer);
