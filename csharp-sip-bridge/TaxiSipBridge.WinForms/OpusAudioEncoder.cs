@@ -15,8 +15,8 @@ public class OpusAudioEncoder : IAudioEncoder
     private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
 
     private readonly SIPSorcery.Media.AudioEncoder _baseEncoder;
-    private Concentus.Structs.OpusEncoder? _opusEncoder;
-    private Concentus.Structs.OpusDecoder? _opusDecoder;
+    private global::Concentus.Structs.OpusEncoder? _opusEncoder;
+    private global::Concentus.Structs.OpusDecoder? _opusDecoder;
     private readonly object _encoderLock = new();
     private readonly object _decoderLock = new();
 
@@ -73,12 +73,12 @@ public class OpusAudioEncoder : IAudioEncoder
         {
             if (_opusEncoder == null)
             {
-                _opusEncoder = Concentus.Structs.OpusEncoder.Create(
-                    OPUS_SAMPLE_RATE, 
-                    OPUS_CHANNELS, 
-                    Concentus.Enums.OpusApplication.OPUS_APPLICATION_VOIP);
+                _opusEncoder = global::Concentus.Structs.OpusEncoder.Create(
+                    OPUS_SAMPLE_RATE,
+                    OPUS_CHANNELS,
+                    global::Concentus.Enums.OpusApplication.OPUS_APPLICATION_VOIP);
                 _opusEncoder.Bitrate = OPUS_BITRATE;
-                _opusEncoder.SignalType = Concentus.Enums.OpusSignal.OPUS_SIGNAL_VOICE;
+                _opusEncoder.SignalType = global::Concentus.Enums.OpusSignal.OPUS_SIGNAL_VOICE;
                 _opusEncoder.Complexity = 5;
             }
 
@@ -117,7 +117,7 @@ public class OpusAudioEncoder : IAudioEncoder
         {
             if (_opusDecoder == null)
             {
-                _opusDecoder = Concentus.Structs.OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+                _opusDecoder = global::Concentus.Structs.OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
             }
 
             var outputBuffer = new short[OPUS_FRAME_SIZE];
