@@ -3161,38 +3161,8 @@ NOW YOU MUST ASK FOR DESTINATION. Say something like: "Got it, pickup is ${sessi
                   break;
                   
                 case "passengers":
-                  // Parse passenger count - check if response looks like an address first
-                  const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
-                  
-                  if (looksLikeAddress) {
-                    console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
-                    
-                    // Store the address for later (might be a correction they want to make)
-                    sessionState.conversationHistory.push({
-                      role: "user",
-                      content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
-                      timestamp: Date.now()
-                    });
-                    
-                    // Force immediate re-prompt for passengers - DON'T advance step
-                    openaiWs!.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[PASSENGER CLARIFICATION NEEDED] You asked for passengers, but the user said: "${userText}" which sounds like an address.
-Ask: "Sorry, I need the number of passengers traveling. How many will there be?"`
-                        }]
-                      }
-                    }));
-                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                    await updateLiveCall(sessionState);
-                    break; // Exit switch, don't advance
-                  }
-                  
-                  // Parse the number
+                  // Parse passenger count FIRST.
+                  // (Important: do not misclassify inputs like "5 passengers" as an address.)
                   const wordToNum: Record<string, number> = {
                     one: 1, two: 2, three: 3, four: 4, five: 5,
                     six: 6, seven: 7, eight: 8, nine: 9, ten: 10
@@ -3222,6 +3192,39 @@ Ask: "Sorry, I need the number of passengers traveling. How many will there be?"
                     answerSaved = true;
                     console.log(`[${callId}] ✅ STATE MACHINE: Step 2 (passengers) COMPLETE → ${parsedCount}`);
                   } else {
+                    // If not parseable, check if they accidentally said an address (common mid-call correction).
+                    const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment)\b/i.test(
+                      userText,
+                    );
+
+                    if (looksLikeAddress) {
+                      console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
+                      
+                      // Store the address for later (might be a correction they want to make)
+                      sessionState.conversationHistory.push({
+                        role: "user",
+                        content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
+                        timestamp: Date.now()
+                      });
+                      
+                      // Force immediate re-prompt for passengers - DON'T advance step
+                      openaiWs!.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "system",
+                          content: [{
+                            type: "input_text",
+                            text: `[PASSENGER CLARIFICATION NEEDED] You asked for passengers, but the user said: "${userText}" which sounds like an address.
+Ask: "Sorry, I need the number of passengers traveling. How many will there be?"`
+                          }]
+                        }
+                      }));
+                      openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                      await updateLiveCall(sessionState);
+                      break; // Exit switch, don't advance
+                    }
+
                     console.log(`[${callId}] ⚠️ Could not parse passenger count from: "${userText}" - forcing re-prompt`);
                     
                     // CRITICAL: Force re-prompt to prevent AI from hallucinating a value
