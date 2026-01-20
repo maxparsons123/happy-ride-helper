@@ -159,7 +159,7 @@ public class SipAutoAnswer : IDisposable
             mediaSession.AcceptRtpFromAny = true;
             
             // Store the negotiated format for later use
-            AudioFormat? negotiatedFormat = null;
+            AudioFormat negotiatedFormat = default;
             
             // Wire up format negotiation
             mediaSession.OnAudioFormatsNegotiated += (formats) =>
@@ -238,9 +238,9 @@ public class SipAutoAnswer : IDisposable
                 // Inject into AudioExtrasSource
                 // Note: AudioExtrasSource expects samples at the negotiated rate
                 // We need to resample from 24kHz to the negotiated rate
-                if (negotiatedFormat.HasValue)
+                if (negotiatedFormat.ClockRate > 0)
                 {
-                    int targetRate = negotiatedFormat.Value.ClockRate;
+                    int targetRate = negotiatedFormat.ClockRate;
                     var resampled = Resample(pcm24, 24000, targetRate);
                     
                     // Send via ExternalAudioSourceRawSample
