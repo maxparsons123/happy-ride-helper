@@ -136,6 +136,15 @@ function pcm16ToBase64(pcm: Int16Array): string {
   return btoa(binary);
 }
 
+// Raw bytes → Base64 (useful when audio is already PCM16 bytes)
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 4096) {
+    binary += String.fromCharCode(...bytes.slice(i, i + 4096));
+  }
+  return btoa(binary);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 4. DYNAMIC SYSTEM PROMPT (Context-Pairing Heart)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -241,11 +250,14 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const callId = url.searchParams.get("call_id") || `call_${Date.now()}`;
   const callerPhone = url.searchParams.get("caller") || "unknown";
+  const source = url.searchParams.get("source") || "unknown";
+  const format = url.searchParams.get("format") || "unknown";
+  const sampleRate = url.searchParams.get("sample_rate") || "unknown";
 
-  console.log(`[${callId}] 🔌 Bridge connected from ${callerPhone}`);
+  console.log(`[${callId}] 🔌 Bridge connected from ${callerPhone} (source=${source}, format=${format}, rate=${sampleRate})`);
 
   socket.onopen = () => {
-    handleRealtimeSession(socket, callId, callerPhone);
+    handleRealtimeSession(socket, callId, callerPhone, { source, format, sampleRate });
   };
 
   socket.onerror = (e) => console.error(`[${callId}] Socket error:`, e);
@@ -257,7 +269,12 @@ Deno.serve(async (req) => {
 // 8. OPENAI REALTIME SESSION HANDLER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function handleRealtimeSession(clientSocket: WebSocket, callId: string, callerPhone: string) {
+function handleRealtimeSession(
+  clientSocket: WebSocket,
+  callId: string,
+  callerPhone: string,
+  meta: { source: string; format: string; sampleRate: string }
+) {
   const state: SessionState = {
     callId,
     callerPhone,
@@ -269,6 +286,11 @@ function handleRealtimeSession(clientSocket: WebSocket, callId: string, callerPh
 
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
+
+  // Lightweight audio diagnostics
+  let audioPacketsIn = 0;
+  let audioBytesIn = 0;
+  let lastAudioLogAt = 0;
 
   // Initialize live_calls record
   supabase.from("live_calls").upsert({
@@ -415,16 +437,46 @@ function handleRealtimeSession(clientSocket: WebSocket, callId: string, callerPh
   // Bridge → OpenAI (Audio Forwarding)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  clientSocket.onmessage = (event) => {
+  clientSocket.onmessage = async (event) => {
     if (cleanedUp || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
 
     try {
-      // Handle binary audio (µ-law from SIP)
+      // Handle binary audio
+      if (event.data instanceof Blob) {
+        const ab = await event.data.arrayBuffer();
+        event = { ...event, data: ab } as MessageEvent;
+      }
+
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-        const ulaw = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-        const pcm8k = ulawToPcm16(ulaw);
-        const pcm24k = resample8kTo24k(pcm8k);
-        const base64 = pcm16ToBase64(pcm24k);
+        const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+
+        audioPacketsIn++;
+        audioBytesIn += bytes.length;
+        const now = Date.now();
+        if (now - lastAudioLogAt > 2000) {
+          lastAudioLogAt = now;
+          console.log(
+            `[${callId}] 🎧 inbound audio: packets=${audioPacketsIn}, bytes=${audioBytesIn} (lastChunk=${bytes.length}, source=${meta.source}, formatHint=${meta.format})`,
+          );
+        }
+
+        // IMPORTANT: Different bridges send different binary formats:
+        // - C# SIP bridge (CallSession.cs) sends raw PCM16 @ 24kHz (little-endian) as binary frames.
+        // - Asterisk/Python bridges often send µ-law @ 8kHz.
+        // Heuristic: µ-law frames are typically 160 bytes for 20ms @ 8kHz.
+
+        let base64: string;
+        const looksLikeUlaw8k = bytes.length === 160 || bytes.length === 320;
+
+        if (!looksLikeUlaw8k && bytes.length % 2 === 0) {
+          // Treat as PCM16 bytes already (assumed 24kHz)
+          base64 = bytesToBase64(bytes);
+        } else {
+          // Treat as µ-law @ 8kHz → convert to PCM16 @ 24kHz
+          const pcm8k = ulawToPcm16(bytes);
+          const pcm24k = resample8kTo24k(pcm8k);
+          base64 = pcm16ToBase64(pcm24k);
+        }
         
         openaiWs.send(JSON.stringify({
           type: "input_audio_buffer.append",
@@ -437,6 +489,13 @@ function handleRealtimeSession(clientSocket: WebSocket, callId: string, callerPh
       const msg = JSON.parse(event.data);
       
       if (msg.type === "audio" && msg.audio) {
+        audioPacketsIn++;
+        if (Date.now() - lastAudioLogAt > 2000) {
+          lastAudioLogAt = Date.now();
+          console.log(
+            `[${callId}] 🎧 inbound audio (json): packets=${audioPacketsIn} (source=${meta.source}, formatHint=${meta.format})`,
+          );
+        }
         // Base64 audio from bridge
         openaiWs.send(JSON.stringify({
           type: "input_audio_buffer.append",
@@ -446,6 +505,13 @@ function handleRealtimeSession(clientSocket: WebSocket, callId: string, callerPh
         console.log(`[${callId}] 📞 Bridge hangup received`);
         cleanup();
         clientSocket.close();
+      } else {
+        // Helpful for debugging protocol mismatches
+        if (typeof msg?.type === "string") {
+          console.log(`[${callId}] ℹ️ Bridge message: type=${msg.type}`);
+        } else {
+          console.log(`[${callId}] ℹ️ Bridge message (untyped)`);
+        }
       }
     } catch (e) {
       console.error(`[${callId}] Error processing bridge message:`, e);
