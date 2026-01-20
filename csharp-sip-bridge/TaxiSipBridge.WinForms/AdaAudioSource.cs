@@ -191,9 +191,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 return;
             }
 
-            // Resample 24kHz → selected codec rate (typically 8kHz for PCMU/PCMA)
+            // Resample 24kHz → selected codec rate
+            // For PCMU/PCMA: 24kHz → 8kHz (downsample)
+            // For Opus: 24kHz → 48kHz (upsample)
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
             short[] resampled = Resample(pcm24, 24000, targetRate);
+
+            // Log first few frames to debug
+            if (_sentFrames < 5)
+            {
+                DebugLog($"🎵 Frame {_sentFrames}: in={pcm24.Length} samples @24k → out={resampled.Length} samples @{targetRate}Hz, codec={_audioFormatManager.SelectedFormat.FormatName}");
+            }
 
             // Encode using negotiated codec
             byte[] encoded = _audioEncoder.EncodeAudio(resampled, _audioFormatManager.SelectedFormat);
@@ -229,16 +237,23 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Simple linear resampling.
+    /// Linear resampling that handles both upsampling and downsampling.
+    /// For Opus: 24kHz → 48kHz (double the samples)
+    /// For PCMU/PCMA: 24kHz → 8kHz (1/3 the samples)
     /// </summary>
     private static short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
 
-        double ratio = (double)fromRate / toRate;
-        int outputLength = (int)(input.Length / ratio);
+        // Calculate output length based on rate ratio
+        // e.g., 24kHz→48kHz with 480 input samples → 960 output samples
+        int outputLength = (int)((long)input.Length * toRate / fromRate);
         var output = new short[outputLength];
 
+        // Linear interpolation
+        double ratio = (double)(input.Length - 1) / (output.Length - 1);
+        
         for (int i = 0; i < output.Length; i++)
         {
             double srcPos = i * ratio;
@@ -247,8 +262,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
             if (srcIndex + 1 < input.Length)
                 output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
-            else if (srcIndex < input.Length)
-                output[i] = input[srcIndex];
+            else
+                output[i] = input[srcIndex < input.Length ? srcIndex : input.Length - 1];
         }
 
         return output;
