@@ -585,7 +585,12 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
 
   // Connect to OpenAI
   try {
-    openaiWs = new WebSocket(OPENAI_REALTIME_URL, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`]);
+    // Match the paired endpoint's protocol negotiation (required for correct session schema)
+    openaiWs = new WebSocket(OPENAI_REALTIME_URL, [
+      "realtime",
+      `openai-insecure-api-key.${OPENAI_API_KEY}`,
+      "openai-beta.realtime-v1",
+    ]);
   } catch (e) {
     console.error(`[${callId}] Failed to connect to OpenAI:`, e);
     socket.close();
