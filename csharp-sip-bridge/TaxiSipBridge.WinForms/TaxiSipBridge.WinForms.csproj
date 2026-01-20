@@ -16,6 +16,7 @@
     <PackageReference Include="SIPSorcery" Version="10.0.1" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Concentus" Version="2.2.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,6 +32,7 @@
     <Compile Include="AudioMonitor.cs" />
     <Compile Include="SipAdaBridgeConfig.cs" />
     <Compile Include="SipAdaBridge.cs" />
+    <Compile Include="OpusAudioEncoder.cs" />
   </ItemGroup>
 
 </Project>
