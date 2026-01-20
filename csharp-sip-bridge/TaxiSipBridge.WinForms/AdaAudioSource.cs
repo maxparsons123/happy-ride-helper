@@ -35,7 +35,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
     public event SourceErrorDelegate? OnAudioSourceError;
-    public event Action<EncodedAudioFrame>? OnAudioSourceEncodedFrameReady { add { } remove { } }
+    
+    event Action<EncodedAudioFrame>? IAudioSource.OnAudioSourceEncodedFrameReady
+    {
+        add { }
+        remove { }
+    }
     
     // Debug logging
     public event Action<string>? OnDebugLog;
