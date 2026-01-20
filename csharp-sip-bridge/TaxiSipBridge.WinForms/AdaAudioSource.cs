@@ -81,32 +81,47 @@ public class AdaAudioSource : IAudioSource, IDisposable
     {
         if (_disposed || _isClosed || pcmBytes.Length == 0) return;
 
-        // Convert bytes to shorts
-        var pcm24 = new short[pcmBytes.Length / 2];
-        Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
+        // Convert bytes to shorts (24kHz, 16-bit mono)
+        var pcm24All = new short[pcmBytes.Length / 2];
+        Buffer.BlockCopy(pcmBytes, 0, pcm24All, 0, pcmBytes.Length);
 
-        // Apply fade-in to avoid clicks
-        if (_needsFadeIn && pcm24.Length > 0)
+        // IMPORTANT: packetise into 20ms frames.
+        // Ada deltas can be variable length; RTP expects consistent 20ms frames.
+        const int PCM24_FRAME_SAMPLES = 24000 / 1000 * AUDIO_SAMPLE_PERIOD_MS; // 480
+
+        int frameCount = 0;
+        for (int offset = 0; offset < pcm24All.Length; offset += PCM24_FRAME_SAMPLES)
         {
-            int fadeLen = Math.Min(FADE_IN_SAMPLES, pcm24.Length);
-            for (int i = 0; i < fadeLen; i++)
+            int len = Math.Min(PCM24_FRAME_SAMPLES, pcm24All.Length - offset);
+
+            // Pad last frame to full 20ms to keep timestamps stable.
+            var frame = new short[PCM24_FRAME_SAMPLES];
+            Array.Copy(pcm24All, offset, frame, 0, len);
+
+            // Apply fade-in only on the first frame after a reset.
+            if (_needsFadeIn && frame.Length > 0)
             {
-                float gain = (float)i / fadeLen;
-                pcm24[i] = (short)(pcm24[i] * gain);
+                int fadeLen = Math.Min(FADE_IN_SAMPLES, frame.Length);
+                for (int i = 0; i < fadeLen; i++)
+                {
+                    float gain = (float)i / fadeLen;
+                    frame[i] = (short)(frame[i] * gain);
+                }
+                _needsFadeIn = false;
             }
-            _needsFadeIn = false;
+
+            // Bound the queue
+            while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
+                _pcmQueue.TryDequeue(out _);
+
+            _pcmQueue.Enqueue(frame);
+            _enqueuedFrames++;
+            frameCount++;
         }
 
-        // Bound the queue
-        while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
-            _pcmQueue.TryDequeue(out _);
-
-        _pcmQueue.Enqueue(pcm24);
-        _enqueuedFrames++;
-
         // Log first enqueue
-        if (_enqueuedFrames == 1)
-            OnDebugLog?.Invoke($"[AdaAudioSource] 📥 First audio: {pcm24.Length} samples");
+        if (_enqueuedFrames > 0 && _enqueuedFrames == frameCount)
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📥 First audio: {pcm24All.Length} samples split into {frameCount}x{PCM24_FRAME_SAMPLES}");
 
         // Log stats every 3 seconds
         if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 3)
@@ -188,17 +203,27 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
             // Resample 24kHz → selected codec rate (typically 8kHz for PCMU/PCMA)
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
+            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+
             short[] resampled = Resample(pcm24, 24000, targetRate);
+
+            // Hard-enforce exact 20ms frame size for RTP.
+            if (resampled.Length != samplesNeeded)
+            {
+                var fixedFrame = new short[samplesNeeded];
+                Array.Copy(resampled, fixedFrame, Math.Min(resampled.Length, samplesNeeded));
+                resampled = fixedFrame;
+            }
 
             // Log first few frames
             if (_sentFrames < 3)
-                OnDebugLog?.Invoke($"[AdaAudioSource] 📤 Frame {_sentFrames}: {pcm24.Length}→{resampled.Length} @{targetRate}Hz");
+                OnDebugLog?.Invoke($"[AdaAudioSource] 📤 Frame {_sentFrames}: {pcm24.Length}→{resampled.Length} @{targetRate}Hz (need {samplesNeeded})");
 
             // Encode using negotiated codec
             byte[] encoded = _audioEncoder.EncodeAudio(resampled, _audioFormatManager.SelectedFormat);
 
             // Calculate RTP duration
-            uint durationRtpUnits = (uint)(targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS);
+            uint durationRtpUnits = (uint)samplesNeeded;
 
             _sentFrames++;
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
