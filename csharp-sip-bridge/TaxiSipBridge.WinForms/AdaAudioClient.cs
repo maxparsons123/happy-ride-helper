@@ -224,23 +224,36 @@ public class AdaAudioClient : IDisposable
     private async Task ReceiveLoopAsync()
     {
         var buffer = new byte[1024 * 64];
+        var messageBuilder = new System.IO.MemoryStream();
 
         while (!_disposed && _ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
         {
             try
             {
-                var result = await _ws.ReceiveAsync(buffer, _cts!.Token);
+                messageBuilder.SetLength(0);  // Clear for new message
 
-                if (result.MessageType == WebSocketMessageType.Close)
+                WebSocketReceiveResult result;
+                do
                 {
-                    Log("🔌 WebSocket closed by server");
-                    break;
-                }
+                    result = await _ws.ReceiveAsync(buffer, _cts!.Token);
+                    
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        Log("🔌 WebSocket closed by server");
+                        OnDisconnected?.Invoke();
+                        return;
+                    }
+
+                    if (result.MessageType != WebSocketMessageType.Text)
+                        break;
+
+                    messageBuilder.Write(buffer, 0, result.Count);
+                } while (!result.EndOfMessage);
 
                 if (result.MessageType != WebSocketMessageType.Text)
                     continue;
 
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                var json = Encoding.UTF8.GetString(messageBuilder.GetBuffer(), 0, (int)messageBuilder.Length);
                 ProcessMessage(json);
             }
             catch (OperationCanceledException) { break; }
