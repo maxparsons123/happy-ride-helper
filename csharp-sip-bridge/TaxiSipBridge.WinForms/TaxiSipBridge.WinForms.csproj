@@ -8,7 +8,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TaxiSipBridge</AssemblyName>
     <RootNamespace>TaxiSipBridge</RootNamespace>
-    <!-- Disable auto-include to prevent duplicate resource errors -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
   </PropertyGroup>
