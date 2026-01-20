@@ -124,7 +124,6 @@ public class SipAutoAnswer : IDisposable
         try
         {
             // For headless bridges: use null AudioSource/Sink to avoid 488 codec conflicts.
-            // VoIPMediaSession will negotiate codecs from the incoming SDP offer.
             var mediaEndPoints = new MediaEndPoints 
             { 
                 AudioSource = null, 
@@ -133,9 +132,10 @@ public class SipAutoAnswer : IDisposable
             mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
             
-            // Restrict to PCMU (ulaw) only for consistent audio handling
-            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
-            mediaSession.MediaStreamManager?.RestrictFormats(audioFormats);
+            // Add PCMU audio track for codec negotiation (SIPSorcery 10.x pattern)
+            var audioFormat = new SDPAudioVideoMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            var audioTrack = new MediaStreamTrack(audioFormat);
+            mediaSession.addTrack(audioTrack);
             
             _currentMediaSession = mediaSession;
 

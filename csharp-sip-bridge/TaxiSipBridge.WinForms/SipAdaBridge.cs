@@ -121,14 +121,14 @@ public class SipAdaBridge : IDisposable
         try
         {
             // For headless bridges: use null AudioSource/Sink to avoid 488 codec conflicts.
-            // VoIPMediaSession will negotiate codecs from the incoming SDP offer.
             var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
             
-            // Restrict to PCMU (ulaw) only for consistent audio handling
-            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
-            rtpSession.MediaStreamManager?.RestrictFormats(audioFormats);
+            // Add PCMU audio track for codec negotiation (SIPSorcery 10.x pattern)
+            var audioFormat = new SDPAudioVideoMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            var audioTrack = new MediaStreamTrack(audioFormat);
+            rtpSession.addTrack(audioTrack);
             
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
