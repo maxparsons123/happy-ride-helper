@@ -32,6 +32,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _silenceFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
+    // Boundary smoothing to prevent clicks/crackling during underruns
+    private short _lastOutputSample;
+    private bool _lastFrameWasSilence = true;
+
     // Test tone mode
     private bool _testToneMode;
     private int _testToneSampleIndex;
@@ -222,8 +226,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
             else if (_pcmQueue.TryDequeue(out var pcm24))
             {
-                // Resample 24kHz → selected codec rate (skip de-emphasis to avoid crackling)
-                audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                // IMPORTANT: Downsample 24kHz → 8kHz using an integer-factor decimator.
+                // This avoids per-frame windowing artifacts that can sound like crackling.
+                if (targetRate == 8000)
+                {
+                    audioFrame = Downsample24kTo8k(pcm24);
+                }
+                else
+                {
+                    audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                }
 
                 // Hard-enforce exact 20ms frame size for RTP
                 if (audioFrame.Length != samplesNeeded)
@@ -235,9 +247,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
             else
             {
-                // Send silence to maintain timing
+                // Send silence to maintain timing (with click-safe ramp)
                 SendSilence();
                 return;
+            }
+
+            // Track last sample to avoid clicks on underrun transitions
+            if (audioFrame.Length > 0)
+            {
+                _lastOutputSample = audioFrame[^1];
+                _lastFrameWasSilence = false;
             }
 
             // Log first few frames
@@ -281,6 +300,28 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return samples;
     }
 
+    private static short[] Downsample24kTo8k(short[] pcm24)
+    {
+        // 24kHz → 8kHz is exactly 3:1. Using a small FIR per group avoids boundary artifacts.
+        if (pcm24.Length < 3) return new short[0];
+
+        int outLen = pcm24.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int idx = i * 3;
+            int s0 = pcm24[idx];
+            int s1 = pcm24[idx + 1];
+            int s2 = pcm24[idx + 2];
+
+            // 3-tap low-pass-ish: (1,2,1)/4
+            output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
+        }
+
+        return output;
+    }
+
     private void SendSilence()
     {
         try
@@ -289,10 +330,28 @@ public class AdaAudioSource : IAudioSource, IDisposable
             int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
             var silence = new short[samplesNeeded];
 
+            // Avoid click when we transition from non-zero audio to silence.
+            if (!_lastFrameWasSilence && _lastOutputSample != 0 && samplesNeeded > 0)
+            {
+                // ~5ms ramp to zero
+                int rampLen = Math.Min(samplesNeeded, Math.Max(1, targetRate / 200));
+                for (int i = 0; i < rampLen; i++)
+                {
+                    float g = 1f - ((float)i / rampLen);
+                    silence[i] = (short)(_lastOutputSample * g);
+                }
+
+                // Ensure next real audio fades in smoothly.
+                _needsFadeIn = true;
+            }
+
             byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
             uint durationRtpUnits = (uint)samplesNeeded;
 
             _silenceFrames++;
+            _lastFrameWasSilence = true;
+            _lastOutputSample = 0;
+
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
         catch { }
