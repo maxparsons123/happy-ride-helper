@@ -588,6 +588,13 @@ const TOOLS = [
   }
 ];
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRICT STATE MACHINE: Index-locked booking progression
+// Ada CANNOT advance to step N+1 until step N is marked complete by user answer
+// ═══════════════════════════════════════════════════════════════════════════════
+const BOOKING_STEPS = ["pickup", "destination", "passengers", "time"] as const;
+type BookingStep = typeof BOOKING_STEPS[number];
+
 // Session state interface
 interface SessionState {
   callId: string;
@@ -599,10 +606,16 @@ interface SessionState {
     passengers: number | null;
     pickupTime: string | null;
   };
+  // STRICT STATE MACHINE: Current step index (0=pickup, 1=destination, 2=passengers, 3=time)
+  currentStepIndex: number;
+  // Track which steps are completed - user must answer before we advance
+  stepCompleted: [boolean, boolean, boolean, boolean];
+  // Legacy field for compatibility - will be derived from currentStepIndex
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
-  // CONTEXT CAPTURE: Snapshot of lastQuestionAsked when user started speaking
-  // This prevents race conditions where Ada's response changes lastQuestionAsked before transcript arrives
+  // CONTEXT CAPTURE: Snapshot of step index when user started speaking
+  // This prevents race conditions where Ada's response changes step before transcript arrives
   contextAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
+  stepIndexAtSpeechStart: number;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -636,6 +649,13 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
+}
+
+// Helper to get current step name from index
+function getCurrentStepName(index: number): BookingStep | "confirmation" | "none" {
+  if (index < 0) return "none";
+  if (index >= BOOKING_STEPS.length) return "confirmation";
+  return BOOKING_STEPS[index];
 }
 
 const ECHO_GUARD_MS = 250;
@@ -1408,8 +1428,12 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       passengers: null,
       pickupTime: null
     },
-    lastQuestionAsked: "none",
-    contextAtSpeechStart: "none",
+    // STRICT STATE MACHINE: Start at step 0 (pickup)
+    currentStepIndex: 0,
+    stepCompleted: [false, false, false, false],
+    stepIndexAtSpeechStart: 0,
+    lastQuestionAsked: "pickup", // Will be derived from currentStepIndex
+    contextAtSpeechStart: "pickup",
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -2081,8 +2105,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       }
     }));
     
+    // STATE MACHINE: Greeting asks about pickup (step 0)
+    sessionState.currentStepIndex = 0;
     sessionState.lastQuestionAsked = "pickup";
-    console.log(`[${callId}] ✅ Greeting sent - will NOT retry`);
+    console.log(`[${callId}] ✅ Greeting sent - STATE MACHINE at step 0 (pickup)`);
   };
   
   // Fallback: if session.updated never arrives, send greeting after 2 seconds
@@ -2643,11 +2669,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "input_audio_buffer.speech_started":
-          // CRITICAL: Capture the context AT THE MOMENT the user starts speaking
-          // This prevents race conditions where Ada's response changes lastQuestionAsked
-          // before the user's transcript arrives
-          sessionState.contextAtSpeechStart = sessionState.lastQuestionAsked;
-          console.log(`[${callId}] 🎤 User started speaking (context captured: ${sessionState.contextAtSpeechStart})`);
+          // CRITICAL: Capture the step index AT THE MOMENT the user starts speaking
+          // This prevents race conditions where Ada's response advances the step before transcript arrives
+          sessionState.stepIndexAtSpeechStart = sessionState.currentStepIndex;
+          sessionState.contextAtSpeechStart = getCurrentStepName(sessionState.currentStepIndex);
+          console.log(`[${callId}] 🎤 User started speaking (step ${sessionState.stepIndexAtSpeechStart}: ${sessionState.contextAtSpeechStart})`);
           break;
 
         case "conversation.item.input_audio_transcription.completed":
@@ -2703,10 +2729,13 @@ Otherwise, say goodbye warmly and call end_call().`
               }
             }
             
-            // Use the context captured when user STARTED speaking, not current lastQuestionAsked
-            // This prevents race conditions where Ada's response changes context before transcript arrives
-            const contextForThisUtterance = sessionState.contextAtSpeechStart || sessionState.lastQuestionAsked;
-            console.log(`[${callId}] 👤 User (after "${contextForThisUtterance}" question): "${userText}"`);
+            // ═══════════════════════════════════════════════════════════════════════════
+            // STRICT STATE MACHINE: Use step index captured at speech start
+            // This prevents race conditions where Ada advances before transcript arrives
+            // ═══════════════════════════════════════════════════════════════════════════
+            const stepIndexForThisAnswer = sessionState.stepIndexAtSpeechStart;
+            const stepNameForThisAnswer = getCurrentStepName(stepIndexForThisAnswer);
+            console.log(`[${callId}] 👤 User answer for step ${stepIndexForThisAnswer} (${stepNameForThisAnswer}): "${userText}"`);
             
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
@@ -2755,73 +2784,178 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
               
               await updateLiveCall(sessionState);
-              break; // Correction handled, don't run normal context pairing
+              break; // Correction handled, don't run normal state machine flow
             }
             
-            // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
-            if (contextForThisUtterance === "passengers") {
-              // Check if response looks like an address rather than a number
-              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
-              const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
-              const isJustNumber = /^[1-9]$|^1[0-9]$|^20$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(userText.trim());
+            // ═══════════════════════════════════════════════════════════════════════════
+            // STRICT STATE MACHINE: Auto-save user answer to current step field
+            // ═══════════════════════════════════════════════════════════════════════════
+            let answerSaved = false;
+            let nextStepIndex = stepIndexForThisAnswer;
+            
+            if (stepIndexForThisAnswer < BOOKING_STEPS.length && !sessionState.stepCompleted[stepIndexForThisAnswer]) {
+              const currentStep = BOOKING_STEPS[stepIndexForThisAnswer];
               
-              if (looksLikeAddress && !hasNumber && !isJustNumber) {
-                console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
-                
-                // Store the address for later (might be a correction they want to make)
-                sessionState.conversationHistory.push({
-                  role: "user",
-                  content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
-                  timestamp: Date.now()
-                });
-                
-                // Force immediate re-prompt for passengers
-                openaiWs!.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{
-                      type: "input_text",
-                      text: `[PASSENGER CLARIFICATION NEEDED] You asked for the number of passengers, but the user said: "${userText}" which sounds like an address.
-
-DO NOT interpret this as passenger count. Politely clarify:
-- Acknowledge you might have misheard
-- Ask specifically for the NUMBER of passengers traveling
-- Keep it brief: "Sorry, I missed that. How many passengers will be traveling?"
-
-Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=NOT YET SET`
-                    }]
+              switch (currentStep) {
+                case "pickup":
+                  // Save pickup address
+                  sessionState.booking.pickup = userText;
+                  sessionState.stepCompleted[0] = true;
+                  nextStepIndex = 1;
+                  answerSaved = true;
+                  console.log(`[${callId}] ✅ STATE MACHINE: Step 0 (pickup) COMPLETE → "${userText}"`);
+                  break;
+                  
+                case "destination":
+                  // Save destination address
+                  sessionState.booking.destination = userText;
+                  sessionState.stepCompleted[1] = true;
+                  nextStepIndex = 2;
+                  answerSaved = true;
+                  console.log(`[${callId}] ✅ STATE MACHINE: Step 1 (destination) COMPLETE → "${userText}"`);
+                  break;
+                  
+                case "passengers":
+                  // Parse passenger count - check if response looks like an address first
+                  const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+                  
+                  if (looksLikeAddress) {
+                    console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
+                    
+                    // Store the address for later (might be a correction they want to make)
+                    sessionState.conversationHistory.push({
+                      role: "user",
+                      content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
+                      timestamp: Date.now()
+                    });
+                    
+                    // Force immediate re-prompt for passengers - DON'T advance step
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[PASSENGER CLARIFICATION NEEDED] You asked for passengers, but the user said: "${userText}" which sounds like an address.
+Ask: "Sorry, I need the number of passengers traveling. How many will there be?"`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    await updateLiveCall(sessionState);
+                    break; // Exit switch, don't advance
                   }
-                }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                break; // Don't run normal context pairing
+                  
+                  // Parse the number
+                  const wordToNum: Record<string, number> = {
+                    one: 1, two: 2, three: 3, four: 4, five: 5,
+                    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+                  };
+                  
+                  const lowerV = userText.toLowerCase().trim();
+                  let parsedCount: number | null = null;
+                  
+                  // First try digit match
+                  const digitMatch = userText.match(/\b(\d+)\b/);
+                  if (digitMatch) {
+                    parsedCount = parseInt(digitMatch[1], 10);
+                  } else {
+                    // Try word match (e.g., "three" → 3)
+                    for (const [word, num] of Object.entries(wordToNum)) {
+                      if (lowerV === word || lowerV.includes(word)) {
+                        parsedCount = num;
+                        break;
+                      }
+                    }
+                  }
+                  
+                  if (parsedCount !== null && parsedCount > 0 && parsedCount <= 20) {
+                    sessionState.booking.passengers = parsedCount;
+                    sessionState.stepCompleted[2] = true;
+                    nextStepIndex = 3;
+                    answerSaved = true;
+                    console.log(`[${callId}] ✅ STATE MACHINE: Step 2 (passengers) COMPLETE → ${parsedCount}`);
+                  } else {
+                    console.log(`[${callId}] ⚠️ Could not parse passenger count from: "${userText}"`);
+                  }
+                  break;
+                  
+                case "time":
+                  // Save pickup time
+                  const lowerTime = userText.toLowerCase();
+                  if (
+                    lowerTime.includes("now") ||
+                    lowerTime.includes("asap") ||
+                    lowerTime.includes("right away") ||
+                    lowerTime.includes("immediately") ||
+                    lowerTime.includes("straightaway")
+                  ) {
+                    sessionState.booking.pickupTime = "ASAP";
+                  } else {
+                    sessionState.booking.pickupTime = userText;
+                  }
+                  sessionState.stepCompleted[3] = true;
+                  nextStepIndex = 4; // Move to confirmation phase
+                  answerSaved = true;
+                  console.log(`[${callId}] ✅ STATE MACHINE: Step 3 (time) COMPLETE → "${sessionState.booking.pickupTime}"`);
+                  break;
+              }
+              
+              // Advance to next step if answer was saved
+              if (answerSaved) {
+                sessionState.currentStepIndex = nextStepIndex;
+                sessionState.lastQuestionAsked = getCurrentStepName(nextStepIndex);
+                console.log(`[${callId}] ➡️ STATE MACHINE: Advanced to step ${nextStepIndex} (${sessionState.lastQuestionAsked})`);
               }
             }
             
-            // Add to history with context annotation (normal flow)
+            // Add to conversation history
             sessionState.conversationHistory.push({
               role: "user",
-              content: `[CONTEXT: Ada asked about ${contextForThisUtterance}] ${userText}`,
+              content: `[STEP ${stepIndexForThisAnswer}: ${stepNameForThisAnswer}] ${userText}`,
               timestamp: Date.now()
             });
             
-            // Send context-aware prompt to OpenAI
-            const contextPrompt = {
+            // Send state-aware prompt to OpenAI with STRICT instructions
+            const allStepsComplete = sessionState.stepCompleted.every(s => s);
+            const nextStepName = getCurrentStepName(sessionState.currentStepIndex);
+            
+            let nextInstruction = "";
+            if (allStepsComplete) {
+              nextInstruction = "ALL 4 STEPS COMPLETE. Now summarize the booking and ask if correct.";
+            } else if (sessionState.currentStepIndex < BOOKING_STEPS.length) {
+              const stepQuestions: Record<BookingStep, string> = {
+                pickup: "Where would you like to be picked up?",
+                destination: "And what is your destination?",
+                passengers: "How many passengers will be traveling?",
+                time: "What time would you like the taxi?"
+              };
+              nextInstruction = `NOW ASK STEP ${sessionState.currentStepIndex} (${nextStepName}): "${stepQuestions[BOOKING_STEPS[sessionState.currentStepIndex]]}"`;
+            }
+            
+            const statePrompt = {
               type: "conversation.item.create",
               item: {
                 type: "message",
                 role: "system",
                 content: [{
                   type: "input_text",
-                  text: `[CONTEXT PAIRING] You just asked about "${contextForThisUtterance}". The user responded: "${userText}". 
-                  
-If this is a valid answer to your ${contextForThisUtterance} question, use sync_booking_data to save it to the CORRECT field.
-Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
+                  text: `[STATE MACHINE UPDATE] User answered step ${stepIndexForThisAnswer} (${stepNameForThisAnswer}): "${userText}"
+
+CURRENT STATE:
+- Step 0 (pickup): ${sessionState.stepCompleted[0] ? "✅ " + sessionState.booking.pickup : "❌ NOT SET"}
+- Step 1 (destination): ${sessionState.stepCompleted[1] ? "✅ " + sessionState.booking.destination : "❌ NOT SET"}
+- Step 2 (passengers): ${sessionState.stepCompleted[2] ? "✅ " + sessionState.booking.passengers : "❌ NOT SET"}
+- Step 3 (time): ${sessionState.stepCompleted[3] ? "✅ " + sessionState.booking.pickupTime : "❌ NOT SET"}
+
+NEXT ACTION: ${nextInstruction}
+
+CRITICAL: You CANNOT ask about a later step until the current step is complete. Follow the sequence strictly.`
                 }]
               }
             };
-            openaiWs!.send(JSON.stringify(contextPrompt));
+            openaiWs!.send(JSON.stringify(statePrompt));
             
             await updateLiveCall(sessionState);
           }
