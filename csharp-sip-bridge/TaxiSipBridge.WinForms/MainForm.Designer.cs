@@ -57,9 +57,14 @@ partial class MainForm
         var lblPass = new Label { Text = "Password:", Location = new Point(320, 58), Size = new Size(65, 23) };
         txtSipPassword = new TextBox { Location = new Point(390, 55), Size = new Size(205, 23), UseSystemPasswordChar = true };
 
+        // Audio Mode
+        var lblAudioMode = new Label { Text = "Audio Mode:", Location = new Point(15, 88), Size = new Size(80, 23) };
+        cmbAudioMode = new ComboBox { Location = new Point(100, 85), Size = new Size(140, 23), DropDownStyle = ComboBoxStyle.DropDownList };
+        cmbAudioMode.Items.AddRange(new object[] { "Standard", "Jitter Buffer", "Built-in Pacer", "Simple Resample", "Test Tone" });
+
         // WebSocket URL
-        var lblWs = new Label { Text = "Ada URL:", Location = new Point(15, 88), Size = new Size(80, 23) };
-        txtWebSocketUrl = new TextBox { Location = new Point(100, 85), Size = new Size(495, 23) };
+        var lblWs = new Label { Text = "Ada URL:", Location = new Point(260, 88), Size = new Size(60, 23) };
+        txtWebSocketUrl = new TextBox { Location = new Point(325, 85), Size = new Size(270, 23) };
 
         // Start SIP Button
         btnStartStop = new Button
@@ -93,7 +98,9 @@ partial class MainForm
 
         grpConfig.Controls.AddRange(new Control[] {
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
-            lblUser, txtSipUser, lblPass, txtSipPassword, lblWs, txtWebSocketUrl,
+            lblUser, txtSipUser, lblPass, txtSipPassword, 
+            lblAudioMode, cmbAudioMode,
+            lblWs, txtWebSocketUrl,
             btnStartStop, btnMicTest
         });
 
@@ -186,6 +193,7 @@ partial class MainForm
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
     private ComboBox cmbTransport;
+    private ComboBox cmbAudioMode;
     private Button btnStartStop;
     private Button btnMicTest;
     private Button btnClearLogs;

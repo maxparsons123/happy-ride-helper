@@ -36,6 +36,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short _lastOutputSample;
     private bool _lastFrameWasSilence = true;
 
+    // Audio mode configuration
+    private AudioMode _audioMode = AudioMode.Standard;
+    private int _jitterBufferMs = 60;
+    private bool _jitterBufferFilled;
+
     // Test tone mode
     private bool _testToneMode;
     private int _testToneSampleIndex;
@@ -54,10 +59,18 @@ public class AdaAudioSource : IAudioSource, IDisposable
     // Debug logging
     public event Action<string>? OnDebugLog;
 
-    public AdaAudioSource()
+    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60)
     {
         _audioEncoder = new AudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
+        _audioMode = audioMode;
+        _jitterBufferMs = jitterBufferMs;
+        
+        // Test tone mode is set via audio mode
+        if (_audioMode == AudioMode.TestTone)
+        {
+            _testToneMode = true;
+        }
     }
 
     public List<AudioFormat> GetAudioSourceFormats() => _audioFormatManager.GetSourceFormats();
@@ -224,32 +237,58 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 // Generate a 440Hz test tone
                 audioFrame = GenerateTestTone(samplesNeeded, targetRate);
             }
-            else if (_pcmQueue.TryDequeue(out var pcm24))
+            else
             {
-                // IMPORTANT: Downsample 24kHz → 8kHz using an integer-factor decimator.
-                // This avoids per-frame windowing artifacts that can sound like crackling.
-                if (targetRate == 8000)
+                // Check jitter buffer mode - wait until we have enough frames buffered
+                if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
                 {
-                    audioFrame = Downsample24kTo8k(pcm24);
+                    int framesNeeded = _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS; // e.g., 60ms = 3 frames
+                    if (_pcmQueue.Count < framesNeeded)
+                    {
+                        SendSilence();
+                        return;
+                    }
+                    _jitterBufferFilled = true;
+                    OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer filled ({_pcmQueue.Count} frames)");
+                }
+
+                if (_pcmQueue.TryDequeue(out var pcm24))
+                {
+                    // Select resampling method based on audio mode
+                    if (_audioMode == AudioMode.SimpleResample)
+                    {
+                        // Simple linear interpolation only
+                        audioFrame = SimpleResample(pcm24, 24000, targetRate);
+                    }
+                    else if (targetRate == 8000)
+                    {
+                        // Use optimized 3:1 decimator for 8kHz
+                        audioFrame = Downsample24kTo8k(pcm24);
+                    }
+                    else
+                    {
+                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                    }
+
+                    // Hard-enforce exact 20ms frame size for RTP
+                    if (audioFrame.Length != samplesNeeded)
+                    {
+                        var fixedFrame = new short[samplesNeeded];
+                        Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
+                        audioFrame = fixedFrame;
+                    }
                 }
                 else
                 {
-                    audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                    // Queue empty - reset jitter buffer state
+                    if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled)
+                    {
+                        _jitterBufferFilled = false;
+                    }
+                    
+                    SendSilence();
+                    return;
                 }
-
-                // Hard-enforce exact 20ms frame size for RTP
-                if (audioFrame.Length != samplesNeeded)
-                {
-                    var fixedFrame = new short[samplesNeeded];
-                    Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
-                    audioFrame = fixedFrame;
-                }
-            }
-            else
-            {
-                // Send silence to maintain timing (with click-safe ramp)
-                SendSilence();
-                return;
             }
 
             // Track last sample to avoid clicks on underrun transitions
@@ -355,6 +394,34 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
         catch { }
+    }
+
+    /// <summary>
+    /// Simple linear interpolation resampling (no filters).
+    /// Fastest option, may have some aliasing on downsampling.
+    /// </summary>
+    private static short[] SimpleResample(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+
+        double ratio = (double)fromRate / toRate;
+        int outputLength = (int)(input.Length / ratio);
+        var output = new short[outputLength];
+
+        for (int i = 0; i < output.Length; i++)
+        {
+            double srcPos = i * ratio;
+            int srcIndex = (int)srcPos;
+            double frac = srcPos - srcIndex;
+
+            if (srcIndex + 1 < input.Length)
+                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
+            else if (srcIndex < input.Length)
+                output[i] = input[srcIndex];
+        }
+
+        return output;
     }
 
     /// <summary>
