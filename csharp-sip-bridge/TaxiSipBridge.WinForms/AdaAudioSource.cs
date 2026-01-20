@@ -18,7 +18,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly IAudioEncoder _audioEncoder;
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     
-    private Timer? _sendTimer;
+    private System.Threading.Timer? _sendTimer;
     private bool _isStarted;
     private bool _isPaused;
     private bool _isClosed;
@@ -28,6 +28,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
     public event SourceErrorDelegate? OnAudioSourceError;
+    public event EncodedSampleDelegate? OnAudioSourceEncodedFrameReady { add { } remove { } }
 
     public AdaAudioSource()
     {
