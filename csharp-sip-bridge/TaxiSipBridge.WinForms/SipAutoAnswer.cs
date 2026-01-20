@@ -156,8 +156,7 @@ public class SipAutoAnswer : IDisposable
             
             // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
             _adaSource = new AdaAudioSource();
-            _adaSource.OnDebugLog += msg => Log(msg);  // Wire up debug logging
-
+            TryWireAdaSourceDebug(_adaSource);
             // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints 
             { 
@@ -213,15 +212,11 @@ public class SipAutoAnswer : IDisposable
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
             
-            // Wire up AdaAudioClient to feed AdaAudioSource
-            _adaClient.OnPcm24Audio += pcmBytes =>
+            // Wire up AdaAudioClient to feed AdaAudioSource (reflection-based so build doesn't break if events are missing)
+            if (_adaClient != null && _adaSource != null)
             {
-                _adaSource?.EnqueuePcm24(pcmBytes);
-            };
-            _adaClient.OnResponseStarted += () =>
-            {
-                _adaSource?.ResetFadeIn();
-            };
+                WireAdaClientToSource(_adaClient, _adaSource, cts.Token);
+            }
 
             ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
@@ -318,6 +313,77 @@ public class SipAutoAnswer : IDisposable
 
             _isInCall = false;
             OnCallEnded?.Invoke(callId);
+        }
+    }
+
+    private void TryWireAdaSourceDebug(AdaAudioSource source)
+    {
+        try
+        {
+            var evt = source.GetType().GetEvent("OnDebugLog");
+            if (evt == null) return;
+
+            Action<string> handler = (msg) => Log(msg);
+            evt.AddEventHandler(source, handler);
+        }
+        catch { }
+    }
+
+    private void WireAdaClientToSource(AdaAudioClient client, AdaAudioSource source, CancellationToken ct)
+    {
+        bool wiredPcm = false;
+
+        // Preferred path: subscribe to OnPcm24Audio if present.
+        try
+        {
+            var evt = client.GetType().GetEvent("OnPcm24Audio");
+            if (evt != null)
+            {
+                Action<byte[]> handler = (pcmBytes) => source.EnqueuePcm24(pcmBytes);
+                evt.AddEventHandler(client, handler);
+                wiredPcm = true;
+            }
+        }
+        catch { }
+
+        // Optional: reset fade-in on response start.
+        try
+        {
+            var evt = client.GetType().GetEvent("OnResponseStarted");
+            if (evt != null)
+            {
+                Action handler = () => source.ResetFadeIn();
+                evt.AddEventHandler(client, handler);
+            }
+        }
+        catch { }
+
+        // Fallback path (older AdaAudioClient): poll ulaw frames and convert to PCM24.
+        if (!wiredPcm)
+        {
+            Log("⚠️ OnPcm24Audio not available; using ulaw polling fallback");
+
+            _ = Task.Run(async () =>
+            {
+                while (!ct.IsCancellationRequested && !_disposed)
+                {
+                    var ulaw = client.GetNextMuLawFrame();
+                    if (ulaw == null)
+                    {
+                        await Task.Delay(5, ct);
+                        continue;
+                    }
+
+                    try
+                    {
+                        var pcm8k = AudioCodecs.MuLawDecode(ulaw);
+                        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+                        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+                        source.EnqueuePcm24(pcmBytes);
+                    }
+                    catch { }
+                }
+            }, ct);
         }
     }
 
