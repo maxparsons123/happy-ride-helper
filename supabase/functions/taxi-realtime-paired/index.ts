@@ -677,7 +677,7 @@ const ASSISTANT_LEADIN_IGNORE_MS = 700;
 const PASSENGERS_QUESTION_PROTECTION_MS = 2200;
 
 // No-reply timeout: if user doesn't respond after Ada finishes, re-prompt after this many ms.
-const NO_REPLY_TIMEOUT_MS = 12000;
+const NO_REPLY_TIMEOUT_MS = 8000; // 8 seconds - natural pause for phone calls
 // Max re-prompts before giving up and asking if they're still there
 const MAX_NO_REPLY_REPROMPTS = 2;
 
