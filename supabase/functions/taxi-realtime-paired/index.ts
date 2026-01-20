@@ -1287,6 +1287,77 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AMENDMENT DETECTION: Allow user to modify any field mid-flow
+// Patterns: "change my pickup to...", "I want to change the destination...", etc.
+// This supports booking modifications while maintaining state machine integrity
+// ═══════════════════════════════════════════════════════════════════════════════
+interface AmendmentResult {
+  field: "pickup" | "destination" | "passengers" | "pickupTime" | null;
+  newValue: string;
+}
+
+function detectAmendment(
+  text: string, 
+  currentBooking: { pickup: string | null; destination: string | null; passengers: number | null; pickupTime: string | null }
+): AmendmentResult {
+  const lower = text.toLowerCase();
+  
+  // Amendment trigger patterns with field indicators
+  const amendmentPatterns: Array<{ pattern: RegExp; field: AmendmentResult["field"] }> = [
+    // Pickup amendments
+    { pattern: /(?:change|update|modify)\s+(?:my\s+)?(?:the\s+)?pickup\s+(?:to|address\s+to)\s+(.+)/i, field: "pickup" },
+    { pattern: /(?:i want to|i'd like to|can you)\s+change\s+(?:my\s+)?pickup\s+(?:to|address\s+to)\s+(.+)/i, field: "pickup" },
+    { pattern: /(?:my\s+)?pickup\s+(?:is|should be|needs to be)\s+(.+)/i, field: "pickup" },
+    { pattern: /pick(?:ing)?\s+(?:me\s+)?up\s+from\s+(.+)\s+instead/i, field: "pickup" },
+    
+    // Destination amendments
+    { pattern: /(?:change|update|modify)\s+(?:my\s+)?(?:the\s+)?destination\s+(?:to|address\s+to)\s+(.+)/i, field: "destination" },
+    { pattern: /(?:i want to|i'd like to|can you)\s+change\s+(?:my\s+)?destination\s+(?:to|address\s+to)\s+(.+)/i, field: "destination" },
+    { pattern: /(?:my\s+)?destination\s+(?:is|should be|needs to be)\s+(.+)/i, field: "destination" },
+    { pattern: /(?:going|take me|drop me)\s+to\s+(.+)\s+instead/i, field: "destination" },
+    { pattern: /(?:i'm|i am)\s+going\s+to\s+(.+)\s+instead/i, field: "destination" },
+    
+    // Passenger amendments
+    { pattern: /(?:change|update)\s+(?:the\s+)?(?:number of\s+)?passengers?\s+to\s+(\d+|one|two|three|four|five|six|seven|eight)/i, field: "passengers" },
+    { pattern: /(?:it's|there's|there are|there will be)\s+(\d+|one|two|three|four|five|six|seven|eight)\s+(?:passengers?|people|of us)/i, field: "passengers" },
+    { pattern: /(\d+|one|two|three|four|five|six|seven|eight)\s+passengers?\s+instead/i, field: "passengers" },
+    
+    // Time amendments
+    { pattern: /(?:change|update|modify)\s+(?:the\s+)?(?:pickup\s+)?time\s+to\s+(.+)/i, field: "pickupTime" },
+    { pattern: /(?:i need|i want)\s+(?:the taxi|it)\s+(?:at|for|by)\s+(.+)\s+instead/i, field: "pickupTime" },
+    { pattern: /(?:make it|book it)\s+(?:for|at)\s+(.+)\s+instead/i, field: "pickupTime" },
+  ];
+  
+  for (const { pattern, field } of amendmentPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && field) {
+      let newValue = match[1].trim().replace(/[.,!?]+$/, "");
+      
+      // For passengers, convert word to number
+      if (field === "passengers") {
+        const wordToNum: Record<string, string> = {
+          one: "1", two: "2", three: "3", four: "4", five: "5",
+          six: "6", seven: "7", eight: "8", nine: "9", ten: "10"
+        };
+        const lowerVal = newValue.toLowerCase();
+        if (wordToNum[lowerVal]) {
+          newValue = wordToNum[lowerVal];
+        }
+      }
+      
+      // Validate the value isn't too short to be a real address (for address fields)
+      if ((field === "pickup" || field === "destination") && newValue.length < 3) {
+        continue;
+      }
+      
+      console.log(`[Amendment] Detected ${field} change to: "${newValue}"`);
+      return { field, newValue };
+    }
+  }
+  
+  return { field: null, newValue: "" };
+}
+
 // "TRUST ADA'S FIRST ECHO" MODE
 // When Ada immediately acknowledges an address (e.g., "Got it, 18 Exmoor Road"),
 // extract that as the canonical value. Ada's interpretation is often more accurate
@@ -2737,6 +2808,62 @@ Otherwise, say goodbye warmly and call end_call().`
             const stepNameForThisAnswer = getCurrentStepName(stepIndexForThisAnswer);
             console.log(`[${callId}] 👤 User answer for step ${stepIndexForThisAnswer} (${stepNameForThisAnswer}): "${userText}"`);
             
+            // ═══════════════════════════════════════════════════════════════════════════
+            // AMENDMENT DETECTION: Allow user to modify any field even if already set
+            // Patterns: "change my pickup to...", "I want to change the destination...", etc.
+            // ═══════════════════════════════════════════════════════════════════════════
+            const amendmentResult = detectAmendment(userText, sessionState.booking);
+            
+            if (amendmentResult.field && amendmentResult.newValue) {
+              const fieldKey = amendmentResult.field as keyof typeof sessionState.booking;
+              const oldValue = sessionState.booking[fieldKey];
+              console.log(`[${callId}] 📝 AMENDMENT DETECTED: ${amendmentResult.field} "${oldValue}" → "${amendmentResult.newValue}"`);
+              
+              // Update the booking state immediately with the amendment
+              if (amendmentResult.field === "pickup") {
+                sessionState.booking.pickup = amendmentResult.newValue;
+              } else if (amendmentResult.field === "destination") {
+                sessionState.booking.destination = amendmentResult.newValue;
+              } else if (amendmentResult.field === "passengers") {
+                const num = parseInt(amendmentResult.newValue, 10);
+                if (!isNaN(num)) sessionState.booking.passengers = num;
+              } else if (amendmentResult.field === "pickupTime") {
+                sessionState.booking.pickupTime = amendmentResult.newValue;
+              }
+              
+              // Add to history with amendment annotation
+              sessionState.conversationHistory.push({
+                role: "user",
+                content: `[AMENDMENT: User changed ${amendmentResult.field} to "${amendmentResult.newValue}"] ${userText}`,
+                timestamp: Date.now()
+              });
+              
+              // Tell OpenAI about the amendment with FULL context for proper handling
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[BOOKING AMENDMENT] The user just changed their ${amendmentResult.field} to: "${amendmentResult.newValue}".
+                    
+UPDATED BOOKING STATE:
+- Pickup: ${sessionState.booking.pickup || "not set"}
+- Destination: ${sessionState.booking.destination || "not set"}  
+- Passengers: ${sessionState.booking.passengers ?? "not set"}
+- Time: ${sessionState.booking.pickupTime || "not set"}
+
+Acknowledge the change briefly (e.g., "No problem, I've updated that to [new value]") and continue. If all fields are complete, summarize the updated booking.`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              
+              await updateLiveCall(sessionState);
+              break; // Amendment handled, don't run normal state machine flow
+            }
+            
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
               userText, 
@@ -2976,18 +3103,51 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
           
           if (toolName === "sync_booking_data") {
             // Update booking state from tool call
-            if (toolArgs.pickup) sessionState.booking.pickup = String(toolArgs.pickup);
-            if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
+            // PROTECTION: Don't let AI overwrite a longer address with a truncated one
+            // This prevents "52A David Road" being replaced with "28" or "52A"
+            const proposedPickup = toolArgs.pickup ? String(toolArgs.pickup) : null;
+            const proposedDest = toolArgs.destination ? String(toolArgs.destination) : null;
+            
+            // Only update pickup if: (1) we don't have one, or (2) proposed is longer/has more words
+            if (proposedPickup) {
+              const currentLen = (sessionState.booking.pickup || "").length;
+              const proposedLen = proposedPickup.length;
+              const currentWords = (sessionState.booking.pickup || "").split(/\s+/).length;
+              const proposedWords = proposedPickup.split(/\s+/).length;
+              
+              if (!sessionState.booking.pickup || proposedLen >= currentLen || proposedWords >= currentWords) {
+                sessionState.booking.pickup = proposedPickup;
+                console.log(`[${callId}] 📊 sync_booking_data: pickup updated to "${proposedPickup}"`);
+              } else {
+                console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED pickup "${proposedPickup}" (shorter than current "${sessionState.booking.pickup}")`);
+              }
+            }
+            
+            // Same protection for destination
+            if (proposedDest) {
+              const currentLen = (sessionState.booking.destination || "").length;
+              const proposedLen = proposedDest.length;
+              const currentWords = (sessionState.booking.destination || "").split(/\s+/).length;
+              const proposedWords = proposedDest.split(/\s+/).length;
+              
+              if (!sessionState.booking.destination || proposedLen >= currentLen || proposedWords >= currentWords) {
+                sessionState.booking.destination = proposedDest;
+                console.log(`[${callId}] 📊 sync_booking_data: destination updated to "${proposedDest}"`);
+              } else {
+                console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED destination "${proposedDest}" (shorter than current "${sessionState.booking.destination}")`);
+              }
+            }
+            
             if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
             if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
             if (toolArgs.last_question_asked) {
               sessionState.lastQuestionAsked = toolArgs.last_question_asked as SessionState["lastQuestionAsked"];
             }
             
-            console.log(`[${callId}] 📊 Booking state updated:`, sessionState.booking);
+            console.log(`[${callId}] 📊 Booking state after sync:`, sessionState.booking);
             await updateLiveCall(sessionState);
             
-            // Send tool result
+            // Send tool result with FULL context for amendments
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -2996,7 +3156,9 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
                 output: JSON.stringify({ 
                   success: true, 
                   current_state: sessionState.booking,
-                  next_question: sessionState.lastQuestionAsked
+                  next_question: sessionState.lastQuestionAsked,
+                  // Context pairing for amendments - AI needs to know what's already set
+                  context: `Current booking: pickup="${sessionState.booking.pickup || "not set"}", destination="${sessionState.booking.destination || "not set"}", passengers=${sessionState.booking.passengers ?? "not set"}, time="${sessionState.booking.pickupTime || "not set"}"`
                 })
               }
             }));
