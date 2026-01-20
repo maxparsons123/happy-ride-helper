@@ -1737,10 +1737,13 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   // ═══════════════════════════════════════════════════════════════════════════
   // Keep-alive heartbeat to prevent WebSocket idle timeout during long silences
   // (e.g., waiting for user confirmation after fare quote)
+  //
+  // NOTE: Some network paths/proxies drop idle WebSockets aggressively.
+  // A shorter interval helps prevent Ada audio from being cut off mid-session.
   // ═══════════════════════════════════════════════════════════════════════════
-  const KEEPALIVE_INTERVAL_MS = 15000; // Send heartbeat every 15 seconds
+  const KEEPALIVE_INTERVAL_MS = 8000; // 8s heartbeat (was 15s)
   let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
-  
+
   keepaliveInterval = setInterval(() => {
     if (cleanedUp || socket.readyState !== WebSocket.OPEN) {
       if (keepaliveInterval) {
@@ -1749,13 +1752,15 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       }
       return;
     }
-    
+
     try {
-      socket.send(JSON.stringify({
-        type: "keepalive",
-        timestamp: Date.now(),
-        call_id: callId
-      }));
+      socket.send(
+        JSON.stringify({
+          type: "keepalive",
+          timestamp: Date.now(),
+          call_id: callId,
+        }),
+      );
     } catch (e) {
       console.error(`[${callId}] ⚠️ Keepalive send failed:`, e);
     }
