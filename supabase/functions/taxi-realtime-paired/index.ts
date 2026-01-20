@@ -2079,10 +2079,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Match taxi-realtime-simple settings for consistent quality
+          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
           threshold: 0.5,
           prefix_padding_ms: 300,
-          silence_duration_ms: 1200,
+          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
         },
         tools: TOOLS,
         tool_choice: "auto",
@@ -2141,8 +2141,20 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           console.log(`[${callId}] 🎤 Response started`);
           break;
           
+        case "input_audio_buffer.committed":
+          // User started speaking - cancel any ongoing AI response for natural interruption
+          if (sessionState.openAiResponseActive) {
+            console.log(`[${callId}] 🗣️ User interrupted (buffer committed) - cancelling AI response`);
+            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+          }
+          break;
+
         case "error":
           console.error(`[${callId}] ❌ OpenAI error:`, JSON.stringify(data));
+          // Forward error to client so bridge can handle appropriately
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "error", message: data.error?.message || "Unknown OpenAI error" }));
+          }
           break;
 
         case "response.audio.delta":
