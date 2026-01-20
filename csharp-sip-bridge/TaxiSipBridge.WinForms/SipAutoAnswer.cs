@@ -26,6 +26,12 @@ public class SipAutoAnswer : IDisposable
     private volatile bool _disposed;
     private IPAddress? _localIp;
 
+    // 2-way audio safety: prevent echo by muting SIP→Ada while Ada is speaking
+    private volatile bool _isBotSpeaking = false;
+    private const int RMS_NOISE_FLOOR = 650;  // Below this = background noise, skip
+    private const int RMS_ECHO_CEILING = 20000; // Above this = likely echo/clipping
+    private const int GREETING_PROTECTION_PACKETS = 150; // ~3 seconds @ 20ms packets
+
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
     public event Action<string, string>? OnCallStarted;
@@ -358,6 +364,9 @@ public class SipAutoAnswer : IDisposable
                 {
                     if (cts.Token.IsCancellationRequested) return;
 
+                    // Set bot-speaking flag when Ada starts sending audio
+                    _isBotSpeaking = true;
+
                     chunkCount++;
                     if (chunkCount <= 5)
                         Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
@@ -374,7 +383,16 @@ public class SipAutoAnswer : IDisposable
                     responseEvt.AddEventHandler(_adaClient, responseHandler);
                 }
 
-                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio (reflection)");
+                // Wire up queue empty detection to clear bot-speaking flag
+                if (_adaAudioSource != null)
+                {
+                    _adaAudioSource.OnQueueEmpty += () =>
+                    {
+                        _isBotSpeaking = false;
+                    };
+                }
+
+                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio (reflection) + bot-speaking protection");
                 return;
             }
 
@@ -432,13 +450,15 @@ public class SipAutoAnswer : IDisposable
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
     {
-        Log($"🔧 [{callId}] Wiring RTP input handler...");
+        Log($"🔧 [{callId}] Wiring RTP input handler with RMS gating...");
 
         int rtpPackets = 0;
         int sentToAda = 0;
         int skippedNoClient = 0;
         int skippedNotConnected = 0;
-        const int FLUSH_PACKETS = 25;
+        int skippedBotSpeaking = 0;
+        int skippedLowRms = 0;
+        int skippedHighRms = 0;
         DateTime lastStats = DateTime.Now;
 
         mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
@@ -454,11 +474,18 @@ public class SipAutoAnswer : IDisposable
             if (rtpPackets % 100 == 0)
                 Log($"📥 [{callId}] RTP total: {rtpPackets}");
 
-            // Give the UAS a moment to settle before forwarding to Ada.
-            if (rtpPackets <= FLUSH_PACKETS) return;
+            // Greeting protection: skip first ~3 seconds to let Ada's greeting play
+            if (rtpPackets <= GREETING_PROTECTION_PACKETS) return;
 
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
+
+            // Bot-speaking protection: don't forward audio while Ada is speaking (prevents echo)
+            if (_isBotSpeaking)
+            {
+                skippedBotSpeaking++;
+                return;
+            }
 
             try
             {
@@ -479,16 +506,44 @@ public class SipAutoAnswer : IDisposable
                     return;
                 }
 
+                // RMS-based noise gate: only forward if audio is meaningful speech
+                // Decode mu-law/A-law and calculate RMS
+                bool isMuLaw = rtp.Header.PayloadType == 0;
+                long sumOfSquares = 0;
+                
+                for (int i = 0; i < payload.Length; i++)
+                {
+                    short sample = isMuLaw
+                        ? MuLawDecode(payload[i])
+                        : ALawDecode(payload[i]);
+                    sumOfSquares += (long)sample * sample;
+                }
+                
+                double rms = Math.Sqrt(sumOfSquares / (double)payload.Length);
+
+                // Filter: too quiet = noise, too loud = echo/clipping
+                if (rms < RMS_NOISE_FLOOR)
+                {
+                    skippedLowRms++;
+                    return;
+                }
+                
+                if (rms > RMS_ECHO_CEILING)
+                {
+                    skippedHighRms++;
+                    return;
+                }
+
                 if (!cts.Token.IsCancellationRequested)
                 {
                     await client.SendMuLawAsync(payload);
                     sentToAda++;
                     
-                    if (sentToAda <= 3)
-                        Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b");
-                    else if ((DateTime.Now - lastStats).TotalSeconds >= 3)
+                    if (sentToAda <= 5)
+                        Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b, RMS={rms:F0}");
+                    else if ((DateTime.Now - lastStats).TotalSeconds >= 5)
                     {
-                        Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, noClient={skippedNoClient}, notConn={skippedNotConnected}");
+                        Log($"📤 [{callId}] RTP→Ada: sent={sentToAda}, botSpeak={skippedBotSpeaking}, lowRms={skippedLowRms}, highRms={skippedHighRms}");
                         lastStats = DateTime.Now;
                     }
                 }
@@ -499,6 +554,29 @@ public class SipAutoAnswer : IDisposable
                 Log($"⚠️ [{callId}] RTP→Ada error: {ex.Message}");
             }
         };
+    }
+
+    // Simple mu-law decode (inline for performance)
+    private static short MuLawDecode(byte mulaw)
+    {
+        mulaw = (byte)~mulaw;
+        int sign = (mulaw & 0x80) != 0 ? -1 : 1;
+        int exponent = (mulaw >> 4) & 0x07;
+        int mantissa = mulaw & 0x0F;
+        return (short)(sign * (((mantissa << 3) + 0x84) << exponent) - 0x84);
+    }
+
+    // Simple A-law decode (inline for performance)
+    private static short ALawDecode(byte alaw)
+    {
+        alaw ^= 0x55;
+        int sign = (alaw & 0x80) != 0 ? -1 : 1;
+        int exponent = (alaw >> 4) & 0x07;
+        int mantissa = alaw & 0x0F;
+        int magnitude = exponent == 0
+            ? (mantissa << 4) + 8
+            : ((mantissa << 4) + 0x108) << (exponent - 1);
+        return (short)(sign * magnitude);
     }
 
     private async Task WaitForCallEnd(CancellationToken ct)

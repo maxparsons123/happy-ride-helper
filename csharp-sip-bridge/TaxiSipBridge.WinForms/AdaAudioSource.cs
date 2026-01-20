@@ -62,6 +62,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     
     // Debug logging
     public event Action<string>? OnDebugLog;
+    
+    // Fires when audio queue becomes empty (bot finished speaking)
+    public event Action? OnQueueEmpty;
+    private bool _wasQueueEmpty = true; // Track state to fire only on transition
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60)
     {
@@ -154,6 +158,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
             _pcmQueue.Enqueue(frame);
             _enqueuedFrames++;
+            _wasQueueEmpty = false; // Mark that we have audio
             frameCount++;
         }
 
@@ -449,6 +454,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
             _silenceFrames++;
             _lastFrameWasSilence = true;
             _lastOutputSample = 0;
+
+            // Fire OnQueueEmpty event when transitioning from audio to silence
+            if (!_wasQueueEmpty)
+            {
+                _wasQueueEmpty = true;
+                OnQueueEmpty?.Invoke();
+            }
 
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
