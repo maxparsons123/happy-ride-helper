@@ -259,11 +259,6 @@ public class SipAutoAnswer : IDisposable
 
         LogNegotiatedCodec(callId, mediaSession);
 
-        // Start AudioExtrasSource and set to None (we inject audio externally)
-        Log($"🔊 [{callId}] Starting AudioExtrasSource...");
-        await mediaSession.AudioExtrasSource.StartAudio();
-        mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
-
         return mediaSession;
     }
 
@@ -308,37 +303,41 @@ public class SipAutoAnswer : IDisposable
                     if (cts.Token.IsCancellationRequested) return;
 
                     chunkCount++;
-                    if (chunkCount <= 3)
+                    if (chunkCount <= 5)
                         Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
 
                     try
                     {
                         // Convert bytes to shorts (24kHz PCM16)
-                        var pcm24 = new short[pcmBytes.Length / 2];
-                        Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
+                        var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
 
-                        // Resample to negotiated rate and inject
-                        int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
-                        var resampled = Resample(pcm24, 24000, targetRate);
-                        var samplingRate = targetRate == 8000
-                            ? AudioSamplingRatesEnum.Rate8KHz
-                            : AudioSamplingRatesEnum.Rate16KHz;
+                        // Resample 24kHz → 8kHz
+                        var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
 
-                        mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                        // Encode to mu-law
+                        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-                        if (chunkCount <= 3)
-                            Log($"📤 [{callId}] Injected {resampled.Length} samples @ {targetRate}Hz");
+                        // Send via RTP using SendAudio (duration in RTP units = sample count)
+                        uint durationRtpUnits = (uint)ulaw.Length;
+                        mediaSession.SendAudio(durationRtpUnits, ulaw);
+
+                        if (chunkCount <= 5)
+                            Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
                     }
                     catch (Exception ex)
                     {
-                        if (chunkCount <= 3)
-                            Log($"⚠️ [{callId}] Audio inject error: {ex.Message}");
+                        if (chunkCount <= 5)
+                            Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
                     }
                 };
 
                 evt.AddEventHandler(_adaClient, handler);
-                Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio (reflection)");
+                Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio → SendAudio");
                 return;
+            }
+            else
+            {
+                Log($"⚠️ [{callId}] OnPcm24Audio event not found on AdaAudioClient");
             }
         }
         catch (Exception ex)
@@ -346,11 +345,12 @@ public class SipAutoAnswer : IDisposable
             Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio: {ex.Message}");
         }
 
-        // Fallback: poll mu-law frames produced by AdaAudioClient and inject them.
-        Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback");
+        // Fallback: poll mu-law frames produced by AdaAudioClient
+        Log($"⚠️ [{callId}] Using mu-law polling fallback → SendAudio");
 
         _ = Task.Run(async () =>
         {
+            int fallbackChunks = 0;
             while (!cts.IsCancellationRequested && !_disposed)
             {
                 byte[]? ulaw = null;
@@ -366,16 +366,17 @@ public class SipAutoAnswer : IDisposable
                     continue;
                 }
 
+                fallbackChunks++;
+                if (fallbackChunks <= 5)
+                    Log($"🔊 [{callId}] Fallback ulaw #{fallbackChunks}: {ulaw.Length}b");
+
                 try
                 {
-                    var pcm8k = AudioCodecs.MuLawDecode(ulaw);
-                    int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
-                    var resampled = Resample(pcm8k, 8000, targetRate);
-                    var samplingRate = targetRate == 8000
-                        ? AudioSamplingRatesEnum.Rate8KHz
-                        : AudioSamplingRatesEnum.Rate16KHz;
+                    uint durationRtpUnits = (uint)ulaw.Length;
+                    mediaSession.SendAudio(durationRtpUnits, ulaw);
 
-                    mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                    if (fallbackChunks <= 5)
+                        Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio (fallback)");
                 }
                 catch (OperationCanceledException)
                 {
