@@ -246,19 +246,29 @@ public class AdaAudioClient : IDisposable
             switch (type)
             {
                 case "response.audio.delta":
+                case "audio":  // Also handle direct "audio" type from some edge functions
+                    // Try both "delta" (OpenAI format) and "audio" (direct format)
+                    JsonElement? audioData = null;
                     if (doc.RootElement.TryGetProperty("delta", out var delta))
+                        audioData = delta;
+                    else if (doc.RootElement.TryGetProperty("audio", out var audio))
+                        audioData = audio;
+                    
+                    if (audioData.HasValue)
                     {
-                        var base64 = delta.GetString();
+                        var base64 = audioData.Value.GetString();
                         if (!string.IsNullOrEmpty(base64))
                         {
                             var pcmBytes = Convert.FromBase64String(base64);
                             _audioDeltas++;
                             _totalAudioBytes += pcmBytes.Length;
                             
-                            // Log stats every 3 seconds
-                            if ((DateTime.Now - _lastAudioStats).TotalSeconds >= 3)
+                            // Log first few and then stats every 3 seconds
+                            if (_audioDeltas <= 3)
+                                Log($"🔊 Ada audio #{_audioDeltas}: {pcmBytes.Length}b");
+                            else if ((DateTime.Now - _lastAudioStats).TotalSeconds >= 3)
                             {
-                                Log($"📊 WS Audio: deltas={_audioDeltas}, bytes={_totalAudioBytes}, last={pcmBytes.Length}b");
+                                Log($"📊 WS Audio: deltas={_audioDeltas}, bytes={_totalAudioBytes}");
                                 _lastAudioStats = DateTime.Now;
                             }
                             
