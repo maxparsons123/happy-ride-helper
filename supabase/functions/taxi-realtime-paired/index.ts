@@ -905,6 +905,16 @@ const STT_CORRECTIONS: Record<string, string> = {
   "fright": "eight",
   "fate": "eight",
   
+  // Telephony mishearings of "three" (common)
+  "boston juice": "three",
+  "bossing juice": "three",
+  "boston jews": "three",
+  "boston use": "three",
+  "boss in juice": "three",
+  "as many as possible": "three", // Context: asked how many, likely a number mishearing
+  "free of us": "three of us",
+  "tree of us": "three of us",
+  
   // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
   "fore passengers": "4 passengers",
@@ -3004,7 +3014,33 @@ Ask: "Sorry, I need the number of passengers traveling. How many will there be?"
                     answerSaved = true;
                     console.log(`[${callId}] ✅ STATE MACHINE: Step 2 (passengers) COMPLETE → ${parsedCount}`);
                   } else {
-                    console.log(`[${callId}] ⚠️ Could not parse passenger count from: "${userText}"`);
+                    console.log(`[${callId}] ⚠️ Could not parse passenger count from: "${userText}" - forcing re-prompt`);
+                    
+                    // CRITICAL: Force re-prompt to prevent AI from hallucinating a value
+                    // This blocks advancement until we get a valid number
+                    sessionState.conversationHistory.push({
+                      role: "user",
+                      content: `[CONTEXT: Ada asked for passengers but got unparseable answer] ${userText}`,
+                      timestamp: Date.now()
+                    });
+                    
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[PASSENGER COUNT NEEDED] I couldn't understand the number of passengers from: "${userText}".
+                          
+CRITICAL: Do NOT make up a passenger count. Do NOT say "4 passengers" or any other number unless the user explicitly said it.
+Ask clearly: "Sorry, I didn't catch that. How many passengers will be traveling?" and WAIT for a number.`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    await updateLiveCall(sessionState);
+                    // Don't break here - let it fall through but answerSaved stays false
                   }
                   break;
                   
