@@ -25,14 +25,18 @@
     <Compile Include="MainForm.Designer.cs">
       <DependentUpon>MainForm.cs</DependentUpon>
     </Compile>
+    <Compile Include="SipAdaBridgeConfig.cs" />
     <Compile Include="SipAutoAnswer.cs" />
     <Compile Include="AdaAudioClient.cs" />
     <Compile Include="AdaAudioSource.cs" />
     <Compile Include="AudioCodecs.cs" />
     <Compile Include="AudioMonitor.cs" />
-    <Compile Include="SipAdaBridgeConfig.cs" />
     <Compile Include="SipAdaBridge.cs" />
     <Compile Include="OpusAudioEncoder.cs" />
+    <Compile Include="IAudioAIClient.cs" />
+    <Compile Include="AIClientFactory.cs" />
+    <Compile Include="OpenAIRealtimeClient.cs" />
+    <Compile Include="PassthroughWebhook.cs" />
   </ItemGroup>
 
 </Project>
