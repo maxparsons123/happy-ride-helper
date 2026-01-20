@@ -25,15 +25,25 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _needsFadeIn = true;
     private volatile bool _disposed;
 
+    // Debug counters
+    private int _enqueuedFrames = 0;
+    private int _sentFrames = 0;
+    private int _silenceFrames = 0;
+    private DateTime _lastStatsLog = DateTime.MinValue;
+
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
     public event SourceErrorDelegate? OnAudioSourceError;
     public event Action<EncodedAudioFrame>? OnAudioSourceEncodedFrameReady { add { } remove { } }
+    
+    // Debug logging event
+    public event Action<string>? OnDebugLog;
 
     public AdaAudioSource()
     {
         _audioEncoder = new AudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
+        DebugLog("🔧 AdaAudioSource created");
     }
 
     public List<AudioFormat> GetAudioSourceFormats() => _audioFormatManager.GetSourceFormats();
@@ -41,6 +51,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void SetAudioSourceFormat(AudioFormat audioFormat)
     {
         _audioFormatManager.SetSelectedFormat(audioFormat);
+        DebugLog($"🎵 Format set: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz");
     }
 
     public void RestrictFormats(Func<AudioFormat, bool> filter)
@@ -79,13 +90,28 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 pcm24[i] = (short)(pcm24[i] * gain);
             }
             _needsFadeIn = false;
+            DebugLog("🎚️ Applied fade-in");
         }
 
         // Bound the queue
+        int dropped = 0;
         while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
+        {
             _pcmQueue.TryDequeue(out _);
+            dropped++;
+        }
+        if (dropped > 0)
+            DebugLog($"⚠️ Queue overflow, dropped {dropped} frames");
 
         _pcmQueue.Enqueue(pcm24);
+        _enqueuedFrames++;
+
+        // Log stats every 5 seconds
+        if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 5)
+        {
+            DebugLog($"📊 Audio stats: enqueued={_enqueuedFrames}, sent={_sentFrames}, silence={_silenceFrames}, queue={_pcmQueue.Count}");
+            _lastStatsLog = DateTime.Now;
+        }
     }
 
     /// <summary>
@@ -94,6 +120,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void ResetFadeIn()
     {
         _needsFadeIn = true;
+        DebugLog("🔄 Fade-in reset (new response)");
     }
 
     /// <summary>
@@ -101,8 +128,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     /// </summary>
     public void ClearQueue()
     {
-        while (_pcmQueue.TryDequeue(out _)) { }
+        int cleared = 0;
+        while (_pcmQueue.TryDequeue(out _)) cleared++;
         _needsFadeIn = true;
+        if (cleared > 0)
+            DebugLog($"🗑️ Cleared {cleared} queued frames");
     }
 
     public Task StartAudio()
@@ -114,6 +144,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             _isStarted = true;
             _sendTimer = new System.Threading.Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
+            DebugLog($"▶️ Audio timer started ({AUDIO_SAMPLE_PERIOD_MS}ms period)");
         }
 
         return Task.CompletedTask;
@@ -122,12 +153,14 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public Task PauseAudio()
     {
         _isPaused = true;
+        DebugLog("⏸️ Audio paused");
         return Task.CompletedTask;
     }
 
     public Task ResumeAudio()
     {
         _isPaused = false;
+        DebugLog("▶️ Audio resumed");
         return Task.CompletedTask;
     }
 
@@ -139,6 +172,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             _sendTimer?.Dispose();
             _sendTimer = null;
             ClearQueue();
+            DebugLog($"⏹️ Audio closed (total: enqueued={_enqueuedFrames}, sent={_sentFrames}, silence={_silenceFrames})");
         }
         return Task.CompletedTask;
     }
@@ -166,10 +200,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
             // Calculate RTP duration
             uint durationRtpUnits = (uint)(targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS);
 
+            _sentFrames++;
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
         catch (Exception ex)
         {
+            DebugLog($"❌ SendSample error: {ex.Message}");
             OnAudioSourceError?.Invoke($"AdaAudioSource error: {ex.Message}");
         }
     }
@@ -185,6 +221,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
             uint durationRtpUnits = (uint)(targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS);
 
+            _silenceFrames++;
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
         catch { }
@@ -216,11 +253,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return output;
     }
 
+    private void DebugLog(string message)
+    {
+        OnDebugLog?.Invoke($"[AdaAudioSource] {message}");
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
+        DebugLog("🗑️ Disposing AdaAudioSource");
         _sendTimer?.Dispose();
         ClearQueue();
 
