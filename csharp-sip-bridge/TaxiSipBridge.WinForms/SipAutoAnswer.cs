@@ -231,10 +231,13 @@ public class SipAutoAnswer : IDisposable
     {
         Log($"🔧 [{callId}] Creating VoIPMediaSession with Opus support...");
 
-        // Create Opus encoder to offer Opus as primary codec
+        // Create Opus encoder for manual encoding
         _opusEncoder = new OpusAudioEncoder();
 
-        var mediaSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = null, AudioSink = null }, _opusEncoder);
+        // Use restrictFormats to prefer Opus; VoIPMediaSession will offer formats from the encoder
+        var mediaSession = new VoIPMediaSession(
+            musicFilePath: null,
+            restrictFormats: fmt => fmt.Codec == AudioCodecsEnum.OPUS || fmt.Codec == AudioCodecsEnum.PCMU);
         mediaSession.AcceptRtpFromAny = true;
 
         // Disable AudioExtrasSource (hold music, etc.) - we inject audio via SendAudio
