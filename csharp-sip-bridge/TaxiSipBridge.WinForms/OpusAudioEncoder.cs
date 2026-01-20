@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Concentus.Structs;
 using Concentus.Enums;
 using SIPSorceryMedia.Abstractions;
@@ -74,16 +73,12 @@ public class OpusAudioEncoder : IAudioEncoder
     {
         lock (_encoderLock)
         {
-            if (_opusEncoder == null)
-            {
-                _opusEncoder = OpusEncoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
-                _opusEncoder.Bitrate = OPUS_BITRATE;
-                _opusEncoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
-                _opusEncoder.Complexity = 5;
-            }
+            _opusEncoder ??= OpusEncoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+            _opusEncoder.Bitrate = OPUS_BITRATE;
+            _opusEncoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
+            _opusEncoder.Complexity = 5;
 
             // Opus expects exactly 960 samples for 20ms at 48kHz
-            // If input is different, pad or truncate
             short[] frame;
             if (pcm.Length == OPUS_FRAME_SIZE)
             {
@@ -101,7 +96,12 @@ public class OpusAudioEncoder : IAudioEncoder
             }
 
             var outputBuffer = new byte[4000]; // Max Opus frame
-            int encodedLength = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outputBuffer, 0, outputBuffer.Length);
+            
+            // Use Span-based API
+            ReadOnlySpan<short> inputSpan = frame.AsSpan();
+            Span<byte> outputSpan = outputBuffer.AsSpan();
+            
+            int encodedLength = _opusEncoder.Encode(inputSpan, outputSpan, OPUS_FRAME_SIZE);
             
             var result = new byte[encodedLength];
             Array.Copy(outputBuffer, result, encodedLength);
@@ -113,13 +113,15 @@ public class OpusAudioEncoder : IAudioEncoder
     {
         lock (_decoderLock)
         {
-            if (_opusDecoder == null)
-            {
-                _opusDecoder = OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
-            }
+            _opusDecoder ??= OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
 
             var outputBuffer = new short[OPUS_FRAME_SIZE];
-            int decodedSamples = _opusDecoder.Decode(encodedSample, 0, encodedSample.Length, outputBuffer, 0, OPUS_FRAME_SIZE, false);
+            
+            // Use Span-based API
+            ReadOnlySpan<byte> inputSpan = encodedSample.AsSpan();
+            Span<short> outputSpan = outputBuffer.AsSpan();
+            
+            int decodedSamples = _opusDecoder.Decode(inputSpan, outputSpan, OPUS_FRAME_SIZE, false);
             
             if (decodedSamples < OPUS_FRAME_SIZE)
             {
