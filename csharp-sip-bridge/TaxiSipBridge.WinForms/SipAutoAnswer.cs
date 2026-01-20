@@ -25,6 +25,9 @@ public class SipAutoAnswer : IDisposable
     private volatile bool _disposed;
     private IPAddress? _localIp;
 
+    // Opus encoder for calls negotiated with Opus codec
+    private OpusAudioEncoder? _opusEncoder;
+
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
     public event Action<string, string>? OnCallStarted;
@@ -226,9 +229,12 @@ public class SipAutoAnswer : IDisposable
         string callId, SIPUserAgent ua, SIPRequest req, CancellationToken ct,
         Action<AudioFormat> onFormatNegotiated)
     {
-        Log($"🔧 [{callId}] Creating VoIPMediaSession...");
+        Log($"🔧 [{callId}] Creating VoIPMediaSession with Opus support...");
 
-        var mediaSession = new VoIPMediaSession();
+        // Create Opus encoder to offer Opus as primary codec
+        _opusEncoder = new OpusAudioEncoder();
+
+        var mediaSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = null, AudioSink = null }, _opusEncoder);
         mediaSession.AcceptRtpFromAny = true;
 
         // Disable AudioExtrasSource (hold music, etc.) - we inject audio via SendAudio
@@ -238,7 +244,7 @@ public class SipAutoAnswer : IDisposable
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
-            Log($"🎵 [{callId}] Audio format: {fmt.Codec} @ {fmt.ClockRate}Hz");
+            Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} @ {fmt.ClockRate}Hz (PT={fmt.RtpClockRate})");
         };
 
         _currentMediaSession = mediaSession;
@@ -293,9 +299,12 @@ public class SipAutoAnswer : IDisposable
         if (_adaClient == null) return;
 
         int chunkCount = 0;
+        bool isOpus = negotiatedFormat.Codec == AudioCodecsEnum.OPUS;
+        int targetRate = isOpus ? 48000 : 8000;
 
-        // Prefer streaming raw PCM audio if the client exposes it, but keep compatibility
-        // with older AdaAudioClient builds by using reflection.
+        Log($"🔧 [{callId}] Wiring Ada audio → {(isOpus ? "Opus" : "mu-law")} @ {targetRate}Hz");
+
+        // Prefer streaming raw PCM audio if the client exposes OnPcm24Audio event
         try
         {
             var evt = _adaClient.GetType().GetEvent("OnPcm24Audio");
@@ -311,16 +320,44 @@ public class SipAutoAnswer : IDisposable
 
                     try
                     {
-                        // 24kHz PCM16 -> 8kHz PCM16 -> mu-law
+                        // Convert bytes to shorts (24kHz PCM16)
                         var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
-                        var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
-                        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-                        uint durationRtpUnits = (uint)ulaw.Length;
-                        mediaSession.SendAudio(durationRtpUnits, ulaw);
+                        byte[] encoded;
+                        uint durationRtpUnits;
 
-                        if (chunkCount <= 5)
-                            Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
+                        if (isOpus)
+                        {
+                            // 24kHz → 48kHz for Opus
+                            var pcm48k = AudioCodecs.Resample(pcm24, 24000, 48000);
+
+                            // Opus expects 960 samples (20ms @ 48kHz)
+                            const int OPUS_FRAME = 960;
+                            for (int offset = 0; offset + OPUS_FRAME <= pcm48k.Length; offset += OPUS_FRAME)
+                            {
+                                var frame = new short[OPUS_FRAME];
+                                Array.Copy(pcm48k, offset, frame, 0, OPUS_FRAME);
+
+                                encoded = _opusEncoder!.EncodeAudio(frame, negotiatedFormat);
+                                durationRtpUnits = OPUS_FRAME; // 20ms @ 48kHz
+                                mediaSession.SendAudio(durationRtpUnits, encoded);
+
+                                if (chunkCount <= 5 && offset == 0)
+                                    Log($"📤 [{callId}] Sent Opus frame {encoded.Length}b");
+                            }
+                        }
+                        else
+                        {
+                            // 24kHz → 8kHz → mu-law
+                            var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
+                            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+
+                            durationRtpUnits = (uint)ulaw.Length;
+                            mediaSession.SendAudio(durationRtpUnits, ulaw);
+
+                            if (chunkCount <= 5)
+                                Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -341,7 +378,13 @@ public class SipAutoAnswer : IDisposable
             Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio; using fallback. Error: {ex.Message}");
         }
 
-        // Fallback: poll mu-law frames produced by AdaAudioClient (GetNextMuLawFrame)
+        // Fallback: poll mu-law frames (only works for G.711, not Opus)
+        if (isOpus)
+        {
+            Log($"⚠️ [{callId}] Cannot use mu-law fallback for Opus - no audio will be sent!");
+            return;
+        }
+
         _ = Task.Run(async () =>
         {
             int fallbackChunks = 0;
