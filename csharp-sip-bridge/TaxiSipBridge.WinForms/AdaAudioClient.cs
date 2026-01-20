@@ -50,8 +50,9 @@ public class AdaAudioClient : IDisposable
         var playbackFormat = new WaveFormat(24000, 16, 1);
         _playbackBuffer = new BufferedWaveProvider(playbackFormat)
         {
-            BufferDuration = TimeSpan.FromSeconds(3),
-            DiscardOnBufferOverflow = true
+            // Ada's full greeting can be 8-10 seconds - ensure enough buffer
+            BufferDuration = TimeSpan.FromSeconds(15),
+            DiscardOnBufferOverflow = false  // Block rather than silently lose audio
         };
 
         _waveOut = new WaveOutEvent { DesiredLatency = 100 };
