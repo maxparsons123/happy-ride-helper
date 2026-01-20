@@ -120,36 +120,39 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            var mediaEndPoints = new MediaEndPoints 
-            { 
-                AudioSource = null, 
-                AudioSink = null 
-            };
-            rtpSession = new VoIPMediaSession(mediaEndPoints);
+            // Create RTP session with PCMU codec for telephony
+            rtpSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = null, AudioSink = null });
             rtpSession.AcceptRtpFromAny = true;
-
+            
+            // Add PCMU audio format explicitly
+            var audioFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            
+            Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
 
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
                 await _sipTransport!.SendResponseAsync(ringing);
-                Log($"☎️ [{callId}] Sent 180 Ringing");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log($"⚠️ [{callId}] Ringing send failed: {ex.Message}");
+            }
 
-            await Task.Delay(300);
+            await Task.Delay(200);
 
+            Log($"📞 [{callId}] Answering call...");
             bool answered = await ua.Answer(uas, rtpSession);
             if (!answered)
             {
-                Log($"❌ [{callId}] Failed to answer call");
+                Log($"❌ [{callId}] Failed to answer - UAS state may be invalid");
                 OnCallEnded?.Invoke(callId);
                 return;
             }
 
             await rtpSession.Start();
-            Log($"📗 [{callId}] Call answered");
+            Log($"📗 [{callId}] Call answered and RTP started");
 
             ws = new ClientWebSocket();
             cts = new CancellationTokenSource();
