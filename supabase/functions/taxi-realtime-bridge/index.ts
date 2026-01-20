@@ -918,7 +918,9 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
   // Client message handler - PRIMARY: binary audio from Python bridge
   socket.onmessage = async (event) => {
     try {
-      // PRIMARY PATH: Raw binary audio from Python bridge (ulaw or PCM16)
+      // PRIMARY PATH: Raw binary audio from Python bridge
+      // Bridge sends: ulaw (160B) OR PCM16 8kHz (320B) OR PCM16 16kHz (640B)
+      // All have pre-emphasis already applied
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
         sessionState.audioPacketsReceived++;
         audioDiag.packetsReceived++;
@@ -927,37 +929,28 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
           ? new Uint8Array(event.data) 
           : event.data;
         
-        // Detect format: ulaw frames are typically 160 bytes (20ms @ 8kHz)
-        // PCM16 frames are typically 320 bytes (20ms @ 8kHz) or 640 bytes (20ms @ 16kHz)
-        const isUlaw = bytes.length === 160 || bytes.length === 320; // Standard ulaw frames
-        const isPcm16k = bytes.length === 640; // 16kHz PCM16
-        
         let pcm: Int16Array;
         let inputRate: number;
         
-        if (isUlaw && bytes.length === 160) {
-          // ulaw 8kHz
+        // Format detection based on frame size:
+        // - 160 bytes = ulaw @ 8kHz (20ms frame)
+        // - 320 bytes = PCM16 @ 8kHz (20ms frame = 160 samples × 2 bytes)
+        // - 640 bytes = PCM16 @ 16kHz (20ms frame = 320 samples × 2 bytes)
+        if (bytes.length === 160) {
+          // ulaw 8kHz - needs decoding
           pcm = ulawToPcm16(bytes);
           inputRate = 8000;
         } else if (bytes.length === 320) {
-          // Could be ulaw doubled or PCM16 8kHz - check if it looks like PCM
-          // PCM16 has wider range, ulaw is compressed
-          const firstWord = (bytes[1] << 8) | bytes[0];
-          if (firstWord > 0x7F00 || firstWord < 0x0100) {
-            // Likely ulaw (values cluster around 0x00-0xFF range after decode)
-            pcm = ulawToPcm16(bytes);
-            inputRate = 8000;
-          } else {
-            // Likely PCM16
-            pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
-            inputRate = 8000;
-          }
-        } else if (isPcm16k) {
+          // PCM16 @ 8kHz - already linear PCM, just reinterpret
+          pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+          inputRate = 8000;
+        } else if (bytes.length === 640) {
           // PCM16 @ 16kHz
           pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
           inputRate = 16000;
         } else {
-          // Default: treat as ulaw
+          // Unknown size - try ulaw decode as fallback
+          console.log(`[${callId}] ⚠️ Unknown frame size: ${bytes.length}B`);
           pcm = ulawToPcm16(bytes);
           inputRate = 8000;
         }
@@ -1015,9 +1008,9 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
           if (sessionState.openAiResponseActive || !awaitingYesNo) return;
         }
         
-        // Apply pre-emphasis, then resample to 24kHz
-        const pcmEmph = applyPreEmphasis(pcm);
-        const pcm24k = resamplePcm16To24k(pcmEmph, inputRate);
+        // NOTE: Python bridge already applies pre-emphasis, so we skip it here
+        // Just resample to 24kHz for OpenAI
+        const pcm24k = resamplePcm16To24k(pcm, inputRate);
         const base64Audio = pcm16ToBase64(pcm24k);
         
         // Forward to OpenAI

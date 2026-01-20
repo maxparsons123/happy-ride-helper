@@ -45,7 +45,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 import os
 
 # HARDCODED: Correct WebSocket URL with .functions subdomain for reliable streaming
-WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-bridge"
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
