@@ -61,7 +61,20 @@ public class AdaAudioClient : IDisposable
         Log("🔊 Audio playback initialized (24kHz)");
 
         _ws = new ClientWebSocket();
-        var uri = new Uri($"{_wsUrl}?caller={Uri.EscapeDataString(caller ?? "desktop")}");
+        
+        // Build URI - only add caller param if URL doesn't already have query params
+        string uriString;
+        if (_wsUrl.Contains("?"))
+        {
+            // URL already has query params, append with &
+            uriString = $"{_wsUrl}&caller={Uri.EscapeDataString(caller ?? "desktop")}";
+        }
+        else
+        {
+            // No query params yet, start with ?
+            uriString = $"{_wsUrl}?caller={Uri.EscapeDataString(caller ?? "desktop")}";
+        }
+        var uri = new Uri(uriString);
 
         Log($"🔌 Connecting to Ada: {uri}");
         await _ws.ConnectAsync(uri, _cts.Token);

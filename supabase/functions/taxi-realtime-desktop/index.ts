@@ -549,7 +549,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         content: [{ type: "input_text", text: `[DISPATCH QUOTE]: "${message}". Ask if they want to proceed. On YES → call book_taxi(action:"confirmed"). On NO → ask if anything else.` }]
       }
     }));
-    openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+    openaiWs.send(JSON.stringify({ type: "response.create" }));
     
     sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
@@ -576,7 +576,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         content: [{ type: "input_text", text: `[BOOKING CONFIRMED]: "${message}". Say goodbye and call end_call().` }]
       }
     }));
-    openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+    openaiWs.send(JSON.stringify({ type: "response.create" }));
   });
   
   dispatchChannel.subscribe((status) => {
@@ -609,7 +609,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       item: {
         type: "message",
         role: "assistant",
-        content: [{ type: "text", text: fullGreeting }]
+        content: [{ type: "output_text", text: fullGreeting }]
       }
     }));
     
@@ -618,7 +618,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     
     openaiWs.send(JSON.stringify({
       type: "response.create",
-      response: { modalities: ["audio", "text"], instructions: `Say exactly: "${fullGreeting}"` }
+      response: { instructions: `Say exactly: "${fullGreeting}"` }
     }));
     
     updateLiveCall(sessionState);
@@ -640,12 +640,13 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
           openaiWs!.send(JSON.stringify({
             type: "session.update",
             session: {
+              type: "session",
               modalities: ["audio", "text"],
               instructions: buildSystemPrompt(sessionState.language),
               voice: VOICE,
               input_audio_format: "pcm16",
               output_audio_format: "pcm16",
-              input_audio_transcription: { model: "whisper-1" },
+              input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
               turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 1200 },
               tools: TOOLS,
               tool_choice: "auto",
@@ -785,7 +786,7 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
               }));
               openaiWs!.send(JSON.stringify({
                 type: "response.create",
-                response: { modalities: ["audio", "text"], instructions: "Say: 'One moment please while I check that for you.' Then STOP." }
+                response: { instructions: "Say: 'One moment please while I check that for you.' Then STOP." }
               }));
               
             } else if (action === "confirmed") {
@@ -832,7 +833,7 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
                   })
                 }
               }));
-              openaiWs!.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
               
               await updateLiveCall(sessionState);
             }
