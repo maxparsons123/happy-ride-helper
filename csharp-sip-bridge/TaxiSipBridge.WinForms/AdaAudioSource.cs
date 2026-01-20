@@ -222,9 +222,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
             else if (_pcmQueue.TryDequeue(out var pcm24))
             {
-                // Resample 24kHz → selected codec rate with de-emphasis for natural sound
-                var resampled = AudioCodecs.Resample(pcm24, 24000, targetRate);
-                audioFrame = AudioCodecs.ApplyDeEmphasis(resampled);
+                // Resample 24kHz → selected codec rate (skip de-emphasis to avoid crackling)
+                audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
 
                 // Hard-enforce exact 20ms frame size for RTP
                 if (audioFrame.Length != samplesNeeded)
