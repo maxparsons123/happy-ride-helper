@@ -96,12 +96,10 @@ public class OpusAudioEncoder : IAudioEncoder
             }
 
             var outputBuffer = new byte[4000]; // Max Opus frame
-            
-            // Use Span-based API
-            ReadOnlySpan<short> inputSpan = frame.AsSpan();
-            Span<byte> outputSpan = outputBuffer.AsSpan();
-            
-            int encodedLength = _opusEncoder.Encode(inputSpan, outputSpan, OPUS_FRAME_SIZE);
+
+#pragma warning disable CS0618 // Concentus: prefer Span overloads when available
+            int encodedLength = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outputBuffer, 0, outputBuffer.Length);
+#pragma warning restore CS0618
             
             var result = new byte[encodedLength];
             Array.Copy(outputBuffer, result, encodedLength);
@@ -116,12 +114,10 @@ public class OpusAudioEncoder : IAudioEncoder
             _opusDecoder ??= OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
 
             var outputBuffer = new short[OPUS_FRAME_SIZE];
-            
-            // Use Span-based API
-            ReadOnlySpan<byte> inputSpan = encodedSample.AsSpan();
-            Span<short> outputSpan = outputBuffer.AsSpan();
-            
-            int decodedSamples = _opusDecoder.Decode(inputSpan, outputSpan, OPUS_FRAME_SIZE, false);
+
+#pragma warning disable CS0618 // Concentus: prefer Span overloads when available
+            int decodedSamples = _opusDecoder.Decode(encodedSample, 0, encodedSample.Length, outputBuffer, 0, OPUS_FRAME_SIZE, false);
+#pragma warning restore CS0618
             
             if (decodedSamples < OPUS_FRAME_SIZE)
             {
