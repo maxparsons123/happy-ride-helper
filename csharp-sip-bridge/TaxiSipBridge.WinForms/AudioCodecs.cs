@@ -1,11 +1,17 @@
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Audio codec utilities for µ-law encoding/decoding and resampling.
+/// Audio codec utilities for µ-law encoding/decoding and high-quality resampling.
 /// Used for converting between OpenAI Realtime API format (24kHz PCM16) and SIP telephony (8kHz µ-law).
 /// </summary>
 public static class AudioCodecs
 {
+    // Pre-emphasis coefficient - boosts high frequencies for better consonant clarity
+    private const float PRE_EMPHASIS = 0.97f;
+    
+    // De-emphasis coefficient - restores natural frequency balance after processing
+    private const float DE_EMPHASIS = 0.97f;
+
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
     /// </summary>
@@ -43,34 +49,187 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// Simple linear resampling between sample rates.
+    /// Apply pre-emphasis filter to boost high frequencies (consonants).
+    /// Use before upsampling for better STT accuracy.
+    /// y[n] = x[n] - α * x[n-1]
+    /// </summary>
+    public static short[] ApplyPreEmphasis(short[] input)
+    {
+        if (input.Length == 0) return input;
+        
+        var output = new short[input.Length];
+        output[0] = input[0];
+        
+        for (int i = 1; i < input.Length; i++)
+        {
+            float val = input[i] - PRE_EMPHASIS * input[i - 1];
+            output[i] = SoftClip(val);
+        }
+        
+        return output;
+    }
+
+    /// <summary>
+    /// Apply de-emphasis filter to restore natural frequency balance.
+    /// Use after downsampling before encoding.
+    /// y[n] = x[n] + α * y[n-1]
+    /// </summary>
+    public static short[] ApplyDeEmphasis(short[] input)
+    {
+        if (input.Length == 0) return input;
+        
+        var output = new short[input.Length];
+        output[0] = input[0];
+        
+        for (int i = 1; i < input.Length; i++)
+        {
+            float val = input[i] + DE_EMPHASIS * output[i - 1];
+            output[i] = SoftClip(val);
+        }
+        
+        return output;
+    }
+
+    /// <summary>
+    /// Soft clipping to prevent harsh distortion.
+    /// Uses tanh-like curve for natural limiting.
+    /// </summary>
+    private static short SoftClip(float sample)
+    {
+        const float threshold = 28000f;
+        const float max = 32767f;
+        
+        if (sample > threshold)
+        {
+            float excess = (sample - threshold) / (max - threshold);
+            sample = threshold + (max - threshold) * (float)Math.Tanh(excess);
+        }
+        else if (sample < -threshold)
+        {
+            float excess = (-sample - threshold) / (max - threshold);
+            sample = -threshold - (max - threshold) * (float)Math.Tanh(excess);
+        }
+        
+        return (short)Math.Clamp(sample, -32768f, 32767f);
+    }
+
+    /// <summary>
+    /// High-quality resampling with anti-aliasing filter.
+    /// Uses windowed-sinc for upsampling, filtered decimation for downsampling.
     /// </summary>
     public static short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+        
+        // For downsampling, apply low-pass filter first to prevent aliasing
+        short[] filtered = input;
+        if (fromRate > toRate)
+        {
+            int filterSize = (int)Math.Ceiling((double)fromRate / toRate) * 2 + 1;
+            filtered = ApplyLowPassFilter(input, filterSize, (double)toRate / fromRate * 0.9);
+        }
         
         double ratio = (double)fromRate / toRate;
-        int outputLength = (int)(input.Length / ratio);
+        int outputLength = (int)(filtered.Length / ratio);
         var output = new short[outputLength];
         
+        // Use cubic interpolation for better quality
         for (int i = 0; i < output.Length; i++)
         {
             double srcPos = i * ratio;
             int srcIndex = (int)srcPos;
-            double frac = srcPos - srcIndex;
+            double t = srcPos - srcIndex;
             
-            // Linear interpolation for better quality
-            if (srcIndex + 1 < input.Length)
-            {
-                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
-            }
-            else if (srcIndex < input.Length)
-            {
-                output[i] = input[srcIndex];
-            }
+            // Cubic Hermite interpolation (4-point)
+            int i0 = Math.Max(0, srcIndex - 1);
+            int i1 = Math.Min(filtered.Length - 1, srcIndex);
+            int i2 = Math.Min(filtered.Length - 1, srcIndex + 1);
+            int i3 = Math.Min(filtered.Length - 1, srcIndex + 2);
+            
+            double p0 = filtered[i0];
+            double p1 = filtered[i1];
+            double p2 = filtered[i2];
+            double p3 = filtered[i3];
+            
+            // Catmull-Rom spline
+            double a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+            double b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+            double c = -0.5 * p0 + 0.5 * p2;
+            double d = p1;
+            
+            double result = a * t * t * t + b * t * t + c * t + d;
+            output[i] = (short)Math.Clamp(result, -32768, 32767);
         }
         
         return output;
+    }
+
+    /// <summary>
+    /// Apply windowed low-pass filter (moving average with Hann window).
+    /// </summary>
+    private static short[] ApplyLowPassFilter(short[] input, int windowSize, double cutoffRatio)
+    {
+        if (windowSize <= 1) return input;
+        
+        // Create windowed sinc kernel
+        var kernel = new double[windowSize];
+        int halfWindow = windowSize / 2;
+        double sum = 0;
+        
+        for (int i = 0; i < windowSize; i++)
+        {
+            int n = i - halfWindow;
+            
+            // Sinc function
+            double sinc = n == 0 ? 1.0 : Math.Sin(Math.PI * cutoffRatio * n) / (Math.PI * n);
+            
+            // Hann window
+            double hann = 0.5 * (1 - Math.Cos(2 * Math.PI * i / (windowSize - 1)));
+            
+            kernel[i] = sinc * hann;
+            sum += kernel[i];
+        }
+        
+        // Normalize kernel
+        for (int i = 0; i < windowSize; i++)
+            kernel[i] /= sum;
+        
+        // Apply convolution
+        var output = new short[input.Length];
+        for (int i = 0; i < input.Length; i++)
+        {
+            double acc = 0;
+            for (int j = 0; j < windowSize; j++)
+            {
+                int idx = i + j - halfWindow;
+                if (idx >= 0 && idx < input.Length)
+                    acc += input[idx] * kernel[j];
+            }
+            output[i] = (short)Math.Clamp(acc, -32768, 32767);
+        }
+        
+        return output;
+    }
+
+    /// <summary>
+    /// High-quality resample with pre/de-emphasis for telephony.
+    /// Call this for SIP → Ada (inbound) path.
+    /// </summary>
+    public static short[] ResampleWithPreEmphasis(short[] input, int fromRate, int toRate)
+    {
+        var preEmphasized = ApplyPreEmphasis(input);
+        return Resample(preEmphasized, fromRate, toRate);
+    }
+
+    /// <summary>
+    /// High-quality resample with de-emphasis for telephony.
+    /// Call this for Ada → SIP (outbound) path.
+    /// </summary>
+    public static short[] ResampleWithDeEmphasis(short[] input, int fromRate, int toRate)
+    {
+        var resampled = Resample(input, fromRate, toRate);
+        return ApplyDeEmphasis(resampled);
     }
 
     /// <summary>
