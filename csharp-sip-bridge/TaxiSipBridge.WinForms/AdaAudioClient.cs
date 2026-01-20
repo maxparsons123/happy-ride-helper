@@ -168,8 +168,11 @@ public class AdaAudioClient : IDisposable
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
 
+        // Decode μ-law → PCM @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
-        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+        
+        // Apply pre-emphasis to boost consonants, then resample to 24kHz
+        var pcm24k = AudioCodecs.ResampleWithPreEmphasis(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         var base64 = Convert.ToBase64String(pcmBytes);
@@ -408,7 +411,8 @@ public class AdaAudioClient : IDisposable
         var playbackBytes = AudioCodecs.ShortsToBytes(pcm24k);
         _playbackBuffer?.AddSamples(playbackBytes, 0, playbackBytes.Length);
 
-        var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+        // Resample with de-emphasis to restore natural frequency balance for SIP output
+        var pcm8k = AudioCodecs.ResampleWithDeEmphasis(pcm24k, 24000, 8000);
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
         for (int i = 0; i < ulaw.Length; i += 160)
