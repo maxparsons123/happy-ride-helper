@@ -321,35 +321,26 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Wiring Ada audio → AdaAudioSource.EnqueuePcm24");
 
-        // Wire Ada's PCM audio to AdaAudioSource (which handles encoding + RTP)
-        try
+        // Wire Ada's PCM audio directly to AdaAudioSource
+        _adaClient.OnPcm24Audio += (pcmBytes) =>
         {
-            var evt = _adaClient.GetType().GetEvent("OnPcm24Audio");
-            if (evt != null)
-            {
-                Action<byte[]> handler = (pcmBytes) =>
-                {
-                    if (cts.Token.IsCancellationRequested) return;
+            if (cts.Token.IsCancellationRequested) return;
 
-                    chunkCount++;
-                    if (chunkCount <= 5)
-                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
+            chunkCount++;
+            if (chunkCount <= 5)
+                Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
 
-                    // Feed audio to AdaAudioSource - it handles resampling, encoding, and RTP
-                    _adaAudioSource.EnqueuePcm24(pcmBytes);
-                };
+            // Feed audio to AdaAudioSource - it handles resampling, encoding, and RTP
+            _adaAudioSource?.EnqueuePcm24(pcmBytes);
+        };
 
-                evt.AddEventHandler(_adaClient, handler);
-                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio → AdaAudioSource");
-                return;
-            }
-
-            Log($"⚠️ [{callId}] OnPcm24Audio not available on AdaAudioClient");
-        }
-        catch (Exception ex)
+        // Wire response started for fade-in reset
+        _adaClient.OnResponseStarted += () =>
         {
-            Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio: {ex.Message}");
-        }
+            _adaAudioSource?.ResetFadeIn();
+        };
+
+        Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio → AdaAudioSource");
     }
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
