@@ -62,11 +62,16 @@ public class AdaAudioClient : IDisposable
 
         _ws = new ClientWebSocket();
         
-        // Build URI - only add caller param if URL doesn't already have query params
+        // Build URI - only add caller param if not already present
         string uriString;
-        if (_wsUrl.Contains("?"))
+        if (_wsUrl.Contains("caller=", StringComparison.OrdinalIgnoreCase))
         {
-            // URL already has query params, append with &
+            // URL already has caller param, use as-is
+            uriString = _wsUrl;
+        }
+        else if (_wsUrl.Contains("?"))
+        {
+            // URL has query params but no caller, append with &
             uriString = $"{_wsUrl}&caller={Uri.EscapeDataString(caller ?? "desktop")}";
         }
         else
