@@ -249,7 +249,7 @@ public class SipAutoAnswer : IDisposable
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
-            Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} @ {fmt.ClockRate}Hz (PT={fmt.ID})");
+            Log($"🎵 [{callId}] Negotiated codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID})");
             
             // Set the format on our audio source so it knows how to encode
             _adaAudioSource?.SetAudioSourceFormat(fmt);
@@ -494,7 +494,7 @@ public class SipAutoAnswer : IDisposable
             if (format.HasValue && !format.Value.IsEmpty())
             {
                 var f = format.Value;
-                Log($"🎵 [{callId}] Codec: {f.Codec} @ {f.ClockRate}Hz (PT={f.ID})");
+                Log($"🎵 [{callId}] Codec: {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
             }
             else
             {
