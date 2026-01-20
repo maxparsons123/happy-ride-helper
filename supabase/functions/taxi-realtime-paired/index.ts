@@ -669,23 +669,17 @@ function getCurrentStepName(index: number): BookingStep | "confirmation" | "none
   return BOOKING_STEPS[index];
 }
 
-const ECHO_GUARD_MS = 250;
+// Timing constants - ALIGNED WITH DESKTOP for smoother interaction
+const ECHO_GUARD_MS = 150; // Reduced from 250ms for faster response
+const GREETING_PROTECTION_MS = 2000; // Reduced from 12000ms - desktop is cleaner
+const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms for quicker confirmations
+const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms for snappier turns
 
-// Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
-// so Ada's initial greeting doesn't get cut off mid-sentence.
-const GREETING_PROTECTION_MS = 12000;
-
-// Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
-const SUMMARY_PROTECTION_MS = 8000;
-
-// While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
-const ASSISTANT_LEADIN_IGNORE_MS = 700;
-
-// RMS thresholds for audio quality
-// NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
-// Only apply barge-in filtering when Ada is actively speaking to prevent echo
-const RMS_BARGE_IN_MIN = 800;   // Minimum for barge-in during Ada speech
-const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
+// RMS thresholds for audio quality (aligned with desktop mode)
+const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
+const RMS_BARGE_IN_MIN = 800;  // Minimum for barge-in during Ada speech
+const RMS_BARGE_IN_MAX = 25000; // Above = likely echo/clipping (increased headroom)
+const RMS_ECHO_CEILING = 20000; // Hard ceiling for echo detection
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
