@@ -21,6 +21,7 @@ public partial class MainForm : Form
         txtSipPassword.Text = "qwe70954504118";
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
         cmbTransport.SelectedIndex = 0; // UDP
+        cmbAudioMode.SelectedIndex = 0; // Standard
     }
 
     private void btnStartStop_Click(object sender, EventArgs e)
@@ -51,7 +52,8 @@ public partial class MainForm : Form
                 SipUser = txtSipUser.Text.Trim(),
                 SipPassword = txtSipPassword.Text.Trim(),
                 AdaWsUrl = txtWebSocketUrl.Text.Trim(),
-                Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
+                Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP,
+                AudioMode = (AudioMode)cmbAudioMode.SelectedIndex
             };
 
             if (!config.IsValid(out var error))
@@ -192,6 +194,7 @@ public partial class MainForm : Form
         txtSipPassword.Enabled = enabled;
         txtWebSocketUrl.Enabled = enabled;
         cmbTransport.Enabled = enabled;
+        cmbAudioMode.Enabled = enabled;
     }
 
     private void AddLog(string message)

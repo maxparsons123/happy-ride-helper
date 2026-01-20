@@ -228,10 +228,11 @@ public class SipAutoAnswer : IDisposable
         Action<AudioFormat> onFormatNegotiated)
     {
         Log($"🔧 [{callId}] Creating AdaAudioSource + VoIPMediaSession...");
+        Log($"🔧 [{callId}] Audio mode: {_config.AudioMode}");
 
         // Create AdaAudioSource - this implements IAudioSource and will handle
         // encoding + RTP pacing via its internal timer
-        _adaAudioSource = new AdaAudioSource();
+        _adaAudioSource = new AdaAudioSource(_config.AudioMode, _config.JitterBufferMs);
         _adaAudioSource.OnDebugLog += msg => Log(msg);
 
         // Create media endpoints with our custom audio source
