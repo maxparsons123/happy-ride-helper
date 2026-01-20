@@ -68,10 +68,10 @@ PRE_EMPHASIS_COEFF = float(os.environ.get("PRE_EMPHASIS_COEFF", "0.95"))
 # Send native format to edge function (edge handles resampling to 24kHz)
 SEND_NATIVE_FORMAT = True
 
-# Reconnection settings
-MAX_RECONNECT_ATTEMPTS = 5  # Increased for mobile network resilience
-RECONNECT_BASE_DELAY_S = 1.0
-HEARTBEAT_INTERVAL_S = 15.0
+# Reconnection settings - aligned with edge function for stability
+MAX_RECONNECT_ATTEMPTS = 10  # Increased for better mobile network resilience
+RECONNECT_BASE_DELAY_S = 0.5  # Faster initial reconnect
+HEARTBEAT_INTERVAL_S = 8.0   # Aligned with edge function keepalive (was 15s)
 
 # Audio processing - DISABLED for cleaner STT
 # OpenAI Whisper handles noise well, noise reduction was muting speech
