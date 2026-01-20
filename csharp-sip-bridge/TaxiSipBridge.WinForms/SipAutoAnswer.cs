@@ -228,12 +228,14 @@ public class SipAutoAnswer : IDisposable
         var mediaSession = new VoIPMediaSession();
         mediaSession.AcceptRtpFromAny = true;
 
+        // Disable AudioExtrasSource (hold music, etc.) - we inject audio via SendAudio
+        mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
+
         mediaSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
             Log($"🎵 [{callId}] Audio format: {fmt.Codec} @ {fmt.ClockRate}Hz");
-            mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
         };
 
         _currentMediaSession = mediaSession;
