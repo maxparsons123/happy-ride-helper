@@ -916,6 +916,8 @@ const STT_CORRECTIONS: Record<string, string> = {
   // Number mishearings - standalone numbers
   "free": "three",
   "tree": "three",
+  // Common mishearing of "four" over phone lines
+  "full": "four",
   // NOTE: we intentionally do NOT map the common words "for" and "to" → numbers,
   // because it corrupts normal sentences (e.g., "to make" → "two make") and can
   // inject fake passenger counts when echo is transcribed.
@@ -3195,6 +3197,7 @@ NOW YOU MUST ASK FOR DESTINATION. Say something like: "Got it, pickup is ${sessi
                   };
                   
                   const lowerV = userText.toLowerCase().trim();
+                  const tokens = lowerV.split(/[^a-z0-9]+/g).filter(Boolean);
                   let parsedCount: number | null = null;
                   
                   // First try digit match
@@ -3204,7 +3207,9 @@ NOW YOU MUST ASK FOR DESTINATION. Say something like: "Got it, pickup is ${sessi
                   } else {
                     // Try word match (e.g., "three" → 3)
                     for (const [word, num] of Object.entries(wordToNum)) {
-                      if (lowerV === word || lowerV.includes(word)) {
+                      // IMPORTANT: require whole-word matches to avoid false positives
+                      // e.g., "phone number" contains "one" as a substring but is not a passenger count.
+                      if (lowerV === word || tokens.includes(word)) {
                         parsedCount = num;
                         break;
                       }
