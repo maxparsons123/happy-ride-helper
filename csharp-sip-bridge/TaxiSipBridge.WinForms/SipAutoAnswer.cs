@@ -202,6 +202,9 @@ public class SipAutoAnswer : IDisposable
             mediaSession = await SetupMediaSession(callId, ua, req, cts.Token, f => negotiatedFormat = f);
             if (mediaSession == null) return;
 
+            // Attach RTP handler immediately so we can see packets even if Ada connect is slow.
+            WireRtpInput(callId, mediaSession, cts);
+
             await SetupAdaConnection(callId, caller, mediaSession, negotiatedFormat, cts);
 
             Log($"✅ [{callId}] Call fully established");
@@ -279,8 +282,6 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Connecting to Ada...");
         await _adaClient.ConnectAsync(caller, cts.Token);
-
-        WireRtpInput(callId, mediaSession, cts);
 
         Log($"✅ [{callId}] Ada audio wired");
     }
@@ -391,6 +392,8 @@ public class SipAutoAnswer : IDisposable
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
     {
+        Log($"🔧 [{callId}] Wiring RTP input handler...");
+
         int rtpPackets = 0;
         const int FLUSH_PACKETS = 25;
 
@@ -407,6 +410,7 @@ public class SipAutoAnswer : IDisposable
             if (rtpPackets % 100 == 0)
                 Log($"📥 [{callId}] RTP total: {rtpPackets}");
 
+            // Give the UAS a moment to settle before forwarding to Ada.
             if (rtpPackets <= FLUSH_PACKETS) return;
 
             var payload = rtp.Payload;
@@ -414,8 +418,9 @@ public class SipAutoAnswer : IDisposable
 
             try
             {
-                if (_adaClient != null && !cts.Token.IsCancellationRequested)
-                    await _adaClient.SendMuLawAsync(payload);
+                var client = _adaClient;
+                if (client != null && !cts.Token.IsCancellationRequested)
+                    await client.SendMuLawAsync(payload);
             }
             catch (OperationCanceledException) { }
             catch { }
