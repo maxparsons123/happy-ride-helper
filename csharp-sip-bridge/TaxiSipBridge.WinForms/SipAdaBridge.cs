@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +20,7 @@ public class SipAdaBridge : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
     private volatile bool _disposed = false;
+    private IPAddress? _localIp;
 
     private readonly ConcurrentQueue<byte[]> _outboundFrames = new();
     private const int MAX_OUTBOUND_FRAMES = 250;
@@ -40,6 +42,33 @@ public class SipAdaBridge : IDisposable
         _config = config;
     }
 
+    /// <summary>
+    /// Get the local IP address that can reach the SIP server.
+    /// This ensures the SDP c= field has a routable address (not 0.0.0.0).
+    /// </summary>
+    private IPAddress GetLocalIp()
+    {
+        try
+        {
+            // Connect to SIP server to determine which local interface to use
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(_config.SipServer, _config.SipPort);
+            var localEp = socket.LocalEndPoint as IPEndPoint;
+            return localEp?.Address ?? IPAddress.Loopback;
+        }
+        catch
+        {
+            // Fallback: find first non-loopback IPv4 address
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    return ip;
+            }
+            return IPAddress.Loopback;
+        }
+    }
+
     public void Start()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(SipAdaBridge));
@@ -49,15 +78,20 @@ public class SipAdaBridge : IDisposable
         Log($"➡ SIP User: {_config.SipUser}");
         Log($"➡ WS: {_config.AdaWsUrl}");
 
+        // Get local IP for proper SDP c= field
+        _localIp = GetLocalIp();
+        Log($"➡ Local IP: {_localIp}");
+
         _sipTransport = new SIPTransport();
 
+        // Bind to specific local IP to ensure SDP contains routable address
         switch (_config.Transport)
         {
             case SipTransportType.UDP:
-                _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
+                _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(_localIp, 0)));
                 break;
             case SipTransportType.TCP:
-                _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 0)));
+                _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(_localIp, 0)));
                 break;
         }
 
@@ -120,15 +154,10 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            // For headless bridges: use null AudioSource/Sink to avoid 488 codec conflicts.
+            // VoIPMediaSession with null endpoints - codec negotiation handled by ua.Answer()
             var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
-            
-            // Add PCMU audio track for codec negotiation (SIPSorcery 10.x pattern)
-            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
-            var audioTrack = new MediaStreamTrack(audioFormats, MediaStreamStatusEnum.SendRecv);
-            rtpSession.addTrack(audioTrack);
             
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
