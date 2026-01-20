@@ -1,6 +1,5 @@
 using SIPSorcery.Media;
 using SIPSorcery.Net;
-using SIPSorcery.SDP;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
@@ -131,11 +130,6 @@ public class SipAutoAnswer : IDisposable
             };
             mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
-            
-            // Restrict to PCMU for telephony
-            var pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
-            mediaSession.MediaStreamManager.AudioFormatsOffered = new List<AudioFormat> { pcmuFormat };
-            
             _currentMediaSession = mediaSession;
 
             var uas = ua.AcceptCall(req);

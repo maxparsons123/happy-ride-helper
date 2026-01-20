@@ -6,8 +6,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
-using SIPSorcery.SDP;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
@@ -120,14 +120,10 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            // Create RTP session with PCMU codec for telephony
+            // Create RTP session for telephony
             var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
-            
-            // Restrict to PCMU (G.711 µ-law) for telephony compatibility
-            var pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
-            rtpSession.MediaStreamManager.AudioFormatsOffered = new List<AudioFormat> { pcmuFormat };
             
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
