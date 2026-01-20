@@ -299,14 +299,23 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Simple linear resampling.
+    /// Resample with anti-aliasing filter for better quality.
+    /// Uses a simple moving average low-pass before downsampling.
     /// </summary>
     private static short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
 
+        // For downsampling (24kHz → 8kHz), apply anti-aliasing filter first
+        short[] filtered = input;
+        if (fromRate > toRate)
+        {
+            int filterSize = (int)Math.Ceiling((double)fromRate / toRate);
+            filtered = ApplyLowPassFilter(input, filterSize);
+        }
+
         double ratio = (double)fromRate / toRate;
-        int outputLength = (int)(input.Length / ratio);
+        int outputLength = (int)(filtered.Length / ratio);
         var output = new short[outputLength];
 
         for (int i = 0; i < output.Length; i++)
@@ -315,12 +324,43 @@ public class AdaAudioSource : IAudioSource, IDisposable
             int srcIndex = (int)srcPos;
             double frac = srcPos - srcIndex;
 
-            if (srcIndex + 1 < input.Length)
-                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
-            else if (srcIndex < input.Length)
-                output[i] = input[srcIndex];
+            if (srcIndex + 1 < filtered.Length)
+                output[i] = (short)(filtered[srcIndex] * (1 - frac) + filtered[srcIndex + 1] * frac);
+            else if (srcIndex < filtered.Length)
+                output[i] = filtered[srcIndex];
         }
 
+        return output;
+    }
+
+    /// <summary>
+    /// Simple moving average low-pass filter to prevent aliasing.
+    /// </summary>
+    private static short[] ApplyLowPassFilter(short[] input, int windowSize)
+    {
+        if (windowSize <= 1) return input;
+        
+        var output = new short[input.Length];
+        int halfWindow = windowSize / 2;
+        
+        for (int i = 0; i < input.Length; i++)
+        {
+            long sum = 0;
+            int count = 0;
+            
+            for (int j = -halfWindow; j <= halfWindow; j++)
+            {
+                int idx = i + j;
+                if (idx >= 0 && idx < input.Length)
+                {
+                    sum += input[idx];
+                    count++;
+                }
+            }
+            
+            output[i] = (short)(sum / count);
+        }
+        
         return output;
     }
 
