@@ -756,6 +756,11 @@ const PHANTOM_PHRASES = [
   "amara.org",
   "次回へ続く", // Japanese "to be continued"
   "ご視聴ありがとうございました",
+  // Common "three" hallucinations - Whisper mishears this number frequently
+  "boston juice",
+  "ozempic juice",
+  "as many as possible",
+  "as much as possible",
 ];
 
 // --- STT Corrections ---
@@ -894,6 +899,9 @@ const STT_CORRECTIONS: Record<string, string> = {
   // Number mishearings - standalone numbers
   "free": "three",
   "tree": "three",
+  "the free": "three",
+  "the tree": "three",
+  "d3": "three",
   "for": "four",
   "to": "two",
   "too": "two",
@@ -904,6 +912,9 @@ const STT_CORRECTIONS: Record<string, string> = {
   "freight": "eight",
   "fright": "eight",
   "fate": "eight",
+  // "Three" hallucinations that survive as transcripts (filter in PHANTOM_PHRASES too)
+  "boston juice": "three",
+  "ozempic juice": "three",
   
   // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
