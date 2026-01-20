@@ -172,7 +172,8 @@ public class AdaAudioClient : IDisposable
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
         
         // Apply pre-emphasis to boost consonants, then resample to 24kHz
-        var pcm24k = AudioCodecs.ResampleWithPreEmphasis(pcm8k, 8000, 24000);
+        var preEmphasized = AudioCodecs.ApplyPreEmphasis(pcm8k);
+        var pcm24k = AudioCodecs.Resample(preEmphasized, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         var base64 = Convert.ToBase64String(pcmBytes);
@@ -412,8 +413,9 @@ public class AdaAudioClient : IDisposable
         _playbackBuffer?.AddSamples(playbackBytes, 0, playbackBytes.Length);
 
         // Resample with de-emphasis to restore natural frequency balance for SIP output
-        var pcm8k = AudioCodecs.ResampleWithDeEmphasis(pcm24k, 24000, 8000);
-        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+        var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+        var deEmphasized = AudioCodecs.ApplyDeEmphasis(pcm8k);
+        var ulaw = AudioCodecs.MuLawEncode(deEmphasized);
 
         for (int i = 0; i < ulaw.Length; i += 160)
         {
