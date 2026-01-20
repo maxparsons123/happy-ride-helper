@@ -165,7 +165,7 @@ public class SipAutoAnswer : IDisposable
             mediaSession.OnAudioFormatsNegotiated += (formats) =>
             {
                 var fmt = formats.FirstOrDefault();
-                Log($"🎵 [{callId}] Audio format negotiated: {fmt.FormatName} (ID={fmt.ID}) @ {fmt.ClockRate}Hz");
+                Log($"🎵 [{callId}] Audio format negotiated: {fmt.Codec} @ {fmt.ClockRate}Hz");
                 mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
             };
             
@@ -203,7 +203,7 @@ public class SipAutoAnswer : IDisposable
             // Log the negotiated codec
             var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
             if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
-                Log($"🎵 [{callId}] Final codec: {selectedFormat.Value.FormatName} (ID={selectedFormat.Value.ID}) @ {selectedFormat.Value.ClockRate}Hz");
+                Log($"🎵 [{callId}] Final codec: {selectedFormat.Value.Name} @ {selectedFormat.Value.ClockRate}Hz");
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
