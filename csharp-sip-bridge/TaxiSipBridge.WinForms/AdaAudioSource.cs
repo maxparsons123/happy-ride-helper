@@ -13,7 +13,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 500;
-    private const int FADE_IN_SAMPLES = 48;
+    private const int FADE_IN_SAMPLES = 80;  // Increased for smoother fade
+    private const int CROSSFADE_SAMPLES = 40; // For silence-to-audio transitions
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
@@ -30,16 +31,19 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _enqueuedFrames;
     private int _sentFrames;
     private int _silenceFrames;
+    private int _interpolatedFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
     // Boundary smoothing to prevent clicks/crackling during underruns
     private short _lastOutputSample;
     private bool _lastFrameWasSilence = true;
+    private short[]? _lastAudioFrame; // Keep last frame for interpolation
 
     // Audio mode configuration
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 60;
+    private int _jitterBufferMs = 80; // Increased default for better buffering
     private bool _jitterBufferFilled;
+    private int _consecutiveUnderruns;
 
     // Test tone mode
     private bool _testToneMode;
@@ -160,7 +164,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // Log stats every 3 seconds
         if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 3)
         {
-            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enqueued={_enqueuedFrames}, sent={_sentFrames}, silence={_silenceFrames}, queue={_pcmQueue.Count}");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enq={_enqueuedFrames}, sent={_sentFrames}, sil={_silenceFrames}, interp={_interpolatedFrames}, q={_pcmQueue.Count}");
             _lastStatsLog = DateTime.Now;
         }
     }
@@ -254,6 +258,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
                 if (_pcmQueue.TryDequeue(out var pcm24))
                 {
+                    _consecutiveUnderruns = 0;
+                    
                     // Select resampling method based on audio mode
                     if (_audioMode == AudioMode.SimpleResample)
                     {
@@ -277,17 +283,43 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
                         audioFrame = fixedFrame;
                     }
+                    
+                    // If we were in silence, crossfade from last sample to new audio
+                    if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
+                    {
+                        int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
+                        for (int i = 0; i < fadeLen; i++)
+                        {
+                            float t = (float)i / fadeLen;
+                            audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
+                        }
+                    }
+                    
+                    // Store for interpolation on underrun
+                    _lastAudioFrame = audioFrame;
                 }
                 else
                 {
-                    // Queue empty - reset jitter buffer state
+                    _consecutiveUnderruns++;
+                    
+                    // Reset jitter buffer state
                     if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled)
                     {
                         _jitterBufferFilled = false;
                     }
                     
-                    SendSilence();
-                    return;
+                    // On first few underruns, try to interpolate from last frame
+                    // This prevents stuttering on brief gaps
+                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
+                    {
+                        audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
+                        _interpolatedFrames++;
+                    }
+                    else
+                    {
+                        SendSilence();
+                        return;
+                    }
                 }
             }
 
@@ -358,6 +390,32 @@ public class AdaAudioSource : IAudioSource, IDisposable
             output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
         }
 
+        return output;
+    }
+
+    /// <summary>
+    /// Generate an interpolated frame during underrun to prevent stuttering.
+    /// Fades out the last frame's characteristics over consecutive underruns.
+    /// </summary>
+    private static short[] GenerateInterpolatedFrame(short[] lastFrame, int samplesNeeded, int underrunCount)
+    {
+        var output = new short[samplesNeeded];
+        
+        // Calculate fade factor based on underrun count (fade out over ~60ms)
+        float fadeBase = 1.0f - (underrunCount * 0.3f);
+        if (fadeBase < 0) fadeBase = 0;
+        
+        // Use tail of last frame with progressive fade
+        int copyLen = Math.Min(lastFrame.Length, samplesNeeded);
+        int startIdx = Math.Max(0, lastFrame.Length - copyLen);
+        
+        for (int i = 0; i < copyLen; i++)
+        {
+            // Progressive fade within the frame
+            float frameFade = fadeBase * (1.0f - (float)i / copyLen * 0.5f);
+            output[i] = (short)(lastFrame[startIdx + i] * frameFade);
+        }
+        
         return output;
     }
 
