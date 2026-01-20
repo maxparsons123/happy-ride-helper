@@ -2944,6 +2944,61 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   break;
                   
                 case "destination":
+                  // Check if user is re-stating their pickup instead of giving destination
+                  const lowerDestInput = userText.toLowerCase();
+                  const isPickupRestatement = lowerDestInput.includes("pickup") || 
+                                              lowerDestInput.includes("pick up") ||
+                                              lowerDestInput.includes("pick-up") ||
+                                              lowerDestInput.includes("from") ||
+                                              lowerDestInput.includes("my address is");
+                  
+                  // Also check if it matches the pickup they already gave
+                  const pickupLower = (sessionState.booking.pickup || "").toLowerCase();
+                  const inputLower = userText.toLowerCase().replace(/my pick ?up is |from |i'm at /gi, "").trim();
+                  const matchesExistingPickup = pickupLower && (
+                    pickupLower.includes(inputLower) || inputLower.includes(pickupLower)
+                  );
+                  
+                  if (isPickupRestatement || matchesExistingPickup) {
+                    console.log(`[${callId}] 🔄 USER RESTATED PICKUP: "${userText}" when asking for destination - re-prompting`);
+                    
+                    // Extract the address they mentioned (might be a correction)
+                    const extractedAddress = userText
+                      .replace(/my pick ?up is |from |i'm at |pick ?up:? ?/gi, "")
+                      .trim();
+                    
+                    // If it's different from current pickup, update it
+                    if (extractedAddress.length > 3 && extractedAddress.toLowerCase() !== pickupLower) {
+                      console.log(`[${callId}] 📝 Updating pickup from "${sessionState.booking.pickup}" to "${extractedAddress}"`);
+                      sessionState.booking.pickup = extractedAddress;
+                    }
+                    
+                    // Re-prompt for destination - don't advance step
+                    sessionState.conversationHistory.push({
+                      role: "user",
+                      content: `[CONTEXT: User restated pickup "${extractedAddress}" when asked for destination] ${userText}`,
+                      timestamp: Date.now()
+                    });
+                    
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[DESTINATION NEEDED] The user just said: "${userText}" which sounds like they're confirming their pickup address.
+                          
+We already have their pickup as: "${sessionState.booking.pickup}".
+NOW YOU MUST ASK FOR DESTINATION. Say something like: "Got it, pickup is ${sessionState.booking.pickup}. And where would you like to go?"`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    await updateLiveCall(sessionState);
+                    break; // Don't save as destination
+                  }
+                  
                   // Save destination address
                   sessionState.booking.destination = userText;
                   sessionState.stepCompleted[1] = true;
