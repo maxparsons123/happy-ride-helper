@@ -1,5 +1,3 @@
-using Concentus.Structs;
-using Concentus.Enums;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
@@ -17,8 +15,8 @@ public class OpusAudioEncoder : IAudioEncoder
     private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
 
     private readonly SIPSorcery.Media.AudioEncoder _baseEncoder;
-    private OpusEncoder? _opusEncoder;
-    private OpusDecoder? _opusDecoder;
+    private Concentus.Structs.OpusEncoder? _opusEncoder;
+    private Concentus.Structs.OpusDecoder? _opusDecoder;
     private readonly object _encoderLock = new();
     private readonly object _decoderLock = new();
 
@@ -73,10 +71,16 @@ public class OpusAudioEncoder : IAudioEncoder
     {
         lock (_encoderLock)
         {
-            _opusEncoder ??= OpusEncoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
-            _opusEncoder.Bitrate = OPUS_BITRATE;
-            _opusEncoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE;
-            _opusEncoder.Complexity = 5;
+            if (_opusEncoder == null)
+            {
+                _opusEncoder = Concentus.Structs.OpusEncoder.Create(
+                    OPUS_SAMPLE_RATE, 
+                    OPUS_CHANNELS, 
+                    Concentus.Enums.OpusApplication.OPUS_APPLICATION_VOIP);
+                _opusEncoder.Bitrate = OPUS_BITRATE;
+                _opusEncoder.SignalType = Concentus.Enums.OpusSignal.OPUS_SIGNAL_VOICE;
+                _opusEncoder.Complexity = 5;
+            }
 
             // Opus expects exactly 960 samples for 20ms at 48kHz
             short[] frame;
@@ -111,7 +115,10 @@ public class OpusAudioEncoder : IAudioEncoder
     {
         lock (_decoderLock)
         {
-            _opusDecoder ??= OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+            if (_opusDecoder == null)
+            {
+                _opusDecoder = Concentus.Structs.OpusDecoder.Create(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+            }
 
             var outputBuffer = new short[OPUS_FRAME_SIZE];
 
