@@ -922,6 +922,29 @@ const STT_CORRECTIONS: Record<string, string> = {
   "5208 david": "52A David",
   "five two a david": "52A David",
   "fifty two a david": "52A David",
+  "52 a david": "52A David",
+  "fifty two a david road": "52A David Road",
+  "52 a david road": "52A David Road",
+  "52a david road": "52A David Road",
+  "52 david road": "52A David Road",
+  "fifty two david road": "52A David Road",
+  "fifty two david": "52A David",
+  
+  // Prevent "52A" from being misheard/spoken as "28"
+  "28 david road": "52A David Road",
+  "28 david": "52A David",
+  "twenty eight david road": "52A David Road",
+  "twenty eight david": "52A David",
+  "28a david road": "52A David Road",
+  "28a david": "52A David",
+  
+  // House number suffix preservation (additional)
+  "52 b": "52B",
+  "52 c": "52C",
+  "18 a": "18A",
+  "18 b": "18B",
+  "7 a": "7A",
+  "7 b": "7B",
 };
 
 // Pre-compiled regex pattern for O(1) STT correction lookups
