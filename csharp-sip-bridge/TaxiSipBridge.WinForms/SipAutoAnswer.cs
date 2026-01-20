@@ -152,8 +152,11 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
+            Log($"🔧 [{callId}] Creating AdaAudioSource...");
+            
             // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
             _adaSource = new AdaAudioSource();
+            _adaSource.OnDebugLog += msg => Log(msg);  // Wire up debug logging
 
             // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints 
@@ -161,39 +164,54 @@ public class SipAutoAnswer : IDisposable
                 AudioSource = _adaSource, 
                 AudioSink = null  // We handle inbound audio via AdaAudioClient
             };
+            Log($"🔧 [{callId}] Creating VoIPMediaSession...");
             mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
             
             _currentMediaSession = mediaSession;
 
+            Log($"🔧 [{callId}] Accepting call...");
             var uas = ua.AcceptCall(req);
 
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
                 await _sipTransport!.SendResponseAsync(ringing);
-                Log($"☎️ [{callId}] Ringing...");
+                Log($"☎️ [{callId}] Sent 180 Ringing");
             }
-            catch { }
+            catch (Exception ex) 
+            { 
+                Log($"⚠️ [{callId}] Failed to send ringing: {ex.Message}");
+            }
 
             await Task.Delay(300, cts.Token);
 
+            Log($"🔧 [{callId}] Answering call...");
             bool answered = await ua.Answer(uas, mediaSession);
 
             if (!answered)
             {
-                Log($"❌ [{callId}] Failed to answer");
+                Log($"❌ [{callId}] ua.Answer() returned false");
                 return;
             }
 
+            Log($"🔧 [{callId}] Starting media session...");
             await mediaSession.Start();
-            Log($"✅ [{callId}] Call answered, RTP started");
+            Log($"✅ [{callId}] Media session started");
 
             // Log the negotiated codec
             var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
             if (selectedFormat != null)
                 Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.FormatName} @ {selectedFormat.ClockRate}Hz");
+            else
+                Log($"⚠️ [{callId}] No codec negotiated!");
 
+            // Log RTP endpoint info
+            var rtpEp = mediaSession.AudioRtpSession?.DestinationEndPoint;
+            if (rtpEp != null)
+                Log($"📡 [{callId}] RTP destination: {rtpEp}");
+
+            Log($"🔧 [{callId}] Creating AdaAudioClient...");
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
@@ -214,9 +232,11 @@ public class SipAutoAnswer : IDisposable
                 try { cts.Cancel(); } catch { }
             };
 
+            Log($"🔧 [{callId}] Connecting to Ada...");
             await _adaClient.ConnectAsync(caller, cts.Token);
 
             int flushCount = 0;
+            int rtpPackets = 0;
             const int FLUSH_PACKETS = 25;
 
             mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
@@ -225,6 +245,16 @@ public class SipAutoAnswer : IDisposable
                 if (cts.Token.IsCancellationRequested) return;
 
                 flushCount++;
+                rtpPackets++;
+                
+                // Log first few packets
+                if (rtpPackets <= 3)
+                    Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b from {ep}");
+                
+                // Log every 100 packets
+                if (rtpPackets % 100 == 0)
+                    Log($"📥 [{callId}] RTP packets received: {rtpPackets}");
+
                 if (flushCount <= FLUSH_PACKETS) return;
 
                 var payload = rtp.Payload;
@@ -241,6 +271,8 @@ public class SipAutoAnswer : IDisposable
                 catch { }
             };
 
+            Log($"✅ [{callId}] Call fully established - waiting for hangup");
+            
             // Keep call alive
             while (!cts.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
             {

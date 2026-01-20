@@ -227,6 +227,10 @@ public class AdaAudioClient : IDisposable
         OnDisconnected?.Invoke();
     }
 
+    private int _audioDeltas = 0;
+    private int _totalAudioBytes = 0;
+    private DateTime _lastAudioStats = DateTime.MinValue;
+
     private void ProcessMessage(string json)
     {
         if (_disposed) return;
@@ -248,6 +252,16 @@ public class AdaAudioClient : IDisposable
                         if (!string.IsNullOrEmpty(base64))
                         {
                             var pcmBytes = Convert.FromBase64String(base64);
+                            _audioDeltas++;
+                            _totalAudioBytes += pcmBytes.Length;
+                            
+                            // Log stats every 3 seconds
+                            if ((DateTime.Now - _lastAudioStats).TotalSeconds >= 3)
+                            {
+                                Log($"📊 WS Audio: deltas={_audioDeltas}, bytes={_totalAudioBytes}, last={pcmBytes.Length}b");
+                                _lastAudioStats = DateTime.Now;
+                            }
+                            
                             OnPcm24Audio?.Invoke(pcmBytes);  // Notify listeners
                             ProcessAdaAudio(pcmBytes);
                         }
@@ -281,9 +295,19 @@ public class AdaAudioClient : IDisposable
                     break;
 
                 case "response.created":
-                case "response.audio.started":
+                    Log("🤖 Ada response started");
                     _needsFadeIn = true;
+                    _audioDeltas = 0;
+                    _totalAudioBytes = 0;
                     OnResponseStarted?.Invoke();  // Notify listeners
+                    break;
+
+                case "response.audio.started":
+                    Log("🔊 Ada audio started");
+                    break;
+
+                case "response.done":
+                    Log($"✅ Ada response done (sent {_audioDeltas} audio chunks, {_totalAudioBytes} bytes)");
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
@@ -301,6 +325,20 @@ public class AdaAudioClient : IDisposable
                         var msg = err.TryGetProperty("message", out var m) ? m.GetString() : "Unknown error";
                         Log($"❌ Ada error: {msg}");
                     }
+                    break;
+
+                case "session.created":
+                    Log("✅ Session created");
+                    break;
+
+                case "session.updated":
+                    Log("🔄 Session updated");
+                    break;
+
+                default:
+                    // Log unknown types for debugging
+                    if (!type.StartsWith("rate_limits"))
+                        Log($"📨 WS event: {type}");
                     break;
             }
         }
