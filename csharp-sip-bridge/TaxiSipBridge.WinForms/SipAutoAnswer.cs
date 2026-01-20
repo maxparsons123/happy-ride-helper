@@ -293,41 +293,91 @@ public class SipAutoAnswer : IDisposable
 
         int chunkCount = 0;
 
-        // Direct subscription to OnPcm24Audio (no reflection needed)
-        _adaClient.OnPcm24Audio += (pcmBytes) =>
+        // Prefer streaming raw PCM audio if the client exposes it, but keep compatibility
+        // with older AdaAudioClient builds by using reflection.
+        try
         {
-            if (cts.Token.IsCancellationRequested) return;
-
-            chunkCount++;
-            if (chunkCount <= 5)
-                Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
-
-            try
+            var evt = _adaClient.GetType().GetEvent("OnPcm24Audio");
+            if (evt != null)
             {
-                // Convert bytes to shorts (24kHz PCM16)
-                var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
+                Action<byte[]> handler = (pcmBytes) =>
+                {
+                    if (cts.Token.IsCancellationRequested) return;
 
-                // Resample 24kHz → 8kHz
-                var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
+                    chunkCount++;
+                    if (chunkCount <= 5)
+                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
 
-                // Encode to mu-law
-                var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+                    try
+                    {
+                        // 24kHz PCM16 -> 8kHz PCM16 -> mu-law
+                        var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
+                        var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
+                        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-                // Send via RTP using SendAudio (duration in RTP units = sample count)
-                uint durationRtpUnits = (uint)ulaw.Length;
-                mediaSession.SendAudio(durationRtpUnits, ulaw);
+                        uint durationRtpUnits = (uint)ulaw.Length;
+                        mediaSession.SendAudio(durationRtpUnits, ulaw);
 
-                if (chunkCount <= 5)
-                    Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
+                        if (chunkCount <= 5)
+                            Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
+                    }
+                    catch (Exception ex)
+                    {
+                        if (chunkCount <= 5)
+                            Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
+                    }
+                };
+
+                evt.AddEventHandler(_adaClient, handler);
+                Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio → SendAudio (reflection)");
+                return;
             }
-            catch (Exception ex)
+
+            Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback → SendAudio");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio; using fallback. Error: {ex.Message}");
+        }
+
+        // Fallback: poll mu-law frames produced by AdaAudioClient (GetNextMuLawFrame)
+        _ = Task.Run(async () =>
+        {
+            int fallbackChunks = 0;
+            while (!cts.IsCancellationRequested && !_disposed)
             {
-                if (chunkCount <= 5)
-                    Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
-            }
-        };
+                byte[]? ulaw = null;
+                try
+                {
+                    ulaw = _adaClient?.GetNextMuLawFrame();
+                }
+                catch { }
 
-        Log($"🔧 [{callId}] Wired Ada OnPcm24Audio → SendAudio (direct)");
+                if (ulaw == null)
+                {
+                    await Task.Delay(5, cts.Token);
+                    continue;
+                }
+
+                fallbackChunks++;
+                if (fallbackChunks <= 5)
+                    Log($"🔊 [{callId}] Fallback ulaw #{fallbackChunks}: {ulaw.Length}b");
+
+                try
+                {
+                    uint durationRtpUnits = (uint)ulaw.Length;
+                    mediaSession.SendAudio(durationRtpUnits, ulaw);
+
+                    if (fallbackChunks <= 5)
+                        Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio (fallback)");
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch { }
+            }
+        }, cts.Token);
     }
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
