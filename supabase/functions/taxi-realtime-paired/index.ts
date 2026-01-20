@@ -645,10 +645,54 @@ const SUMMARY_PROTECTION_MS = 8000;
 // While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
-// Barge-in RMS thresholds to distinguish real speech from echo/noise
-// (Higher minimum reduces false barge-ins from background/line noise)
-const BARGE_IN_RMS_MIN = 1000;
-const BARGE_IN_RMS_MAX = 20000;
+// RMS thresholds for audio quality (aligned with desktop mode)
+const RMS_NOISE_FLOOR = 650;    // Below = background noise, skip
+const RMS_BARGE_IN_MIN = 1000;  // Minimum for barge-in during Ada speech
+const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
+
+// Audio diagnostics tracking
+interface AudioDiagnostics {
+  packetsReceived: number;
+  packetsForwarded: number;
+  packetsSkippedNoise: number;
+  packetsSkippedEcho: number;
+  packetsSkippedBotSpeaking: number;
+  packetsSkippedGreeting: number;
+  lastRmsValues: number[];
+  avgRms: number;
+}
+
+function createAudioDiagnostics(): AudioDiagnostics {
+  return {
+    packetsReceived: 0,
+    packetsForwarded: 0,
+    packetsSkippedNoise: 0,
+    packetsSkippedEcho: 0,
+    packetsSkippedBotSpeaking: 0,
+    packetsSkippedGreeting: 0,
+    lastRmsValues: [],
+    avgRms: 0
+  };
+}
+
+function updateRmsAverage(diag: AudioDiagnostics, rms: number) {
+  diag.lastRmsValues.push(rms);
+  if (diag.lastRmsValues.length > 50) diag.lastRmsValues.shift();
+  diag.avgRms = diag.lastRmsValues.reduce((a, b) => a + b, 0) / diag.lastRmsValues.length;
+}
+
+// Pre-emphasis filter to boost high frequencies (consonants) for better STT
+// y[n] = x[n] - 0.97 * x[n-1]
+function applyPreEmphasis(pcm: Int16Array): Int16Array {
+  if (pcm.length === 0) return pcm;
+  const output = new Int16Array(pcm.length);
+  output[0] = pcm[0];
+  for (let i = 1; i < pcm.length; i++) {
+    const val = pcm[i] - 0.97 * pcm[i - 1];
+    output[i] = Math.max(-32768, Math.min(32767, Math.round(val)));
+  }
+  return output;
+}
 
 // Whisper "phantom radio host" hallucinations - triggered by silence/static
 const PHANTOM_PHRASES = [
@@ -3182,6 +3226,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
     cleanupWithKeepalive();
   };
 
+  // Audio diagnostics for this session
+  const audioDiag = createAudioDiagnostics();
+
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
     try {
@@ -3191,14 +3238,45 @@ Do NOT skip any part. Say ALL of it warmly.]`
           ? new Uint8Array(event.data)
           : event.data;
 
+        audioDiag.packetsReceived++;
+
+        // Decode to PCM for RMS calculation
+        let pcmInput: Int16Array;
+        if (inboundAudioFormat === "ulaw") {
+          pcmInput = ulawToPcm16(audioBytes); // 8kHz PCM16
+        } else {
+          // slin/slin16: already PCM16
+          pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
+        }
+
+        const rms = computeRms(pcmInput);
+        updateRmsAverage(audioDiag, rms);
+
+        // Log audio stats periodically
+        if (audioDiag.packetsReceived <= 3) {
+          console.log(`[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)}`);
+        } else if (audioDiag.packetsReceived % 200 === 0) {
+          console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
+        }
+
         // GREETING PROTECTION: ignore early line noise so Ada doesn't get cut off
         if (Date.now() < sessionState.greetingProtectionUntil) {
+          audioDiag.packetsSkippedGreeting++;
           return;
         }
 
         // ECHO GUARD: block audio briefly after Ada finishes speaking
         if (Date.now() < sessionState.echoGuardUntil) {
+          audioDiag.packetsSkippedEcho++;
           return; // Drop this audio frame (likely echo)
+        }
+
+        // RMS noise gate: skip background noise when Ada is NOT speaking
+        if (!sessionState.openAiResponseActive) {
+          if (rms < RMS_NOISE_FLOOR) {
+            audioDiag.packetsSkippedNoise++;
+            return;
+          }
         }
 
         // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
@@ -3213,15 +3291,6 @@ Do NOT skip any part. Say ALL of it warmly.]`
         }
 
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-          let pcmInput: Int16Array;
-
-          if (inboundAudioFormat === "ulaw") {
-            pcmInput = ulawToPcm16(audioBytes); // 8kHz PCM16
-          } else {
-            // slin/slin16: already PCM16
-            pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
-          }
-
           // RMS-based barge-in detection: only forward audio that sounds like real speech
           // If Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off,
           // then require RMS within a sane window to be treated as a real barge-in.
@@ -3230,18 +3299,22 @@ Do NOT skip any part. Say ALL of it warmly.]`
               ? (Date.now() - sessionState.openAiSpeechStartedAt)
               : 0;
             if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+              audioDiag.packetsSkippedBotSpeaking++;
               return;
             }
 
-            const rms = computeRms(pcmInput);
-            if (rms < BARGE_IN_RMS_MIN || rms > BARGE_IN_RMS_MAX) {
+            if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+              audioDiag.packetsSkippedEcho++;
               return; // Not real speech, likely echo or noise
             }
           }
 
-          const pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
+          // Apply pre-emphasis for better STT consonant clarity, then resample
+          const pcmEmph = applyPreEmphasis(pcmInput);
+          const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
+          audioDiag.packetsForwarded++;
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
             audio: base64Audio,
@@ -3323,7 +3396,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
           // Bridge acknowledged our keepalive - connection is alive
           // (no action needed, just confirms the connection is healthy)
         } else if (data.type === "hangup") {
-          console.log(`[${callId}] Client requested hangup`);
+          console.log(`[${callId}] Client hangup - audio stats: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
           cleanupWithKeepalive();
         }
       }
@@ -3337,7 +3410,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
   };
 
   socket.onclose = () => {
-    console.log(`[${callId}] Client WebSocket closed`);
+    console.log(`[${callId}] Client closed - audio: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}, noise=${audioDiag.packetsSkippedNoise}`);
     cleanupWithKeepalive();
   };
 }

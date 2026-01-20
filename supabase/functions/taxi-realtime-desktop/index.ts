@@ -300,14 +300,62 @@ const ECHO_GUARD_MS = 150; // Reduced from 250ms
 const GREETING_PROTECTION_MS = 2000; // Reduced from 3000ms
 const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms
 const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms
-const BARGE_IN_RMS_MIN = 800; // Reduced from 1000
-const BARGE_IN_RMS_MAX = 25000; // Increased from 20000
+
+// RMS thresholds for audio quality (aligned with paired mode)
+const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
+const RMS_BARGE_IN_MIN = 800;  // Minimum for barge-in during Ada speech
+const RMS_BARGE_IN_MAX = 25000; // Above = likely echo/clipping
+const RMS_ECHO_CEILING = 20000; // Hard ceiling for echo detection
+
+// Audio diagnostics tracking
+interface AudioDiagnostics {
+  packetsReceived: number;
+  packetsForwarded: number;
+  packetsSkippedNoise: number;
+  packetsSkippedEcho: number;
+  packetsSkippedBotSpeaking: number;
+  packetsSkippedGreeting: number;
+  lastRmsValues: number[];
+  avgRms: number;
+}
+
+function createAudioDiagnostics(): AudioDiagnostics {
+  return {
+    packetsReceived: 0,
+    packetsForwarded: 0,
+    packetsSkippedNoise: 0,
+    packetsSkippedEcho: 0,
+    packetsSkippedBotSpeaking: 0,
+    packetsSkippedGreeting: 0,
+    lastRmsValues: [],
+    avgRms: 0
+  };
+}
+
+function updateRmsAverage(diag: AudioDiagnostics, rms: number) {
+  diag.lastRmsValues.push(rms);
+  if (diag.lastRmsValues.length > 50) diag.lastRmsValues.shift();
+  diag.avgRms = diag.lastRmsValues.reduce((a, b) => a + b, 0) / diag.lastRmsValues.length;
+}
 
 function computeRms(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
   let sum = 0;
   for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
   return Math.sqrt(sum / pcm.length);
+}
+
+// Pre-emphasis filter to boost high frequencies (consonants) for better STT
+// y[n] = x[n] - 0.97 * x[n-1]
+function applyPreEmphasis(pcm: Int16Array): Int16Array {
+  if (pcm.length === 0) return pcm;
+  const output = new Int16Array(pcm.length);
+  output[0] = pcm[0];
+  for (let i = 1; i < pcm.length; i++) {
+    const val = pcm[i] - 0.97 * pcm[i - 1];
+    output[i] = Math.max(-32768, Math.min(32767, Math.round(val)));
+  }
+  return output;
 }
 
 function createSessionState(callId: string, callerPhone: string, language: string): SessionState {
@@ -875,6 +923,9 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
   openaiWs.onerror = (error) => console.error(`[${callId}] OpenAI error:`, error);
   openaiWs.onclose = () => { console.log(`[${callId}] OpenAI closed`); cleanup(); };
 
+  // Audio diagnostics for this session
+  const audioDiag = createAudioDiagnostics();
+
   // Client message handler
   socket.onmessage = async (event) => {
     try {
@@ -884,19 +935,62 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
         // Handle input_audio_buffer.append from C# bridge (already PCM16 @ 24kHz)
         if (data.type === "input_audio_buffer.append" && data.audio) {
           sessionState.audioPacketsReceived++;
+          audioDiag.packetsReceived++;
           
-          // Log first few packets
-          if (sessionState.audioPacketsReceived <= 3) {
-            console.log(`[${callId}] 🎙️ Audio packet #${sessionState.audioPacketsReceived}: ${data.audio.length} chars`);
-          } else if (sessionState.audioPacketsReceived % 100 === 0) {
-            console.log(`[${callId}] 📊 Audio stats: received=${sessionState.audioPacketsReceived}, sent=${sessionState.audioPacketsSent}`);
+          // Decode base64 to get PCM for RMS calculation
+          const binaryStr = atob(data.audio);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+          const pcm24k = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+          
+          const rms = computeRms(pcm24k);
+          updateRmsAverage(audioDiag, rms);
+          
+          // Log first few packets with RMS
+          if (sessionState.audioPacketsReceived <= 5) {
+            console.log(`[${callId}] 🎙️ Audio #${sessionState.audioPacketsReceived}: ${data.audio.length} chars, RMS=${rms.toFixed(0)}`);
+          } else if (sessionState.audioPacketsReceived % 200 === 0) {
+            console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
           }
           
           // Greeting protection
-          if (Date.now() < sessionState.greetingProtectionUntil) return;
+          if (Date.now() < sessionState.greetingProtectionUntil) {
+            audioDiag.packetsSkippedGreeting++;
+            return;
+          }
           
           // Echo guard
-          if (Date.now() < sessionState.echoGuardUntil) return;
+          if (Date.now() < sessionState.echoGuardUntil) {
+            audioDiag.packetsSkippedEcho++;
+            return;
+          }
+          
+          // RMS noise gate: skip background noise when Ada is NOT speaking
+          if (!sessionState.openAiResponseActive) {
+            if (rms < RMS_NOISE_FLOOR) {
+              audioDiag.packetsSkippedNoise++;
+              return;
+            }
+          }
+          
+          // Barge-in detection: when Ada IS speaking, apply stricter thresholds
+          if (sessionState.openAiResponseActive) {
+            const sinceSpeakStart = sessionState.openAiSpeechStartedAt
+              ? (Date.now() - sessionState.openAiSpeechStartedAt)
+              : 0;
+            
+            // Ignore first 500ms of Ada speaking (lead-in protection)
+            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+              audioDiag.packetsSkippedBotSpeaking++;
+              return;
+            }
+            
+            // Barge-in RMS window
+            if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+              audioDiag.packetsSkippedEcho++;
+              return;
+            }
+          }
           
           // Summary protection (allow confirmation responses through)
           if (Date.now() < sessionState.summaryProtectionUntil) {
@@ -904,27 +998,50 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
             if (sessionState.openAiResponseActive || !awaitingYesNo) return;
           }
           
-          // Forward directly to OpenAI - C# bridge already sends PCM16 @ 24kHz
+          // Forward to OpenAI
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            audioDiag.packetsForwarded++;
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.audio }));
           }
           
         } else if (data.type === "audio" && data.audio) {
-          // Legacy handler for ulaw audio
+          // Legacy handler for ulaw audio (Python bridge)
           sessionState.audioPacketsReceived++;
+          audioDiag.packetsReceived++;
           
           const binaryStr = atob(data.audio);
           const bytes = new Uint8Array(binaryStr.length);
           for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
           
-          if (Date.now() < sessionState.greetingProtectionUntil) return;
-          if (Date.now() < sessionState.echoGuardUntil) return;
-          
           const pcm8k = ulawToPcm16(bytes);
-          const pcm24k = resamplePcm16To24k(pcm8k, 8000);
+          const rms = computeRms(pcm8k);
+          updateRmsAverage(audioDiag, rms);
+          
+          // Greeting protection
+          if (Date.now() < sessionState.greetingProtectionUntil) {
+            audioDiag.packetsSkippedGreeting++;
+            return;
+          }
+          
+          // Echo guard
+          if (Date.now() < sessionState.echoGuardUntil) {
+            audioDiag.packetsSkippedEcho++;
+            return;
+          }
+          
+          // RMS noise gate
+          if (!sessionState.openAiResponseActive && rms < RMS_NOISE_FLOOR) {
+            audioDiag.packetsSkippedNoise++;
+            return;
+          }
+          
+          // Apply pre-emphasis for better STT, then resample
+          const pcm8kEmph = applyPreEmphasis(pcm8k);
+          const pcm24k = resamplePcm16To24k(pcm8kEmph, 8000);
           const base64Audio = pcm16ToBase64(pcm24k);
           
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            audioDiag.packetsForwarded++;
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
           }
           
@@ -934,7 +1051,7 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
             console.log(`[${callId}] 📱 Phone updated: ${data.phone}`);
           }
         } else if (data.type === "hangup") {
-          console.log(`[${callId}] Client hangup`);
+          console.log(`[${callId}] Client hangup - final audio stats: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}`);
           cleanup();
         }
       }
@@ -944,7 +1061,11 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
   };
 
   socket.onerror = (error) => console.error(`[${callId}] Client error:`, error);
-  socket.onclose = () => { console.log(`[${callId}] Client closed`); clearInterval(keepaliveInterval); cleanup(); };
+  socket.onclose = () => {
+    console.log(`[${callId}] Client closed - audio: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}`);
+    clearInterval(keepaliveInterval);
+    cleanup();
+  };
 }
 
 // Main server
