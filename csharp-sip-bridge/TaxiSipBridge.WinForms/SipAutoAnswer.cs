@@ -10,6 +10,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// SIP auto-answer bridge that connects incoming calls to Ada voice AI.
+/// Uses AudioExtrasSource for audio injection.
 /// </summary>
 public class SipAutoAnswer : IDisposable
 {
@@ -194,13 +195,14 @@ public class SipAutoAnswer : IDisposable
         OnCallStarted?.Invoke(callId, caller);
 
         VoIPMediaSession? mediaSession = null;
+        AudioFormat negotiatedFormat = default;
 
         try
         {
-            mediaSession = await SetupMediaSession(callId, ua, req, cts.Token);
+            mediaSession = await SetupMediaSession(callId, ua, req, cts.Token, f => negotiatedFormat = f);
             if (mediaSession == null) return;
 
-            await SetupAdaConnection(callId, caller, mediaSession, cts);
+            await SetupAdaConnection(callId, caller, mediaSession, negotiatedFormat, cts);
 
             Log($"✅ [{callId}] Call fully established");
 
@@ -218,7 +220,8 @@ public class SipAutoAnswer : IDisposable
     }
 
     private async Task<VoIPMediaSession?> SetupMediaSession(
-        string callId, SIPUserAgent ua, SIPRequest req, CancellationToken ct)
+        string callId, SIPUserAgent ua, SIPRequest req, CancellationToken ct,
+        Action<AudioFormat> onFormatNegotiated)
     {
         Log($"🔧 [{callId}] Creating VoIPMediaSession...");
 
@@ -228,7 +231,9 @@ public class SipAutoAnswer : IDisposable
         mediaSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
+            onFormatNegotiated(fmt);
             Log($"🎵 [{callId}] Audio format: {fmt.Codec} @ {fmt.ClockRate}Hz");
+            mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
         };
 
         _currentMediaSession = mediaSession;
@@ -254,11 +259,17 @@ public class SipAutoAnswer : IDisposable
 
         LogNegotiatedCodec(callId, mediaSession);
 
+        // Start AudioExtrasSource and set to None (we inject audio externally)
+        Log($"🔊 [{callId}] Starting AudioExtrasSource...");
+        await mediaSession.AudioExtrasSource.StartAudio();
+        mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
+
         return mediaSession;
     }
 
     private async Task SetupAdaConnection(
-        string callId, string caller, VoIPMediaSession mediaSession, CancellationTokenSource cts)
+        string callId, string caller, VoIPMediaSession mediaSession,
+        AudioFormat negotiatedFormat, CancellationTokenSource cts)
     {
         Log($"🔧 [{callId}] Creating AdaAudioClient...");
 
@@ -266,7 +277,7 @@ public class SipAutoAnswer : IDisposable
         _adaClient.OnLog += msg => Log(msg);
         _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        WireAdaAudioOutput(callId, mediaSession, cts);
+        WireAdaAudioOutput(callId, mediaSession, negotiatedFormat, cts);
         WireHangupHandler(callId, cts);
 
         Log($"🔧 [{callId}] Connecting to Ada...");
@@ -277,7 +288,9 @@ public class SipAutoAnswer : IDisposable
         Log($"✅ [{callId}] Ada audio wired");
     }
 
-    private void WireAdaAudioOutput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
+    private void WireAdaAudioOutput(
+        string callId, VoIPMediaSession mediaSession,
+        AudioFormat negotiatedFormat, CancellationTokenSource cts)
     {
         int chunkCount = 0;
 
@@ -286,25 +299,29 @@ public class SipAutoAnswer : IDisposable
             if (cts.Token.IsCancellationRequested) return;
 
             chunkCount++;
-            if (chunkCount <= 5)
+            if (chunkCount <= 3)
                 Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
 
             try
             {
-                var pcm24k = AudioCodecs.BytesToShorts(pcmBytes);
-                var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
-                var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+                // Convert bytes to shorts (24kHz PCM16)
+                var pcm24 = new short[pcmBytes.Length / 2];
+                Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
 
-                uint duration = (uint)ulaw.Length;
-                mediaSession.SendAudio(duration, ulaw);
+                // Resample to negotiated rate and inject
+                int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
+                var resampled = Resample(pcm24, 24000, targetRate);
+                var samplingRate = targetRate == 8000 ? AudioSamplingRatesEnum.Rate8KHz : AudioSamplingRatesEnum.Rate16KHz;
 
-                if (chunkCount <= 5)
-                    Log($"📤 [{callId}] Sent {ulaw.Length}b via RTP");
+                mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+
+                if (chunkCount <= 3)
+                    Log($"📤 [{callId}] Injected {resampled.Length} samples @ {targetRate}Hz");
             }
             catch (Exception ex)
             {
-                if (chunkCount <= 5)
-                    Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
+                if (chunkCount <= 3)
+                    Log($"⚠️ [{callId}] Audio inject error: {ex.Message}");
             }
         };
 
@@ -451,6 +468,33 @@ public class SipAutoAnswer : IDisposable
             Log($"🎵 [{callId}] Codec: {format.Value.Name} @ {format.Value.ClockRate}Hz");
         else
             Log($"⚠️ [{callId}] No codec negotiated!");
+    }
+
+    /// <summary>
+    /// Simple linear resampling from one rate to another.
+    /// </summary>
+    private static short[] Resample(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+
+        double ratio = (double)fromRate / toRate;
+        int outputLength = (int)(input.Length / ratio);
+        var output = new short[outputLength];
+
+        for (int i = 0; i < output.Length; i++)
+        {
+            double srcPos = i * ratio;
+            int srcIndex = (int)srcPos;
+            double frac = srcPos - srcIndex;
+
+            if (srcIndex + 1 < input.Length)
+                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
+            else if (srcIndex < input.Length)
+                output[i] = input[srcIndex];
+        }
+
+        return output;
     }
 
     private void Log(string msg)

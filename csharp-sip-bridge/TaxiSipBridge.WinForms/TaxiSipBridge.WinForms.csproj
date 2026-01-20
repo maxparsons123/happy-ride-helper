@@ -33,7 +33,6 @@
     <Compile Include="SipAdaBridgeConfig.cs" />
     <Compile Include="SipAdaBridge.cs" />
     <Compile Include="OpusAudioEncoder.cs" />
-    <Compile Include="TestToneAudioSource.cs" />
   </ItemGroup>
 
 </Project>
