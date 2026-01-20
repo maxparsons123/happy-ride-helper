@@ -254,7 +254,7 @@ const TOOLS = [
   {
     type: "function",
     name: "end_call",
-    description: "Disconnect the call after goodbye.",
+    description: "ONLY call this after you have completed the entire booking flow, received confirmation, delivered the closing script, AND said goodbye. NEVER call this at the start or middle of a call.",
     parameters: { type: "object", properties: {} }
   }
 ];
@@ -607,24 +607,23 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     const { greeting, pickupQuestion } = getGreeting(sessionState.language);
     const fullGreeting = `${greeting} ${pickupQuestion}`;
     
-    console.log(`[${callId}] 🎤 Sending greeting`);
+    console.log(`[${callId}] 🎤 Sending greeting via response.create`);
     
+    sessionState.lastQuestionAsked = "pickup";
+    sessionState.greetingProtectionUntil = Date.now() + GREETING_PROTECTION_MS * 2; // Extra protection during greeting
+    
+    // Use response.create with a system-level instruction to speak the greeting
+    // Do NOT pre-create an assistant message - let the model generate it with audio
     openaiWs.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: fullGreeting }]
+      type: "response.create",
+      response: {
+        modalities: ["text", "audio"],
+        instructions: `IMPORTANT: You are starting a new taxi booking call. Greet the customer warmly and ask for their pickup location. Say: "${fullGreeting}" Do NOT call any tools yet - just greet the user and wait for their response.`
       }
     }));
     
-    sessionState.lastQuestionAsked = "pickup";
+    // Track in history after we know it was spoken
     sessionState.conversationHistory.push({ role: "assistant", content: fullGreeting, timestamp: Date.now() });
-    
-    openaiWs.send(JSON.stringify({
-      type: "response.create",
-      response: { instructions: `Say exactly: "${fullGreeting}"` }
-    }));
     
     updateLiveCall(sessionState);
   };
