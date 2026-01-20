@@ -4086,6 +4086,25 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
         } else if (data.type === "audio" && data.audio) {
           // Legacy handler: receive base64 audio, assume 8kHz ulaw unless told otherwise.
+          
+          // GREETING PROTECTION: ignore early line noise so Ada doesn't get cut off
+          if (Date.now() < sessionState.greetingProtectionUntil) {
+            return;
+          }
+
+          // ECHO GUARD: block audio briefly after Ada finishes speaking
+          if (Date.now() < sessionState.echoGuardUntil) {
+            return;
+          }
+
+          // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
+          if (Date.now() < sessionState.summaryProtectionUntil) {
+            const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
+            if (sessionState.openAiResponseActive || !awaitingYesNo) {
+              return;
+            }
+          }
+
           const binaryStr = atob(data.audio);
           const bytes = new Uint8Array(binaryStr.length);
           for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
@@ -4099,7 +4118,32 @@ Do NOT skip any part. Say ALL of it warmly.]`
             ? ulawToPcm16(bytes)
             : new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
 
-          const pcm24k = resamplePcm16To24k(pcmInput, assumedRate);
+          // Apply barge-in protection while Ada is speaking
+          if (sessionState.openAiResponseActive) {
+            const sinceSpeakStart = sessionState.openAiSpeechStartedAt
+              ? (Date.now() - sessionState.openAiSpeechStartedAt)
+              : 0;
+            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+              return;
+            }
+
+            const rms = computeRms(pcmInput);
+            if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+              bargeInCandidateFrames = 0;
+              return;
+            }
+
+            bargeInCandidateFrames = Math.min(bargeInCandidateFrames + 1, 10);
+            if (bargeInCandidateFrames < 3) {
+              return;
+            }
+          } else {
+            bargeInCandidateFrames = 0;
+          }
+
+          // Apply pre-emphasis for STT clarity
+          const pcmEmph = applyPreEmphasis(pcmInput);
+          const pcm24k = resamplePcm16To24k(pcmEmph, assumedRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
