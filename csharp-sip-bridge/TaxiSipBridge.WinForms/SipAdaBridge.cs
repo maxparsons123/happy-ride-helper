@@ -182,9 +182,8 @@ public class SipAdaBridge : IDisposable
 
             // Log the negotiated codec
             var selectedFormat = rtpSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-            if (selectedFormat != null)
-                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.FormatName} @ {selectedFormat.ClockRate}Hz");
-
+            if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
+                Log($"🎵 [{callId}] Negotiated codec: ID {selectedFormat.Value.ID} @ {selectedFormat.Value.ClockRate}Hz");
             ws = new ClientWebSocket();
             cts = new CancellationTokenSource();
 

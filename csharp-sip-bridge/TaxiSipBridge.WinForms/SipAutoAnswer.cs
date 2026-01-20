@@ -202,7 +202,7 @@ public class SipAutoAnswer : IDisposable
             // Log the negotiated codec
             var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
             if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
-                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.Value.Codec} (ID {selectedFormat.Value.ID}) @ {selectedFormat.Value.ClockRate}Hz");
+                Log($"🎵 [{callId}] Negotiated codec: ID {selectedFormat.Value.ID} @ {selectedFormat.Value.ClockRate}Hz");
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
