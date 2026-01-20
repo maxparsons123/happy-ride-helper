@@ -8,13 +8,29 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TaxiSipBridge</AssemblyName>
     <RootNamespace>TaxiSipBridge</RootNamespace>
+    <!-- Disable auto-include to prevent duplicate resource errors -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="SIPSorcery" Version="6.2.4" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="1.4.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="MainForm.cs" />
+    <Compile Include="MainForm.Designer.cs">
+      <DependentUpon>MainForm.cs</DependentUpon>
+    </Compile>
+    <Compile Include="SipAutoAnswer.cs" />
+    <Compile Include="AdaAudioClient.cs" />
+    <Compile Include="AudioCodecs.cs" />
+    <Compile Include="AudioMonitor.cs" />
+    <Compile Include="SipAdaBridgeConfig.cs" />
+    <Compile Include="SipAdaBridge.cs" />
   </ItemGroup>
 
 </Project>
