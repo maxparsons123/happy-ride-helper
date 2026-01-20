@@ -241,11 +241,25 @@ public class SipAutoAnswer : IDisposable
         // Disable AudioExtrasSource (hold music, etc.) - we inject audio via SendAudio
         mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
 
+        // Log session details
+        Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
+
         mediaSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
-            Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} @ {fmt.ClockRate}Hz (PT={fmt.RtpClockRate})");
+            Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} @ {fmt.ClockRate}Hz (PT={fmt.ID})");
+        };
+
+        // Add handler for RTP events at session level for diagnostics
+        mediaSession.OnRtpEvent += (ep, evt, hdr) =>
+        {
+            Log($"📡 [{callId}] RTP Event: {evt}");
+        };
+
+        mediaSession.OnTimeout += (mt) =>
+        {
+            Log($"⏰ [{callId}] Media timeout: {mt}");
         };
 
         _currentMediaSession = mediaSession;
