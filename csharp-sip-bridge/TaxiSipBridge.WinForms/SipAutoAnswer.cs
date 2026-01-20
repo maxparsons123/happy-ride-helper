@@ -123,17 +123,20 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // Create AudioExtrasSource for PCMU codec
-            var audioExtras = new AudioExtrasSource();
-            audioExtras.SetAudioSourceFormat(new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU));
-            
+            // For headless bridges: use null AudioSource/Sink to avoid 488 codec conflicts.
+            // VoIPMediaSession will negotiate codecs from the incoming SDP offer.
             var mediaEndPoints = new MediaEndPoints 
             { 
-                AudioSource = audioExtras, 
+                AudioSource = null, 
                 AudioSink = null 
             };
             mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
+            
+            // Restrict to PCMU (ulaw) only for consistent audio handling
+            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
+            mediaSession.MediaStreamManager?.RestrictFormats(audioFormats);
+            
             _currentMediaSession = mediaSession;
 
             var uas = ua.AcceptCall(req);

@@ -120,13 +120,15 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            // Create RTP session with AudioExtrasSource for telephony
-            var audioExtras = new AudioExtrasSource();
-            audioExtras.SetAudioSourceFormat(new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU));
-            
-            var mediaEndPoints = new MediaEndPoints { AudioSource = audioExtras, AudioSink = null };
+            // For headless bridges: use null AudioSource/Sink to avoid 488 codec conflicts.
+            // VoIPMediaSession will negotiate codecs from the incoming SDP offer.
+            var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
+            
+            // Restrict to PCMU (ulaw) only for consistent audio handling
+            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
+            rtpSession.MediaStreamManager?.RestrictFormats(audioFormats);
             
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
