@@ -614,7 +614,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       item: {
         type: "message",
         role: "assistant",
-        content: [{ type: "output_text", text: fullGreeting }]
+        content: [{ type: "text", text: fullGreeting }]
       }
     }));
     
