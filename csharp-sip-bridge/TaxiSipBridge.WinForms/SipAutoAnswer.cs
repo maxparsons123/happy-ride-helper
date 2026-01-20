@@ -123,9 +123,13 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
+            // Create AudioExtrasSource for PCMU codec
+            var audioExtras = new AudioExtrasSource();
+            audioExtras.SetAudioSourceFormat(new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU));
+            
             var mediaEndPoints = new MediaEndPoints 
             { 
-                AudioSource = null, 
+                AudioSource = audioExtras, 
                 AudioSink = null 
             };
             mediaSession = new VoIPMediaSession(mediaEndPoints);

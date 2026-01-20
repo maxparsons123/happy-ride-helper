@@ -120,8 +120,11 @@ public class SipAdaBridge : IDisposable
 
         try
         {
-            // Create RTP session for telephony
-            var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
+            // Create RTP session with AudioExtrasSource for telephony
+            var audioExtras = new AudioExtrasSource();
+            audioExtras.SetAudioSourceFormat(new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU));
+            
+            var mediaEndPoints = new MediaEndPoints { AudioSource = audioExtras, AudioSink = null };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
             
