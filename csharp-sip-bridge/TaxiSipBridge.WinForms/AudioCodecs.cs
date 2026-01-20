@@ -1,3 +1,6 @@
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+
 namespace TaxiSipBridge;
 
 /// <summary>
@@ -114,10 +117,63 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// High-quality resampling with anti-aliasing filter.
+    /// High-quality resampling using NAudio's WDL resampler.
+    /// This is a professional-grade resampler used in audio production.
+    /// </summary>
+    public static short[] ResampleNAudio(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+
+        // Convert shorts to floats for NAudio
+        var floats = new float[input.Length];
+        for (int i = 0; i < input.Length; i++)
+            floats[i] = input[i] / 32768f;
+
+        // Create a raw sample provider from our float data
+        var sourceProvider = new RawSourceWaveStream(
+            new MemoryStream(FloatsToBytes(floats)),
+            WaveFormat.CreateIeeeFloatWaveFormat(fromRate, 1));
+
+        // Use WDL resampler (high quality)
+        var resampler = new WdlResamplingSampleProvider(
+            sourceProvider.ToSampleProvider(),
+            toRate);
+
+        // Read resampled data
+        int expectedSamples = (int)((long)input.Length * toRate / fromRate);
+        var outputFloats = new float[expectedSamples + 100]; // small buffer for rounding
+        int samplesRead = resampler.Read(outputFloats, 0, outputFloats.Length);
+
+        // Convert back to shorts
+        var output = new short[samplesRead];
+        for (int i = 0; i < samplesRead; i++)
+            output[i] = (short)Math.Clamp(outputFloats[i] * 32767f, -32768, 32767);
+
+        return output;
+    }
+
+    private static byte[] FloatsToBytes(float[] floats)
+    {
+        var bytes = new byte[floats.Length * 4];
+        Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    /// <summary>
+    /// High-quality resampling with anti-aliasing filter (fallback/custom implementation).
     /// Uses windowed-sinc for upsampling, filtered decimation for downsampling.
     /// </summary>
     public static short[] Resample(short[] input, int fromRate, int toRate)
+    {
+        // Use NAudio's WDL resampler for best quality
+        return ResampleNAudio(input, fromRate, toRate);
+    }
+
+    /// <summary>
+    /// Custom resampling with Catmull-Rom interpolation (fallback if NAudio has issues).
+    /// </summary>
+    public static short[] ResampleCustom(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
         if (input.Length == 0) return input;
