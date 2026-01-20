@@ -2868,9 +2868,78 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             if (stepIndexForThisAnswer < BOOKING_STEPS.length && !sessionState.stepCompleted[stepIndexForThisAnswer]) {
               const currentStep = BOOKING_STEPS[stepIndexForThisAnswer];
               
+              // CRITICAL: Validate that response looks like an address for pickup/destination
+              // Filter out hallucinations like "Passengers will be traveling", "Thank you for watching", etc.
+              const looksLikeValidAddress = (text: string): boolean => {
+                const lower = text.toLowerCase();
+                
+                // REJECT: Known hallucination patterns
+                const hallucinations = [
+                  "passengers will",
+                  "traveling",
+                  "travelling",
+                  "thank you",
+                  "thanks for",
+                  "one moment",
+                  "please hold",
+                  "checking",
+                  "booking",
+                  "confirmed",
+                  "i'm ada",
+                  "your taxi",
+                  "would you like",
+                  "yes please",
+                  "no thank",
+                ];
+                if (hallucinations.some(h => lower.includes(h))) {
+                  return false;
+                }
+                
+                // REJECT: Numeric-only responses (likely passenger count said at wrong time)
+                if (/^(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\.?$/i.test(text.trim())) {
+                  return false;
+                }
+                
+                // ACCEPT: Has address keywords (road, street, airport, etc.)
+                const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "airport", "station", "hotel", "hospital", "mall", "centre", "center", "square", "park", "building", "house", "flat", "apartment", "estate", "gardens", "grove", "hill", "view", "rise", "heath", "green"];
+                if (addressKeywords.some(kw => lower.includes(kw))) {
+                  return true;
+                }
+                
+                // ACCEPT: Has house number pattern (e.g., "52A", "123", "14 Main")
+                if (/^\d+[a-zA-Z]?\s+\w/.test(text) || /\b\d+[a-zA-Z]?\b/.test(text)) {
+                  return true;
+                }
+                
+                // ACCEPT: Known landmarks/businesses (2+ words, not a hallucination)
+                if (text.split(/\s+/).length >= 2 && text.length > 5) {
+                  return true;
+                }
+                
+                return false;
+              };
+              
               switch (currentStep) {
                 case "pickup":
-                  // Save pickup address
+                  // Validate before saving pickup address
+                  if (!looksLikeValidAddress(userText)) {
+                    console.log(`[${callId}] 🚫 REJECTED PICKUP: "${userText}" - doesn't look like a valid address`);
+                    // Don't advance, ask again
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[PICKUP NEEDED] The user said: "${userText}" which doesn't sound like an address. Ask again: "Where would you like to be picked up?"`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    await updateLiveCall(sessionState);
+                    break; // Don't advance
+                  }
                   sessionState.booking.pickup = userText;
                   sessionState.stepCompleted[0] = true;
                   nextStepIndex = 1;
@@ -2879,7 +2948,25 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   break;
                   
                 case "destination":
-                  // Save destination address
+                  // Validate before saving destination address
+                  if (!looksLikeValidAddress(userText)) {
+                    console.log(`[${callId}] 🚫 REJECTED DESTINATION: "${userText}" - doesn't look like a valid address`);
+                    // Don't advance, ask again
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[DESTINATION NEEDED] The user said: "${userText}" which doesn't sound like an address. Ask again: "Where would you like to go?"`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    await updateLiveCall(sessionState);
+                    break; // Don't advance
+                  }
                   sessionState.booking.destination = userText;
                   sessionState.stepCompleted[1] = true;
                   nextStepIndex = 2;
