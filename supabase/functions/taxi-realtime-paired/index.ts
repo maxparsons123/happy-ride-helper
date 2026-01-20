@@ -670,6 +670,10 @@ const SUMMARY_PROTECTION_MS = 8000;
 // While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
+// Passenger question is short but critical; protect it from false-positive barge-in cutoffs.
+// (Server VAD can sometimes commit due to echo/line noise right as Ada starts speaking.)
+const PASSENGERS_QUESTION_PROTECTION_MS = 2200;
+
 // RMS thresholds for audio quality
 // NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
 // Only apply barge-in filtering when Ada is actively speaking to prevent echo
@@ -2316,6 +2320,26 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "input_audio_buffer.committed":
           // User started speaking - cancel any ongoing AI response for natural interruption
           if (sessionState.openAiResponseActive) {
+            const now = Date.now();
+            const sinceSpeechStart = sessionState.openAiSpeechStartedAt
+              ? now - sessionState.openAiSpeechStartedAt
+              : Number.POSITIVE_INFINITY;
+
+            // Protection windows to prevent Ada being cut off by echo / line noise.
+            const inGreetingProtection = now < sessionState.greetingProtectionUntil;
+            const inSummaryProtection = now < sessionState.summaryProtectionUntil;
+            const inLeadIn = sinceSpeechStart < ASSISTANT_LEADIN_IGNORE_MS;
+            const inPassengersProtection =
+              sessionState.lastQuestionAsked === "passengers" && sinceSpeechStart < PASSENGERS_QUESTION_PROTECTION_MS;
+
+            if (inGreetingProtection || inSummaryProtection || inLeadIn || inPassengersProtection) {
+              console.log(
+                `[${callId}] 🛡️ Ignoring buffer committed (no cancel) - ` +
+                  `greeting=${inGreetingProtection}, summary=${inSummaryProtection}, leadIn=${inLeadIn}, passengersProtect=${inPassengersProtection}`
+              );
+              break;
+            }
+
             console.log(`[${callId}] 🗣️ User interrupted (buffer committed) - cancelling AI response`);
             openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
           }
@@ -2770,6 +2794,51 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             // Filter out phantom hallucinations from Whisper
             if (isPhantomHallucination(userText)) {
               console.log(`[${callId}] 👻 Filtered phantom hallucination: "${userText}"`);
+              break;
+            }
+
+            // "REPEAT THAT" / RETRIEVAL: If the user didn't hear Ada (common when audio is cut off),
+            // have Ada repeat ONLY the last question, without advancing state.
+            const lowerUser = userText.toLowerCase().trim();
+            const isRepeatRequest =
+              /^(sorry\??|pardon\??|say that again\??|repeat\??|come again\??|what was that\??)$/i.test(lowerUser) ||
+              lowerUser.includes("can you repeat") ||
+              lowerUser.includes("say that again") ||
+              lowerUser.includes("repeat that");
+
+            if (isRepeatRequest) {
+              console.log(`[${callId}] 🔁 Repeat request detected - repeating last question (${sessionState.lastQuestionAsked})`);
+
+              const questionByType: Record<SessionState["lastQuestionAsked"], string> = {
+                pickup: "Where would you like to be picked up?",
+                destination: "And what is your destination?",
+                passengers: "How many passengers will be traveling?",
+                time: "What time would you like the taxi?",
+                confirmation: "Would you like me to go ahead and book that?",
+                none: "No worries — what can I help you with?",
+              };
+
+              const q = questionByType[sessionState.lastQuestionAsked] || "No worries — what can I help you with?";
+              openaiWs!.send(
+                JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [
+                      {
+                        type: "input_text",
+                        text:
+                          `[REPEAT LAST QUESTION]\n` +
+                          `User asked to repeat. Repeat ONLY this question (no extra info, no new questions): "${q}"\n` +
+                          `Current step: ${sessionState.currentStepIndex} (${getCurrentStepName(sessionState.currentStepIndex)}).`,
+                      },
+                    ],
+                  },
+                })
+              );
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              await updateLiveCall(sessionState);
               break;
             }
             
