@@ -121,11 +121,13 @@ public class SipAdaBridge : IDisposable
         try
         {
             // Create RTP session with PCMU codec for telephony
-            rtpSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = null, AudioSink = null });
+            var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
+            rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
             
-            // Add PCMU audio format explicitly
-            var audioFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            // Restrict to PCMU (G.711 µ-law) for telephony compatibility
+            var pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            rtpSession.MediaStreamManager.AudioFormatsOffered = new List<AudioFormat> { pcmuFormat };
             
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);

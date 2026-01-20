@@ -124,13 +124,18 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            var nullEndPoints = new MediaEndPoints 
+            var mediaEndPoints = new MediaEndPoints 
             { 
                 AudioSource = null, 
                 AudioSink = null 
             };
-            mediaSession = new VoIPMediaSession(nullEndPoints);
+            mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
+            
+            // Restrict to PCMU for telephony
+            var pcmuFormat = new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU);
+            mediaSession.MediaStreamManager.AudioFormatsOffered = new List<AudioFormat> { pcmuFormat };
+            
             _currentMediaSession = mediaSession;
 
             var uas = ua.AcceptCall(req);
