@@ -249,7 +249,26 @@ public class SipAutoAnswer : IDisposable
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
-            Log($"🎵 [{callId}] Negotiated codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID})");
+            
+            // Detailed codec info
+            var codecName = fmt.FormatName ?? "UNKNOWN";
+            var codecType = fmt.Codec switch
+            {
+                AudioCodecsEnum.PCMU => "G.711 μ-law (PCMU)",
+                AudioCodecsEnum.PCMA => "G.711 A-law (PCMA)",
+                AudioCodecsEnum.OPUS => "Opus",
+                AudioCodecsEnum.G722 => "G.722",
+                AudioCodecsEnum.G729 => "G.729",
+                _ => codecName
+            };
+            
+            Log($"═══════════════════════════════════════════════════════");
+            Log($"🎵 [{callId}] NEGOTIATED CODEC: {codecType}");
+            Log($"   ├─ Format Name: {codecName}");
+            Log($"   ├─ Clock Rate: {fmt.ClockRate}Hz");
+            Log($"   ├─ Payload Type: {fmt.FormatID}");
+            Log($"   └─ Channels: {fmt.ChannelCount}");
+            Log($"═══════════════════════════════════════════════════════");
             
             // Set the format on our audio source so it knows how to encode
             _adaAudioSource?.SetAudioSourceFormat(fmt);
@@ -582,15 +601,30 @@ public class SipAutoAnswer : IDisposable
     {
         try
         {
-            var format = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-            if (format.HasValue && !format.Value.IsEmpty())
+            // Log local (what we send) and remote (what we receive) formats
+            var localFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+            var remoteFormat = mediaSession.AudioRemoteTrack?.Capabilities?.FirstOrDefault();
+            
+            Log($"🔊 [{callId}] Audio Track Summary:");
+            
+            if (localFormat.HasValue && !localFormat.Value.IsEmpty())
             {
-                var f = format.Value;
-                Log($"🎵 [{callId}] Codec: {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
+                var f = localFormat.Value;
+                Log($"   ├─ TX (to SIP): {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
             }
             else
             {
-                Log($"⚠️ [{callId}] No codec negotiated!");
+                Log($"   ├─ TX: Not negotiated");
+            }
+            
+            if (remoteFormat.HasValue && !remoteFormat.Value.IsEmpty())
+            {
+                var f = remoteFormat.Value;
+                Log($"   └─ RX (from SIP): {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
+            }
+            else
+            {
+                Log($"   └─ RX: Not negotiated");
             }
         }
         catch (Exception ex)
