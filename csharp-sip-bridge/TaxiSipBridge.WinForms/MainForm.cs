@@ -241,19 +241,30 @@ public partial class MainForm : Form
 
     private void CopyLogsToClipboard(bool selectedOnly)
     {
-        // Avoid LINQ here so we don't depend on System.Linq being imported.
-        var source = selectedOnly ? (ICollection)lstLogs.SelectedItems : (ICollection)lstLogs.Items;
+        var lines = new System.Text.StringBuilder();
+        int count = 0;
 
-        if (source.Count == 0)
+        if (selectedOnly)
+        {
+            foreach (object item in lstLogs.SelectedItems)
+            {
+                lines.AppendLine(item?.ToString() ?? "");
+                count++;
+            }
+        }
+        else
+        {
+            foreach (object item in lstLogs.Items)
+            {
+                lines.AppendLine(item?.ToString() ?? "");
+                count++;
+            }
+        }
+
+        if (count == 0)
         {
             MessageBox.Show("No logs to copy.", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
-        }
-
-        var lines = new System.Text.StringBuilder();
-        foreach (var item in source)
-        {
-            lines.AppendLine(item?.ToString());
         }
 
         try
