@@ -773,6 +773,11 @@ const PHANTOM_PHRASES = [
   "your taxi booking assistant",
   "welcome to the taxibot demo",
   "let's get started",
+
+  // Whisper prompt occasionally leaks into transcripts when audio is too quiet / missing.
+  // If we treat this as user input, it breaks the state machine (especially passengers).
+  "taxi booking. addresses, street names, numbers, passenger count.",
+  "taxi booking. street numbers, addresses, passenger count, pickup location, destination. uk addresses.",
 ];
 
 // --- STT Corrections ---
@@ -3984,7 +3989,13 @@ Do NOT skip any part. Say ALL of it warmly.]`
             const sinceSpeakStart = sessionState.openAiSpeechStartedAt
               ? (Date.now() - sessionState.openAiSpeechStartedAt)
               : 0;
-            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+            // Passenger answers are often a single word ("two", "four") and can land inside the lead-in.
+            // If we drop that audio, Whisper sometimes returns the prompt text instead.
+            if (
+              sinceSpeakStart > 0 &&
+              sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS &&
+              sessionState.lastQuestionAsked !== "passengers"
+            ) {
               audioDiag.packetsSkippedBotSpeaking++;
               return;
             }
@@ -3997,7 +4008,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
             // Sustained barge-in requirement
             bargeInCandidateFrames = Math.min(bargeInCandidateFrames + 1, 10);
-            if (bargeInCandidateFrames < 3) {
+            const requiredFrames = sessionState.lastQuestionAsked === "passengers" ? 2 : 3;
+            if (bargeInCandidateFrames < requiredFrames) {
               audioDiag.packetsSkippedEcho++;
               return;
             }
