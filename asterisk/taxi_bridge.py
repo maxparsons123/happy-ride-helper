@@ -44,12 +44,12 @@ AUDIOSOCKET_PORT = 9092
 # Load WS_URL from bridge-config.json (same directory as script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "bridge-config.json")
-DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple"
+DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
 
 try:
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
-        WS_URL = config.get("edge_functions", {}).get("taxi_realtime_simple_ws", DEFAULT_WS_URL)
+        WS_URL = config.get("edge_functions", {}).get("taxi_realtime_paired_ws", DEFAULT_WS_URL)
         print(f"✅ Loaded config from {CONFIG_PATH}", flush=True)
         print(f"   WebSocket URL: {WS_URL}", flush=True)
 except (FileNotFoundError, json.JSONDecodeError) as e:
