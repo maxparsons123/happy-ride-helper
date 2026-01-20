@@ -152,23 +152,22 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // ========== TEST MODE: Use TestToneAudioSource ==========
-            // This sends a pure 440Hz sine wave to verify RTP/codec works
-            // Replace with AdaAudioSource when testing is complete
+            // ========== TEST MODE: Use AudioExtrasSource with built-in test signals ==========
+            // This is the official SIPSorcery way to send test audio
             
-            Log($"🔊 [{callId}] CREATING TEST TONE SOURCE (440Hz sine wave)");
-            var testSource = new TestToneAudioSource();
-            testSource.OnLog += msg => Log(msg);
+            Log($"🔊 [{callId}] CREATING TEST MODE SESSION (SIPSorcery AudioExtrasSource)");
             
-            var mediaEndPoints = new MediaEndPoints 
-            { 
-                AudioSource = testSource, 
-                AudioSink = null
-            };
-            
-            Log($"🔧 [{callId}] Creating VoIPMediaSession...");
-            mediaSession = new VoIPMediaSession(mediaEndPoints);
+            // Create VoIPMediaSession with NO custom audio source - use built-in AudioExtrasSource
+            mediaSession = new VoIPMediaSession();
             mediaSession.AcceptRtpFromAny = true;
+            
+            // Wire up format negotiation
+            mediaSession.OnAudioFormatsNegotiated += (formats) =>
+            {
+                var fmt = formats.FirstOrDefault();
+                Log($"🎵 [{callId}] Audio format negotiated: {fmt.FormatName} (ID={fmt.ID}) @ {fmt.ClockRate}Hz");
+                mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
+            };
             
             _currentMediaSession = mediaSession;
 
@@ -204,22 +203,48 @@ public class SipAutoAnswer : IDisposable
             // Log the negotiated codec
             var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
             if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
-                Log($"🎵 [{callId}] Negotiated codec: ID {selectedFormat.Value.ID} @ {selectedFormat.Value.ClockRate}Hz");
+                Log($"🎵 [{callId}] Final codec: {selectedFormat.Value.FormatName} (ID={selectedFormat.Value.ID}) @ {selectedFormat.Value.ClockRate}Hz");
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
-            // Log RTP endpoint info
-            Log($"📡 [{callId}] Media session AcceptRtpFromAny: {mediaSession.AcceptRtpFromAny}");
-            Log($"🔧 [{callId}] Creating AdaAudioClient...");
+            // ========== START TEST AUDIO ==========
+            Log($"🔊 [{callId}] Starting AudioExtrasSource...");
+            await mediaSession.AudioExtrasSource.StartAudio();
+            
+            Log($"🎵 [{callId}] Playing SINE WAVE (440Hz) - you should hear a tone!");
+            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.SineWave);
+            
+            // Play sine wave for 5 seconds
+            await Task.Delay(5000, cts.Token);
+            
+            Log($"🎵 [{callId}] Playing MUSIC...");
+            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.Music);
+            
+            // Play music for 5 seconds
+            await Task.Delay(5000, cts.Token);
+            
+            Log($"🎵 [{callId}] Playing WHITE NOISE...");
+            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.WhiteNoise);
+            
+            await Task.Delay(3000, cts.Token);
+            
+            Log($"🔇 [{callId}] Setting to SILENCE...");
+            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.Silence);
+
+            // ========== END TEST AUDIO ==========
+            
+            // Now connect to Ada for real conversation
+            Log($"📡 [{callId}] Test complete - connecting to Ada...");
+            
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
-            
-            // Wire up AdaAudioClient to feed AdaAudioSource (reflection-based so build doesn't break if events are missing)
-            if (_adaClient != null && _adaSource != null)
+
+            ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
-                WireAdaClientToSource(_adaClient, _adaSource, cts.Token);
-            }
+                Log($"📴 [{callId}] Caller hung up");
+                try { cts.Cancel(); } catch { }
+            };
 
             ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
