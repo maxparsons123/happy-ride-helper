@@ -321,26 +321,78 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Wiring Ada audio → AdaAudioSource.EnqueuePcm24");
 
-        // Wire Ada's PCM audio directly to AdaAudioSource
-        _adaClient.OnPcm24Audio += (pcmBytes) =>
+        // IMPORTANT: to stay compatible with older AdaAudioClient builds (where these events may not exist),
+        // we wire via reflection and fall back to mu-law polling.
+        try
         {
-            if (cts.Token.IsCancellationRequested) return;
+            var pcmEvt = _adaClient.GetType().GetEvent("OnPcm24Audio");
+            if (pcmEvt != null)
+            {
+                Action<byte[]> pcmHandler = (pcmBytes) =>
+                {
+                    if (cts.Token.IsCancellationRequested) return;
 
-            chunkCount++;
-            if (chunkCount <= 5)
-                Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
+                    chunkCount++;
+                    if (chunkCount <= 5)
+                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
 
-            // Feed audio to AdaAudioSource - it handles resampling, encoding, and RTP
-            _adaAudioSource?.EnqueuePcm24(pcmBytes);
-        };
+                    _adaAudioSource?.EnqueuePcm24(pcmBytes);
+                };
 
-        // Wire response started for fade-in reset
-        _adaClient.OnResponseStarted += () =>
+                pcmEvt.AddEventHandler(_adaClient, pcmHandler);
+
+                var responseEvt = _adaClient.GetType().GetEvent("OnResponseStarted");
+                if (responseEvt != null)
+                {
+                    Action responseHandler = () => _adaAudioSource?.ResetFadeIn();
+                    responseEvt.AddEventHandler(_adaClient, responseHandler);
+                }
+
+                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio (reflection)");
+                return;
+            }
+
+            Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback → SendAudio");
+        }
+        catch (Exception ex)
         {
-            _adaAudioSource?.ResetFadeIn();
-        };
+            Log($"⚠️ [{callId}] Failed to wire PCM events; using fallback. Error: {ex.Message}");
+        }
 
-        Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio → AdaAudioSource");
+        // Fallback: poll mu-law frames from AdaAudioClient and inject directly.
+        // This only works for G.711 calls (PCMU/PCMA). Opus requires PCM.
+        if (negotiatedFormat.Codec == AudioCodecsEnum.OPUS)
+        {
+            Log($"⚠️ [{callId}] Opus negotiated but PCM event not available - cannot send Ada audio.");
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            int fallbackChunks = 0;
+            while (!cts.IsCancellationRequested && !_disposed)
+            {
+                byte[]? ulaw = null;
+                try { ulaw = _adaClient?.GetNextMuLawFrame(); } catch { }
+
+                if (ulaw == null)
+                {
+                    await Task.Delay(5, cts.Token);
+                    continue;
+                }
+
+                fallbackChunks++;
+                if (fallbackChunks <= 5)
+                    Log($"🔊 [{callId}] Fallback ulaw #{fallbackChunks}: {ulaw.Length}b");
+
+                try
+                {
+                    mediaSession.SendAudio((uint)ulaw.Length, ulaw);
+                }
+                catch (OperationCanceledException) { break; }
+                catch { }
+            }
+        }, cts.Token);
     }
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
