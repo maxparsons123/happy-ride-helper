@@ -600,6 +600,9 @@ interface SessionState {
     pickupTime: string | null;
   };
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
+  // CONTEXT CAPTURE: Snapshot of lastQuestionAsked when user started speaking
+  // This prevents race conditions where Ada's response changes lastQuestionAsked before transcript arrives
+  contextAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -1406,6 +1409,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       pickupTime: null
     },
     lastQuestionAsked: "none",
+    contextAtSpeechStart: "none",
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -2639,7 +2643,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "input_audio_buffer.speech_started":
-          console.log(`[${callId}] 🎤 User started speaking`);
+          // CRITICAL: Capture the context AT THE MOMENT the user starts speaking
+          // This prevents race conditions where Ada's response changes lastQuestionAsked
+          // before the user's transcript arrives
+          sessionState.contextAtSpeechStart = sessionState.lastQuestionAsked;
+          console.log(`[${callId}] 🎤 User started speaking (context captured: ${sessionState.contextAtSpeechStart})`);
           break;
 
         case "conversation.item.input_audio_transcription.completed":
@@ -2695,7 +2703,10 @@ Otherwise, say goodbye warmly and call end_call().`
               }
             }
             
-            console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
+            // Use the context captured when user STARTED speaking, not current lastQuestionAsked
+            // This prevents race conditions where Ada's response changes context before transcript arrives
+            const contextForThisUtterance = sessionState.contextAtSpeechStart || sessionState.lastQuestionAsked;
+            console.log(`[${callId}] 👤 User (after "${contextForThisUtterance}" question): "${userText}"`);
             
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
@@ -2748,7 +2759,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             }
             
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
-            if (sessionState.lastQuestionAsked === "passengers") {
+            if (contextForThisUtterance === "passengers") {
               // Check if response looks like an address rather than a number
               const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
               const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
@@ -2791,7 +2802,7 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
             // Add to history with context annotation (normal flow)
             sessionState.conversationHistory.push({
               role: "user",
-              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
+              content: `[CONTEXT: Ada asked about ${contextForThisUtterance}] ${userText}`,
               timestamp: Date.now()
             });
             
@@ -2803,9 +2814,9 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                 role: "system",
                 content: [{
                   type: "input_text",
-                  text: `[CONTEXT PAIRING] You just asked about "${sessionState.lastQuestionAsked}". The user responded: "${userText}". 
+                  text: `[CONTEXT PAIRING] You just asked about "${contextForThisUtterance}". The user responded: "${userText}". 
                   
-If this is a valid answer to your ${sessionState.lastQuestionAsked} question, use sync_booking_data to save it to the CORRECT field.
+If this is a valid answer to your ${contextForThisUtterance} question, use sync_booking_data to save it to the CORRECT field.
 Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
                 }]
               }
