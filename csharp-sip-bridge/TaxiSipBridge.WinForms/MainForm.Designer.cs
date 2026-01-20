@@ -132,8 +132,19 @@ partial class MainForm
             Font = new Font("Consolas", 9F),
             BackColor = Color.FromArgb(30, 30, 30),
             ForeColor = Color.LightGreen,
-            BorderStyle = BorderStyle.None
+            BorderStyle = BorderStyle.None,
+            SelectionMode = SelectionMode.MultiExtended
         };
+        lstLogs.KeyDown += this.lstLogs_KeyDown;
+
+        // Logs context menu
+        ctxLogs = new ContextMenuStrip(this.components);
+        mnuCopySelected = new ToolStripMenuItem("Copy selected");
+        mnuCopySelected.Click += this.mnuCopySelected_Click;
+        mnuCopyAll = new ToolStripMenuItem("Copy all");
+        mnuCopyAll.Click += this.mnuCopyAll_Click;
+        ctxLogs.Items.AddRange(new ToolStripItem[] { mnuCopySelected, mnuCopyAll });
+        lstLogs.ContextMenuStrip = ctxLogs;
 
         btnClearLogs = new Button
         {
@@ -183,4 +194,7 @@ partial class MainForm
     private Label lblActiveCall;
     private Label lblCallId;
     private ListBox lstLogs;
+    private ContextMenuStrip ctxLogs;
+    private ToolStripMenuItem mnuCopySelected;
+    private ToolStripMenuItem mnuCopyAll;
 }

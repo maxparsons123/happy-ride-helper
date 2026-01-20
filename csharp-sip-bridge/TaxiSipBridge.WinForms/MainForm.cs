@@ -236,28 +236,55 @@ public partial class MainForm : Form
         lstLogs.Items.Clear();
     }
 
-    private void btnCopyLogs_Click(object sender, EventArgs e)
+    private void CopyLogsToClipboard(bool selectedOnly)
     {
-        if (lstLogs.Items.Count == 0)
+        // Avoid LINQ here so we don't depend on System.Linq being imported.
+        var source = selectedOnly ? (ICollection)lstLogs.SelectedItems : (ICollection)lstLogs.Items;
+
+        if (source.Count == 0)
         {
             MessageBox.Show("No logs to copy.", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
         var lines = new System.Text.StringBuilder();
-        foreach (var item in lstLogs.Items)
+        foreach (var item in source)
         {
-            lines.AppendLine(item.ToString());
+            lines.AppendLine(item?.ToString());
         }
 
         try
         {
             Clipboard.SetText(lines.ToString());
-            MessageBox.Show($"Copied {lstLogs.Items.Count} log lines to clipboard!", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
             MessageBox.Show($"Failed to copy: {ex.Message}", "Copy Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void btnCopyLogs_Click(object sender, EventArgs e)
+    {
+        CopyLogsToClipboard(selectedOnly: false);
+        MessageBox.Show($"Copied {lstLogs.Items.Count} log lines to clipboard!", "Copy Logs", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void mnuCopySelected_Click(object sender, EventArgs e)
+    {
+        CopyLogsToClipboard(selectedOnly: true);
+    }
+
+    private void mnuCopyAll_Click(object sender, EventArgs e)
+    {
+        CopyLogsToClipboard(selectedOnly: false);
+    }
+
+    private void lstLogs_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Control && e.KeyCode == Keys.C)
+        {
+            CopyLogsToClipboard(selectedOnly: lstLogs.SelectedItems.Count > 0);
+            e.Handled = true;
         }
     }
 
