@@ -164,15 +164,33 @@ public class AdaAudioClient : IDisposable
     private int _sentToAda = 0;
     private DateTime _lastSendStats = DateTime.Now;
 
+    /// <summary>
+    /// Send telephony audio (µ-law 8kHz) to Ada with high-quality conversion.
+    /// Uses the same processing pipeline as the browser for consistent quality.
+    /// </summary>
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
 
-        // Decode μ-law → PCM @ 8kHz, then resample to 24kHz
-        // Skip pre-emphasis filter to avoid crackling artifacts
+        // HIGH-QUALITY PIPELINE (matches browser quality):
+        // 1. Decode μ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
-        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+        
+        // 2. Apply pre-emphasis to boost consonants (improves STT accuracy)
+        //    Using the full 0.97 coefficient for maximum clarity
+        var pcm8kEmph = AudioCodecs.ApplyPreEmphasis(pcm8k);
+        
+        // 3. Apply gentle volume boost (telephony audio is often quieter than browser mic)
+        //    1.4x boost brings it closer to browser levels without clipping
+        for (int i = 0; i < pcm8kEmph.Length; i++)
+        {
+            int sample = (int)(pcm8kEmph[i] * 1.4f);
+            pcm8kEmph[i] = (short)Math.Clamp(sample, -32768, 32767);
+        }
+        
+        // 4. High-quality resample 8kHz → 24kHz using NAudio WDL resampler
+        var pcm24k = AudioCodecs.Resample(pcm8kEmph, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         var base64 = Convert.ToBase64String(pcmBytes);
@@ -188,10 +206,10 @@ public class AdaAudioClient : IDisposable
             
             _sentToAda++;
             if (_sentToAda <= 3)
-                Log($"🎙️ Sent to Ada #{_sentToAda}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24k");
+                Log($"🎙️ Sent to Ada #{_sentToAda}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24k (HQ pipeline)");
             else if ((DateTime.Now - _lastSendStats).TotalSeconds >= 3)
             {
-                Log($"📤 Sent to Ada: {_sentToAda} packets");
+                Log($"📤 Sent to Ada: {_sentToAda} packets (pre-emphasis + 1.4x boost)");
                 _lastSendStats = DateTime.Now;
             }
         }
