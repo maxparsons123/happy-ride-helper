@@ -4,6 +4,15 @@ using NAudio.Wave.SampleProviders;
 namespace TaxiSipBridge;
 
 /// <summary>
+/// Resampler mode for A/B testing audio quality.
+/// </summary>
+public enum ResamplerMode
+{
+    NAudio,      // WDL resampler - professional grade
+    Custom       // Catmull-Rom interpolation with sinc filter
+}
+
+/// <summary>
 /// Audio codec utilities for µ-law encoding/decoding and high-quality resampling.
 /// Used for converting between OpenAI Realtime API format (24kHz PCM16) and SIP telephony (8kHz µ-law).
 /// </summary>
@@ -14,6 +23,11 @@ public static class AudioCodecs
     
     // De-emphasis coefficient - restores natural frequency balance after processing
     private const float DE_EMPHASIS = 0.97f;
+
+    /// <summary>
+    /// Current resampler mode. Change at runtime for A/B testing.
+    /// </summary>
+    public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.NAudio;
 
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
@@ -161,13 +175,16 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// High-quality resampling with anti-aliasing filter (fallback/custom implementation).
-    /// Uses windowed-sinc for upsampling, filtered decimation for downsampling.
+    /// High-quality resampling - uses CurrentResamplerMode to select algorithm.
     /// </summary>
     public static short[] Resample(short[] input, int fromRate, int toRate)
     {
-        // Use NAudio's WDL resampler for best quality
-        return ResampleNAudio(input, fromRate, toRate);
+        return CurrentResamplerMode switch
+        {
+            ResamplerMode.NAudio => ResampleNAudio(input, fromRate, toRate),
+            ResamplerMode.Custom => ResampleCustom(input, fromRate, toRate),
+            _ => ResampleNAudio(input, fromRate, toRate)
+        };
     }
 
     /// <summary>

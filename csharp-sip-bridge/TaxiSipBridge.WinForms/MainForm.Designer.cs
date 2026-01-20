@@ -59,12 +59,20 @@ partial class MainForm
 
         // Audio Mode
         var lblAudioMode = new Label { Text = "Audio Mode:", Location = new Point(15, 88), Size = new Size(80, 23) };
-        cmbAudioMode = new ComboBox { Location = new Point(100, 85), Size = new Size(140, 23), DropDownStyle = ComboBoxStyle.DropDownList };
+        cmbAudioMode = new ComboBox { Location = new Point(100, 85), Size = new Size(120, 23), DropDownStyle = ComboBoxStyle.DropDownList };
         cmbAudioMode.Items.AddRange(new object[] { "Standard", "Jitter Buffer", "Built-in Pacer", "Simple Resample", "Test Tone" });
 
+        // Resampler Mode
+        var lblResampler = new Label { Text = "Resampler:", Location = new Point(230, 88), Size = new Size(65, 23) };
+        cmbResampler = new ComboBox { Location = new Point(300, 85), Size = new Size(90, 23), DropDownStyle = ComboBoxStyle.DropDownList };
+        cmbResampler.Items.AddRange(new object[] { "NAudio", "Custom" });
+        cmbResampler.SelectedIndexChanged += (s, e) => {
+            AudioCodecs.CurrentResamplerMode = (ResamplerMode)cmbResampler.SelectedIndex;
+        };
+
         // WebSocket URL
-        var lblWs = new Label { Text = "Ada URL:", Location = new Point(260, 88), Size = new Size(60, 23) };
-        txtWebSocketUrl = new TextBox { Location = new Point(325, 85), Size = new Size(270, 23) };
+        var lblWs = new Label { Text = "Ada URL:", Location = new Point(400, 88), Size = new Size(60, 23) };
+        txtWebSocketUrl = new TextBox { Location = new Point(465, 85), Size = new Size(130, 23) };
 
         // Start SIP Button
         btnStartStop = new Button
@@ -100,6 +108,7 @@ partial class MainForm
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
             lblUser, txtSipUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
+            lblResampler, cmbResampler,
             lblWs, txtWebSocketUrl,
             btnStartStop, btnMicTest
         });
@@ -194,6 +203,7 @@ partial class MainForm
     private TextBox txtWebSocketUrl;
     private ComboBox cmbTransport;
     private ComboBox cmbAudioMode;
+    private ComboBox cmbResampler;
     private Button btnStartStop;
     private Button btnMicTest;
     private Button btnClearLogs;

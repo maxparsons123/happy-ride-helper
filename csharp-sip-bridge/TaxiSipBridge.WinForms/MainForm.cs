@@ -22,6 +22,7 @@ public partial class MainForm : Form
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
+        cmbResampler.SelectedIndex = 0; // NAudio (default)
     }
 
     private void btnStartStop_Click(object sender, EventArgs e)
@@ -195,6 +196,7 @@ public partial class MainForm : Form
         txtWebSocketUrl.Enabled = enabled;
         cmbTransport.Enabled = enabled;
         cmbAudioMode.Enabled = enabled;
+        cmbResampler.Enabled = enabled;
     }
 
     private void AddLog(string message)
