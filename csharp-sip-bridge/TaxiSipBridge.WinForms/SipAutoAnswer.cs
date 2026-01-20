@@ -3,12 +3,14 @@ using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
 namespace TaxiSipBridge;
 
+/// <summary>
+/// SIP auto-answer bridge that connects incoming calls to Ada voice AI.
+/// </summary>
 public class SipAutoAnswer : IDisposable
 {
     private readonly SipAdaBridgeConfig _config;
@@ -16,11 +18,10 @@ public class SipAutoAnswer : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
     private AdaAudioClient? _adaClient;
-    private AdaAudioSource? _adaSource;
     private VoIPMediaSession? _currentMediaSession;
     private CancellationTokenSource? _callCts;
-    private volatile bool _isInCall = false;
-    private volatile bool _disposed = false;
+    private volatile bool _isInCall;
+    private volatile bool _disposed;
     private IPAddress? _localIp;
 
     public event Action? OnRegistered;
@@ -38,35 +39,11 @@ public class SipAutoAnswer : IDisposable
         _config = config;
     }
 
-    /// <summary>
-    /// Get the local IP address that can reach the SIP server.
-    /// </summary>
-    private IPAddress GetLocalIp()
-    {
-        try
-        {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            socket.Connect(_config.SipServer, _config.SipPort);
-            var localEp = socket.LocalEndPoint as IPEndPoint;
-            return localEp?.Address ?? IPAddress.Loopback;
-        }
-        catch
-        {
-            var host = Dns.GetHostEntry(Dns.GetHostName());
-            foreach (var ip in host.AddressList)
-            {
-                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
-                    return ip;
-            }
-            return IPAddress.Loopback;
-        }
-    }
-
     public void Start()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(SipAutoAnswer));
 
-        Log($"🚕 SIP Auto-Answer starting...");
+        Log("🚕 SIP Auto-Answer starting...");
         Log($"➡ SIP Server: {_config.SipServer}:{_config.SipPort} ({_config.Transport})");
         Log($"➡ User: {_config.SipUser}");
         Log($"➡ Ada: {_config.AdaWsUrl}");
@@ -101,359 +78,6 @@ public class SipAutoAnswer : IDisposable
 
         _regUserAgent.Start();
         Log("🟢 Waiting for registration...");
-    }
-
-    private void OnRegistrationSuccess(SIPURI uri, SIPResponse resp)
-    {
-        Log("✅ SIP Registered - Ready for calls");
-        IsRegistered = true;
-        OnRegistered?.Invoke();
-    }
-
-    private void OnRegistrationFailure(SIPURI uri, SIPResponse? resp, string err)
-    {
-        Log($"❌ Registration failed: {err}");
-        IsRegistered = false;
-        OnRegistrationFailed?.Invoke(err);
-    }
-
-    private async void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
-    {
-        var caller = req.Header.From.FromURI.User ?? "unknown";
-        Log($"📞 Incoming call from {caller}");
-        await HandleIncomingCall(ua, req, caller);
-    }
-
-    private async Task HandleIncomingCall(SIPUserAgent ua, SIPRequest req, string caller)
-    {
-        if (_disposed) return;
-
-        if (_isInCall)
-        {
-            Log("⚠️ Already in a call, rejecting");
-            try
-            {
-                var busy = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.BusyHere, null);
-                await _sipTransport!.SendResponseAsync(busy);
-            }
-            catch { }
-            return;
-        }
-
-        _isInCall = true;
-        var callId = Guid.NewGuid().ToString("N")[..8];
-
-        _callCts = new CancellationTokenSource();
-        var cts = _callCts;
-
-        OnCallStarted?.Invoke(callId, caller);
-
-        VoIPMediaSession? mediaSession = null;
-
-        try
-        {
-            // ========== PRODUCTION MODE: Send mu-law RTP directly ==========
-            Log($"🔧 [{callId}] Creating VoIPMediaSession...");
-            
-            mediaSession = new VoIPMediaSession();
-            mediaSession.AcceptRtpFromAny = true;
-            
-            // Store the negotiated format for later use
-            AudioFormat negotiatedFormat = default;
-            
-            // Wire up format negotiation
-            mediaSession.OnAudioFormatsNegotiated += (formats) =>
-            {
-                var fmt = formats.FirstOrDefault();
-                negotiatedFormat = fmt;
-                Log($"🎵 [{callId}] Audio format negotiated: {fmt.Codec} @ {fmt.ClockRate}Hz");
-            };
-            
-            _currentMediaSession = mediaSession;
-
-            Log($"🔧 [{callId}] Accepting call...");
-            var uas = ua.AcceptCall(req);
-
-            try
-            {
-                var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
-                await _sipTransport!.SendResponseAsync(ringing);
-                Log($"☎️ [{callId}] Sent 180 Ringing");
-            }
-            catch (Exception ex) 
-            { 
-                Log($"⚠️ [{callId}] Failed to send ringing: {ex.Message}");
-            }
-
-            await Task.Delay(300, cts.Token);
-
-            Log($"🔧 [{callId}] Answering call...");
-            bool answered = await ua.Answer(uas, mediaSession);
-
-            if (!answered)
-            {
-                Log($"❌ [{callId}] ua.Answer() returned false");
-                return;
-            }
-
-            Log($"🔧 [{callId}] Starting media session...");
-            await mediaSession.Start();
-            Log($"✅ [{callId}] Media session started");
-
-            // Log the negotiated codec
-            var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-            if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
-                Log($"🎵 [{callId}] Final codec: {selectedFormat.Value.Name} @ {selectedFormat.Value.ClockRate}Hz");
-            else
-                Log($"⚠️ [{callId}] No codec negotiated!");
-
-            // Connect to Ada
-            Log($"🔧 [{callId}] Creating AdaAudioClient...");
-            _adaClient = new AdaAudioClient(_config.AdaWsUrl);
-            _adaClient.OnLog += msg => Log(msg);
-            _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
-            
-            // Wire Ada audio - use SendAudio() with mu-law encoded frames
-            int adaAudioChunks = 0;
-
-            // Subscribe directly to OnPcm24Audio event
-            _adaClient.OnPcm24Audio += (pcmBytes) =>
-            {
-                if (cts.Token.IsCancellationRequested) return;
-                if (mediaSession == null) return;
-
-                adaAudioChunks++;
-                if (adaAudioChunks <= 5)
-                    Log($"🔊 [{callId}] Ada audio chunk #{adaAudioChunks}: {pcmBytes.Length} bytes");
-
-                try
-                {
-                    // Convert bytes to shorts (24kHz PCM16)
-                    var pcm24k = AudioCodecs.BytesToShorts(pcmBytes);
-                    
-                    // Resample 24kHz -> 8kHz
-                    var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
-                    
-                    // Encode to mu-law
-                    var ulaw = AudioCodecs.MuLawEncode(pcm8k);
-                    
-                    // Send via RTP using SendAudio
-                    // SendAudio expects the encoded audio samples
-                    uint durationRtpUnits = (uint)(ulaw.Length); // 8kHz = 8 samples per ms
-                    mediaSession.SendAudio(durationRtpUnits, ulaw);
-                    
-                    if (adaAudioChunks <= 5)
-                        Log($"📤 [{callId}] Sent {ulaw.Length} ulaw bytes via SendAudio");
-                }
-                catch (Exception ex)
-                {
-                    if (adaAudioChunks <= 5)
-                        Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
-                }
-            };
-            
-            Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio -> SendAudio");
-
-            ua.OnCallHungup += (SIPDialogue dialogue) =>
-            {
-                Log($"📴 [{callId}] Caller hung up");
-                try { cts.Cancel(); } catch { }
-            };
-
-            Log($"🔧 [{callId}] Connecting to Ada...");
-            await _adaClient.ConnectAsync(caller, cts.Token);
-
-            int flushCount = 0;
-            int rtpPackets = 0;
-            const int FLUSH_PACKETS = 25;
-
-            mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
-            {
-                if (mt != SDPMediaTypesEnum.audio) return;
-                if (cts.Token.IsCancellationRequested) return;
-
-                flushCount++;
-                rtpPackets++;
-                
-                // Log first few packets
-                if (rtpPackets <= 3)
-                    Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b from {ep}");
-                
-                // Log every 100 packets
-                if (rtpPackets % 100 == 0)
-                    Log($"📥 [{callId}] RTP packets received: {rtpPackets}");
-
-                if (flushCount <= FLUSH_PACKETS) return;
-
-                var payload = rtp.Payload;
-                if (payload == null || payload.Length == 0) return;
-
-                try
-                {
-                    if (_adaClient != null && !cts.Token.IsCancellationRequested)
-                    {
-                        await _adaClient.SendMuLawAsync(payload);
-                    }
-                }
-                catch (OperationCanceledException) { }
-                catch { }
-            };
-
-            Log($"✅ [{callId}] Call fully established - Ada audio wired");
-            
-            // Keep call alive
-            while (!cts.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
-            {
-                await Task.Delay(500, cts.Token);
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Log($"❌ [{callId}] Error: {ex.Message}");
-        }
-        finally
-        {
-            Log($"📴 [{callId}] Call ended - cleaning up");
-
-            try { ua.Hangup(); } catch { }
-
-            if (_adaClient != null)
-            {
-                try
-                {
-                    await _adaClient.DisconnectAsync();
-                    _adaClient.Dispose();
-                }
-                catch { }
-                _adaClient = null;
-            }
-
-            if (_adaSource != null)
-            {
-                try { _adaSource.Dispose(); } catch { }
-                _adaSource = null;
-            }
-
-            if (mediaSession != null)
-            {
-                try { mediaSession.Close("call ended"); } catch { }
-            }
-            _currentMediaSession = null;
-
-            if (_callCts == cts)
-            {
-                try { _callCts?.Dispose(); } catch { }
-                _callCts = null;
-            }
-
-            _isInCall = false;
-            OnCallEnded?.Invoke(callId);
-        }
-    }
-
-    private void TryWireAdaSourceDebug(AdaAudioSource source)
-    {
-        try
-        {
-            var evt = source.GetType().GetEvent("OnDebugLog");
-            if (evt == null) return;
-
-            Action<string> handler = (msg) => Log(msg);
-            evt.AddEventHandler(source, handler);
-        }
-        catch { }
-    }
-
-    private void WireAdaClientToSource(AdaAudioClient client, AdaAudioSource source, CancellationToken ct)
-    {
-        bool wiredPcm = false;
-
-        // Preferred path: subscribe to OnPcm24Audio if present.
-        try
-        {
-            var evt = client.GetType().GetEvent("OnPcm24Audio");
-            if (evt != null)
-            {
-                Action<byte[]> handler = (pcmBytes) => source.EnqueuePcm24(pcmBytes);
-                evt.AddEventHandler(client, handler);
-                wiredPcm = true;
-            }
-        }
-        catch { }
-
-        // Optional: reset fade-in on response start.
-        try
-        {
-            var evt = client.GetType().GetEvent("OnResponseStarted");
-            if (evt != null)
-            {
-                Action handler = () => source.ResetFadeIn();
-                evt.AddEventHandler(client, handler);
-            }
-        }
-        catch { }
-
-        // Fallback path (older AdaAudioClient): poll ulaw frames and convert to PCM24.
-        if (!wiredPcm)
-        {
-            Log("⚠️ OnPcm24Audio not available; using ulaw polling fallback");
-
-            _ = Task.Run(async () =>
-            {
-                while (!ct.IsCancellationRequested && !_disposed)
-                {
-                    var ulaw = client.GetNextMuLawFrame();
-                    if (ulaw == null)
-                    {
-                        await Task.Delay(5, ct);
-                        continue;
-                    }
-
-                    try
-                    {
-                        var pcm8k = AudioCodecs.MuLawDecode(ulaw);
-                        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
-                        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
-                        source.EnqueuePcm24(pcmBytes);
-                    }
-                    catch { }
-                }
-            }, ct);
-        }
-    }
-
-    /// <summary>
-    /// Simple linear resampling from one rate to another.
-    /// </summary>
-    private static short[] Resample(short[] input, int fromRate, int toRate)
-    {
-        if (fromRate == toRate) return input;
-        if (input.Length == 0) return input;
-
-        double ratio = (double)fromRate / toRate;
-        int outputLength = (int)(input.Length / ratio);
-        var output = new short[outputLength];
-
-        for (int i = 0; i < output.Length; i++)
-        {
-            double srcPos = i * ratio;
-            int srcIndex = (int)srcPos;
-            double frac = srcPos - srcIndex;
-
-            if (srcIndex + 1 < input.Length)
-                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
-            else if (srcIndex < input.Length)
-                output[i] = input[srcIndex];
-        }
-
-        return output;
-    }
-
-    private void Log(string msg)
-    {
-        if (_disposed) return;
-        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
     }
 
     public void Stop()
@@ -497,10 +121,323 @@ public class SipAutoAnswer : IDisposable
 
         Stop();
 
-        try { _adaSource?.Dispose(); _adaSource = null; } catch { }
         try { _adaClient?.Dispose(); _adaClient = null; } catch { }
         try { _callCts?.Dispose(); _callCts = null; } catch { }
 
         GC.SuppressFinalize(this);
     }
+
+    #region SIP Registration
+
+    private void OnRegistrationSuccess(SIPURI uri, SIPResponse resp)
+    {
+        Log("✅ SIP Registered - Ready for calls");
+        IsRegistered = true;
+        OnRegistered?.Invoke();
+    }
+
+    private void OnRegistrationFailure(SIPURI uri, SIPResponse? resp, string err)
+    {
+        Log($"❌ Registration failed: {err}");
+        IsRegistered = false;
+        OnRegistrationFailed?.Invoke(err);
+    }
+
+    #endregion
+
+    #region Call Handling
+
+    private async void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
+    {
+        var caller = req.Header.From.FromURI.User ?? "unknown";
+        Log($"📞 Incoming call from {caller}");
+        await HandleIncomingCall(ua, req, caller);
+    }
+
+    private async Task HandleIncomingCall(SIPUserAgent ua, SIPRequest req, string caller)
+    {
+        if (_disposed) return;
+
+        if (_isInCall)
+        {
+            Log("⚠️ Already in a call, rejecting");
+            await SendBusyResponse(req);
+            return;
+        }
+
+        _isInCall = true;
+        var callId = Guid.NewGuid().ToString("N")[..8];
+        _callCts = new CancellationTokenSource();
+        var cts = _callCts;
+
+        OnCallStarted?.Invoke(callId, caller);
+
+        VoIPMediaSession? mediaSession = null;
+
+        try
+        {
+            mediaSession = await SetupMediaSession(callId, ua, req, cts.Token);
+            if (mediaSession == null) return;
+
+            _adaClient = CreateAdaClient(callId, mediaSession, cts);
+            
+            WireHangupHandler(ua, callId, cts);
+            
+            Log($"🔧 [{callId}] Connecting to Ada...");
+            await _adaClient.ConnectAsync(caller, cts.Token);
+
+            WireRtpHandler(callId, mediaSession, cts);
+
+            Log($"✅ [{callId}] Call fully established");
+
+            await WaitForCallEnd(cts.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Log($"❌ [{callId}] Error: {ex.Message}");
+        }
+        finally
+        {
+            await CleanupCall(callId, ua, mediaSession, cts);
+        }
+    }
+
+    private async Task<VoIPMediaSession?> SetupMediaSession(
+        string callId, SIPUserAgent ua, SIPRequest req, CancellationToken ct)
+    {
+        Log($"🔧 [{callId}] Creating VoIPMediaSession...");
+
+        var mediaSession = new VoIPMediaSession();
+        mediaSession.AcceptRtpFromAny = true;
+
+        mediaSession.OnAudioFormatsNegotiated += formats =>
+        {
+            var fmt = formats.FirstOrDefault();
+            Log($"🎵 [{callId}] Audio format: {fmt.Codec} @ {fmt.ClockRate}Hz");
+        };
+
+        _currentMediaSession = mediaSession;
+
+        Log($"🔧 [{callId}] Accepting call...");
+        var uas = ua.AcceptCall(req);
+
+        await SendRingingResponse(callId, req);
+        await Task.Delay(300, ct);
+
+        Log($"🔧 [{callId}] Answering call...");
+        bool answered = await ua.Answer(uas, mediaSession);
+
+        if (!answered)
+        {
+            Log($"❌ [{callId}] ua.Answer() returned false");
+            return null;
+        }
+
+        Log($"🔧 [{callId}] Starting media session...");
+        await mediaSession.Start();
+        Log($"✅ [{callId}] Media session started");
+
+        LogNegotiatedCodec(callId, mediaSession);
+
+        return mediaSession;
+    }
+
+    private AdaAudioClient CreateAdaClient(
+        string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
+    {
+        Log($"🔧 [{callId}] Creating AdaAudioClient...");
+        
+        var client = new AdaAudioClient(_config.AdaWsUrl);
+        client.OnLog += msg => Log(msg);
+        client.OnTranscript += t => OnTranscript?.Invoke(t);
+
+        int chunkCount = 0;
+        client.OnPcm24Audio += pcmBytes =>
+        {
+            if (cts.Token.IsCancellationRequested) return;
+
+            chunkCount++;
+            if (chunkCount <= 5)
+                Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
+
+            SendAdaAudioToRtp(callId, mediaSession, pcmBytes, chunkCount);
+        };
+
+        Log($"🔧 [{callId}] Ada audio wired via OnPcm24Audio");
+        return client;
+    }
+
+    private void SendAdaAudioToRtp(
+        string callId, VoIPMediaSession mediaSession, byte[] pcmBytes, int chunkCount)
+    {
+        try
+        {
+            var pcm24k = AudioCodecs.BytesToShorts(pcmBytes);
+            var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+
+            uint duration = (uint)ulaw.Length;
+            mediaSession.SendAudio(duration, ulaw);
+
+            if (chunkCount <= 5)
+                Log($"📤 [{callId}] Sent {ulaw.Length}b via RTP");
+        }
+        catch (Exception ex)
+        {
+            if (chunkCount <= 5)
+                Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
+        }
+    }
+
+    private void WireHangupHandler(SIPUserAgent ua, string callId, CancellationTokenSource cts)
+    {
+        ua.OnCallHungup += dialogue =>
+        {
+            Log($"📴 [{callId}] Caller hung up");
+            try { cts.Cancel(); } catch { }
+        };
+    }
+
+    private void WireRtpHandler(
+        string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
+    {
+        int rtpPackets = 0;
+        const int FLUSH_PACKETS = 25;
+
+        mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
+        {
+            if (mt != SDPMediaTypesEnum.audio) return;
+            if (cts.Token.IsCancellationRequested) return;
+
+            rtpPackets++;
+
+            if (rtpPackets <= 3)
+                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b");
+
+            if (rtpPackets % 100 == 0)
+                Log($"📥 [{callId}] RTP total: {rtpPackets}");
+
+            if (rtpPackets <= FLUSH_PACKETS) return;
+
+            var payload = rtp.Payload;
+            if (payload == null || payload.Length == 0) return;
+
+            try
+            {
+                if (_adaClient != null && !cts.Token.IsCancellationRequested)
+                    await _adaClient.SendMuLawAsync(payload);
+            }
+            catch (OperationCanceledException) { }
+            catch { }
+        };
+    }
+
+    private async Task WaitForCallEnd(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
+        {
+            await Task.Delay(500, ct);
+        }
+    }
+
+    private async Task CleanupCall(
+        string callId, SIPUserAgent ua, VoIPMediaSession? mediaSession, CancellationTokenSource cts)
+    {
+        Log($"📴 [{callId}] Call ended - cleaning up");
+
+        try { ua.Hangup(); } catch { }
+
+        if (_adaClient != null)
+        {
+            try
+            {
+                await _adaClient.DisconnectAsync();
+                _adaClient.Dispose();
+            }
+            catch { }
+            _adaClient = null;
+        }
+
+        if (mediaSession != null)
+        {
+            try { mediaSession.Close("call ended"); } catch { }
+        }
+        _currentMediaSession = null;
+
+        if (_callCts == cts)
+        {
+            try { _callCts?.Dispose(); } catch { }
+            _callCts = null;
+        }
+
+        _isInCall = false;
+        OnCallEnded?.Invoke(callId);
+    }
+
+    #endregion
+
+    #region Helpers
+
+    private IPAddress GetLocalIp()
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(_config.SipServer, _config.SipPort);
+            var localEp = socket.LocalEndPoint as IPEndPoint;
+            return localEp?.Address ?? IPAddress.Loopback;
+        }
+        catch
+        {
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    return ip;
+            }
+            return IPAddress.Loopback;
+        }
+    }
+
+    private async Task SendBusyResponse(SIPRequest req)
+    {
+        try
+        {
+            var busy = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.BusyHere, null);
+            await _sipTransport!.SendResponseAsync(busy);
+        }
+        catch { }
+    }
+
+    private async Task SendRingingResponse(string callId, SIPRequest req)
+    {
+        try
+        {
+            var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
+            await _sipTransport!.SendResponseAsync(ringing);
+            Log($"☎️ [{callId}] Sent 180 Ringing");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Failed to send ringing: {ex.Message}");
+        }
+    }
+
+    private void LogNegotiatedCodec(string callId, VoIPMediaSession mediaSession)
+    {
+        var format = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+        if (format.HasValue && !format.Value.IsEmpty())
+            Log($"🎵 [{callId}] Codec: {format.Value.Name} @ {format.Value.ClockRate}Hz");
+        else
+            Log($"⚠️ [{callId}] No codec negotiated!");
+    }
+
+    private void Log(string msg)
+    {
+        if (_disposed) return;
+        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+    }
+
+    #endregion
 }
