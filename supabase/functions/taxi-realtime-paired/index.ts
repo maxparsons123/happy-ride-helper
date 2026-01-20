@@ -524,6 +524,14 @@ When the user responds, ALWAYS check what question you just asked them:
 - If you asked for PASSENGERS and they respond → it's the passenger count
 - If you asked for TIME and they respond → it's the pickup time
 NEVER swap fields. Trust the question context.
+
+# 🔊 SPEECH-TO-TEXT HALLUCINATION CORRECTIONS (CRITICAL)
+The phone line's speech recognition sometimes mishears certain words. When you see these in user input, interpret them as follows:
+- "Boston Juice", "Ozempic Juice", "the free", "d3", "tree" → user said "THREE" (3)
+- "for" (standalone), "four" → may be "FOUR" (4) - check context
+- "to", "too" → may be "TWO" (2) - check context
+- "Sweets Puffs" → user said "Sweet Spot" (a location name)
+When asking for passengers and the user says something like "Boston Juice passengers" or "Ozempic Juice", they mean 3 passengers.
 `;
 }
 
@@ -606,6 +614,9 @@ interface SessionState {
     passengers: number | null;
     pickupTime: string | null;
   };
+  // OpenAI reconnection tracking
+  openAiReconnectAttempts: number;
+  lastOpenAiConnectedAt: number;
   // STRICT STATE MACHINE: Current step index (0=pickup, 1=destination, 2=passengers, 3=time)
   currentStepIndex: number;
   // Track which steps are completed - user must answer before we advance
@@ -1439,6 +1450,9 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       passengers: null,
       pickupTime: null
     },
+    // OpenAI reconnection tracking
+    openAiReconnectAttempts: 0,
+    lastOpenAiConnectedAt: 0,
     // STRICT STATE MACHINE: Start at step 0 (pickup)
     currentStepIndex: 0,
     stepCompleted: [false, false, false, false],
@@ -2067,16 +2081,65 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] 📡 Dispatch channel status: ${status}`);
   });
 
-  // Connect to OpenAI Realtime
-  // Note: Deno WebSocket requires headers as second argument array for protocols,
-  // but OpenAI needs Authorization header. Use the URL with query param workaround
-  // or rely on the proper Deno fetch-based approach.
-  try {
-    // For Deno, we need to use a different approach - create WebSocket with protocols
-    const wsUrl = `${OPENAI_REALTIME_URL}`;
-    openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
-  } catch (e) {
-    console.error(`[${callId}] Failed to connect to OpenAI:`, e);
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OpenAI WebSocket Connection with Auto-Reconnect
+  // If OpenAI drops mid-call, attempt to reconnect without dropping bridge connection
+  // ═══════════════════════════════════════════════════════════════════════════
+  const MAX_OPENAI_RECONNECT_ATTEMPTS = 3;
+  const OPENAI_RECONNECT_DELAY_MS = 1000;
+  
+  const connectToOpenAI = (): boolean => {
+    try {
+      const wsUrl = `${OPENAI_REALTIME_URL}`;
+      openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
+      sessionState.lastOpenAiConnectedAt = Date.now();
+      console.log(`[${callId}] 🔌 Connecting to OpenAI Realtime (attempt ${sessionState.openAiReconnectAttempts + 1})...`);
+      return true;
+    } catch (e) {
+      console.error(`[${callId}] ❌ Failed to connect to OpenAI:`, e);
+      return false;
+    }
+  };
+  
+  const attemptOpenAiReconnect = () => {
+    if (cleanedUp) {
+      console.log(`[${callId}] 🚫 Not reconnecting - session cleaned up`);
+      return;
+    }
+    
+    if (sessionState.openAiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
+      console.error(`[${callId}] ❌ Max OpenAI reconnect attempts reached (${MAX_OPENAI_RECONNECT_ATTEMPTS}), ending call`);
+      // Notify bridge that we're having issues
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ 
+          type: "error", 
+          message: "Connection to AI service lost. Please try again.",
+          code: "OPENAI_RECONNECT_FAILED"
+        }));
+      }
+      cleanupWithKeepalive();
+      return;
+    }
+    
+    sessionState.openAiReconnectAttempts++;
+    const delay = OPENAI_RECONNECT_DELAY_MS * sessionState.openAiReconnectAttempts;
+    console.log(`[${callId}] 🔄 Scheduling OpenAI reconnect in ${delay}ms (attempt ${sessionState.openAiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS})`);
+    
+    trackedTimeout(() => {
+      if (cleanedUp) return;
+      
+      if (connectToOpenAI()) {
+        // Re-attach event handlers (they're set below)
+        setupOpenAiHandlers();
+      } else {
+        attemptOpenAiReconnect();
+      }
+    }, delay);
+  };
+  
+  // Initial connection
+  if (!connectToOpenAI()) {
+    console.error(`[${callId}] ❌ Initial OpenAI connection failed`);
     socket.close();
     return;
   }
@@ -2196,11 +2259,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify(sessionConfig));
   };
 
+  // Setup OpenAI handlers immediately (not wrapped in function for simplicity)
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
+    // Reset reconnect counter on successful connection
+    sessionState.openAiReconnectAttempts = 0;
+    sessionState.lastOpenAiConnectedAt = Date.now();
   };
 
-  openaiWs.onmessage = async (event) => {
+  openaiWs.onmessage = async (event: MessageEvent) => {
     try {
       const data = JSON.parse(event.data);
       
@@ -3491,20 +3558,30 @@ Do NOT skip any part. Say ALL of it warmly.]`
     }
   };
 
-  openaiWs.onerror = (error) => {
-    console.error(`[${callId}] OpenAI WebSocket error:`, error);
+  openaiWs.onerror = (error: Event) => {
+    console.error(`[${callId}] ❌ OpenAI WebSocket error:`, error);
   };
 
-  openaiWs.onclose = (ev) => {
-    // Include close codes/reasons to debug unexpected disconnects.
-    // NOTE: Deno's WS close event may not always include reason.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const anyEv: any = ev;
-    console.log(
-      `[${callId}] OpenAI WebSocket closed` +
-        (anyEv?.code ? ` code=${anyEv.code}` : "") +
-        (anyEv?.reason ? ` reason=${anyEv.reason}` : ""),
-    );
+  openaiWs.onclose = (ev: CloseEvent) => {
+    const code = ev.code;
+    const reason = ev.reason || "no reason";
+    console.log(`[${callId}] 🔌 OpenAI WebSocket closed code=${code} reason=${reason}`);
+    
+    // Check if this was an unexpected disconnect (not a normal close)
+    const wasConnectedRecently = (Date.now() - sessionState.lastOpenAiConnectedAt) > 5000;
+    const isUnexpectedClose = code !== 1000 && code !== 1001;
+    
+    if (isUnexpectedClose && wasConnectedRecently && !cleanedUp) {
+      console.log(`[${callId}] ⚠️ Unexpected OpenAI disconnect - notifying bridge`);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ 
+          type: "error", 
+          message: "AI connection interrupted. The call may need to be restarted.",
+          code: "OPENAI_DISCONNECTED"
+        }));
+      }
+    }
+    
     cleanupWithKeepalive();
   };
 
