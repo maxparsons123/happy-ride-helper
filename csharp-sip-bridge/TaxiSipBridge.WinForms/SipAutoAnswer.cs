@@ -16,6 +16,7 @@ public class SipAutoAnswer : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
     private AdaAudioClient? _adaClient;
+    private AdaAudioSource? _adaSource;
     private VoIPMediaSession? _currentMediaSession;
     private CancellationTokenSource? _callCts;
     private volatile bool _isInCall = false;
@@ -39,13 +40,11 @@ public class SipAutoAnswer : IDisposable
 
     /// <summary>
     /// Get the local IP address that can reach the SIP server.
-    /// This ensures the SDP c= field has a routable address (not 0.0.0.0).
     /// </summary>
     private IPAddress GetLocalIp()
     {
         try
         {
-            // Connect to SIP server to determine which local interface to use
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             socket.Connect(_config.SipServer, _config.SipPort);
             var localEp = socket.LocalEndPoint as IPEndPoint;
@@ -53,7 +52,6 @@ public class SipAutoAnswer : IDisposable
         }
         catch
         {
-            // Fallback: find first non-loopback IPv4 address
             var host = Dns.GetHostEntry(Dns.GetHostName());
             foreach (var ip in host.AddressList)
             {
@@ -73,13 +71,11 @@ public class SipAutoAnswer : IDisposable
         Log($"➡ User: {_config.SipUser}");
         Log($"➡ Ada: {_config.AdaWsUrl}");
 
-        // Get local IP for proper SDP c= field
         _localIp = GetLocalIp();
         Log($"➡ Local IP: {_localIp}");
 
         _sipTransport = new SIPTransport();
 
-        // Bind to specific local IP to ensure SDP contains routable address
         switch (_config.Transport)
         {
             case SipTransportType.UDP:
@@ -152,16 +148,18 @@ public class SipAutoAnswer : IDisposable
 
         OnCallStarted?.Invoke(callId, caller);
 
-        uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
         VoIPMediaSession? mediaSession = null;
 
         try
         {
-            // VoIPMediaSession with null endpoints - codec negotiation handled by ua.Answer()
+            // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
+            _adaSource = new AdaAudioSource();
+
+            // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints 
             { 
-                AudioSource = null, 
-                AudioSink = null 
+                AudioSource = _adaSource, 
+                AudioSink = null  // We handle inbound audio via AdaAudioClient
             };
             mediaSession = new VoIPMediaSession(mediaEndPoints);
             mediaSession.AcceptRtpFromAny = true;
@@ -191,9 +189,24 @@ public class SipAutoAnswer : IDisposable
             await mediaSession.Start();
             Log($"✅ [{callId}] Call answered, RTP started");
 
+            // Log the negotiated codec
+            var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+            if (selectedFormat != null)
+                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.FormatName} @ {selectedFormat.ClockRate}Hz");
+
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
+            
+            // Wire up AdaAudioClient to feed AdaAudioSource
+            _adaClient.OnPcm24Audio += pcmBytes =>
+            {
+                _adaSource?.EnqueuePcm24(pcmBytes);
+            };
+            _adaClient.OnResponseStarted += () =>
+            {
+                _adaSource?.ResetFadeIn();
+            };
 
             ua.OnCallHungup += (SIPDialogue dialogue) =>
             {
@@ -214,62 +227,21 @@ public class SipAutoAnswer : IDisposable
                 flushCount++;
                 if (flushCount <= FLUSH_PACKETS) return;
 
-                var ulaw = rtp.Payload;
-                if (ulaw == null || ulaw.Length == 0) return;
+                var payload = rtp.Payload;
+                if (payload == null || payload.Length == 0) return;
 
                 try
                 {
                     if (_adaClient != null && !cts.Token.IsCancellationRequested)
                     {
-                        await _adaClient.SendMuLawAsync(ulaw);
+                        await _adaClient.SendMuLawAsync(payload);
                     }
                 }
                 catch (OperationCanceledException) { }
                 catch { }
             };
 
-            _ = Task.Run(async () =>
-            {
-                var sw = Stopwatch.StartNew();
-                long nextFrame = 0;
-
-                while (!cts.Token.IsCancellationRequested && !_disposed)
-                {
-                    try
-                    {
-                        long now = sw.ElapsedMilliseconds;
-                        if (now < nextFrame)
-                        {
-                            int delay = (int)(nextFrame - now);
-                            if (delay > 0 && delay < 100)
-                                await Task.Delay(delay, cts.Token);
-                        }
-
-                        var frame = _adaClient?.GetNextMuLawFrame();
-                        if (frame != null && mediaSession != null)
-                        {
-                            mediaSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
-                                frame,
-                                rtpTimestamp,
-                                0,
-                                0
-                            );
-
-                            rtpTimestamp += 160;
-                            nextFrame = sw.ElapsedMilliseconds + 20;
-                        }
-                        else
-                        {
-                            await Task.Delay(5, cts.Token);
-                            nextFrame = sw.ElapsedMilliseconds;
-                        }
-                    }
-                    catch (OperationCanceledException) { break; }
-                    catch { }
-                }
-            }, cts.Token);
-
+            // Keep call alive
             while (!cts.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
             {
                 await Task.Delay(500, cts.Token);
@@ -295,6 +267,12 @@ public class SipAutoAnswer : IDisposable
                 }
                 catch { }
                 _adaClient = null;
+            }
+
+            if (_adaSource != null)
+            {
+                try { _adaSource.Dispose(); } catch { }
+                _adaSource = null;
             }
 
             if (mediaSession != null)
@@ -361,6 +339,7 @@ public class SipAutoAnswer : IDisposable
 
         Stop();
 
+        try { _adaSource?.Dispose(); _adaSource = null; } catch { }
         try { _adaClient?.Dispose(); _adaClient = null; } catch { }
         try { _callCts?.Dispose(); _callCts = null; } catch { }
 
