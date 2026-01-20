@@ -19,7 +19,8 @@ public partial class MainForm : Form
         txtSipPort.Text = "5060";
         txtSipUser.Text = "max201";
         txtSipPassword.Text = "qwe70954504118";
-        txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired";
+        // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
+        txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired";
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
         cmbResampler.SelectedIndex = 0; // NAudio (default)
