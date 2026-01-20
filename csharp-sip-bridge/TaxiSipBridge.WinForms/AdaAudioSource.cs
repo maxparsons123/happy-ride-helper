@@ -41,9 +41,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     public AdaAudioSource()
     {
-        _audioEncoder = new AudioEncoder();
+        // Use OpusAudioEncoder which includes Opus + G.711 codecs
+        _audioEncoder = new OpusAudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
-        DebugLog("🔧 AdaAudioSource created");
+        DebugLog($"🔧 AdaAudioSource created with {_audioEncoder.SupportedFormats.Count} codecs (including Opus)");
     }
 
     public List<AudioFormat> GetAudioSourceFormats() => _audioFormatManager.GetSourceFormats();
