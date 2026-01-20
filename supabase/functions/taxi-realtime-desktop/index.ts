@@ -640,7 +640,6 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
           openaiWs!.send(JSON.stringify({
             type: "session.update",
             session: {
-              type: "session",
               modalities: ["audio", "text"],
               instructions: buildSystemPrompt(sessionState.language),
               voice: VOICE,
