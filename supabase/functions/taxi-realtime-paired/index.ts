@@ -1597,6 +1597,9 @@ NEVER swap fields. Trust the question context.
 // Update live_calls table with current state
 async function updateLiveCall(sessionState: SessionState) {
   try {
+    // Calculate derived "last_step" for context-pairing tracking
+    const lastStep = sessionState.lastQuestionAsked || "none";
+    
     const { error } = await supabase
       .from("live_calls")
       .upsert({
@@ -1609,11 +1612,22 @@ async function updateLiveCall(sessionState: SessionState) {
         booking_confirmed: sessionState.bookingConfirmed,
         transcripts: sessionState.conversationHistory,
         source: "paired",
+        fare: sessionState.pendingFare || null,
+        eta: sessionState.pendingEta || null,
+        // Store context-pairing state for debugging/analytics
+        clarification_attempts: {
+          pickup: sessionState.stepCompleted[0] ? 1 : 0,
+          destination: sessionState.stepCompleted[1] ? 1 : 0,
+          passengers: sessionState.stepCompleted[2] ? 1 : 0,
+          last_step: lastStep
+        },
         updated_at: new Date().toISOString()
       }, { onConflict: "call_id" });
     
     if (error) {
       console.error(`[${sessionState.callId}] Failed to update live_calls:`, error);
+    } else {
+      console.log(`[${sessionState.callId}] 📊 live_calls synced: step=${lastStep}, pickup="${sessionState.booking.pickup || "unset"}", dest="${sessionState.booking.destination || "unset"}", pax=${sessionState.booking.passengers ?? "unset"}`);
     }
   } catch (e) {
     console.error(`[${sessionState.callId}] Error updating live_calls:`, e);
@@ -3404,18 +3418,37 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
             }
             
             console.log(`[${callId}] 📊 Booking state after sync:`, sessionState.booking);
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // CONTEXT-PAIRING DATABASE SYNC
+            // Update live_calls with current state for real-time dashboard tracking
+            // This is the "Digital Notepad" pattern - AI writes, DB persists
+            // ═══════════════════════════════════════════════════════════════════
             await updateLiveCall(sessionState);
             
-            // Send tool result with FULL context for amendments
+            // Calculate next step based on what's missing
+            let nextStep = "confirmation";
+            if (!sessionState.booking.pickup) nextStep = "pickup";
+            else if (!sessionState.booking.destination) nextStep = "destination";
+            else if (sessionState.booking.passengers === null) nextStep = "passengers";
+            else if (!sessionState.booking.pickupTime) nextStep = "time";
+            
+            // Send tool result - acknowledge sync and instruct next step
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
                 type: "function_call_output",
                 call_id: data.call_id,
                 output: JSON.stringify({ 
-                  success: true, 
-                  current_state: sessionState.booking,
-                  next_question: sessionState.lastQuestionAsked,
+                  success: true,
+                  message: "Data synced. Proceed to next step.",
+                  current_state: {
+                    pickup_address: sessionState.booking.pickup || null,
+                    dest_address: sessionState.booking.destination || null,
+                    passenger_count: sessionState.booking.passengers,
+                    last_step: sessionState.lastQuestionAsked
+                  },
+                  next_step: nextStep,
                   // Context pairing for amendments - AI needs to know what's already set
                   context: `Current booking: pickup="${sessionState.booking.pickup || "not set"}", destination="${sessionState.booking.destination || "not set"}", passengers=${sessionState.booking.passengers ?? "not set"}, time="${sessionState.booking.pickupTime || "not set"}"`
                 })
