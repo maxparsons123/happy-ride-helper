@@ -945,6 +945,38 @@ const STT_CORRECTIONS: Record<string, string> = {
   "18 b": "18B",
   "7 a": "7A",
   "7 b": "7B",
+  
+  // 1214A address preservation - common mishearings
+  "1214 a": "1214A",
+  "twelve fourteen a": "1214A",
+  "twelve 14 a": "1214A",
+  "1214a": "1214A",
+  "one two one four a": "1214A",
+  "1214 8": "1214A",
+  "12148": "1214A",
+  "twelve fourteen eight": "1214A",
+  "one two one four eight": "1214A",
+  
+  // Generic letter suffix patterns for 4-digit addresses
+  "1000 a": "1000A",
+  "1000 b": "1000B",
+  "1001 a": "1001A",
+  "1001 b": "1001B",
+  "1100 a": "1100A",
+  "1100 b": "1100B",
+  "1200 a": "1200A",
+  "1200 b": "1200B",
+  "1210 a": "1210A",
+  "1210 b": "1210B",
+  "1211 a": "1211A",
+  "1212 a": "1212A",
+  "1213 a": "1213A",
+  "1214 b": "1214B",
+  "1215 a": "1215A",
+  "1220 a": "1220A",
+  "1300 a": "1300A",
+  "1400 a": "1400A",
+  "1500 a": "1500A",
 };
 
 // Pre-compiled regex pattern for O(1) STT correction lookups
@@ -962,8 +994,14 @@ function correctTranscript(text: string): string {
   if (!text || text.length === 0) return "";
   
   // Single-pass replacement using pre-compiled pattern
-  const corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
+  let corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
     return STT_CORRECTIONS_LOWER.get(matched.toLowerCase()) || matched;
+  });
+  
+  // DYNAMIC SUFFIX PRESERVATION: Handle ANY "number space letter" pattern
+  // E.g., "1214 A" → "1214A", "52 B" → "52B", "7 C" → "7C"
+  corrected = corrected.replace(/\b(\d+)\s+([ABCabc])\b/g, (_, num, letter) => {
+    return num + letter.toUpperCase();
   });
   
   // Capitalize first letter and return
