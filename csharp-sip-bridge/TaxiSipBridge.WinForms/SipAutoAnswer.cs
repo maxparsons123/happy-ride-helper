@@ -19,14 +19,12 @@ public class SipAutoAnswer : IDisposable
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
     private AdaAudioClient? _adaClient;
+    private AdaAudioSource? _adaAudioSource;
     private VoIPMediaSession? _currentMediaSession;
     private CancellationTokenSource? _callCts;
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private IPAddress? _localIp;
-
-    // Opus encoder for calls negotiated with Opus codec
-    private OpusAudioEncoder? _opusEncoder;
 
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
@@ -229,19 +227,22 @@ public class SipAutoAnswer : IDisposable
         string callId, SIPUserAgent ua, SIPRequest req, CancellationToken ct,
         Action<AudioFormat> onFormatNegotiated)
     {
-        Log($"🔧 [{callId}] Creating VoIPMediaSession with Opus support...");
+        Log($"🔧 [{callId}] Creating AdaAudioSource + VoIPMediaSession...");
 
-        // Create Opus encoder for manual encoding of Ada audio
-        _opusEncoder = new OpusAudioEncoder();
+        // Create AdaAudioSource - this implements IAudioSource and will handle
+        // encoding + RTP pacing via its internal timer
+        _adaAudioSource = new AdaAudioSource();
+        _adaAudioSource.OnDebugLog += msg => Log(msg);
 
-        // Use default VoIPMediaSession - codec negotiation happens via SDP offer/answer
-        var mediaSession = new VoIPMediaSession();
+        // Create media endpoints with our custom audio source
+        var mediaEndPoints = new MediaEndPoints
+        {
+            AudioSource = _adaAudioSource
+        };
+
+        var mediaSession = new VoIPMediaSession(mediaEndPoints);
         mediaSession.AcceptRtpFromAny = true;
 
-        // Disable AudioExtrasSource (hold music, etc.) - we inject audio via SendAudio
-        mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
-
-        // Log session details
         Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
 
         mediaSession.OnAudioFormatsNegotiated += formats =>
@@ -249,6 +250,9 @@ public class SipAutoAnswer : IDisposable
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
             Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} @ {fmt.ClockRate}Hz (PT={fmt.ID})");
+            
+            // Set the format on our audio source so it knows how to encode
+            _adaAudioSource?.SetAudioSourceFormat(fmt);
         };
 
         // Add handler for RTP events at session level for diagnostics
@@ -279,7 +283,7 @@ public class SipAutoAnswer : IDisposable
             return null;
         }
 
-        Log($"🔧 [{callId}] Starting media session...");
+        Log($"🔧 [{callId}] Starting media session (this starts AdaAudioSource timer)...");
         await mediaSession.Start();
         Log($"✅ [{callId}] Media session started");
 
@@ -311,15 +315,13 @@ public class SipAutoAnswer : IDisposable
         string callId, VoIPMediaSession mediaSession,
         AudioFormat negotiatedFormat, CancellationTokenSource cts)
     {
-        if (_adaClient == null) return;
+        if (_adaClient == null || _adaAudioSource == null) return;
 
         int chunkCount = 0;
-        bool isOpus = negotiatedFormat.Codec == AudioCodecsEnum.OPUS;
-        int targetRate = isOpus ? 48000 : 8000;
 
-        Log($"🔧 [{callId}] Wiring Ada audio → {(isOpus ? "Opus" : "mu-law")} @ {targetRate}Hz");
+        Log($"🔧 [{callId}] Wiring Ada audio → AdaAudioSource.EnqueuePcm24");
 
-        // Prefer streaming raw PCM audio if the client exposes OnPcm24Audio event
+        // Wire Ada's PCM audio to AdaAudioSource (which handles encoding + RTP)
         try
         {
             var evt = _adaClient.GetType().GetEvent("OnPcm24Audio");
@@ -331,112 +333,23 @@ public class SipAutoAnswer : IDisposable
 
                     chunkCount++;
                     if (chunkCount <= 5)
-                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
+                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
 
-                    try
-                    {
-                        // Convert bytes to shorts (24kHz PCM16)
-                        var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
-
-                        byte[] encoded;
-                        uint durationRtpUnits;
-
-                        if (isOpus)
-                        {
-                            // 24kHz → 48kHz for Opus
-                            var pcm48k = AudioCodecs.Resample(pcm24, 24000, 48000);
-
-                            // Opus expects 960 samples (20ms @ 48kHz)
-                            const int OPUS_FRAME = 960;
-                            for (int offset = 0; offset + OPUS_FRAME <= pcm48k.Length; offset += OPUS_FRAME)
-                            {
-                                var frame = new short[OPUS_FRAME];
-                                Array.Copy(pcm48k, offset, frame, 0, OPUS_FRAME);
-
-                                encoded = _opusEncoder!.EncodeAudio(frame, negotiatedFormat);
-                                durationRtpUnits = OPUS_FRAME; // 20ms @ 48kHz
-                                mediaSession.SendAudio(durationRtpUnits, encoded);
-
-                                if (chunkCount <= 5 && offset == 0)
-                                    Log($"📤 [{callId}] Sent Opus frame {encoded.Length}b");
-                            }
-                        }
-                        else
-                        {
-                            // 24kHz → 8kHz → mu-law
-                            var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
-                            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
-
-                            durationRtpUnits = (uint)ulaw.Length;
-                            mediaSession.SendAudio(durationRtpUnits, ulaw);
-
-                            if (chunkCount <= 5)
-                                Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (chunkCount <= 5)
-                            Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
-                    }
+                    // Feed audio to AdaAudioSource - it handles resampling, encoding, and RTP
+                    _adaAudioSource.EnqueuePcm24(pcmBytes);
                 };
 
                 evt.AddEventHandler(_adaClient, handler);
-                Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio → SendAudio (reflection)");
+                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio → AdaAudioSource");
                 return;
             }
 
-            Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback → SendAudio");
+            Log($"⚠️ [{callId}] OnPcm24Audio not available on AdaAudioClient");
         }
         catch (Exception ex)
         {
-            Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio; using fallback. Error: {ex.Message}");
+            Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio: {ex.Message}");
         }
-
-        // Fallback: poll mu-law frames (only works for G.711, not Opus)
-        if (isOpus)
-        {
-            Log($"⚠️ [{callId}] Cannot use mu-law fallback for Opus - no audio will be sent!");
-            return;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            int fallbackChunks = 0;
-            while (!cts.IsCancellationRequested && !_disposed)
-            {
-                byte[]? ulaw = null;
-                try
-                {
-                    ulaw = _adaClient?.GetNextMuLawFrame();
-                }
-                catch { }
-
-                if (ulaw == null)
-                {
-                    await Task.Delay(5, cts.Token);
-                    continue;
-                }
-
-                fallbackChunks++;
-                if (fallbackChunks <= 5)
-                    Log($"🔊 [{callId}] Fallback ulaw #{fallbackChunks}: {ulaw.Length}b");
-
-                try
-                {
-                    uint durationRtpUnits = (uint)ulaw.Length;
-                    mediaSession.SendAudio(durationRtpUnits, ulaw);
-
-                    if (fallbackChunks <= 5)
-                        Log($"📤 [{callId}] Sent {ulaw.Length}b ulaw via SendAudio (fallback)");
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch { }
-            }
-        }, cts.Token);
     }
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
@@ -509,6 +422,12 @@ public class SipAutoAnswer : IDisposable
             }
             catch { }
             _adaClient = null;
+        }
+
+        if (_adaAudioSource != null)
+        {
+            try { _adaAudioSource.Dispose(); } catch { }
+            _adaAudioSource = null;
         }
 
         if (mediaSession != null)
