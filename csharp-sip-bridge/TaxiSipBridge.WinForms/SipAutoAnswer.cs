@@ -152,7 +152,7 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // ========== PRODUCTION MODE: Use AudioExtrasSource for Ada audio ==========
+            // ========== PRODUCTION MODE: Send mu-law RTP directly ==========
             Log($"🔧 [{callId}] Creating VoIPMediaSession...");
             
             mediaSession = new VoIPMediaSession();
@@ -167,7 +167,6 @@ public class SipAutoAnswer : IDisposable
                 var fmt = formats.FirstOrDefault();
                 negotiatedFormat = fmt;
                 Log($"🎵 [{callId}] Audio format negotiated: {fmt.Codec} @ {fmt.ClockRate}Hz");
-                mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
             };
             
             _currentMediaSession = mediaSession;
@@ -208,20 +207,13 @@ public class SipAutoAnswer : IDisposable
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
-            // Start the AudioExtrasSource
-            Log($"🔊 [{callId}] Starting AudioExtrasSource...");
-            await mediaSession.AudioExtrasSource.StartAudio();
-            
-            // Set to silence initially (we'll inject audio via ExternalAudioSourceRawSample)
-            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
-
             // Connect to Ada
             Log($"🔧 [{callId}] Creating AdaAudioClient...");
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
             
-            // Wire Ada audio to AudioExtrasSource (use reflection so builds work even if event is missing)
+            // Wire Ada audio - use SendAudio() with mu-law encoded frames
             int adaAudioChunks = 0;
             bool wiredViaEvent = false;
 
@@ -233,40 +225,51 @@ public class SipAutoAnswer : IDisposable
                     Action<byte[]> handler = (pcmBytes) =>
                     {
                         if (cts.Token.IsCancellationRequested) return;
+                        if (mediaSession == null) return;
 
                         adaAudioChunks++;
-                        if (adaAudioChunks <= 3)
+                        if (adaAudioChunks <= 5)
                             Log($"🔊 [{callId}] Ada audio chunk #{adaAudioChunks}: {pcmBytes.Length} bytes");
 
-                        // Convert bytes to shorts (24kHz PCM16)
-                        var pcm24 = new short[pcmBytes.Length / 2];
-                        Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
-
-                        // Inject into AudioExtrasSource
-                        // Note: AudioExtrasSource expects samples at the negotiated rate
-                        if (negotiatedFormat.ClockRate > 0)
+                        try
                         {
-                            int targetRate = negotiatedFormat.ClockRate;
-                            var resampled = Resample(pcm24, 24000, targetRate);
-
-                            var samplingRate = targetRate == 8000 ? AudioSamplingRatesEnum.Rate8KHz : AudioSamplingRatesEnum.Rate16KHz;
-                            mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                            // Convert bytes to shorts (24kHz PCM16)
+                            var pcm24k = AudioCodecs.BytesToShorts(pcmBytes);
+                            
+                            // Resample 24kHz -> 8kHz
+                            var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+                            
+                            // Encode to mu-law
+                            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+                            
+                            // Send via RTP using SendAudio
+                            // SendAudio expects the encoded audio samples
+                            uint durationRtpUnits = (uint)(ulaw.Length); // 8kHz = 8 samples per ms
+                            mediaSession.SendAudio(durationRtpUnits, ulaw);
+                            
+                            if (adaAudioChunks <= 5)
+                                Log($"📤 [{callId}] Sent {ulaw.Length} ulaw bytes via SendAudio");
+                        }
+                        catch (Exception ex)
+                        {
+                            if (adaAudioChunks <= 5)
+                                Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
                         }
                     };
 
                     evt.AddEventHandler(_adaClient, handler);
                     wiredViaEvent = true;
-                    Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio event");
+                    Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio -> SendAudio");
                 }
             }
             catch (Exception ex)
             {
-                Log($"⚠️ [{callId}] Failed wiring OnPcm24Audio via reflection: {ex.Message}");
+                Log($"⚠️ [{callId}] Failed wiring OnPcm24Audio: {ex.Message}");
             }
 
             if (!wiredViaEvent)
             {
-                Log($"⚠️ [{callId}] OnPcm24Audio not available; using ulaw polling fallback");
+                Log($"⚠️ [{callId}] Using ulaw polling fallback -> SendAudio");
                 _ = Task.Run(async () =>
                 {
                     while (!cts.Token.IsCancellationRequested && !_disposed)
@@ -280,16 +283,8 @@ public class SipAutoAnswer : IDisposable
 
                         try
                         {
-                            var pcm8k = AudioCodecs.MuLawDecode(ulaw);
-
-                            // If codec negotiation hasn't completed yet, skip.
-                            if (negotiatedFormat.ClockRate <= 0) continue;
-
-                            int targetRate = negotiatedFormat.ClockRate;
-                            var resampled = Resample(pcm8k, 8000, targetRate);
-
-                            var samplingRate = targetRate == 8000 ? AudioSamplingRatesEnum.Rate8KHz : AudioSamplingRatesEnum.Rate16KHz;
-                            mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                            uint durationRtpUnits = (uint)(ulaw.Length);
+                            mediaSession.SendAudio(durationRtpUnits, ulaw);
                         }
                         catch { }
                     }
