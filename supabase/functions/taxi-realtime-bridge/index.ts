@@ -915,9 +915,120 @@ Current: pickup=${sessionState.booking.pickup || "empty"}, destination=${session
   // Audio diagnostics
   const audioDiag = createAudioDiagnostics();
 
-  // Client message handler - PRIMARY: ulaw audio from Python bridge
+  // Client message handler - PRIMARY: binary audio from Python bridge
   socket.onmessage = async (event) => {
     try {
+      // PRIMARY PATH: Raw binary audio from Python bridge (ulaw or PCM16)
+      if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+        sessionState.audioPacketsReceived++;
+        audioDiag.packetsReceived++;
+        
+        const bytes = event.data instanceof ArrayBuffer 
+          ? new Uint8Array(event.data) 
+          : event.data;
+        
+        // Detect format: ulaw frames are typically 160 bytes (20ms @ 8kHz)
+        // PCM16 frames are typically 320 bytes (20ms @ 8kHz) or 640 bytes (20ms @ 16kHz)
+        const isUlaw = bytes.length === 160 || bytes.length === 320; // Standard ulaw frames
+        const isPcm16k = bytes.length === 640; // 16kHz PCM16
+        
+        let pcm: Int16Array;
+        let inputRate: number;
+        
+        if (isUlaw && bytes.length === 160) {
+          // ulaw 8kHz
+          pcm = ulawToPcm16(bytes);
+          inputRate = 8000;
+        } else if (bytes.length === 320) {
+          // Could be ulaw doubled or PCM16 8kHz - check if it looks like PCM
+          // PCM16 has wider range, ulaw is compressed
+          const firstWord = (bytes[1] << 8) | bytes[0];
+          if (firstWord > 0x7F00 || firstWord < 0x0100) {
+            // Likely ulaw (values cluster around 0x00-0xFF range after decode)
+            pcm = ulawToPcm16(bytes);
+            inputRate = 8000;
+          } else {
+            // Likely PCM16
+            pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+            inputRate = 8000;
+          }
+        } else if (isPcm16k) {
+          // PCM16 @ 16kHz
+          pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+          inputRate = 16000;
+        } else {
+          // Default: treat as ulaw
+          pcm = ulawToPcm16(bytes);
+          inputRate = 8000;
+        }
+        
+        const rms = computeRms(pcm);
+        updateRmsAverage(audioDiag, rms);
+        
+        // Log first few packets
+        if (sessionState.audioPacketsReceived <= 5) {
+          console.log(`[${callId}] 🎙️ Binary #${sessionState.audioPacketsReceived}: ${bytes.length}B, rate=${inputRate}, RMS=${rms.toFixed(0)}`);
+        } else if (sessionState.audioPacketsReceived % 200 === 0) {
+          console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
+        }
+        
+        // Greeting protection
+        if (Date.now() < sessionState.greetingProtectionUntil) {
+          audioDiag.packetsSkippedGreeting++;
+          return;
+        }
+        
+        // Echo guard
+        if (Date.now() < sessionState.echoGuardUntil) {
+          audioDiag.packetsSkippedEcho++;
+          return;
+        }
+        
+        // RMS noise gate
+        if (!sessionState.openAiResponseActive && rms < RMS_NOISE_FLOOR) {
+          audioDiag.packetsSkippedNoise++;
+          return;
+        }
+        
+        // Barge-in detection when Ada is speaking
+        if (sessionState.openAiResponseActive) {
+          const sinceSpeakStart = sessionState.openAiSpeechStartedAt
+            ? (Date.now() - sessionState.openAiSpeechStartedAt)
+            : 0;
+          
+          // Lead-in protection
+          if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+            audioDiag.packetsSkippedBotSpeaking++;
+            return;
+          }
+          
+          // Barge-in RMS window
+          if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+            audioDiag.packetsSkippedEcho++;
+            return;
+          }
+        }
+        
+        // Summary protection
+        if (Date.now() < sessionState.summaryProtectionUntil) {
+          const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
+          if (sessionState.openAiResponseActive || !awaitingYesNo) return;
+        }
+        
+        // Apply pre-emphasis, then resample to 24kHz
+        const pcmEmph = applyPreEmphasis(pcm);
+        const pcm24k = resamplePcm16To24k(pcmEmph, inputRate);
+        const base64Audio = pcm16ToBase64(pcm24k);
+        
+        // Forward to OpenAI
+        if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          audioDiag.packetsForwarded++;
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
+        }
+        return;
+      }
+      
+      // SECONDARY PATH: JSON messages
       if (typeof event.data === "string") {
         const data = JSON.parse(event.data);
         
