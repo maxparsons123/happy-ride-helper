@@ -649,6 +649,8 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
+  // No-reply re-prompt: track how many times we've re-prompted without user response
+  noReplyRepromptCount: number;
 }
 
 // Helper to get current step name from index
@@ -673,6 +675,11 @@ const ASSISTANT_LEADIN_IGNORE_MS = 700;
 // Passenger question is short but critical; protect it from false-positive barge-in cutoffs.
 // (Server VAD can sometimes commit due to echo/line noise right as Ada starts speaking.)
 const PASSENGERS_QUESTION_PROTECTION_MS = 2200;
+
+// No-reply timeout: if user doesn't respond after Ada finishes, re-prompt after this many ms.
+const NO_REPLY_TIMEOUT_MS = 12000;
+// Max re-prompts before giving up and asking if they're still there
+const MAX_NO_REPLY_REPROMPTS = 2;
 
 // RMS thresholds for audio quality
 // NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
@@ -1538,7 +1545,8 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false
+    saidOneMoment: false,
+    noReplyRepromptCount: 0
   };
 }
 
@@ -2771,6 +2779,80 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             console.log(`[${callId}] 🚀 Flushing queued post-confirmation goodbye response`);
             openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
           }
+          
+          // ═══════════════════════════════════════════════════════════════════
+          // NO-REPLY TIMEOUT: If user doesn't respond, re-prompt after timeout
+          // This prevents Ada from going silent indefinitely if VAD fails
+          // ═══════════════════════════════════════════════════════════════════
+          if (!sessionState.bookingConfirmed && !sessionState.waitingForQuoteSilence && !cleanedUp) {
+            const currentStep = sessionState.lastQuestionAsked;
+            const repromptCount = sessionState.noReplyRepromptCount;
+            
+            trackedTimeout(() => {
+              // Check if we're still in the same state and no user response arrived
+              if (
+                cleanedUp ||
+                !openaiWs ||
+                openaiWs.readyState !== WebSocket.OPEN ||
+                sessionState.openAiResponseActive ||
+                sessionState.bookingConfirmed ||
+                sessionState.waitingForQuoteSilence ||
+                sessionState.lastQuestionAsked !== currentStep
+              ) {
+                return; // State changed, no need to re-prompt
+              }
+              
+              // Check if last Ada speech time matches (no new speech since)
+              const timeSinceAdaSpoke = Date.now() - sessionState.lastAdaFinishedSpeakingAt;
+              if (timeSinceAdaSpoke < NO_REPLY_TIMEOUT_MS - 1000) {
+                return; // Ada spoke again, skip this re-prompt
+              }
+              
+              if (repromptCount >= MAX_NO_REPLY_REPROMPTS) {
+                console.log(`[${callId}] 🔇 NO-REPLY: Max reprompts (${MAX_NO_REPLY_REPROMPTS}) reached - asking if still there`);
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[NO RESPONSE DETECTED] The user hasn't responded for a while. Ask: "Hello? Are you still there? I'm ready to help whenever you are."`
+                    }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+                sessionState.noReplyRepromptCount = 0; // Reset after "are you there"
+              } else {
+                console.log(`[${callId}] 🔄 NO-REPLY TIMEOUT: Re-prompting for ${currentStep} (attempt ${repromptCount + 1}/${MAX_NO_REPLY_REPROMPTS})`);
+                
+                const questionByStep: Record<SessionState["lastQuestionAsked"], string> = {
+                  pickup: "Where would you like to be picked up?",
+                  destination: "And what is your destination?",
+                  passengers: "How many passengers will be traveling?",
+                  time: "What time would you like the taxi?",
+                  confirmation: "Would you like me to go ahead and book that for you?",
+                  none: "How can I help you today?"
+                };
+                
+                const question = questionByStep[currentStep] || "How can I help?";
+                
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[NO-REPLY RE-PROMPT] The user hasn't responded. Gently repeat the question: "${question}"`
+                    }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+                sessionState.noReplyRepromptCount = repromptCount + 1;
+              }
+            }, NO_REPLY_TIMEOUT_MS);
+          }
           break;
 
         case "input_audio_buffer.speech_started":
@@ -2778,6 +2860,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // This prevents race conditions where Ada's response advances the step before transcript arrives
           sessionState.stepIndexAtSpeechStart = sessionState.currentStepIndex;
           sessionState.contextAtSpeechStart = getCurrentStepName(sessionState.currentStepIndex);
+          // Reset no-reply counter since user is responding
+          sessionState.noReplyRepromptCount = 0;
           console.log(`[${callId}] 🎤 User started speaking (step ${sessionState.stepIndexAtSpeechStart}: ${sessionState.contextAtSpeechStart})`);
           break;
 
