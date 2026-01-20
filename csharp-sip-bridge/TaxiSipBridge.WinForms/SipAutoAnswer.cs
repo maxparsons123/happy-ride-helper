@@ -157,6 +157,11 @@ public class SipAutoAnswer : IDisposable
             // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
             _adaSource = new AdaAudioSource();
             TryWireAdaSourceDebug(_adaSource);
+            
+            // ENABLE TEST TONE MODE - sends 440Hz sine wave to verify codec works
+            // Comment out this line to use real Ada audio
+            _adaSource.EnableTestTone(true);
+            Log($"🔊 [{callId}] TEST TONE MODE ENABLED - you should hear a 440Hz beep");
             // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints 
             { 

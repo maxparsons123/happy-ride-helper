@@ -32,6 +32,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _silenceFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
+    // Test tone mode
+    private bool _testToneMode;
+    private int _testToneSampleIndex;
+    private const double TEST_TONE_FREQ = 440.0; // A4 note
+
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
     public event SourceErrorDelegate? OnAudioSourceError;
@@ -56,7 +61,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void SetAudioSourceFormat(AudioFormat audioFormat)
     {
         _audioFormatManager.SetSelectedFormat(audioFormat);
-        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz");
+        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} (ID={audioFormat.ID}) @ {audioFormat.ClockRate}Hz");
     }
 
     public void RestrictFormats(Func<AudioFormat, bool> filter)
@@ -67,6 +72,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public bool HasEncodedAudioSubscribers() => OnAudioSourceEncodedSample != null;
 
     public bool IsAudioSourcePaused() => _isPaused;
+
+    /// <summary>
+    /// Enable test tone mode - sends a 440Hz sine wave instead of Ada audio.
+    /// Useful for debugging codec/format issues.
+    /// </summary>
+    public void EnableTestTone(bool enable = true)
+    {
+        _testToneMode = enable;
+        _testToneSampleIndex = 0;
+        OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Test tone mode: {(enable ? "ENABLED" : "DISABLED")}");
+    }
 
     public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample)
     {
@@ -80,6 +96,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void EnqueuePcm24(byte[] pcmBytes)
     {
         if (_disposed || _isClosed || pcmBytes.Length == 0) return;
+        if (_testToneMode) return; // Ignore Ada audio in test mode
 
         // Convert bytes to shorts (24kHz, 16-bit mono)
         var pcm24All = new short[pcmBytes.Length / 2];
@@ -157,7 +174,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             _isStarted = true;
             _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
-            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Timer started ({AUDIO_SAMPLE_PERIOD_MS}ms)");
+            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Timer started ({AUDIO_SAMPLE_PERIOD_MS}ms), format={_audioFormatManager.SelectedFormat.FormatName}");
         }
 
         return Task.CompletedTask;
@@ -194,33 +211,44 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
         try
         {
-            if (!_pcmQueue.TryDequeue(out var pcm24))
+            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
+            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            short[] audioFrame;
+
+            if (_testToneMode)
+            {
+                // Generate a 440Hz test tone
+                audioFrame = GenerateTestTone(samplesNeeded, targetRate);
+            }
+            else if (_pcmQueue.TryDequeue(out var pcm24))
+            {
+                // Resample 24kHz → selected codec rate
+                audioFrame = Resample(pcm24, 24000, targetRate);
+
+                // Hard-enforce exact 20ms frame size for RTP
+                if (audioFrame.Length != samplesNeeded)
+                {
+                    var fixedFrame = new short[samplesNeeded];
+                    Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
+                    audioFrame = fixedFrame;
+                }
+            }
+            else
             {
                 // Send silence to maintain timing
                 SendSilence();
                 return;
             }
 
-            // Resample 24kHz → selected codec rate (typically 8kHz for PCMU/PCMA)
-            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
-            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
-
-            short[] resampled = Resample(pcm24, 24000, targetRate);
-
-            // Hard-enforce exact 20ms frame size for RTP.
-            if (resampled.Length != samplesNeeded)
+            // Log first few frames
+            if (_sentFrames < 5)
             {
-                var fixedFrame = new short[samplesNeeded];
-                Array.Copy(resampled, fixedFrame, Math.Min(resampled.Length, samplesNeeded));
-                resampled = fixedFrame;
+                var mode = _testToneMode ? "TONE" : "ADA";
+                OnDebugLog?.Invoke($"[AdaAudioSource] 📤 [{mode}] Frame {_sentFrames}: {audioFrame.Length} samples @{targetRate}Hz, codec={_audioFormatManager.SelectedFormat.FormatName}");
             }
 
-            // Log first few frames
-            if (_sentFrames < 3)
-                OnDebugLog?.Invoke($"[AdaAudioSource] 📤 Frame {_sentFrames}: {pcm24.Length}→{resampled.Length} @{targetRate}Hz (need {samplesNeeded})");
-
             // Encode using negotiated codec
-            byte[] encoded = _audioEncoder.EncodeAudio(resampled, _audioFormatManager.SelectedFormat);
+            byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
 
             // Calculate RTP duration
             uint durationRtpUnits = (uint)samplesNeeded;
@@ -235,6 +263,24 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
     }
 
+    /// <summary>
+    /// Generate a sine wave test tone at 440Hz.
+    /// </summary>
+    private short[] GenerateTestTone(int sampleCount, int sampleRate)
+    {
+        var samples = new short[sampleCount];
+        double angularFreq = 2.0 * Math.PI * TEST_TONE_FREQ / sampleRate;
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double sample = Math.Sin(angularFreq * _testToneSampleIndex);
+            samples[i] = (short)(sample * 16000); // ~50% volume
+            _testToneSampleIndex++;
+        }
+
+        return samples;
+    }
+
     private void SendSilence()
     {
         try
@@ -244,7 +290,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             var silence = new short[samplesNeeded];
 
             byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
-            uint durationRtpUnits = (uint)(targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS);
+            uint durationRtpUnits = (uint)samplesNeeded;
 
             _silenceFrames++;
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
