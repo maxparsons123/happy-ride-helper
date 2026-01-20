@@ -321,11 +321,17 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Wiring Ada audio → AdaAudioSource.EnqueuePcm24");
 
+        // Debug: log what type we have and what events are available
+        var clientType = _adaClient.GetType();
+        Log($"🔍 [{callId}] AdaAudioClient type: {clientType.FullName}");
+        var allEvents = clientType.GetEvents();
+        Log($"🔍 [{callId}] Available events: {string.Join(", ", allEvents.Select(e => e.Name))}");
+
         // IMPORTANT: to stay compatible with older AdaAudioClient builds (where these events may not exist),
         // we wire via reflection and fall back to mu-law polling.
         try
         {
-            var pcmEvt = _adaClient.GetType().GetEvent("OnPcm24Audio");
+            var pcmEvt = clientType.GetEvent("OnPcm24Audio");
             if (pcmEvt != null)
             {
                 Action<byte[]> pcmHandler = (pcmBytes) =>
@@ -341,7 +347,7 @@ public class SipAutoAnswer : IDisposable
 
                 pcmEvt.AddEventHandler(_adaClient, pcmHandler);
 
-                var responseEvt = _adaClient.GetType().GetEvent("OnResponseStarted");
+                var responseEvt = clientType.GetEvent("OnResponseStarted");
                 if (responseEvt != null)
                 {
                     Action responseHandler = () => _adaAudioSource?.ResetFadeIn();
@@ -352,7 +358,7 @@ public class SipAutoAnswer : IDisposable
                 return;
             }
 
-            Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback → SendAudio");
+            Log($"⚠️ [{callId}] OnPcm24Audio not found in {allEvents.Length} events; using mu-law polling fallback");
         }
         catch (Exception ex)
         {
