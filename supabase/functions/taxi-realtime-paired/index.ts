@@ -23,7 +23,8 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // OpenAI Realtime API config
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
+// IMPORTANT: Use the stable Realtime endpoint/model. (Some preview model IDs get retired and can cause disconnects.)
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
 const VOICE = "shimmer";
 
 // ---------------------------------------------------------------------------
@@ -2028,47 +2029,56 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     }
   }, 2000);
 
-  openaiWs.onopen = () => {
-    console.log(`[${callId}] ✅ Connected to OpenAI Realtime`);
-    
+  // Ensure we follow the Realtime protocol correctly:
+  // send session.update ONLY AFTER receiving session.created.
+  let sessionUpdateSent = false;
+  const sendSessionUpdate = () => {
+    if (sessionUpdateSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    sessionUpdateSent = true;
+
     // Configure session with context-pairing system
     const systemPrompt = buildSystemPrompt(sessionState.language);
-    
+
     // Build Whisper prompt - only add English-specific hints if not auto-detect
-    const whisperPrompt = sessionState.language === "auto" 
+    const whisperPrompt = sessionState.language === "auto"
       ? "Taxi booking. Addresses, street names, numbers, passenger count."
       : sessionState.language === "en"
         ? "Taxi booking. Street numbers, addresses, passenger count, pickup location, destination. UK addresses."
         : "Taxi booking. Addresses, street names, numbers, passenger count.";
-    
+
     const sessionConfig = {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
         voice: VOICE,
-        instructions: systemPrompt + `\n\n[CALL CONTEXT]\nCall ID: ${callId}\nCaller: ${callerPhone}\nLanguage: ${sessionState.language}`,
+        instructions:
+          systemPrompt +
+          `\n\n[CALL CONTEXT]\nCall ID: ${callId}\nCaller: ${callerPhone}\nLanguage: ${sessionState.language}`,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        input_audio_transcription: { 
+        input_audio_transcription: {
           model: "whisper-1",
-          prompt: whisperPrompt
+          prompt: whisperPrompt,
         },
         turn_detection: {
           type: "server_vad",
           // Match taxi-realtime-simple settings for consistent quality
           threshold: 0.5,
           prefix_padding_ms: 300,
-          silence_duration_ms: 1200
+          silence_duration_ms: 1200,
         },
         tools: TOOLS,
         tool_choice: "auto",
-        temperature: 0.6 // OpenAI Realtime API minimum is 0.6
-      }
+        temperature: 0.6, // OpenAI Realtime API minimum is 0.6
+      },
     };
-    
-    openaiWs!.send(JSON.stringify(sessionConfig));
-    
-    // NOTE: Greeting is now sent on session.created, not here
+
+    console.log(`[${callId}] 📤 Sending session.update (after session.created)`);
+    openaiWs.send(JSON.stringify(sessionConfig));
+  };
+
+  openaiWs.onopen = () => {
+    console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
   };
 
   openaiWs.onmessage = async (event) => {
@@ -2077,8 +2087,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       
       switch (data.type) {
         case "session.created":
-          // Session created - but wait for session.updated before greeting
-          console.log(`[${callId}] 📋 Session created - waiting for session.updated`);
+          console.log(`[${callId}] 📋 Session created`);
+          // Now we can safely configure the session.
+          sendSessionUpdate();
           break;
           
         case "session.updated":
@@ -3228,8 +3239,16 @@ Do NOT skip any part. Say ALL of it warmly.]`
     console.error(`[${callId}] OpenAI WebSocket error:`, error);
   };
 
-  openaiWs.onclose = () => {
-    console.log(`[${callId}] OpenAI WebSocket closed`);
+  openaiWs.onclose = (ev) => {
+    // Include close codes/reasons to debug unexpected disconnects.
+    // NOTE: Deno's WS close event may not always include reason.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyEv: any = ev;
+    console.log(
+      `[${callId}] OpenAI WebSocket closed` +
+        (anyEv?.code ? ` code=${anyEv.code}` : "") +
+        (anyEv?.reason ? ` reason=${anyEv.reason}` : ""),
+    );
     cleanupWithKeepalive();
   };
 
@@ -3411,8 +3430,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
     console.error(`[${callId}] Client WebSocket error:`, error);
   };
 
-  socket.onclose = () => {
-    console.log(`[${callId}] Client closed - audio: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}, noise=${audioDiag.packetsSkippedNoise}`);
+  socket.onclose = (ev) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyEv: any = ev;
+    console.log(
+      `[${callId}] Client closed` +
+        (anyEv?.code ? ` code=${anyEv.code}` : "") +
+        (anyEv?.reason ? ` reason=${anyEv.reason}` : "") +
+        ` - audio: fwd=${audioDiag.packetsForwarded}/${audioDiag.packetsReceived}, noise=${audioDiag.packetsSkippedNoise}`,
+    );
     cleanupWithKeepalive();
   };
 }
