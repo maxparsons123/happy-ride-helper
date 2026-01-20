@@ -152,19 +152,20 @@ public class SipAutoAnswer : IDisposable
 
         try
         {
-            // ========== TEST MODE: Use AudioExtrasSource with built-in test signals ==========
-            // This is the official SIPSorcery way to send test audio
+            // ========== PRODUCTION MODE: Use AudioExtrasSource for Ada audio ==========
+            Log($"🔧 [{callId}] Creating VoIPMediaSession...");
             
-            Log($"🔊 [{callId}] CREATING TEST MODE SESSION (SIPSorcery AudioExtrasSource)");
-            
-            // Create VoIPMediaSession with NO custom audio source - use built-in AudioExtrasSource
             mediaSession = new VoIPMediaSession();
             mediaSession.AcceptRtpFromAny = true;
+            
+            // Store the negotiated format for later use
+            AudioFormat? negotiatedFormat = null;
             
             // Wire up format negotiation
             mediaSession.OnAudioFormatsNegotiated += (formats) =>
             {
                 var fmt = formats.FirstOrDefault();
+                negotiatedFormat = fmt;
                 Log($"🎵 [{callId}] Audio format negotiated: {fmt.Codec} @ {fmt.ClockRate}Hz");
                 mediaSession.AudioExtrasSource.SetAudioSourceFormat(fmt);
             };
@@ -207,43 +208,45 @@ public class SipAutoAnswer : IDisposable
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
-            // ========== START TEST AUDIO ==========
+            // Start the AudioExtrasSource
             Log($"🔊 [{callId}] Starting AudioExtrasSource...");
             await mediaSession.AudioExtrasSource.StartAudio();
             
-            Log($"🎵 [{callId}] Playing SINE WAVE (440Hz) - you should hear a tone!");
-            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.SineWave);
-            
-            // Play sine wave for 5 seconds
-            await Task.Delay(5000, cts.Token);
-            
-            Log($"🎵 [{callId}] Playing MUSIC...");
-            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.Music);
-            
-            // Play music for 5 seconds
-            await Task.Delay(5000, cts.Token);
-            
-            Log($"🎵 [{callId}] Playing WHITE NOISE...");
-            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.WhiteNoise);
-            
-            await Task.Delay(3000, cts.Token);
-            
-            Log($"🔇 [{callId}] Setting to SILENCE...");
-            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.Silence);
+            // Set to silence initially (we'll inject audio via ExternalAudioSourceRawSample)
+            mediaSession.AudioExtrasSource.SetSource(AudioSourcesEnum.None);
 
-            // ========== END TEST AUDIO ==========
-            
-            // Now connect to Ada for real conversation
-            Log($"📡 [{callId}] Test complete - connecting to Ada...");
-            
+            // Connect to Ada
+            Log($"🔧 [{callId}] Creating AdaAudioClient...");
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
             _adaClient.OnTranscript += t => OnTranscript?.Invoke(t);
-
-            ua.OnCallHungup += (SIPDialogue dialogue) =>
+            
+            // Wire Ada audio to AudioExtrasSource
+            int adaAudioChunks = 0;
+            _adaClient.OnPcm24Audio += (pcmBytes) =>
             {
-                Log($"📴 [{callId}] Caller hung up");
-                try { cts.Cancel(); } catch { }
+                if (cts.Token.IsCancellationRequested) return;
+                
+                adaAudioChunks++;
+                if (adaAudioChunks <= 3)
+                    Log($"🔊 [{callId}] Ada audio chunk #{adaAudioChunks}: {pcmBytes.Length} bytes");
+                
+                // Convert bytes to shorts (24kHz PCM16)
+                var pcm24 = new short[pcmBytes.Length / 2];
+                Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
+                
+                // Inject into AudioExtrasSource
+                // Note: AudioExtrasSource expects samples at the negotiated rate
+                // We need to resample from 24kHz to the negotiated rate
+                if (negotiatedFormat.HasValue)
+                {
+                    int targetRate = negotiatedFormat.Value.ClockRate;
+                    var resampled = Resample(pcm24, 24000, targetRate);
+                    
+                    // Send via ExternalAudioSourceRawSample
+                    var samplingRate = targetRate == 8000 ? AudioSamplingRatesEnum.Rate8KHz : AudioSamplingRatesEnum.Rate16KHz;
+                    mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                }
             };
 
             ua.OnCallHungup += (SIPDialogue dialogue) =>
@@ -291,7 +294,7 @@ public class SipAutoAnswer : IDisposable
                 catch { }
             };
 
-            Log($"✅ [{callId}] Call fully established - waiting for hangup");
+            Log($"✅ [{callId}] Call fully established - Ada audio wired");
             
             // Keep call alive
             while (!cts.IsCancellationRequested && _adaClient?.IsConnected == true && !_disposed)
@@ -413,6 +416,33 @@ public class SipAutoAnswer : IDisposable
                 }
             }, ct);
         }
+    }
+
+    /// <summary>
+    /// Simple linear resampling from one rate to another.
+    /// </summary>
+    private static short[] Resample(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+
+        double ratio = (double)fromRate / toRate;
+        int outputLength = (int)(input.Length / ratio);
+        var output = new short[outputLength];
+
+        for (int i = 0; i < output.Length; i++)
+        {
+            double srcPos = i * ratio;
+            int srcIndex = (int)srcPos;
+            double frac = srcPos - srcIndex;
+
+            if (srcIndex + 1 < input.Length)
+                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
+            else if (srcIndex < input.Length)
+                output[i] = input[srcIndex];
+        }
+
+        return output;
     }
 
     private void Log(string msg)
