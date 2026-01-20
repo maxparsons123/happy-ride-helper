@@ -292,40 +292,98 @@ public class SipAutoAnswer : IDisposable
         string callId, VoIPMediaSession mediaSession,
         AudioFormat negotiatedFormat, CancellationTokenSource cts)
     {
+        if (_adaClient == null) return;
+
         int chunkCount = 0;
 
-        _adaClient!.OnPcm24Audio += pcmBytes =>
+        // Use reflection so SipAutoAnswer compiles even if an older AdaAudioClient
+        // implementation (without OnPcm24Audio) is being referenced by the project.
+        try
         {
-            if (cts.Token.IsCancellationRequested) return;
-
-            chunkCount++;
-            if (chunkCount <= 3)
-                Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
-
-            try
+            var evt = _adaClient.GetType().GetEvent("OnPcm24Audio");
+            if (evt != null)
             {
-                // Convert bytes to shorts (24kHz PCM16)
-                var pcm24 = new short[pcmBytes.Length / 2];
-                Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
+                Action<byte[]> handler = (pcmBytes) =>
+                {
+                    if (cts.Token.IsCancellationRequested) return;
 
-                // Resample to negotiated rate and inject
-                int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
-                var resampled = Resample(pcm24, 24000, targetRate);
-                var samplingRate = targetRate == 8000 ? AudioSamplingRatesEnum.Rate8KHz : AudioSamplingRatesEnum.Rate16KHz;
+                    chunkCount++;
+                    if (chunkCount <= 3)
+                        Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b");
 
-                mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                    try
+                    {
+                        // Convert bytes to shorts (24kHz PCM16)
+                        var pcm24 = new short[pcmBytes.Length / 2];
+                        Buffer.BlockCopy(pcmBytes, 0, pcm24, 0, pcmBytes.Length);
 
-                if (chunkCount <= 3)
-                    Log($"📤 [{callId}] Injected {resampled.Length} samples @ {targetRate}Hz");
+                        // Resample to negotiated rate and inject
+                        int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
+                        var resampled = Resample(pcm24, 24000, targetRate);
+                        var samplingRate = targetRate == 8000
+                            ? AudioSamplingRatesEnum.Rate8KHz
+                            : AudioSamplingRatesEnum.Rate16KHz;
+
+                        mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+
+                        if (chunkCount <= 3)
+                            Log($"📤 [{callId}] Injected {resampled.Length} samples @ {targetRate}Hz");
+                    }
+                    catch (Exception ex)
+                    {
+                        if (chunkCount <= 3)
+                            Log($"⚠️ [{callId}] Audio inject error: {ex.Message}");
+                    }
+                };
+
+                evt.AddEventHandler(_adaClient, handler);
+                Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio (reflection)");
+                return;
             }
-            catch (Exception ex)
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Failed to wire OnPcm24Audio: {ex.Message}");
+        }
+
+        // Fallback: poll mu-law frames produced by AdaAudioClient and inject them.
+        Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback");
+
+        _ = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested && !_disposed)
             {
-                if (chunkCount <= 3)
-                    Log($"⚠️ [{callId}] Audio inject error: {ex.Message}");
-            }
-        };
+                byte[]? ulaw = null;
+                try
+                {
+                    ulaw = _adaClient?.GetNextMuLawFrame();
+                }
+                catch { }
 
-        Log($"🔧 [{callId}] Wired Ada audio via OnPcm24Audio");
+                if (ulaw == null)
+                {
+                    await Task.Delay(5, cts.Token);
+                    continue;
+                }
+
+                try
+                {
+                    var pcm8k = AudioCodecs.MuLawDecode(ulaw);
+                    int targetRate = negotiatedFormat.ClockRate > 0 ? negotiatedFormat.ClockRate : 8000;
+                    var resampled = Resample(pcm8k, 8000, targetRate);
+                    var samplingRate = targetRate == 8000
+                        ? AudioSamplingRatesEnum.Rate8KHz
+                        : AudioSamplingRatesEnum.Rate16KHz;
+
+                    mediaSession.AudioExtrasSource.ExternalAudioSourceRawSample(samplingRate, 20, resampled);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch { }
+            }
+        }, cts.Token);
     }
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
