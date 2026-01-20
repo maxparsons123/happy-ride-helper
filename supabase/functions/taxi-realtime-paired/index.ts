@@ -636,8 +636,9 @@ interface SessionState {
 
 const ECHO_GUARD_MS = 250;
 
-// Greeting protection window in ms - ignore early line noise so Ada's first prompt doesn't get cut off
-const GREETING_PROTECTION_MS = 3000;
+// Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
+// so Ada's initial greeting doesn't get cut off mid-sentence.
+const GREETING_PROTECTION_MS = 12000;
 
 // Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
 const SUMMARY_PROTECTION_MS = 8000;
