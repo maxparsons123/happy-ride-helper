@@ -645,9 +645,10 @@ const SUMMARY_PROTECTION_MS = 8000;
 // While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
-// RMS thresholds for audio quality (aligned with desktop mode)
-const RMS_NOISE_FLOOR = 650;    // Below = background noise, skip
-const RMS_BARGE_IN_MIN = 1000;  // Minimum for barge-in during Ada speech
+// RMS thresholds for audio quality
+// NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
+// Only apply barge-in filtering when Ada is actively speaking to prevent echo
+const RMS_BARGE_IN_MIN = 800;   // Minimum for barge-in during Ada speech
 const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
 
 // Audio diagnostics tracking
@@ -3271,13 +3272,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
           return; // Drop this audio frame (likely echo)
         }
 
-        // RMS noise gate: skip background noise when Ada is NOT speaking
-        if (!sessionState.openAiResponseActive) {
-          if (rms < RMS_NOISE_FLOOR) {
-            audioDiag.packetsSkippedNoise++;
-            return;
-          }
-        }
+        // NOTE: Removed RMS noise gate - telephony audio has very low RMS values (1-200)
+        // and filtering was blocking ALL audio. We only filter during barge-in detection.
 
         // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
         // IMPORTANT: once Ada has FINISHED speaking the fare quote and we're awaiting a YES/NO,
