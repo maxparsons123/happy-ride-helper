@@ -4,19 +4,23 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Mic, Phone, PhoneOff, Bot } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { 
-  TAXI_REALTIME_WS_URL, 
-  TAXI_REALTIME_SIMPLE_WS_URL, 
+import {
+  TAXI_REALTIME_WS_URL,
+  TAXI_REALTIME_SIMPLE_WS_URL,
   TAXI_REALTIME_PAIRED_WS_URL,
-  TAXI_REALTIME_DESKTOP_WS_URL 
+  TAXI_REALTIME_DESKTOP_WS_URL,
 } from "@/config/supabase";
+
+// Fast Uint8Array -> base64 for binary payloads (avoid per-byte string concatenation)
+const BASE64_DECODER = new TextDecoder("latin1");
+const uint8ToBase64 = (bytes: Uint8Array) => btoa(BASE64_DECODER.decode(bytes));
 
 // Endpoint options for testing different backends
 const WS_ENDPOINTS = {
-  "realtime": TAXI_REALTIME_WS_URL,
-  "simple": TAXI_REALTIME_SIMPLE_WS_URL,
-  "paired": TAXI_REALTIME_PAIRED_WS_URL,
-  "desktop": TAXI_REALTIME_DESKTOP_WS_URL,
+  realtime: TAXI_REALTIME_WS_URL,
+  simple: TAXI_REALTIME_SIMPLE_WS_URL,
+  paired: TAXI_REALTIME_PAIRED_WS_URL,
+  desktop: TAXI_REALTIME_DESKTOP_WS_URL,
 } as const;
 
 type EndpointKey = keyof typeof WS_ENDPOINTS;
@@ -490,23 +494,27 @@ export default function VoiceTest() {
 
       // Handle audio data from worklet
       workletNode.port.onmessage = (e) => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        // Backpressure guard: if the socket can't drain fast enough, drop mic frames
+        // (prevents UI lockups + server overload that can lead to garbled audio)
+        if (ws.bufferedAmount > 2_000_000) {
+          console.warn("WS backpressure — dropping mic audio", ws.bufferedAmount);
+          return;
+        }
 
         const buffer = e.data as ArrayBuffer;
         const uint8 = new Uint8Array(buffer);
-        
-        // Convert to base64
-        let binary = "";
-        for (let i = 0; i < uint8.length; i++) {
-          binary += String.fromCharCode(uint8[i]);
-        }
-        const base64 = btoa(binary);
 
-        wsRef.current.send(JSON.stringify({
-          type: "audio",
-          audio: base64
-        }));
-        
+        const base64 = uint8ToBase64(uint8);
+        ws.send(
+          JSON.stringify({
+            type: "audio",
+            audio: base64,
+          }),
+        );
+
         // Mark that we actually sent audio
         audioSentRef.current = true;
       };
