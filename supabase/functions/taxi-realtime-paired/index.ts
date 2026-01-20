@@ -3254,8 +3254,35 @@ Do NOT skip any part. Say ALL of it warmly.]`
       if (typeof event.data === "string") {
         const data = JSON.parse(event.data);
 
-        if (data.type === "audio" && data.audio) {
-          // If we receive base64 audio, assume it's 8kHz ulaw unless told otherwise.
+        // Handle input_audio_buffer.append from C# bridge (already PCM16 @ 24kHz)
+        if (data.type === "input_audio_buffer.append" && data.audio) {
+          // GREETING PROTECTION: ignore early line noise so Ada doesn't get cut off
+          if (Date.now() < sessionState.greetingProtectionUntil) {
+            return;
+          }
+
+          // ECHO GUARD: block audio briefly after Ada finishes speaking
+          if (Date.now() < sessionState.echoGuardUntil) {
+            return; // Drop this audio frame (likely echo)
+          }
+
+          // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
+          if (Date.now() < sessionState.summaryProtectionUntil) {
+            const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
+            if (sessionState.openAiResponseActive || !awaitingYesNo) {
+              return; // Drop - Ada is delivering summary/quote
+            }
+          }
+
+          // Forward directly to OpenAI - C# bridge already sends PCM16 @ 24kHz
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: data.audio,
+            }));
+          }
+        } else if (data.type === "audio" && data.audio) {
+          // Legacy handler: receive base64 audio, assume 8kHz ulaw unless told otherwise.
           const binaryStr = atob(data.audio);
           const bytes = new Uint8Array(binaryStr.length);
           for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
