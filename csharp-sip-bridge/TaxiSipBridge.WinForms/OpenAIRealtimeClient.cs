@@ -1,0 +1,710 @@
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
+using System.Collections.Concurrent;
+
+namespace TaxiSipBridge;
+
+/// <summary>
+/// Direct OpenAI Realtime API client - no edge function required.
+/// Replicates the taxi-realtime-desktop edge function logic locally.
+/// </summary>
+public class OpenAIRealtimeClient : IAudioAIClient
+{
+    private readonly string _apiKey;
+    private readonly string _model;
+    private readonly string _voice;
+    private readonly string _systemPrompt;
+    private readonly string? _dispatchWebhookUrl;
+    
+    private ClientWebSocket? _ws;
+    private CancellationTokenSource? _cts;
+    private volatile bool _disposed = false;
+
+    private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
+    private const int MAX_QUEUE_FRAMES = 500;
+
+    private bool _needsFadeIn = true;
+    private const int FadeInSamples = 48;
+    
+    // Session state
+    private string? _callerId;
+    private string _lastQuestionAsked = "pickup";
+    private BookingState _booking = new();
+    private bool _greetingSent = false;
+
+    public event Action<string>? OnLog;
+    public event Action<string>? OnTranscript;
+    public event Action? OnConnected;
+    public event Action? OnDisconnected;
+    public event Action<string>? OnAdaSpeaking;
+    public event Action<byte[]>? OnPcm24Audio;
+    public event Action? OnResponseStarted;
+    
+    // Tool call events for external handling
+    public event Action<string, Dictionary<string, object>>? OnToolCall;
+    public event Action<BookingState>? OnBookingUpdated;
+
+    public bool IsConnected => _ws?.State == WebSocketState.Open;
+    public int PendingFrameCount => _outboundQueue.Count;
+
+    /// <summary>
+    /// Create a direct OpenAI Realtime client.
+    /// </summary>
+    /// <param name="apiKey">OpenAI API key</param>
+    /// <param name="model">Model name (default: gpt-4o-mini-realtime-preview-2024-12-17)</param>
+    /// <param name="voice">Voice name (default: shimmer)</param>
+    /// <param name="systemPrompt">Custom system prompt (null for default taxi booking prompt)</param>
+    /// <param name="dispatchWebhookUrl">Optional webhook URL for dispatch integration</param>
+    public OpenAIRealtimeClient(
+        string apiKey,
+        string model = "gpt-4o-mini-realtime-preview-2024-12-17",
+        string voice = "shimmer",
+        string? systemPrompt = null,
+        string? dispatchWebhookUrl = null)
+    {
+        _apiKey = apiKey;
+        _model = model;
+        _voice = voice;
+        _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
+        _dispatchWebhookUrl = dispatchWebhookUrl;
+    }
+
+    public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(OpenAIRealtimeClient));
+        
+        _callerId = caller;
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _greetingSent = false;
+        _booking = new BookingState();
+        _lastQuestionAsked = "pickup";
+
+        _ws = new ClientWebSocket();
+        
+        // OpenAI Realtime API requires specific subprotocols
+        _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
+        _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
+        
+        var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
+        
+        Log($"🔌 Connecting to OpenAI Realtime: {_model}");
+        
+        try
+        {
+            await _ws.ConnectAsync(uri, _cts.Token);
+            Log("✅ Connected to OpenAI Realtime API");
+            OnConnected?.Invoke();
+            _ = ReceiveLoopAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Failed to connect: {ex.Message}");
+            throw;
+        }
+    }
+
+    public async Task SendMuLawAsync(byte[] ulawData)
+    {
+        if (_disposed || _ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
+
+        // Decode µ-law → PCM16 @ 8kHz
+        var pcm8k = AudioCodecs.MuLawDecode(ulawData);
+        // Resample 8kHz → 24kHz
+        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+        var base64 = Convert.ToBase64String(pcmBytes);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+
+        try
+        {
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+    }
+
+    public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
+    {
+        if (_disposed || _ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
+
+        byte[] audioToSend;
+
+        if (sampleRate != 24000)
+        {
+            var samples = AudioCodecs.BytesToShorts(pcmData);
+            var resampled = AudioCodecs.Resample(samples, sampleRate, 24000);
+            audioToSend = AudioCodecs.ShortsToBytes(resampled);
+        }
+        else
+        {
+            audioToSend = pcmData;
+        }
+
+        var base64 = Convert.ToBase64String(audioToSend);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+
+        try
+        {
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
+    }
+
+    public byte[]? GetNextMuLawFrame()
+    {
+        if (_outboundQueue.TryDequeue(out var frame))
+            return frame;
+        return null;
+    }
+
+    public void ClearPendingFrames()
+    {
+        while (_outboundQueue.TryDequeue(out _)) { }
+    }
+
+    private async Task ReceiveLoopAsync()
+    {
+        var buffer = new byte[1024 * 64];
+
+        while (!_disposed && _ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
+        {
+            try
+            {
+                var result = await _ws.ReceiveAsync(buffer, _cts!.Token);
+
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    Log("🔌 WebSocket closed by OpenAI");
+                    break;
+                }
+
+                if (result.MessageType != WebSocketMessageType.Text)
+                    continue;
+
+                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                await ProcessMessageAsync(json);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (WebSocketException ex)
+            {
+                Log($"⚠️ WebSocket error: {ex.Message}");
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Receive error: {ex.Message}");
+                break;
+            }
+        }
+
+        OnDisconnected?.Invoke();
+    }
+
+    private async Task ProcessMessageAsync(string json)
+    {
+        if (_disposed) return;
+        
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("type", out var typeEl))
+                return;
+
+            var type = typeEl.GetString();
+
+            switch (type)
+            {
+                case "session.created":
+                    Log("📋 Session created - configuring...");
+                    await ConfigureSessionAsync();
+                    break;
+                    
+                case "session.updated":
+                    Log("✅ Session configured - sending greeting");
+                    await SendGreetingAsync();
+                    break;
+
+                case "response.audio.delta":
+                    if (doc.RootElement.TryGetProperty("delta", out var delta))
+                    {
+                        var base64 = delta.GetString();
+                        if (!string.IsNullOrEmpty(base64))
+                        {
+                            var pcmBytes = Convert.FromBase64String(base64);
+                            OnPcm24Audio?.Invoke(pcmBytes);
+                            ProcessAdaAudio(pcmBytes);
+                        }
+                    }
+                    break;
+
+                case "response.audio_transcript.delta":
+                    if (doc.RootElement.TryGetProperty("delta", out var textDelta))
+                    {
+                        var transcript = textDelta.GetString();
+                        if (!string.IsNullOrEmpty(transcript))
+                            OnAdaSpeaking?.Invoke(transcript);
+                    }
+                    break;
+
+                case "response.audio_transcript.done":
+                    if (doc.RootElement.TryGetProperty("transcript", out var fullText))
+                    {
+                        var transcript = fullText.GetString();
+                        if (!string.IsNullOrEmpty(transcript))
+                            OnTranscript?.Invoke($"Ada: {transcript}");
+                    }
+                    break;
+
+                case "input_audio_buffer.speech_started":
+                    Log("🎤 User speaking...");
+                    break;
+
+                case "input_audio_buffer.speech_stopped":
+                    Log("🎤 User stopped speaking");
+                    break;
+
+                case "response.created":
+                    Log("🤖 Response started");
+                    _needsFadeIn = true;
+                    OnResponseStarted?.Invoke();
+                    break;
+
+                case "response.done":
+                    Log("✅ Response done");
+                    break;
+
+                case "conversation.item.input_audio_transcription.completed":
+                    if (doc.RootElement.TryGetProperty("transcript", out var userText))
+                    {
+                        var transcript = userText.GetString();
+                        if (!string.IsNullOrEmpty(transcript))
+                        {
+                            OnTranscript?.Invoke($"You: {transcript}");
+                            Log($"👤 User: \"{transcript}\"");
+                            
+                            // Send context pairing hint to OpenAI
+                            await SendContextHintAsync(transcript);
+                        }
+                    }
+                    break;
+
+                case "response.function_call_arguments.done":
+                    await HandleToolCallAsync(doc.RootElement);
+                    break;
+
+                case "error":
+                    if (doc.RootElement.TryGetProperty("error", out var err))
+                    {
+                        var msg = err.TryGetProperty("message", out var m) ? m.GetString() : "Unknown error";
+                        Log($"❌ OpenAI error: {msg}");
+                    }
+                    break;
+
+                default:
+                    if (!type.StartsWith("rate_limits"))
+                        Log($"📨 Event: {type}");
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Parse error: {ex.Message}");
+        }
+    }
+
+    private async Task ConfigureSessionAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        var sessionUpdate = new
+        {
+            type = "session.update",
+            session = new
+            {
+                modalities = new[] { "text", "audio" },
+                instructions = _systemPrompt,
+                voice = _voice,
+                input_audio_format = "pcm16",
+                output_audio_format = "pcm16",
+                input_audio_transcription = new { model = "whisper-1" },
+                turn_detection = new
+                {
+                    type = "server_vad",
+                    threshold = 0.5,
+                    prefix_padding_ms = 300,
+                    silence_duration_ms = 1200
+                },
+                tools = GetTools(),
+                tool_choice = "auto",
+                temperature = 0.6
+            }
+        };
+
+        var json = JsonSerializer.Serialize(sessionUpdate);
+        await _ws.SendAsync(
+            new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
+            WebSocketMessageType.Text,
+            true,
+            _cts?.Token ?? CancellationToken.None);
+    }
+
+    private async Task SendGreetingAsync()
+    {
+        if (_greetingSent || _ws?.State != WebSocketState.Open) return;
+        _greetingSent = true;
+
+        var greeting = "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?";
+
+        // Add greeting to conversation
+        var createMsg = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "assistant",
+                content = new[] { new { type = "output_text", text = greeting } }
+            }
+        };
+        
+        await SendJsonAsync(createMsg);
+
+        // Trigger response to speak the greeting
+        var responseCreate = new
+        {
+            type = "response.create",
+            response = new { instructions = $"Say exactly: \"{greeting}\"" }
+        };
+        
+        await SendJsonAsync(responseCreate);
+        
+        _lastQuestionAsked = "pickup";
+        Log("🎤 Greeting sent");
+    }
+
+    private async Task SendContextHintAsync(string userText)
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        var hint = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "system",
+                content = new[] { new {
+                    type = "input_text",
+                    text = $"[CONTEXT] You asked about \"{_lastQuestionAsked}\". User said: \"{userText}\". " +
+                           $"Save to the CORRECT field using sync_booking_data. " +
+                           $"Current: pickup={_booking.Pickup ?? "empty"}, destination={_booking.Destination ?? "empty"}, passengers={_booking.Passengers?.ToString() ?? "empty"}"
+                }}
+            }
+        };
+
+        await SendJsonAsync(hint);
+    }
+
+    private async Task HandleToolCallAsync(JsonElement root)
+    {
+        if (!root.TryGetProperty("name", out var nameEl)) return;
+        var toolName = nameEl.GetString();
+        
+        var args = new Dictionary<string, object>();
+        if (root.TryGetProperty("arguments", out var argsEl))
+        {
+            try
+            {
+                var argsJson = argsEl.GetString();
+                if (!string.IsNullOrEmpty(argsJson))
+                {
+                    using var argsDoc = JsonDocument.Parse(argsJson);
+                    foreach (var prop in argsDoc.RootElement.EnumerateObject())
+                    {
+                        args[prop.Name] = prop.Value.ValueKind switch
+                        {
+                            JsonValueKind.String => prop.Value.GetString() ?? "",
+                            JsonValueKind.Number => prop.Value.GetInt32(),
+                            JsonValueKind.True => true,
+                            JsonValueKind.False => false,
+                            _ => prop.Value.ToString()
+                        };
+                    }
+                }
+            }
+            catch { }
+        }
+
+        Log($"🔧 Tool: {toolName} {JsonSerializer.Serialize(args)}");
+        OnToolCall?.Invoke(toolName ?? "", args);
+
+        string? callId = null;
+        if (root.TryGetProperty("call_id", out var callIdEl))
+            callId = callIdEl.GetString();
+
+        switch (toolName)
+        {
+            case "sync_booking_data":
+                if (args.TryGetValue("pickup", out var pickup))
+                    _booking.Pickup = pickup.ToString();
+                if (args.TryGetValue("destination", out var dest))
+                    _booking.Destination = dest.ToString();
+                if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax.ToString(), out var paxInt))
+                    _booking.Passengers = paxInt;
+                if (args.TryGetValue("pickup_time", out var time))
+                    _booking.PickupTime = time.ToString();
+                if (args.TryGetValue("last_question_asked", out var lastQ))
+                    _lastQuestionAsked = lastQ.ToString() ?? "none";
+                
+                OnBookingUpdated?.Invoke(_booking);
+                
+                await SendToolResultAsync(callId, new { success = true, state = _booking });
+                break;
+
+            case "book_taxi":
+                var action = args.TryGetValue("action", out var a) ? a.ToString() : "unknown";
+                Log($"📦 Book taxi: {action}");
+                
+                if (action == "request_quote")
+                {
+                    // Simulate quote response (or call dispatch webhook)
+                    await SendToolResultAsync(callId, new { 
+                        success = true, 
+                        fare = "£12.50", 
+                        eta = "5 minutes",
+                        message = "Quote: £12.50, driver arrives in 5 minutes"
+                    });
+                }
+                else if (action == "confirmed")
+                {
+                    _booking.Confirmed = true;
+                    OnBookingUpdated?.Invoke(_booking);
+                    await SendToolResultAsync(callId, new { 
+                        success = true, 
+                        booking_ref = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}",
+                        message = "Booking confirmed!"
+                    });
+                }
+                break;
+
+            case "end_call":
+                Log("📞 End call requested");
+                await SendToolResultAsync(callId, new { success = true });
+                // Optionally trigger disconnect after a delay
+                break;
+
+            default:
+                await SendToolResultAsync(callId, new { error = $"Unknown tool: {toolName}" });
+                break;
+        }
+    }
+
+    private async Task SendToolResultAsync(string? callId, object result)
+    {
+        if (callId == null || _ws?.State != WebSocketState.Open) return;
+
+        var msg = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "function_call_output",
+                call_id = callId,
+                output = JsonSerializer.Serialize(result)
+            }
+        };
+
+        await SendJsonAsync(msg);
+        await SendJsonAsync(new { type = "response.create" });
+    }
+
+    private async Task SendJsonAsync(object obj)
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+        
+        var json = JsonSerializer.Serialize(obj);
+        await _ws.SendAsync(
+            new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
+            WebSocketMessageType.Text,
+            true,
+            _cts?.Token ?? CancellationToken.None);
+    }
+
+    private void ProcessAdaAudio(byte[] pcm24kBytes)
+    {
+        if (_disposed) return;
+        
+        var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
+
+        // Apply fade-in to prevent clicks
+        if (_needsFadeIn && pcm24k.Length > 0)
+        {
+            int fadeLen = Math.Min(FadeInSamples, pcm24k.Length);
+            for (int i = 0; i < fadeLen; i++)
+            {
+                float gain = (float)i / fadeLen;
+                pcm24k[i] = (short)(pcm24k[i] * gain);
+            }
+            _needsFadeIn = false;
+        }
+
+        // Resample 24kHz → 8kHz and encode to µ-law for RTP
+        var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+
+        // Split into 20ms frames (160 samples @ 8kHz)
+        for (int i = 0; i < ulaw.Length; i += 160)
+        {
+            int len = Math.Min(160, ulaw.Length - i);
+            var frame = new byte[160];
+            Buffer.BlockCopy(ulaw, i, frame, 0, len);
+            
+            if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                _outboundQueue.TryDequeue(out _);
+            
+            _outboundQueue.Enqueue(frame);
+        }
+    }
+
+    private static object[] GetTools() => new object[]
+    {
+        new {
+            type = "function",
+            name = "sync_booking_data",
+            description = "Save user answers to the correct field.",
+            parameters = new {
+                type = "object",
+                properties = new {
+                    pickup = new { type = "string", description = "Pickup address" },
+                    destination = new { type = "string", description = "Destination address" },
+                    passengers = new { type = "integer", description = "Number of passengers" },
+                    pickup_time = new { type = "string", description = "Pickup time" },
+                    last_question_asked = new { 
+                        type = "string", 
+                        @enum = new[] { "pickup", "destination", "passengers", "time", "confirmation", "none" },
+                        description = "What question you are about to ask NEXT"
+                    }
+                }
+            }
+        },
+        new {
+            type = "function",
+            name = "book_taxi",
+            description = "Request quote or confirm booking.",
+            parameters = new {
+                type = "object",
+                properties = new {
+                    action = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
+                    pickup = new { type = "string" },
+                    destination = new { type = "string" },
+                    passengers = new { type = "integer", minimum = 1 },
+                    time = new { type = "string" }
+                },
+                required = new[] { "action" }
+            }
+        },
+        new {
+            type = "function",
+            name = "end_call",
+            description = "Disconnect the call after goodbye.",
+            parameters = new { type = "object", properties = new { } }
+        }
+    };
+
+    private static string GetDefaultSystemPrompt() => @"You are Ada, a friendly and efficient taxi booking assistant.
+Speak in English.
+
+# BOOKING FLOW (STRICT ORDER)
+1. Ask for PICKUP address → call sync_booking_data(pickup=...)
+2. Ask for DESTINATION address → call sync_booking_data(destination=...)
+3. Ask for NUMBER OF PASSENGERS → call sync_booking_data(passengers=...)
+4. Ask if they need it NOW or schedule → call sync_booking_data(pickup_time=...)
+5. Summarize ALL details, then call book_taxi(action=""request_quote"")
+6. Wait for fare/ETA from dispatch, then ask customer to confirm
+7. If confirmed → call book_taxi(action=""confirmed"")
+8. Deliver closing script → call end_call()
+
+# ADDRESS HANDLING
+✅ Accept ANY address exactly as spoken - NEVER ask for clarification
+✅ Move to the next question immediately after receiving any address
+❌ NEVER ask for house numbers, postcodes, or more details
+
+# CONTEXT PAIRING (CRITICAL)
+When the user responds, check what question you just asked them:
+- If you asked for PICKUP → their response is the pickup location
+- If you asked for DESTINATION → their response is the destination  
+- If you asked for PASSENGERS → their response is the passenger count
+NEVER swap fields. Trust the question context.
+
+# TOOLS
+- sync_booking_data: Save user answers to the correct field
+- book_taxi: Request quote or confirm booking
+- end_call: Disconnect after goodbye";
+
+    private void Log(string message)
+    {
+        if (_disposed) return;
+        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {message}");
+    }
+
+    public async Task DisconnectAsync()
+    {
+        if (_disposed) return;
+        
+        try { _cts?.Cancel(); } catch { }
+
+        if (_ws?.State == WebSocketState.Open)
+        {
+            try
+            {
+                using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", closeCts.Token);
+            }
+            catch { }
+        }
+
+        try { _ws?.Dispose(); _ws = null; } catch { }
+        ClearPendingFrames();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        
+        try { _cts?.Cancel(); } catch { }
+        try { _ws?.Dispose(); } catch { }
+        try { _cts?.Dispose(); } catch { }
+        
+        ClearPendingFrames();
+        GC.SuppressFinalize(this);
+    }
+}
+
+/// <summary>
+/// Booking state for the taxi booking flow.
+/// </summary>
+public class BookingState
+{
+    public string? Pickup { get; set; }
+    public string? Destination { get; set; }
+    public int? Passengers { get; set; }
+    public string? PickupTime { get; set; }
+    public string? Fare { get; set; }
+    public string? Eta { get; set; }
+    public string? BookingRef { get; set; }
+    public bool Confirmed { get; set; }
+}
