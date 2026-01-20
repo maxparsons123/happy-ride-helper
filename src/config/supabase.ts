@@ -23,6 +23,8 @@ export const getEdgeFunctionWsUrl = (functionName: string) =>
 // Commonly used function URLs
 export const TAXI_REALTIME_WS_URL = getEdgeFunctionWsUrl("taxi-realtime");
 export const TAXI_REALTIME_SIMPLE_WS_URL = getEdgeFunctionWsUrl("taxi-realtime-simple");
+export const TAXI_REALTIME_PAIRED_WS_URL = getEdgeFunctionWsUrl("taxi-realtime-paired");
+export const TAXI_REALTIME_DESKTOP_WS_URL = getEdgeFunctionWsUrl("taxi-realtime-desktop");
 export const TAXI_WEBHOOK_TEST_URL = getEdgeFunctionUrl("taxi-webhook-test");
 
 // For external bridges (Python, C#, etc.) - copy these values

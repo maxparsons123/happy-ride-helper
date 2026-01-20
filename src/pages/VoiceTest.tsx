@@ -4,9 +4,22 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Mic, Phone, PhoneOff, Bot } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { TAXI_REALTIME_WS_URL } from "@/config/supabase";
+import { 
+  TAXI_REALTIME_WS_URL, 
+  TAXI_REALTIME_SIMPLE_WS_URL, 
+  TAXI_REALTIME_PAIRED_WS_URL,
+  TAXI_REALTIME_DESKTOP_WS_URL 
+} from "@/config/supabase";
 
-const WS_URL = TAXI_REALTIME_WS_URL;
+// Endpoint options for testing different backends
+const WS_ENDPOINTS = {
+  "realtime": TAXI_REALTIME_WS_URL,
+  "simple": TAXI_REALTIME_SIMPLE_WS_URL,
+  "paired": TAXI_REALTIME_PAIRED_WS_URL,
+  "desktop": TAXI_REALTIME_DESKTOP_WS_URL,
+} as const;
+
+type EndpointKey = keyof typeof WS_ENDPOINTS;
 
 interface Agent {
   id: string;
@@ -49,6 +62,9 @@ export default function VoiceTest() {
   // Raw passthrough mode
   const [rawPassthroughMode, setRawPassthroughMode] = useState(false);
   const [rawPassthroughEndpoint, setRawPassthroughEndpoint] = useState("");
+  
+  // Endpoint selection (for testing different backends)
+  const [selectedEndpoint, setSelectedEndpoint] = useState<EndpointKey>("paired");
   
   // Metrics
   const [lastLatency, setLastLatency] = useState<number | null>(null);
@@ -256,7 +272,9 @@ export default function VoiceTest() {
       await audioContextRef.current.resume();
     }
 
-    const ws = new WebSocket(WS_URL);
+    const wsUrl = WS_ENDPOINTS[selectedEndpoint];
+    console.log("Connecting to:", wsUrl);
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -387,7 +405,7 @@ export default function VoiceTest() {
       isConnectingRef.current = false;
       addMessage("Connection error", "system");
     };
-  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents, rawPassthroughMode, rawPassthroughEndpoint]);
+  }, [addMessage, playAudioChunk, updateMetrics, cleanupAudio, selectedAgent, agents, rawPassthroughMode, rawPassthroughEndpoint, selectedEndpoint]);
 
   // Internal stop without state dependency issues
   const stopRecordingInternal = useCallback(() => {
@@ -851,6 +869,26 @@ export default function VoiceTest() {
                 <SelectItem value="coral">Coral</SelectItem>
                 <SelectItem value="sage">Sage</SelectItem>
                 <SelectItem value="verse">Verse</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Backend Endpoint Selector */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Backend:</span>
+            <Select
+              value={selectedEndpoint}
+              onValueChange={(v) => setSelectedEndpoint(v as EndpointKey)}
+              disabled={status !== "disconnected"}
+            >
+              <SelectTrigger className="w-[100px] bg-card border-chat-border text-xs">
+                <SelectValue placeholder="Endpoint" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-chat-border">
+                <SelectItem value="paired">Paired</SelectItem>
+                <SelectItem value="simple">Simple</SelectItem>
+                <SelectItem value="desktop">Desktop</SelectItem>
+                <SelectItem value="realtime">Legacy</SelectItem>
               </SelectContent>
             </Select>
           </div>
