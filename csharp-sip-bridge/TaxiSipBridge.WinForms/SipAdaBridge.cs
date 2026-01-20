@@ -22,12 +22,6 @@ public class SipAdaBridge : IDisposable
     private volatile bool _disposed = false;
     private IPAddress? _localIp;
 
-    private readonly ConcurrentQueue<byte[]> _outboundFrames = new();
-    private const int MAX_OUTBOUND_FRAMES = 250;
-
-    private bool _needsFadeIn = true;
-    private const int FadeInSamples = 48;
-
     public AudioMonitor? AudioMonitor { get; set; }
 
     public event Action? OnRegistered;
@@ -50,7 +44,6 @@ public class SipAdaBridge : IDisposable
     {
         try
         {
-            // Connect to SIP server to determine which local interface to use
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             socket.Connect(_config.SipServer, _config.SipPort);
             var localEp = socket.LocalEndPoint as IPEndPoint;
@@ -58,7 +51,6 @@ public class SipAdaBridge : IDisposable
         }
         catch
         {
-            // Fallback: find first non-loopback IPv4 address
             var host = Dns.GetHostEntry(Dns.GetHostName());
             foreach (var ip in host.AddressList)
             {
@@ -78,13 +70,11 @@ public class SipAdaBridge : IDisposable
         Log($"➡ SIP User: {_config.SipUser}");
         Log($"➡ WS: {_config.AdaWsUrl}");
 
-        // Get local IP for proper SDP c= field
         _localIp = GetLocalIp();
         Log($"➡ Local IP: {_localIp}");
 
         _sipTransport = new SIPTransport();
 
-        // Bind to specific local IP to ensure SDP contains routable address
         switch (_config.Transport)
         {
             case SipTransportType.UDP:
@@ -140,22 +130,26 @@ public class SipAdaBridge : IDisposable
         Log($"📞 [{callId}] Call from {caller}");
         OnCallStarted?.Invoke(callId, caller);
 
-        while (_outboundFrames.TryDequeue(out _)) { }
-        _needsFadeIn = true;
-
         const int FLUSH_PACKETS = 25;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
 
-        uint rtpTimestamp = (uint)Random.Shared.Next(0, int.MaxValue);
+        AdaAudioSource? adaSource = null;
         VoIPMediaSession? rtpSession = null;
         ClientWebSocket? ws = null;
         CancellationTokenSource? cts = null;
 
         try
         {
-            // VoIPMediaSession with null endpoints - codec negotiation handled by ua.Answer()
-            var mediaEndPoints = new MediaEndPoints { AudioSource = null, AudioSink = null };
+            // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
+            adaSource = new AdaAudioSource();
+
+            // Create VoIPMediaSession with our custom audio source
+            var mediaEndPoints = new MediaEndPoints 
+            { 
+                AudioSource = adaSource, 
+                AudioSink = null  // We handle inbound audio manually
+            };
             rtpSession = new VoIPMediaSession(mediaEndPoints);
             rtpSession.AcceptRtpFromAny = true;
             
@@ -186,6 +180,11 @@ public class SipAdaBridge : IDisposable
             await rtpSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
+            // Log the negotiated codec
+            var selectedFormat = rtpSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+            if (selectedFormat != null)
+                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.FormatName} @ {selectedFormat.ClockRate}Hz");
+
             ws = new ClientWebSocket();
             cts = new CancellationTokenSource();
 
@@ -202,6 +201,7 @@ public class SipAdaBridge : IDisposable
             await ws.ConnectAsync(wsUri, cts.Token);
             Log($"🟢 [{callId}] WS Connected");
 
+            // Handle inbound RTP (caller → Ada)
             rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
                 if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
@@ -220,16 +220,18 @@ public class SipAdaBridge : IDisposable
                     Log($"✅ [{callId}] Inbound flush complete");
                 }
 
-                var ulaw = rtp.Payload;
-                if (ulaw == null || ulaw.Length == 0) return;
+                var payload = rtp.Payload;
+                if (payload == null || payload.Length == 0) return;
 
+                // Send µ-law directly to WebSocket
                 _ = ws.SendAsync(
-                    new ArraySegment<byte>(ulaw),
+                    new ArraySegment<byte>(payload),
                     WebSocketMessageType.Binary,
                     true,
                     CancellationToken.None);
             };
 
+            // WebSocket receive loop (Ada → caller)
             _ = Task.Run(async () =>
             {
                 var buffer = new byte[1024 * 64];
@@ -239,7 +241,7 @@ public class SipAdaBridge : IDisposable
                     {
                         var result = await ws.ReceiveAsync(buffer, cts.Token);
 
-                        if (result.MessageType == WebSocketMessageType.Close)
+                        if (result.MessageType == WebSocketCloseStatus.NormalClosure || result.MessageType == WebSocketMessageType.Close)
                         {
                             Log($"🔌 [{callId}] WS closed by server");
                             break;
@@ -263,7 +265,7 @@ public class SipAdaBridge : IDisposable
                             if (!string.IsNullOrEmpty(base64))
                             {
                                 var pcmBytes = Convert.FromBase64String(base64);
-                                EnqueueAiPcm24(callId, pcmBytes);
+                                adaSource.EnqueuePcm24(pcmBytes);
                             }
                         }
                         else if (typeStr == "audio" &&
@@ -273,7 +275,7 @@ public class SipAdaBridge : IDisposable
                             if (!string.IsNullOrEmpty(base64))
                             {
                                 var pcmBytes = Convert.FromBase64String(base64);
-                                EnqueueAiPcm24(callId, pcmBytes);
+                                adaSource.EnqueuePcm24(pcmBytes);
                             }
                         }
                         else if (typeStr == "response.audio_transcript.delta" &&
@@ -285,7 +287,7 @@ public class SipAdaBridge : IDisposable
                         }
                         else if (typeStr == "response.created" || typeStr == "response.audio.started")
                         {
-                            _needsFadeIn = true;
+                            adaSource.ResetFadeIn();
                         }
                     }
                     catch (OperationCanceledException) { break; }
@@ -298,54 +300,7 @@ public class SipAdaBridge : IDisposable
                 Log($"🔚 [{callId}] WS read loop ended");
             }, cts.Token);
 
-            _ = Task.Run(async () =>
-            {
-                var stopwatch = Stopwatch.StartNew();
-                long nextFrameTime = 0;
-                int framesPlayed = 0;
-
-                while (!cts.Token.IsCancellationRequested && !_disposed)
-                {
-                    try
-                    {
-                        long now = stopwatch.ElapsedMilliseconds;
-                        if (now < nextFrameTime)
-                        {
-                            int delay = (int)(nextFrameTime - now);
-                            if (delay > 0 && delay < 100)
-                                await Task.Delay(delay, cts.Token);
-                        }
-
-                        if (_outboundFrames.TryDequeue(out var frame))
-                        {
-                        rtpSession.SendRtpRaw(
-                            SDPMediaTypesEnum.audio,
-                            frame,
-                            rtpTimestamp,
-                            0,
-                            0
-                        );
-
-                            AudioMonitor?.AddFrame(frame);
-                            OnAudioFrame?.Invoke(frame);
-
-                            rtpTimestamp += 160;
-                            framesPlayed++;
-                            nextFrameTime = stopwatch.ElapsedMilliseconds + 20;
-                        }
-                        else
-                        {
-                            await Task.Delay(5, cts.Token);
-                            nextFrameTime = stopwatch.ElapsedMilliseconds;
-                        }
-                    }
-                    catch (OperationCanceledException) { break; }
-                    catch { }
-                }
-
-                Log($"🔚 [{callId}] Playback loop ended - played {framesPlayed} frames");
-            }, cts.Token);
-
+            // Keep call alive
             while (!cts.IsCancellationRequested && ws.State == WebSocketState.Open && !_disposed)
                 await Task.Delay(500, cts.Token);
         }
@@ -378,46 +333,15 @@ public class SipAdaBridge : IDisposable
             {
                 try { rtpSession.Close("call ended"); } catch { }
             }
+
+            if (adaSource != null)
+            {
+                try { adaSource.Dispose(); } catch { }
+            }
             
             try { cts?.Dispose(); } catch { }
             
-            while (_outboundFrames.TryDequeue(out _)) { }
-            
             OnCallEnded?.Invoke(callId);
-        }
-    }
-
-    private void EnqueueAiPcm24(string callId, byte[] pcmBytes)
-    {
-        if (_disposed) return;
-        
-        var pcm24 = AudioCodecs.BytesToShorts(pcmBytes);
-
-        if (_needsFadeIn && pcm24.Length > 0)
-        {
-            int fadeLen = Math.Min(FadeInSamples, pcm24.Length);
-            for (int i = 0; i < fadeLen; i++)
-            {
-                float gain = (float)i / fadeLen;
-                pcm24[i] = (short)(pcm24[i] * gain);
-            }
-            _needsFadeIn = false;
-        }
-
-        var pcm8k = AudioCodecs.Resample(pcm24, 24000, 8000);
-        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
-
-        for (int i = 0; i < ulaw.Length; i += 160)
-        {
-            int len = Math.Min(160, ulaw.Length - i);
-            var frame = new byte[160];
-            Buffer.BlockCopy(ulaw, i, frame, 0, len);
-            
-            if (_outboundFrames.Count >= MAX_OUTBOUND_FRAMES)
-            {
-                _outboundFrames.TryDequeue(out _);
-            }
-            _outboundFrames.Enqueue(frame);
         }
     }
 
@@ -446,8 +370,6 @@ public class SipAdaBridge : IDisposable
         }
         
         try { _sipTransport?.Shutdown(); } catch { }
-        
-        while (_outboundFrames.TryDequeue(out _)) { }
         
         Log("🛑 Bridge stopped");
     }

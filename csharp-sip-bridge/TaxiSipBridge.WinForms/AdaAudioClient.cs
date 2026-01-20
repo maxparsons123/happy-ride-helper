@@ -29,6 +29,10 @@ public class AdaAudioClient : IDisposable
     public event Action? OnConnected;
     public event Action? OnDisconnected;
     public event Action<string>? OnAdaSpeaking;
+    
+    // New events for AdaAudioSource integration
+    public event Action<byte[]>? OnPcm24Audio;  // Raw PCM24 bytes from Ada
+    public event Action? OnResponseStarted;      // For fade-in reset
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
 
@@ -244,6 +248,7 @@ public class AdaAudioClient : IDisposable
                         if (!string.IsNullOrEmpty(base64))
                         {
                             var pcmBytes = Convert.FromBase64String(base64);
+                            OnPcm24Audio?.Invoke(pcmBytes);  // Notify listeners
                             ProcessAdaAudio(pcmBytes);
                         }
                     }
@@ -278,6 +283,7 @@ public class AdaAudioClient : IDisposable
                 case "response.created":
                 case "response.audio.started":
                     _needsFadeIn = true;
+                    OnResponseStarted?.Invoke();  // Notify listeners
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
