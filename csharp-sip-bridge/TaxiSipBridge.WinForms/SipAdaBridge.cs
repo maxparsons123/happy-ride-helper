@@ -172,7 +172,7 @@ public class SipAdaBridge : IDisposable
 
             rtpSession.OnRtpPacketReceived += (ep, mt, rtp) =>
             {
-                if (mt != SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
+                if (mt != SIPSorceryMedia.Abstractions.SDPMediaTypesEnum.audio || ws.State != WebSocketState.Open)
                     return;
 
                 inboundPacketCount++;
@@ -287,7 +287,7 @@ public class SipAdaBridge : IDisposable
                         if (_outboundFrames.TryDequeue(out var frame))
                         {
                             rtpSession.SendRtpRaw(
-                                SDPMediaTypesEnum.audio,
+                                SIPSorceryMedia.Abstractions.SDPMediaTypesEnum.audio,
                                 frame,
                                 rtpTimestamp,
                                 0,
