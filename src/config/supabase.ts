@@ -14,11 +14,16 @@ export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || `https://${SUPA
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "";
 
 // Edge function URLs
-export const getEdgeFunctionUrl = (functionName: string) => 
-  `${SUPABASE_URL}/functions/v1/${functionName}`;
+// IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
+const FUNCTIONS_BASE_URL = SUPABASE_PROJECT_ID
+  ? `https://${SUPABASE_PROJECT_ID}.functions.supabase.co`
+  : "";
 
-export const getEdgeFunctionWsUrl = (functionName: string) => 
-  `wss://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/${functionName}`;
+export const getEdgeFunctionUrl = (functionName: string) =>
+  `${FUNCTIONS_BASE_URL}/functions/v1/${functionName}`;
+
+export const getEdgeFunctionWsUrl = (functionName: string) =>
+  `wss://${SUPABASE_PROJECT_ID}.functions.supabase.co/functions/v1/${functionName}`;
 
 // Commonly used function URLs
 export const TAXI_REALTIME_WS_URL = getEdgeFunctionWsUrl("taxi-realtime");

@@ -308,6 +308,24 @@ export default function VoiceTest() {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
+
+      // Heartbeat from backend: acknowledge so certain proxies don't treat the
+      // connection as one-way traffic (helps prevent mid-utterance cutoffs).
+      if (data?.type === "keepalive") {
+        try {
+          ws.send(
+            JSON.stringify({
+              type: "keepalive_ack",
+              timestamp: data.timestamp,
+              call_id: data.call_id,
+            }),
+          );
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
       console.log("Received:", data);
 
       if (data.type === "session_ready") {
