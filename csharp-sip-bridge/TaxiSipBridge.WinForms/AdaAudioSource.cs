@@ -113,7 +113,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         if (!_isStarted)
         {
             _isStarted = true;
-            _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
+            _sendTimer = new System.Threading.Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
         }
 
         return Task.CompletedTask;
