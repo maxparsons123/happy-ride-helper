@@ -26,6 +26,7 @@
     </Compile>
     <Compile Include="SipAutoAnswer.cs" />
     <Compile Include="AdaAudioClient.cs" />
+    <Compile Include="AdaAudioSource.cs" />
     <Compile Include="AudioCodecs.cs" />
     <Compile Include="AudioMonitor.cs" />
     <Compile Include="SipAdaBridgeConfig.cs" />
