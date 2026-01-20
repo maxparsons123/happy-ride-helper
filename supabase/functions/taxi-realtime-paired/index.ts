@@ -2129,8 +2129,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       if (cleanedUp) return;
       
       if (connectToOpenAI()) {
-        // Re-attach event handlers (they're set below)
-        setupOpenAiHandlers();
+        // Connection will trigger onopen which handles session setup
+        console.log(`[${callId}] 🔄 Reconnection initiated, awaiting session.created...`);
       } else {
         attemptOpenAiReconnect();
       }
@@ -2259,15 +2259,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify(sessionConfig));
   };
 
-  // Setup OpenAI handlers immediately (not wrapped in function for simplicity)
-  openaiWs.onopen = () => {
+  // Setup OpenAI handlers immediately (using non-null assertion since we return early if null)
+  openaiWs!.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
     // Reset reconnect counter on successful connection
     sessionState.openAiReconnectAttempts = 0;
     sessionState.lastOpenAiConnectedAt = Date.now();
   };
 
-  openaiWs.onmessage = async (event: MessageEvent) => {
+  openaiWs!.onmessage = async (event: MessageEvent) => {
     try {
       const data = JSON.parse(event.data);
       
@@ -3558,11 +3558,11 @@ Do NOT skip any part. Say ALL of it warmly.]`
     }
   };
 
-  openaiWs.onerror = (error: Event) => {
+  openaiWs!.onerror = (error: Event) => {
     console.error(`[${callId}] ❌ OpenAI WebSocket error:`, error);
   };
 
-  openaiWs.onclose = (ev: CloseEvent) => {
+  openaiWs!.onclose = (ev: CloseEvent) => {
     const code = ev.code;
     const reason = ev.reason || "no reason";
     console.log(`[${callId}] 🔌 OpenAI WebSocket closed code=${code} reason=${reason}`);
