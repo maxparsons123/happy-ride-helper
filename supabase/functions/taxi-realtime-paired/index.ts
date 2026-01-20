@@ -767,6 +767,12 @@ const PHANTOM_PHRASES = [
   "amara.org",
   "次回へ続く", // Japanese "to be continued"
   "ご視聴ありがとうございました",
+  // Echo of Ada's own common intro (should never be treated as caller input)
+  "i'm ada",
+  "im ada",
+  "your taxi booking assistant",
+  "welcome to the taxibot demo",
+  "let's get started",
 ];
 
 // --- STT Corrections ---
@@ -905,8 +911,9 @@ const STT_CORRECTIONS: Record<string, string> = {
   // Number mishearings - standalone numbers
   "free": "three",
   "tree": "three",
-  "for": "four",
-  "to": "two",
+  // NOTE: we intentionally do NOT map the common words "for" and "to" → numbers,
+  // because it corrupts normal sentences (e.g., "to make" → "two make") and can
+  // inject fake passenger counts when echo is transcribed.
   "too": "two",
   "won": "one",
   "wan": "one",
@@ -3909,6 +3916,10 @@ Do NOT skip any part. Say ALL of it warmly.]`
   // Audio diagnostics for this session
   const audioDiag = createAudioDiagnostics();
 
+  // Require sustained "barge-in" (multiple consecutive frames) while Ada is speaking.
+  // This reduces false-positive interrupts / echo being transcribed as user speech.
+  let bargeInCandidateFrames = 0;
+
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
     try {
@@ -3979,9 +3990,19 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }
 
             if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+              bargeInCandidateFrames = 0;
               audioDiag.packetsSkippedEcho++;
               return; // Not real speech, likely echo or noise
             }
+
+            // Sustained barge-in requirement
+            bargeInCandidateFrames = Math.min(bargeInCandidateFrames + 1, 10);
+            if (bargeInCandidateFrames < 3) {
+              audioDiag.packetsSkippedEcho++;
+              return;
+            }
+          } else {
+            bargeInCandidateFrames = 0;
           }
 
           // Apply pre-emphasis for better STT consonant clarity, then resample
@@ -4020,6 +4041,40 @@ Do NOT skip any part. Say ALL of it warmly.]`
             if (sessionState.openAiResponseActive || !awaitingYesNo) {
               return; // Drop - Ada is delivering summary/quote
             }
+          }
+
+          // Apply the same barge-in gating for the C# bridge (PCM16@24k base64).
+          // Without this, loudspeaker echo can be transcribed as user speech (especially on passengers step).
+          if (sessionState.openAiResponseActive) {
+            const sinceSpeakStart = sessionState.openAiSpeechStartedAt
+              ? (Date.now() - sessionState.openAiSpeechStartedAt)
+              : 0;
+            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+              return;
+            }
+
+            try {
+              const bin = atob(data.audio);
+              const bytes = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+              const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+              const rms = computeRms(pcm);
+
+              if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+                bargeInCandidateFrames = 0;
+                return;
+              }
+
+              bargeInCandidateFrames = Math.min(bargeInCandidateFrames + 1, 10);
+              if (bargeInCandidateFrames < 3) {
+                return;
+              }
+            } catch {
+              // If decode fails, don't forward (safer than letting echo through)
+              return;
+            }
+          } else {
+            bargeInCandidateFrames = 0;
           }
 
           // Forward directly to OpenAI - C# bridge already sends PCM16 @ 24kHz
