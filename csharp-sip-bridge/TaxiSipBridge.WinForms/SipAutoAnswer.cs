@@ -201,16 +201,13 @@ public class SipAutoAnswer : IDisposable
 
             // Log the negotiated codec
             var selectedFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-            if (selectedFormat != null)
-                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.FormatName} @ {selectedFormat.ClockRate}Hz");
+            if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
+                Log($"🎵 [{callId}] Negotiated codec: {selectedFormat.Value.Codec} (ID {selectedFormat.Value.ID}) @ {selectedFormat.Value.ClockRate}Hz");
             else
                 Log($"⚠️ [{callId}] No codec negotiated!");
 
             // Log RTP endpoint info
-            var rtpEp = mediaSession.AudioRtpSession?.DestinationEndPoint;
-            if (rtpEp != null)
-                Log($"📡 [{callId}] RTP destination: {rtpEp}");
-
+            Log($"📡 [{callId}] Media session AcceptRtpFromAny: {mediaSession.AcceptRtpFromAny}");
             Log($"🔧 [{callId}] Creating AdaAudioClient...");
             _adaClient = new AdaAudioClient(_config.AdaWsUrl);
             _adaClient.OnLog += msg => Log(msg);
