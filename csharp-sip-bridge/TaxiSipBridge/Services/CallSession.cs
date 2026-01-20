@@ -338,7 +338,9 @@ public class CallSession : IDisposable
         try
         {
             _rtpSession?.SendAudioFrame(
-                (uint)frame.Length * 8, // Timestamp increment
+                // RTP timestamp units are audio samples (NOT bits).
+                // For PCMU (8kHz), 20ms frames are 160 samples/bytes.
+                (uint)frame.Length, // Timestamp increment (samples)
                 (int)SDPWellKnownMediaFormatsEnum.PCMU,
                 frame);
             
