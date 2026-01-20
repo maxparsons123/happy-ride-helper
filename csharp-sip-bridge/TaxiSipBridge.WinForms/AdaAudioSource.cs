@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
+using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
 
@@ -18,7 +19,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly IAudioEncoder _audioEncoder;
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
 
-    private System.Threading.Timer? _sendTimer;
+    private Timer? _sendTimer;
     private bool _isStarted;
     private bool _isPaused;
     private bool _isClosed;
@@ -135,7 +136,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         if (!_isStarted)
         {
             _isStarted = true;
-            _sendTimer = new System.Threading.Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
+            _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
             OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Timer started ({AUDIO_SAMPLE_PERIOD_MS}ms)");
         }
 
