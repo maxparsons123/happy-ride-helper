@@ -268,13 +268,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     }
                     else if (targetRate == 8000)
                     {
-                        // Use SIPSorcery's built-in resampler for best compatibility
-                        audioFrame = PcmResampler.Resample(pcm24, 24000, targetRate);
+                        // Use optimized 3:1 decimator for 8kHz
+                        audioFrame = Downsample24kTo8k(pcm24);
                     }
                     else
                     {
-                        // Use SIPSorcery's built-in resampler
-                        audioFrame = PcmResampler.Resample(pcm24, 24000, targetRate);
+                        // Use AudioCodecs high-quality resampler
+                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP
