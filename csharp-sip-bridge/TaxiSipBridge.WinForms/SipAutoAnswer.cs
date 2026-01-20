@@ -415,7 +415,11 @@ public class SipAutoAnswer : IDisposable
         Log($"🔧 [{callId}] Wiring RTP input handler...");
 
         int rtpPackets = 0;
+        int sentToAda = 0;
+        int skippedNoClient = 0;
+        int skippedNotConnected = 0;
         const int FLUSH_PACKETS = 25;
+        DateTime lastStats = DateTime.Now;
 
         mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
         {
@@ -439,11 +443,41 @@ public class SipAutoAnswer : IDisposable
             try
             {
                 var client = _adaClient;
-                if (client != null && !cts.Token.IsCancellationRequested)
+                if (client == null)
+                {
+                    skippedNoClient++;
+                    if (skippedNoClient <= 3)
+                        Log($"⚠️ [{callId}] RTP→Ada skip: _adaClient is null");
+                    return;
+                }
+
+                if (!client.IsConnected)
+                {
+                    skippedNotConnected++;
+                    if (skippedNotConnected <= 3)
+                        Log($"⚠️ [{callId}] RTP→Ada skip: WS not connected yet");
+                    return;
+                }
+
+                if (!cts.Token.IsCancellationRequested)
+                {
                     await client.SendMuLawAsync(payload);
+                    sentToAda++;
+                    
+                    if (sentToAda <= 3)
+                        Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b");
+                    else if ((DateTime.Now - lastStats).TotalSeconds >= 3)
+                    {
+                        Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, noClient={skippedNoClient}, notConn={skippedNotConnected}");
+                        lastStats = DateTime.Now;
+                    }
+                }
             }
             catch (OperationCanceledException) { }
-            catch { }
+            catch (Exception ex) 
+            { 
+                Log($"⚠️ [{callId}] RTP→Ada error: {ex.Message}");
+            }
         };
     }
 
