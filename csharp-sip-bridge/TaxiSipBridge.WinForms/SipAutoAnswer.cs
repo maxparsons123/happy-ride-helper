@@ -133,8 +133,8 @@ public class SipAutoAnswer : IDisposable
             mediaSession.AcceptRtpFromAny = true;
             
             // Add PCMU audio track for codec negotiation (SIPSorcery 10.x pattern)
-            var audioFormat = new SDPAudioVideoMediaFormat(SDPWellKnownMediaFormatsEnum.PCMU);
-            var audioTrack = new MediaStreamTrack(audioFormat);
+            var audioFormats = new List<AudioFormat> { new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMU) };
+            var audioTrack = new MediaStreamTrack(audioFormats, MediaStreamStatusEnum.SendRecv);
             mediaSession.addTrack(audioTrack);
             
             _currentMediaSession = mediaSession;
