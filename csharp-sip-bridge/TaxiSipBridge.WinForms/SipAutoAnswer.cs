@@ -564,11 +564,23 @@ public class SipAutoAnswer : IDisposable
 
     private void LogNegotiatedCodec(string callId, VoIPMediaSession mediaSession)
     {
-        var format = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-        if (format.HasValue && !format.Value.IsEmpty())
-            Log($"🎵 [{callId}] Codec: {format.Value.Name} @ {format.Value.ClockRate}Hz");
-        else
-            Log($"⚠️ [{callId}] No codec negotiated!");
+        try
+        {
+            var format = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+            if (format.HasValue && !format.Value.IsEmpty())
+            {
+                var f = format.Value;
+                Log($"🎵 [{callId}] Codec: {f.Codec} @ {f.ClockRate}Hz (PT={f.ID})");
+            }
+            else
+            {
+                Log($"⚠️ [{callId}] No codec negotiated!");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] LogNegotiatedCodec error: {ex.Message}");
+        }
     }
 
     /// <summary>
