@@ -3381,33 +3381,66 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
             const proposedPickup = toolArgs.pickup ? String(toolArgs.pickup) : null;
             const proposedDest = toolArgs.destination ? String(toolArgs.destination) : null;
             
+            // ═══════════════════════════════════════════════════════════════════
+            // PHANTOM PHRASE PROTECTION FOR SYNC_BOOKING_DATA
+            // Sometimes Whisper prompt text leaks into the AI's tool calls
+            // We must filter these BEFORE saving to state
+            // ═══════════════════════════════════════════════════════════════════
+            const isPhantomAddress = (addr: string | null): boolean => {
+              if (!addr) return false;
+              const lower = addr.toLowerCase().trim();
+              // Exact matches or contains phantom phrases
+              const phantomPatterns = [
+                "addresses, street names, numbers, passenger count",
+                "taxi booking. addresses",
+                "street numbers, addresses, passenger count",
+                "pickup location, destination",
+                "uk addresses",
+                "taxi booking.",
+              ];
+              for (const pattern of phantomPatterns) {
+                if (lower.includes(pattern)) return true;
+              }
+              // Also use the main phantom check
+              return isPhantomHallucination(addr);
+            };
+            
             // Only update pickup if: (1) we don't have one, or (2) proposed is longer/has more words
+            // AND (3) it's not a phantom phrase
             if (proposedPickup) {
-              const currentLen = (sessionState.booking.pickup || "").length;
-              const proposedLen = proposedPickup.length;
-              const currentWords = (sessionState.booking.pickup || "").split(/\s+/).length;
-              const proposedWords = proposedPickup.split(/\s+/).length;
-              
-              if (!sessionState.booking.pickup || proposedLen >= currentLen || proposedWords >= currentWords) {
-                sessionState.booking.pickup = proposedPickup;
-                console.log(`[${callId}] 📊 sync_booking_data: pickup updated to "${proposedPickup}"`);
+              if (isPhantomAddress(proposedPickup)) {
+                console.log(`[${callId}] 🚫 sync_booking_data: REJECTED phantom pickup "${proposedPickup}"`);
               } else {
-                console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED pickup "${proposedPickup}" (shorter than current "${sessionState.booking.pickup}")`);
+                const currentLen = (sessionState.booking.pickup || "").length;
+                const proposedLen = proposedPickup.length;
+                const currentWords = (sessionState.booking.pickup || "").split(/\s+/).length;
+                const proposedWords = proposedPickup.split(/\s+/).length;
+                
+                if (!sessionState.booking.pickup || proposedLen >= currentLen || proposedWords >= currentWords) {
+                  sessionState.booking.pickup = proposedPickup;
+                  console.log(`[${callId}] 📊 sync_booking_data: pickup updated to "${proposedPickup}"`);
+                } else {
+                  console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED pickup "${proposedPickup}" (shorter than current "${sessionState.booking.pickup}")`);
+                }
               }
             }
             
             // Same protection for destination
             if (proposedDest) {
-              const currentLen = (sessionState.booking.destination || "").length;
-              const proposedLen = proposedDest.length;
-              const currentWords = (sessionState.booking.destination || "").split(/\s+/).length;
-              const proposedWords = proposedDest.split(/\s+/).length;
-              
-              if (!sessionState.booking.destination || proposedLen >= currentLen || proposedWords >= currentWords) {
-                sessionState.booking.destination = proposedDest;
-                console.log(`[${callId}] 📊 sync_booking_data: destination updated to "${proposedDest}"`);
+              if (isPhantomAddress(proposedDest)) {
+                console.log(`[${callId}] 🚫 sync_booking_data: REJECTED phantom destination "${proposedDest}"`);
               } else {
-                console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED destination "${proposedDest}" (shorter than current "${sessionState.booking.destination}")`);
+                const currentLen = (sessionState.booking.destination || "").length;
+                const proposedLen = proposedDest.length;
+                const currentWords = (sessionState.booking.destination || "").split(/\s+/).length;
+                const proposedWords = proposedDest.split(/\s+/).length;
+                
+                if (!sessionState.booking.destination || proposedLen >= currentLen || proposedWords >= currentWords) {
+                  sessionState.booking.destination = proposedDest;
+                  console.log(`[${callId}] 📊 sync_booking_data: destination updated to "${proposedDest}"`);
+                } else {
+                  console.log(`[${callId}] 🛡️ sync_booking_data: REJECTED destination "${proposedDest}" (shorter than current "${sessionState.booking.destination}")`);
+                }
               }
             }
             
