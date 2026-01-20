@@ -142,6 +142,9 @@ public class AdaAudioClient : IDisposable
         catch (WebSocketException) { }
     }
 
+    private int _sentToAda = 0;
+    private DateTime _lastSendStats = DateTime.Now;
+
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
@@ -161,9 +164,18 @@ public class AdaAudioClient : IDisposable
                 WebSocketMessageType.Text,
                 true,
                 _cts?.Token ?? CancellationToken.None);
+            
+            _sentToAda++;
+            if (_sentToAda <= 3)
+                Log($"🎙️ Sent to Ada #{_sentToAda}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24k");
+            else if ((DateTime.Now - _lastSendStats).TotalSeconds >= 3)
+            {
+                Log($"📤 Sent to Ada: {_sentToAda} packets");
+                _lastSendStats = DateTime.Now;
+            }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
     }
 
     public byte[]? GetNextMuLawFrame()
