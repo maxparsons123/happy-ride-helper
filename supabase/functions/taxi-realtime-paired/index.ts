@@ -695,6 +695,7 @@ interface SessionState {
   noReplyRepromptCount: number;
   lastUserActivityAt: number;
   awaitingReplyAt: number;
+  lastRepromptSentAt: number; // Prevent rapid-fire reprompts
 }
 
 // Helper to get current step name from index
@@ -1577,7 +1578,8 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     // No-reply reprompt tracking
     noReplyRepromptCount: 0,
     lastUserActivityAt: Date.now(),
-    awaitingReplyAt: 0
+    awaitingReplyAt: 0,
+    lastRepromptSentAt: 0
   };
 }
 
@@ -3046,12 +3048,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
           }
           
-          // ARM NO-REPLY TIMER: If Ada just asked a question, set a 3-second timer
+          // ARM NO-REPLY TIMER: If Ada just asked a question, set a timer
           // If user doesn't respond, re-ask the question
+          // GUARD: Don't re-arm if we've already exceeded max reprompts
           if (
             !sessionState.bookingConfirmed &&
             !sessionState.waitingForQuoteSilence &&
             sessionState.lastQuestionAsked !== "none" &&
+            sessionState.noReplyRepromptCount <= MAX_NO_REPLY_REPROMPTS && // Don't keep arming after max
             openaiWs &&
             openaiWs.readyState === WebSocket.OPEN &&
             !cleanedUp
@@ -3077,23 +3081,22 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               // Don't reprompt if booking is confirmed
               if (sessionState.bookingConfirmed) return;
               
+              // COOLDOWN: Prevent rapid-fire reprompts (minimum 5s between reprompts)
+              const timeSinceLastReprompt = Date.now() - sessionState.lastRepromptSentAt;
+              if (timeSinceLastReprompt < 5000) {
+                console.log(`[${callId}] ⏳ No-reply timer: Cooldown active (${timeSinceLastReprompt}ms since last), skipping`);
+                return;
+              }
+              
               sessionState.noReplyRepromptCount++;
+              sessionState.lastRepromptSentAt = Date.now();
               console.log(`[${callId}] 🔁 No-reply reprompt #${sessionState.noReplyRepromptCount}`);
               
               if (sessionState.noReplyRepromptCount > MAX_NO_REPLY_REPROMPTS) {
-                // After max reprompts, ask if they're still there
-                console.log(`[${callId}] 🔁 Max reprompts reached, asking if user is still there`);
-                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [{ type: "input_text", text: `[NO REPLY] Say: "Hello? Are you still there?" and wait for a response.` }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({ type: "response.create" }));
-                }
+                // After max reprompts, ask if they're still there - but DON'T trigger another response.create
+                // Just log it and let the call timeout naturally
+                console.log(`[${callId}] 🔁 Max reprompts reached - no more questions, waiting for user or timeout`);
+                return; // Don't send another response - prevents infinite loop
               } else {
                 // Re-ask the current question
                 const stepQuestions: Record<string, string> = {
