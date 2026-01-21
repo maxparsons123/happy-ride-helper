@@ -2238,10 +2238,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
+          // ADDRESS QUALITY FIX: Increased padding to capture full addresses
+          // Users often pause mid-address (e.g., "52A... Lifford Lane")
           threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
+          prefix_padding_ms: 500,        // Was 300 - captures address start better
+          silence_duration_ms: 1500,     // Was 1000 - more time for full addresses
         },
         tools: TOOLS,
         tool_choice: "auto",
