@@ -467,9 +467,12 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER repeat addresses after the summary is confirmed.
 ❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address - just accept it and move on.
 ❌ NEVER ask for "more details" or "could you be more specific" - accept the address as given.
+❌ NEVER jump back to ask for pickup/destination if they are already marked ✅ in the booking state.
+❌ NEVER re-ask a question that has already been answered - check the booking state first.
 ✅ Accept business names, landmarks, and place names as valid pickup/destination (e.g., "Sweet Spot", "Tesco", "The Hospital", "Train Station").
 ✅ Only ask for a house number if it's clearly a residential street address missing a number.
 ✅ If the user gives a place name or business, accept it immediately and move to the next question.
+✅ ALWAYS check the "CURRENT BOOKING STATE" section to see what's already captured before asking questions.
 `;
 
 
@@ -1664,6 +1667,47 @@ serve(async (req) => {
         }
         prompt += `\n\nCURRENT CONTEXT: ${historyContext} Ask where they want to go today - do NOT assume they want the same trip.`;
       }
+    }
+
+    // === INJECT CURRENT BOOKING STATE (CRITICAL - prevents re-asking answered questions) ===
+    // This tells Ada exactly what has been captured so she doesn't jump back
+    const bookingState = sessionState.booking;
+    const capturedFields: string[] = [];
+    const missingFields: string[] = [];
+    
+    if (bookingState.pickup && bookingState.pickup.length > 2) {
+      capturedFields.push(`✅ Pickup: "${bookingState.pickup}"`);
+    } else {
+      missingFields.push("Pickup");
+    }
+    
+    if (bookingState.destination && bookingState.destination.length > 2) {
+      capturedFields.push(`✅ Destination: "${bookingState.destination}"`);
+    } else {
+      missingFields.push("Destination");
+    }
+    
+    if (bookingState.passengers !== null && bookingState.passengers > 0) {
+      capturedFields.push(`✅ Passengers: ${bookingState.passengers}`);
+    } else {
+      missingFields.push("Passengers");
+    }
+    
+    if (bookingState.pickup_time !== null) {
+      capturedFields.push(`✅ Time: ${bookingState.pickup_time}`);
+    } else {
+      missingFields.push("Time");
+    }
+    
+    // Only inject if we have some state
+    if (capturedFields.length > 0 || sessionState.bookingStep !== "pickup") {
+      prompt += `\n\n# 🔒 CURRENT BOOKING STATE (DO NOT RE-ASK THESE)
+${capturedFields.join("\n")}
+${missingFields.length > 0 ? `\n❓ Still needed: ${missingFields.join(", ")}` : "\n✅ ALL FIELDS CAPTURED - proceed to summary!"}
+
+🚨 CRITICAL: You MUST NOT ask for fields marked with ✅ - they are already captured.
+Current step: ${sessionState.bookingStep.toUpperCase()}
+${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now." : `→ Ask ONLY for: ${missingFields[0] || "confirmation"}`}`;
     }
 
     // Inject recent transcripts so Ada only responds to what was actually said
