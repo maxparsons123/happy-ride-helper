@@ -2274,42 +2274,44 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] 🎙️ Deepgram key detected (len=${DEEPGRAM_API_KEY.length})`);
     
     try {
-      // Flux requires linear16 encoding - convert mulaw to linear16 at send time
-      // Flux only supports: 8000, 16000, 24000, 44100, 48000 Hz
-      const sampleRate = inboundSampleRate === 8000 ? 16000 : inboundSampleRate; // Upsample 8kHz to 16kHz for Flux
+      // Use Nova-2 phonecall model optimized for 8kHz telephony
+      // Nova-2 supports native 8kHz so no upsampling needed
+      const sampleRate = inboundSampleRate; // Keep native 8kHz for telephony
       
-      // Deepgram Flux v2 endpoint - built for voice agents with native turn detection
-      // CRITICAL: Must use /v2/listen (not /v1/listen) for Flux
-      const baseUrl = `wss://api.deepgram.com/v2/listen`;
+      // Deepgram v1 endpoint with Nova-2 (widely available)
+      const baseUrl = `wss://api.deepgram.com/v1/listen`;
       const params = new URLSearchParams({
-        model: "flux-general-en",
+        model: "nova-2-phonecall",       // Optimized for telephony audio
         encoding: "linear16",
         sample_rate: sampleRate.toString(),
         channels: "1",
-        // Flux-specific turn detection parameters
-        eot_threshold: "0.7",           // End-of-turn confidence threshold
-        eager_eot_threshold: "0.5",     // Enable early LLM response preparation
-        eot_timeout_ms: "3000",         // Max silence before forcing end-of-turn (reduced for snappy response)
-        // Standard options
+        // Streaming options
+        interim_results: "true",          // Get partial results for responsiveness
+        utterance_end_ms: "1500",         // Detect end of speech
+        vad_events: "true",               // Voice activity detection
+        endpointing: "300",               // Quick endpointing for snappy response
+        // Formatting
         punctuate: "true",
         smart_format: "true",
         numerals: "true",
+        // Keyword boosting for taxi context
+        keywords: "pickup:2,destination:2,taxi:1.5,passengers:1.5,address:1.5,street:1.5,road:1.5",
       });
       
       const url = `${baseUrl}?${params.toString()}`;
       
-      console.log(`[${callId}] 🎙️ Connecting to Deepgram Flux (v2) @ ${sampleRate}Hz...`);
+      console.log(`[${callId}] 🎙️ Connecting to Deepgram Nova-2 (v1) @ ${sampleRate}Hz...`);
       
-      // Use subprotocol auth for Deno
+      // Use subprotocol auth for Deno compatibility
       try {
         deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
       } catch (wsError) {
-        console.error(`[${callId}] ❌ Deepgram Flux WebSocket creation failed:`, wsError);
+        console.error(`[${callId}] ❌ Deepgram WebSocket creation failed:`, wsError);
         return false;
       }
       
       deepgramWs.onopen = () => {
-        console.log(`[${callId}] 🎙️ Deepgram Flux connected (flux-general-en @ ${sampleRate}Hz)`);
+        console.log(`[${callId}] 🎙️ Deepgram Nova-2 connected (nova-2-phonecall @ ${sampleRate}Hz)`);
       };
       
       deepgramWs.onmessage = (event: MessageEvent) => {
@@ -2317,19 +2319,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           const data = JSON.parse(event.data);
           const msgType = data.type;
           
-          // Handle Flux-specific events
-          if (msgType === "EagerEndOfTurn") {
-            // User is likely done speaking - can start preparing response
-            console.log(`[${callId}] 🎙️ Flux: EagerEndOfTurn (confidence=${data.confidence?.toFixed(2)})`);
-            // Could trigger early LLM processing here
-          } else if (msgType === "EndOfTurn") {
-            // Definitive end of user's turn
-            console.log(`[${callId}] 🎙️ Flux: EndOfTurn (final)`);
-          } else if (msgType === "TurnResumed") {
-            // User continued speaking after EagerEndOfTurn - cancel draft response
-            console.log(`[${callId}] 🎙️ Flux: TurnResumed (user continued speaking)`);
-          } else if (msgType === "Connected") {
-            console.log(`[${callId}] 🎙️ Flux: Connected to Deepgram`);
+          // Handle Nova-2 specific events
+          if (msgType === "SpeechStarted") {
+            console.log(`[${callId}] 🎙️ Nova-2: Speech started`);
+          } else if (msgType === "UtteranceEnd") {
+            // End of utterance detected
+            console.log(`[${callId}] 🎙️ Nova-2: UtteranceEnd`);
           } else if (data.channel?.alternatives?.[0]) {
             // Regular transcript result (Results type)
             const alt = data.channel.alternatives[0];
@@ -2344,7 +2339,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 if (deepgramTranscriptBuffer.length > 5) {
                   deepgramTranscriptBuffer.shift(); // Keep last 5
                 }
-                console.log(`[${callId}] 🎙️ Flux FINAL: "${transcript}" (conf=${alt.confidence?.toFixed(2)})`);
+                console.log(`[${callId}] 🎙️ Nova-2 FINAL: "${transcript}" (conf=${alt.confidence?.toFixed(2)})`);
                 
                 // Send to client for logging/display
                 if (socket.readyState === WebSocket.OPEN) {
@@ -2357,27 +2352,27 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 }
               } else {
                 // Interim result - log but don't store
-                console.log(`[${callId}] 🎙️ Flux interim: "${transcript}"`);
+                console.log(`[${callId}] 🎙️ Nova-2 interim: "${transcript}"`);
               }
             }
           }
         } catch (e) {
-          console.error(`[${callId}] Deepgram Flux parse error:`, e);
+          console.error(`[${callId}] Deepgram Nova-2 parse error:`, e);
         }
       };
       
       deepgramWs.onerror = (error: Event) => {
-        console.error(`[${callId}] ❌ Deepgram Flux WebSocket error:`, error);
+        console.error(`[${callId}] ❌ Deepgram Nova-2 WebSocket error:`, error);
       };
       
       deepgramWs.onclose = (event: CloseEvent) => {
-        console.log(`[${callId}] 🎙️ Deepgram Flux closed: code=${event.code}, reason="${event.reason || 'none'}"`);
+        console.log(`[${callId}] 🎙️ Deepgram Nova-2 closed: code=${event.code}, reason="${event.reason || 'none'}"`);
         deepgramWs = null;
       };
       
       return true;
     } catch (e) {
-      console.error(`[${callId}] Failed to connect to Deepgram Flux:`, e);
+      console.error(`[${callId}] Failed to connect to Deepgram Nova-2:`, e);
       return false;
     }
   };
@@ -4176,13 +4171,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
 
             // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
-            // Flux requires linear16 @ 16kHz - we already have pcmInput as Int16Array
+            // Nova-2 phonecall model supports 8kHz natively - no resampling needed
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              // Resample to 16kHz if coming from 8kHz (Flux works best at 16kHz)
-              const pcm16k = inboundSampleRate === 8000 
-                ? resamplePcm8kTo16k(pcmInput) 
-                : pcmInput;
-              const pcmBytes = new Uint8Array(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
+              const pcmBytes = new Uint8Array(pcmInput.buffer, pcmInput.byteOffset, pcmInput.byteLength);
               deepgramWs.send(pcmBytes);
             }
 
@@ -4219,13 +4210,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }));
 
           // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
-          // Flux requires linear16 @ 16kHz
+          // Nova-2 phonecall model supports 8kHz natively - no resampling needed
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            // Resample to 16kHz if coming from 8kHz (Flux works best at 16kHz)
-            const pcm16k = inboundSampleRate === 8000 
-              ? resamplePcm8kTo16k(pcmInput) 
-              : pcmInput;
-            const pcmBytes = new Uint8Array(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
+            const pcmBytes = new Uint8Array(pcmInput.buffer, pcmInput.byteOffset, pcmInput.byteLength);
             deepgramWs.send(pcmBytes);
           }
         }
