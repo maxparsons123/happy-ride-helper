@@ -6186,22 +6186,33 @@ Do NOT say 'booked' until the tool returns success.]`
           // 🔧 FAILSAFE: If dispatch_confirm broadcast doesn't arrive within 3s, trigger confirmation directly
           // This prevents Ada from going silent if the dispatch system doesn't send the broadcast
           const confirmationTimeoutMs = 3000;
+          console.log(`[${sessionState.callId}] ⏱️ Setting confirmation failsafe timer for ${confirmationTimeoutMs}ms`);
+          
           sessionState.confirmationFailsafeTimerId = setTimeout(() => {
+            console.log(`[${sessionState.callId}] ⏱️ FAILSAFE timer fired - checking: bookingFullyConfirmed=${sessionState.bookingFullyConfirmed}, confirmationSpoken=${sessionState.confirmationSpoken}, openaiWs=${!!openaiWs}, openaiConnected=${openaiConnected}, isConnectionClosed=${isConnectionClosed}`);
+            
             // Only trigger if booking was confirmed and we haven't already spoken
             if (sessionState.bookingFullyConfirmed && 
                 !sessionState.confirmationSpoken && 
+                !isConnectionClosed &&
                 openaiWs && 
                 openaiConnected) {
               console.log(`[${sessionState.callId}] ⏰ FAILSAFE: dispatch_confirm not received in ${confirmationTimeoutMs}ms - triggering confirmation directly`);
               sessionState.confirmationSpoken = true;
               
+              // ✅ CRITICAL: Set askedAnythingElse so goodbye logic works correctly
+              sessionState.askedAnythingElse = true;
+              sessionState.confirmationResponsePending = true;
+              
               const langCode = sessionState.language || "en";
               const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
               const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
               
-              // Cancel any stale response and clear buffers
-              sessionState.discardCurrentResponseAudio = true;
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              // ✅ Only cancel if there's an active response (prevents response_cancel_not_active error)
+              if (sessionState.openAiResponseActive) {
+                sessionState.discardCurrentResponseAudio = true;
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              }
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
               
               // Inject confirmation message
@@ -6225,9 +6236,12 @@ Do NOT say 'booked' until the tool returns success.]`
                   instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say EXACTLY: "${confirmationScript}" Do not add extra details.`
                 }
               }));
+            } else {
+              console.log(`[${sessionState.callId}] ⏱️ FAILSAFE skipped - conditions not met`);
             }
           }, confirmationTimeoutMs);
           
+          break; // ✅ CRITICAL: Prevent fall-through to next case
         }
 
         case "cancel_booking": {
