@@ -469,6 +469,8 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER ask for "more details" or "could you be more specific" - accept the address as given.
 ❌ NEVER jump back to ask for pickup/destination if they are already marked ✅ in the booking state.
 ❌ NEVER re-ask a question that has already been answered - check the booking state first.
+❌ NEVER ask "Could you please confirm the pickup address as..." or any variation - this is strictly forbidden.
+❌ NEVER say "confirm the pickup" or "confirm the destination" - only confirm the FULL summary, never individual addresses.
 ✅ Accept business names, landmarks, and place names as valid pickup/destination (e.g., "Sweet Spot", "Tesco", "The Hospital", "Train Station").
 ✅ Only ask for a house number if it's clearly a residential street address missing a number.
 ✅ If the user gives a place name or business, accept it immediately and move to the next question.
@@ -2557,6 +2559,68 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           
           const hasHardBlockPhrase = !isCancellationContext && !isGoodbyeContext && HARD_BLOCK_PHRASES.some((phrase) => lowerText.includes(phrase));
 
+          // === FORBIDDEN ADDRESS CONFIRMATION DETECTION ===
+          // Ada is STRICTLY FORBIDDEN from asking to confirm individual addresses (e.g., "Could you please confirm the pickup address as...")
+          // This must be cancelled immediately as per the address-confirmation-prohibition rule
+          const isForbiddenAddressConfirmation = 
+            /(?:confirm the pickup|confirm the destination|confirm.*pickup address|confirm.*destination address|please confirm the.*address|could you.*confirm)/i.test(lowerText) ||
+            /(?:verify the pickup|verify the destination|verify.*address)/i.test(lowerText);
+          
+          if (isForbiddenAddressConfirmation) {
+            console.log(`[${sessionState.callId}] 🚫 FORBIDDEN: Ada tried to ask for address confirmation! Cancelling response.`);
+            console.log(`[${sessionState.callId}] 🚫 Detected phrase: "${currentText}"`);
+            
+            // Drop any further audio deltas from this response
+            sessionState.discardCurrentResponseAudio = true;
+            
+            // DISCARD buffered audio - don't let the forbidden phrase be heard
+            if (sessionState.pendingAudioBuffer.length > 0) {
+              console.log(`[${sessionState.callId}] 🗑️ Discarding ${sessionState.pendingAudioBuffer.length} buffered audio chunks (address confirmation)`);
+              sessionState.pendingAudioBuffer = [];
+            }
+            
+            // Cancel the current response
+            if (sessionState.openAiResponseActive) {
+              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            
+            // Clear the audio buffer
+            openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            // Remove the hallucinated transcript
+            if (sessionState.assistantTranscriptIndex !== null) {
+              sessionState.transcripts.splice(sessionState.assistantTranscriptIndex, 1);
+              sessionState.assistantTranscriptIndex = null;
+            }
+            
+            // Reset audio buffering
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+            
+            // Inject recovery: Ada should just move on to the next step
+            const recoveryText = sessionState.bookingStep === "passengers" 
+              ? "[SYSTEM: DO NOT confirm addresses - just ask: 'How many people will be travelling?' NOTHING ELSE.]"
+              : sessionState.bookingStep === "time"
+              ? "[SYSTEM: DO NOT confirm addresses - just ask: 'When do you need the taxi?' NOTHING ELSE.]"
+              : sessionState.bookingStep === "summary"
+              ? `[SYSTEM: DO NOT confirm addresses individually. Say the FULL summary: "You'd like to be picked up at ${sessionState.booking.pickup || 'pickup'}, and travel to ${sessionState.booking.destination || 'destination'}. There will be ${sessionState.booking.passengers || 1} passengers, and you'd like to be picked up ${sessionState.booking.pickup_time || 'now'}. Is that correct?"]`
+              : "[SYSTEM: DO NOT ask to confirm individual addresses. Accept what the customer said and ask the NEXT question in the sequence.]";
+            
+            openaiWs?.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: recoveryText }],
+                },
+              })
+            );
+            
+            safeResponseCreate(sessionState, "address-confirmation-recovery");
+            break; // Don't continue processing this delta
+          }
+
           // If pendingQuote is active, ONLY block hard confirmation phrases, placeholder leaks, and fare mismatches.
           // If no pendingQuote, block all confirmation + fare phrases (original behavior)
           // EXCEPT: Never block goodbye phrases!
@@ -2699,14 +2763,21 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestionAt = Date.now();
           }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: TIME`);
-        } else if (/(?:is that correct|confirm|shall i book|book that|go ahead)/i.test(lowerAssistantText)) {
-          sessionState.lastQuestionType = "confirmation";
-          sessionState.lastQuestionAt = Date.now();
-          if (isQuestion) {
-            sessionState.lastSpokenQuestion = lastAssistantText;
-            sessionState.lastSpokenQuestionAt = Date.now();
+        } else if (/(?:is that correct|shall i book|book that|go ahead|would you like me to (?:book|confirm))/i.test(lowerAssistantText)) {
+          // IMPORTANT: Exclude forbidden address confirmation phrases from triggering "confirmation" state
+          const isForbiddenAddressConfirmation = /(?:confirm the pickup|confirm the destination|confirm.*pickup address|confirm.*destination address|please confirm the)/i.test(lowerAssistantText);
+          
+          if (!isForbiddenAddressConfirmation) {
+            sessionState.lastQuestionType = "confirmation";
+            sessionState.lastQuestionAt = Date.now();
+            if (isQuestion) {
+              sessionState.lastSpokenQuestion = lastAssistantText;
+              sessionState.lastSpokenQuestionAt = Date.now();
+            }
+            console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
+          } else {
+            console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
           }
-          console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
         }
 
         // AUTO-TRIGGER (TOOL ENFORCEMENT): If Ada says she's "checking the price" but never calls book_taxi,
