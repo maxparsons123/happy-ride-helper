@@ -331,21 +331,7 @@ class TaxiBridgeV7:
         self.audio_queue: Deque[bytes] = deque(maxlen=200)
         self.pending_audio_buffer: Deque[bytes] = deque(maxlen=100)
 
-    # -------------------------------------------------------------------------
-    # FORMAT DETECTION
-    # -------------------------------------------------------------------------
-
     async def _detect_format(self, frame_len: int) -> None:
-        """Detect Asterisk audio format from frame size.
-        
-        v7.4: LOCKED TO ULAW - slin16 auto-detection was corrupting audio mid-call.
-        The format switching caused garbled audio when Asterisk changed codecs.
-        
-        Frame sizes for 20ms:
-        - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
-        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
-        - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
-        """
         # v7.4: LOCK TO ULAW - ignore format changes entirely
         if LOCK_FORMAT_ULAW:
             if frame_len != self.state.ast_frame_bytes:
@@ -356,74 +342,15 @@ class TaxiBridgeV7:
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = frame_len
             return
-        
-        # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
-        FORMAT_LOCK_DURATION = 5.0
-        if self.state.format_locked:
-            if time.time() - self.state.format_lock_time < FORMAT_LOCK_DURATION:
-                self.state.ast_frame_bytes = frame_len
-                return
-            self.state.format_locked = False
-        
-        old_codec = self.state.ast_codec
-        
-        if frame_len == 640:
-            self.state.ast_codec = "slin16"
-            self.state.ast_rate = SLIN16_RATE
-            self.state.ast_frame_bytes = 640
-            logger.info("[%s] ✅ Detected: slin16 @ 16kHz", self.state.call_id)
-        elif frame_len == 320:
-            self.state.ast_codec = "slin"
-            self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = 320
-            logger.info("[%s] 🔎 Detected: slin @ 8kHz", self.state.call_id)
-        elif frame_len == 160:
-            self.state.ast_codec = "ulaw"
-            self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = 160
-            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz", self.state.call_id)
-        else:
-            if frame_len > 400:
-                self.state.ast_codec = "slin16"
-                self.state.ast_rate = SLIN16_RATE
-            else:
-                self.state.ast_codec = "slin"
-                self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = frame_len
-            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
-                          self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
-        
-        self.state.format_locked = True
-        self.state.format_lock_time = time.time()
-        
-        if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
-            await self.ws.send(json.dumps({
-                "type": "update_format",
-                "call_id": self.state.call_id,
-                "inbound_format": self.state.ast_codec,
-                "inbound_sample_rate": self.state.ast_rate,
-            }))
-            logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
-                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
 
-    # -------------------------------------------------------------------------
-    # WEBSOCKET CONNECTION
-    # -------------------------------------------------------------------------
-
-    async def connect_websocket(self, url: Optional[str] = None, 
-                                init_data: Optional[dict] = None) -> bool:
-        """Connect to WebSocket with exponential backoff."""
+    async def connect_websocket(self, url: Optional[str] = None, init_data: Optional[dict] = None) -> bool:
         target_url = url or self.state.current_ws_url
-
         while self.state.reconnect_attempts < MAX_RECONNECT_ATTEMPTS and self.running:
             try:
-                # Exponential backoff delay
                 if self.state.reconnect_attempts > 0:
                     delay = RECONNECT_BASE_DELAY_S * (2 ** (self.state.reconnect_attempts - 1))
                     logger.info("[%s] 🔄 Reconnecting in %.1fs", self.state.call_id, delay)
                     await asyncio.sleep(delay)
-
-                # Less aggressive pinging to reduce disconnects under load
                 self.ws = await asyncio.wait_for(
                     websockets.connect(
                         target_url,
@@ -435,8 +362,6 @@ class TaxiBridgeV7:
                     timeout=10.0,
                 )
                 self.state.current_ws_url = target_url
-
-                # Send init if redirected or reconnecting
                 if init_data:
                     init_payload = {
                         "type": "init",
@@ -448,38 +373,29 @@ class TaxiBridgeV7:
                     }
                     await self.ws.send(json.dumps(init_payload))
                     logger.info("[%s] 📡 Sent reconnect init", self.state.call_id)
-
-                # Flush any pending audio
                 while self.pending_audio_buffer:
                     try:
                         await self.ws.send(self.pending_audio_buffer.popleft())
                     except Exception:
                         break
-
                 self.state.ws_connected = True
                 self.state.reconnect_attempts = 0
                 logger.info("[%s] ✅ Connected to %s", self.state.call_id, target_url)
                 return True
-
             except asyncio.TimeoutError:
                 logger.warning("[%s] ⏱️ WS connect timeout", self.state.call_id)
             except Exception as e:
                 logger.warning("[%s] 🔌 WS connect failed: %s", self.state.call_id, e)
-
             self.state.reconnect_attempts += 1
-
         logger.error("[%s] ❌ Max reconnect attempts reached", self.state.call_id)
         return False
 
     async def stop_call(self, reason: str) -> None:
-        """Stop the call gracefully."""
         if not self.running:
             return
         self.running = False
         self.state.ws_connected = False
         logger.info("[%s] 🛑 Stopping: %s", self.state.call_id, reason)
-
-        # Send hangup to AI
         if self.ws:
             try:
                 await self.ws.send(json.dumps({
@@ -489,30 +405,22 @@ class TaxiBridgeV7:
                 }))
             except Exception:
                 pass
-
-        # Close connections
         try:
             if self.ws:
                 await self.ws.close(code=1000, reason=reason)
         except Exception:
             pass
-
         try:
             self.writer.close()
             await self.writer.wait_closed()
         except Exception:
             pass
 
-    # -------------------------------------------------------------------------
-    # MAIN RUN LOOP
-    # -------------------------------------------------------------------------
-
     async def heartbeat_loop(self) -> None:
-        """Periodic heartbeat logging."""
         try:
             while self.running:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-                if not self.running:  # 🔥 FIXED: Early exit check after sleep
+                if not self.running:
                     break
                 age = time.time() - self.state.last_ws_activity
                 status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
@@ -521,27 +429,18 @@ class TaxiBridgeV7:
             logger.debug("[%s] Heartbeat task cancelled", self.state.call_id)
 
     async def run(self) -> None:
-        """Main bridge loop."""
         peer = self.writer.get_extra_info("peername")
         logger.info("[%s] 📞 Call from %s", self.state.call_id, peer)
-
         playback_task = asyncio.create_task(self.queue_to_asterisk())
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-
         try:
-            # Outer loop: keep the phone call alive even if the backend WS drops.
             while self.running:
-                # (Re)connect WS if needed
                 if not self.state.ws_connected:
                     if not await self.connect_websocket():
                         logger.error("[%s] ❌ WebSocket (re)connect failed", self.state.call_id)
                         await self.stop_call("WebSocket reconnect failed")
                         break
-
-                    # Only send eager init once (first ever connection).
                     if not self.state.init_sent and self.ws:
-                        # v7.4: Tell edge we're sending PCM16 (slin) not ulaw
-                        # This is critical - otherwise edge runs ulawToPcm16 on PCM data
                         send_format = "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec
                         eager_init = {
                             "type": "init",
@@ -550,39 +449,23 @@ class TaxiBridgeV7:
                             "user_phone": "unknown",
                             "addressTtsSplicing": True,
                             "eager_init": True,
-                            "inbound_format": send_format,  # slin = PCM16 @ 8kHz
-                            "inbound_sample_rate": self.state.ast_rate,  # 8000
+                            "inbound_format": send_format,
+                            "inbound_sample_rate": self.state.ast_rate,
                         }
                         await self.ws.send(json.dumps(eager_init))
                         self.state.init_sent = True
                         logger.info("[%s] 🚀 Sent eager init (format=%s @ %dHz)",
                                    self.state.call_id, send_format, self.state.ast_rate)
-
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
                 ai_task = asyncio.create_task(self.ai_to_queue())
-
-                done, pending = await asyncio.wait(
-                    {ast_task, ai_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
+                done, pending = await asyncio.wait({ast_task, ai_task}, return_when=asyncio.FIRST_COMPLETED)
                 for t in pending:
                     t.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-
-                # If the completed task threw, handle it.
-                exc: Optional[BaseException] = None
-                for t in done:
-                    exc = t.exception()
-                    if exc:
-                        break
-
+                exc = next((t.exception() for t in done if t.exception()), None)
                 if exc is None:
-                    # Task ended cleanly (usually means call ended somewhere else).
                     break
-
                 if isinstance(exc, RedirectException):
-                    logger.info("[%s] 🔀 Redirect to %s", self.state.call_id, exc.url)
                     self.state.ws_connected = False
                     try:
                         if self.ws:
@@ -591,20 +474,13 @@ class TaxiBridgeV7:
                         pass
                     self.state.reconnect_attempts = 0
                     if not await self.connect_websocket(url=exc.url, init_data=exc.init_data):
-                        logger.error("[%s] ❌ Redirect failed", self.state.call_id)
                         await self.stop_call("Redirect failed")
                         break
-                    # Continue loop with new WS
                     continue
-
                 if isinstance(exc, CallEndedException):
-                    logger.info("[%s] 📴 Call formally ended", self.state.call_id)
                     break
-
                 if isinstance(exc, (ConnectionClosed, WebSocketException)):
-                    logger.warning("[%s] 🔌 WebSocket closed: %s", self.state.call_id, exc)
                     self.state.ws_connected = False
-                    # Mark this as a reconnect attempt so connect_websocket sends reconnect init.
                     self.state.reconnect_attempts = max(self.state.reconnect_attempts, 1)
                     try:
                         if self.ws:
@@ -612,39 +488,27 @@ class TaxiBridgeV7:
                     except Exception:
                         pass
                     self.ws = None
-                    # Continue loop to reconnect while keeping AudioSocket alive.
                     continue
-
-                logger.error("[%s] ❌ Error: %s", self.state.call_id, exc)
                 await self.stop_call("Unhandled error")
                 break
-
         finally:
             self.running = False
-            # 🔥 FIXED: Proper task cancellation - cancel then await
             tasks_to_cancel = [playback_task, heartbeat_task]
             for task in tasks_to_cancel:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-            logger.info("[%s] 📊 Frames sent: %d",
-                       self.state.call_id, self.state.binary_audio_count)
             await self.cleanup()
 
     async def cleanup(self) -> None:
-        """Clean up resources."""
-        # 🔥 FIXED: Clear queues to release memory
         self.audio_queue.clear()
         self.pending_audio_buffer.clear()
-        
         try:
             if self.ws:
                 await self.ws.close()
         except Exception:
             pass
-        # 🔥 FIXED: Clear reference to break circular refs
         self.ws = None
-        
         try:
             if not self.writer.is_closing():
                 self.writer.close()
@@ -652,311 +516,130 @@ class TaxiBridgeV7:
         except Exception:
             pass
 
-    # -------------------------------------------------------------------------
-    # ASTERISK → AI
-    # -------------------------------------------------------------------------
-
     async def asterisk_to_ai(self) -> None:
-        """Read AudioSocket frames from Asterisk and forward to AI."""
         try:
             while self.running and self.state.ws_connected:
-                # Early exit check before blocking read
                 if not self.running:
                     break
-
-                try:
-                    header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
-                    m_type = header[0]
-                    m_len = struct.unpack(">H", header[1:3])[0]
-                    payload = await self.reader.readexactly(m_len)
-
-                    if m_type == MSG_UUID:
-                        raw_hex = payload.hex()
-                        if len(raw_hex) >= 12:
-                            self.state.phone = raw_hex[-12:]
-                        logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
-
-                        # Send phone update
-                        if self.ws and self.state.ws_connected:
-                            await self.ws.send(json.dumps({
-                                "type": "update_phone",
-                                "call_id": self.state.call_id,
-                                "phone": self.state.phone,
-                                "user_phone": self.state.phone,
-                            }))
-                            logger.info("[%s] 📱 Phone update sent", self.state.call_id)
-
-                    elif m_type == MSG_AUDIO:
-                        if m_len != self.state.ast_frame_bytes:
-                            await self._detect_format(m_len)
-
-                        # Decode µ-law to linear PCM if needed
-                        linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
-                        
-                        # Convert to numpy for processing
-                        pcm_array = np.frombuffer(linear, dtype=np.int16).astype(np.float32)
-                        
-                        # Calculate input RMS for debugging
-                        input_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
-                        
-                        # v7.5: Apply VOLUME BOOST first (6x) to bring quiet lines up
-                        if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
-                            pcm_array *= VOLUME_BOOST_FACTOR
-                        
-                        # v7.5: Apply AGC to normalize levels
-                        if ENABLE_AGC and pcm_array.size > 0:
-                            rms = float(np.sqrt(np.mean(pcm_array ** 2)))
-                            if rms > 10:  # Only apply AGC if there's actual audio
-                                target_gain = float(np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN))
-                                self.state.last_gain = self.state.last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - self.state.last_gain)
-                                pcm_array *= self.state.last_gain
-                        
-                        # Calculate output RMS
-                        output_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
-                        
-                        # Log audio levels periodically (every ~1 second = 50 frames @ 20ms)
-                        if LOG_AUDIO_LEVELS and self.state.binary_audio_count % 50 == 0:
-                            logger.info("[%s] 🔊 Audio: inRMS=%.0f → outRMS=%.0f (gain=%.1fx, boost=%.0fx)",
-                                       self.state.call_id, input_rms, output_rms, 
-                                       self.state.last_gain, VOLUME_BOOST_FACTOR)
-                        
-                        # Apply pre-emphasis to boost consonants before STT
-                        emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
-                        cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
-
-                        # Send audio in native format - edge function handles resampling to 24kHz
-                        # slin16 (16kHz) is preferred as it preserves more high-frequency content
-                        if SEND_NATIVE_FORMAT:
-                            if self.state.ast_codec == "ulaw":
-                                audio_to_send = lin2ulaw(cleaned)
-                            else:
-                                # slin/slin16 PCM16 passthrough (8kHz or 16kHz)
-                                audio_to_send = cleaned
-                        else:
-                            # Always send PCM16 (convert µ-law to linear)
-                            audio_to_send = cleaned
-                        # Send to AI
-                        if self.state.ws_connected and self.ws:
-                            try:
-                                await self.ws.send(audio_to_send)
-                                self.state.binary_audio_count += 1
-                                self.state.last_ws_activity = time.time()
-                            except Exception:
-                                self.pending_audio_buffer.append(audio_to_send)
-                                raise
-
-                    elif m_type == MSG_HANGUP:
-                        logger.info("[%s] 📴 Hangup from Asterisk", self.state.call_id)
-                        await self.stop_call("Asterisk hangup")
-                        return
-
-                except asyncio.TimeoutError:
-                    logger.warning("[%s] ⏱️ Asterisk timeout", self.state.call_id)
-                    await self.stop_call("Asterisk timeout")
+                header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
+                m_type = header[0]
+                m_len = struct.unpack(">H", header[1:3])[0]
+                payload = await self.reader.readexactly(m_len)
+                if m_type == MSG_UUID:
+                    raw_hex = payload.hex()
+                    if len(raw_hex) >= 12:
+                        self.state.phone = raw_hex[-12:]
+                    logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
+                    if self.ws and self.state.ws_connected:
+                        await self.ws.send(json.dumps({
+                            "type": "update_phone",
+                            "call_id": self.state.call_id,
+                            "phone": self.state.phone,
+                            "user_phone": self.state.phone,
+                        }))
+                elif m_type == MSG_AUDIO:
+                    if m_len != self.state.ast_frame_bytes:
+                        await self._detect_format(m_len)
+                    linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
+                    pcm_array = np.frombuffer(linear, dtype=np.int16).astype(np.float32)
+                    input_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
+                    if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
+                        pcm_array *= VOLUME_BOOST_FACTOR
+                    if ENABLE_AGC and pcm_array.size > 0:
+                        rms = float(np.sqrt(np.mean(pcm_array ** 2)))
+                        if rms > 10:
+                            target_gain = float(np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN))
+                            self.state.last_gain = self.state.last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - self.state.last_gain)
+                            pcm_array *= self.state.last_gain
+                    output_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
+                    if LOG_AUDIO_LEVELS and self.state.binary_audio_count % 50 == 0:
+                        logger.info("[%s] 🔊 Audio: inRMS=%.0f → outRMS=%.0f (gain=%.1fx, boost=%.0fx)",
+                                   self.state.call_id, input_rms, output_rms,
+                                   self.state.last_gain, VOLUME_BOOST_FACTOR)
+                    emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
+                    cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
+                    audio_to_send = cleaned
+                    if self.state.ws_connected and self.ws:
+                        try:
+                            await self.ws.send(audio_to_send)
+                            self.state.binary_audio_count += 1
+                            self.state.last_ws_activity = time.time()
+                        except Exception:
+                            self.pending_audio_buffer.append(audio_to_send)
+                            raise
+                elif m_type == MSG_HANGUP:
+                    await self.stop_call("Asterisk hangup")
                     return
-                except asyncio.IncompleteReadError:
-                    logger.info("[%s] 📴 Asterisk closed", self.state.call_id)
-                    await self.stop_call("Asterisk closed")
-                    return
-                except (ConnectionClosed, WebSocketException):
-                    raise
-                except asyncio.CancelledError:
-                    logger.debug("[%s] Asterisk->AI task cancelled", self.state.call_id)
-                    return
-                except Exception as e:
-                    logger.error("[%s] ❌ asterisk_to_ai error: %s", self.state.call_id, e)
-                    await self.stop_call("asterisk_to_ai error")
-                    return
-        except asyncio.CancelledError:
-            logger.debug("[%s] Asterisk->AI task cancelled (outer)", self.state.call_id)
-
-    # -------------------------------------------------------------------------
-    # AI → QUEUE
-    # -------------------------------------------------------------------------
+        except Exception:
+            await self.stop_call("asterisk_to_ai error")
 
     async def ai_to_queue(self) -> None:
-        """Receive audio + control messages from AI."""
         audio_count = 0
         try:
             async for message in self.ws:
-                # 🔥 FIXED: Early exit check to prevent processing after stop
                 if not self.running:
                     break
-                    
                 self.state.last_ws_activity = time.time()
-
-                # Binary audio (TTS from AI - resample to Asterisk rate)
                 if isinstance(message, bytes):
                     pcm_ast = resample_audio(message, AI_RATE, self.state.ast_rate)
                     out = lin2ulaw(pcm_ast) if self.state.ast_codec == "ulaw" else pcm_ast
                     self.audio_queue.append(out)
                     audio_count += 1
                     continue
-
-                # JSON messages
                 data = json.loads(message)
                 msg_type = data.get("type")
-
                 if msg_type in ("audio", "address_tts"):
-                    # TTS audio - resample to Asterisk rate
                     raw_24k = base64.b64decode(data["audio"])
                     pcm_ast = resample_audio(raw_24k, AI_RATE, self.state.ast_rate)
                     out = lin2ulaw(pcm_ast) if self.state.ast_codec == "ulaw" else pcm_ast
                     self.audio_queue.append(out)
                     audio_count += 1
-
-                elif msg_type == "transcript":
-                    role = data.get("role", "?").upper()
-                    text = data.get("text", "")
-                    logger.info("[%s] 💬 %s: %s", self.state.call_id, role, text)
-
-                elif msg_type == "ai_interrupted":
-                    flushed = len(self.audio_queue)
-                    self.audio_queue.clear()
-                    logger.info("[%s] 🛑 Flushed %d chunks (barge-in)", 
-                               self.state.call_id, flushed)
-
                 elif msg_type == "redirect":
                     raise RedirectException(data.get("url", WS_URL), data.get("init_data", {}))
-
                 elif msg_type == "call_ended":
-                    logger.info("[%s] 📴 AI ended: %s", 
-                               self.state.call_id, data.get("reason"))
-                    self.state.call_formally_ended = True
-                    self.running = False
                     raise CallEndedException()
-
-                elif msg_type == "keepalive":
-                    # Respond to keepalive pings from edge function
-                    if self.ws and self.state.ws_connected:
-                        await self.ws.send(json.dumps({
-                            "type": "keepalive_ack",
-                            "timestamp": data.get("timestamp"),
-                            "call_id": self.state.call_id
-                        }))
-
-                elif msg_type == "error":
-                    logger.error("[%s] 🧨 AI error: %s", 
-                                self.state.call_id, data.get("error"))
-
-        except (RedirectException, CallEndedException):
-            raise
-        except (ConnectionClosed, WebSocketException):
-            raise
-        except asyncio.CancelledError:
-            # 🔥 FIXED: Handle task cancellation gracefully
-            logger.debug("[%s] AI->Queue task cancelled", self.state.call_id)
-        except Exception as e:
-            logger.error("[%s] ❌ ai_to_queue error: %s", self.state.call_id, e)
         finally:
             logger.info("[%s] 📊 AI audio received: %d", self.state.call_id, audio_count)
 
-    # -------------------------------------------------------------------------
-    # QUEUE → ASTERISK
-    # -------------------------------------------------------------------------
-
     async def queue_to_asterisk(self) -> None:
-        """Stream audio from queue to Asterisk at correct pacing."""
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
-
         try:
             while self.running:
-                # Calculate bytes_per_sec dynamically (format can change mid-call)
                 bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-                
-                # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
-
-                # Calculate expected playback position
                 elapsed = time.time() - start_time
                 expected = int(elapsed * bytes_per_sec)
-
                 if bytes_played < expected and len(buffer) >= self.state.ast_frame_bytes:
-                    # We're behind - send frames to catch up
                     frames_needed = (expected - bytes_played) // self.state.ast_frame_bytes
                     frames_available = len(buffer) // self.state.ast_frame_bytes
                     frames_to_send = min(frames_needed, frames_available, 10)
-
                     for _ in range(frames_to_send):
                         if len(buffer) < self.state.ast_frame_bytes:
                             break
                         chunk = bytes(buffer[:self.state.ast_frame_bytes])
                         del buffer[:self.state.ast_frame_bytes]
-
-                        try:
-                            self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
-                            await self.writer.drain()
-                            bytes_played += len(chunk)
-                        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                            logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                            await self.stop_call("Asterisk disconnected")
-                            return
-                        except Exception as e:
-                            logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                            await self.stop_call("Write failed")
-                            return
-
-                # Sleep for one frame duration
-                await asyncio.sleep(0.02)
-
-                # Send silence if buffer is empty but we need to maintain timing
-                if not buffer and bytes_played < expected:
-                    # Get next frame
-                    if len(buffer) >= self.state.ast_frame_bytes:
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
-                    else:
-                        chunk = self._silence()
-
-                    # Send to Asterisk
-                    try:
                         self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                         await self.writer.drain()
                         bytes_played += len(chunk)
-                    except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                        logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                        await self.stop_call("Asterisk disconnected")
-                        return
-                    except Exception as e:
-                        logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                        await self.stop_call("Write failed")
-                        return
+                await asyncio.sleep(0.02)
+                if not buffer and bytes_played < expected:
+                    chunk = self._silence()
+                    self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
+                    await self.writer.drain()
+                    bytes_played += len(chunk)
         except asyncio.CancelledError:
-            # 🔥 FIXED: Handle task cancellation gracefully
-            logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
+            pass
 
     def _silence(self) -> bytes:
-        """Generate one frame of silence."""
         b = 0xFF if self.state.ast_codec == "ulaw" else 0x00
         return bytes([b]) * self.state.ast_frame_bytes
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 async def main() -> None:
-    server = await asyncio.start_server(
-        lambda r, w: TaxiBridgeV7(r, w).run(),
-        AUDIOSOCKET_HOST,
-        AUDIOSOCKET_PORT,
-    )
-
-    startup_lines = [
-        "🚀 Taxi Bridge v7.5 - AGGRESSIVE AUDIO BOOST (PAIRED MODE)",
-        f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
-        f"   Connecting to: {WS_URL}",
-        f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
-        f"   Volume boost: {VOLUME_BOOST_FACTOR}x, AGC target: {TARGET_RMS} RMS",
-        f"   Preferred codec: ulaw @ 8kHz (locked)",
-    ]
-    for line in startup_lines:
-        print(line, flush=True)
-        logger.info(line)
-
+    server = await asyncio.start_server(lambda r, w: TaxiBridgeV7(r, w).run(), AUDIOSOCKET_HOST, AUDIOSOCKET_PORT)
     async with server:
         await server.serve_forever()
 
