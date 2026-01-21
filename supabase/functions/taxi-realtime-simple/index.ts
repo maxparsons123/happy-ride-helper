@@ -5962,15 +5962,42 @@ Do NOT say 'booked' until the tool returns success.]`
           safeResponseCreate(sessionState, "end_call_goodbye");
           
           // Close OpenAI connection after extended delay to let full goodbye audio finish,
-          // then tell the bridge to hang up.
+          // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
+          // (If we only send a hangup message but leave the WS open, the function may be killed by
+          // runtime limits and the bridge reports: "no close frame received or sent".)
           setTimeout(() => {
             console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
+
+            // Stop keep-alives immediately (we are ending the session)
             try {
-              socket.send(JSON.stringify({ type: "hangup", reason: "end_call" }));
+              stopKeepAlive();
             } catch {
               // ignore
             }
-            openaiWs?.close();
+
+            // Notify the bridge
+            try {
+              socket.send(JSON.stringify({ type: "hangup", reason: "end_call" }));
+              console.log(`[${sessionState.callId}] 📤 Sent hangup to bridge`);
+            } catch (e) {
+              console.warn(`[${sessionState.callId}] ⚠️ Failed to send hangup to bridge:`, e);
+            }
+
+            // Close the bridge WebSocket gracefully (send close frame)
+            try {
+              isConnectionClosed = true;
+              socket.close(1000, "end_call");
+              console.log(`[${sessionState.callId}] 📴 Closed bridge WebSocket (1000 end_call)`);
+            } catch (e) {
+              console.warn(`[${sessionState.callId}] ⚠️ Failed to close bridge WebSocket:`, e);
+            }
+
+            // Close OpenAI WS
+            try {
+              openaiWs?.close();
+            } catch {
+              // ignore
+            }
           }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
           
           // Return early - don't trigger another response.create at the end
