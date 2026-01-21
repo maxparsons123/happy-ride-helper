@@ -648,9 +648,10 @@ const SUMMARY_PROTECTION_MS = 8000;
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
 // RMS thresholds for audio quality
-// NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
-// Only apply barge-in filtering when Ada is actively speaking to prevent echo
-const RMS_BARGE_IN_MIN = 800;   // Minimum for barge-in during Ada speech
+// NOTE: Telephony audio can have extremely low RMS (even ~1-50) depending on trunk/codecs.
+// Only apply barge-in filtering when Ada is actively speaking to prevent echo.
+// Keep MIN low or Ada will never hear quiet callers during her own speech.
+const RMS_BARGE_IN_MIN = 5;     // Minimum for barge-in during Ada speech
 const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
 
 // Audio diagnostics tracking
@@ -1470,6 +1471,28 @@ function computeRms(pcm: Int16Array): number {
   return Math.sqrt(sum / pcm.length);
 }
 
+function applyGain(pcm: Int16Array, gain: number): Int16Array {
+  if (gain <= 1) return pcm;
+  const out = new Int16Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) {
+    const v = Math.round(pcm[i] * gain);
+    out[i] = Math.max(-32768, Math.min(32767, v));
+  }
+  return out;
+}
+
+// Very lightweight auto-gain to prevent "near silence" input causing Whisper hallucinations.
+// We cap the gain to avoid amplifying noise too aggressively.
+function computeAutoGain(rms: number): number {
+  // If RMS is already healthy, do nothing.
+  if (rms >= 120) return 1;
+  // If RMS is tiny, boost toward a modest target.
+  const target = 250;
+  const safeRms = Math.max(1, rms);
+  const g = target / safeRms;
+  return Math.max(1, Math.min(15, g));
+}
+
 // Create initial session state
 function createSessionState(callId: string, callerPhone: string, language: string): SessionState {
   return {
@@ -2124,6 +2147,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   let greetingSent = false;
   let greetingAudioReceived = false; // Track if we actually got audio for the greeting
   let greetingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  // Monitoring: throttle DB inserts for audio playback in the LiveCalls panel
+  let monitorAiChunkCount = 0;
   
   const sendGreeting = () => {
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
@@ -2328,12 +2353,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             
             // NON-BLOCKING: Stream AI audio to monitoring panel (fire and forget - no jitter)
-            void supabase.from("live_call_audio").insert({
-              call_id: callId,
-              audio_chunk: data.delta,
-              audio_source: "ai",
-              created_at: new Date().toISOString(),
-            });
+            // IMPORTANT: Throttle inserts to avoid slowing the realtime loop.
+            monitorAiChunkCount++;
+            if (monitorAiChunkCount % 5 === 0) {
+              void supabase.from("live_call_audio").insert({
+                call_id: callId,
+                audio_chunk: data.delta,
+                audio_source: "ai",
+                created_at: new Date().toISOString(),
+              });
+            }
           }
           break;
 
@@ -3463,6 +3492,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
   // Audio diagnostics for this session
   const audioDiag = createAudioDiagnostics();
+  // Monitoring: throttle user audio inserts for the C# bridge path.
+  let monitorUserChunkCount = 0;
 
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
@@ -3484,12 +3515,19 @@ Do NOT skip any part. Say ALL of it warmly.]`
           pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
         }
 
-        const rms = computeRms(pcmInput);
+        const rmsRaw = computeRms(pcmInput);
+        const gain = computeAutoGain(rmsRaw);
+        if (gain > 1) {
+          pcmInput = applyGain(pcmInput, gain);
+        }
+        const rms = gain > 1 ? computeRms(pcmInput) : rmsRaw;
         updateRmsAverage(audioDiag, rms);
 
         // Log audio stats periodically
         if (audioDiag.packetsReceived <= 3) {
-          console.log(`[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)}`);
+          console.log(
+            `[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)}, gain=${gain.toFixed(1)}, fmt=${inboundAudioFormat}@${inboundSampleRate}`,
+          );
         } else if (audioDiag.packetsReceived % 200 === 0) {
           console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
         }
@@ -3596,12 +3634,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }));
             
             // NON-BLOCKING: Stream user audio to monitoring panel (fire and forget)
-            void supabase.from("live_call_audio").insert({
-              call_id: callId,
-              audio_chunk: data.audio,
-              audio_source: "user",
-              created_at: new Date().toISOString(),
-            });
+            monitorUserChunkCount++;
+            if (monitorUserChunkCount % 5 === 0) {
+              void supabase.from("live_call_audio").insert({
+                call_id: callId,
+                audio_chunk: data.audio,
+                audio_source: "user",
+                created_at: new Date().toISOString(),
+              });
+            }
           }
         } else if (data.type === "audio" && data.audio) {
           // Legacy handler: receive base64 audio, assume 8kHz ulaw unless told otherwise.
