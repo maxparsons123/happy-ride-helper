@@ -866,66 +866,39 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     async def queue_to_asterisk(self) -> None:
-        """Stream audio from queue to Asterisk at correct pacing."""
-        start_time = time.time()
-        bytes_played = 0
+        """Stream audio from queue to Asterisk at correct pacing.
+        
+        v7.6 FIX: Send exactly ONE frame per 20ms tick to prevent fast playback.
+        The old "catch up" logic was sending bursts of frames causing sped-up audio.
+        """
         buffer = bytearray()
+        frame_duration_ms = 20  # 20ms per frame
+        last_send_time = time.time()
 
         try:
             while self.running:
-                # Calculate bytes_per_sec dynamically (format can change mid-call)
-                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-                
                 # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Calculate expected playback position
-                elapsed = time.time() - start_time
-                expected = int(elapsed * bytes_per_sec)
+                # Calculate time since last frame sent
+                now = time.time()
+                elapsed_ms = (now - last_send_time) * 1000
 
-                if bytes_played < expected and len(buffer) >= self.state.ast_frame_bytes:
-                    # We're behind - send frames to catch up
-                    frames_needed = (expected - bytes_played) // self.state.ast_frame_bytes
-                    frames_available = len(buffer) // self.state.ast_frame_bytes
-                    frames_to_send = min(frames_needed, frames_available, 10)
-
-                    for _ in range(frames_to_send):
-                        if len(buffer) < self.state.ast_frame_bytes:
-                            break
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
-
-                        try:
-                            self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
-                            await self.writer.drain()
-                            bytes_played += len(chunk)
-                        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                            logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                            await self.stop_call("Asterisk disconnected")
-                            return
-                        except Exception as e:
-                            logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                            await self.stop_call("Write failed")
-                            return
-
-                # Sleep for one frame duration
-                await asyncio.sleep(0.02)
-
-                # Send silence if buffer is empty but we need to maintain timing
-                if not buffer and bytes_played < expected:
-                    # Get next frame
+                # Only send ONE frame every 20ms - strict real-time pacing
+                if elapsed_ms >= frame_duration_ms:
                     if len(buffer) >= self.state.ast_frame_bytes:
+                        # Send one frame of real audio
                         chunk = bytes(buffer[:self.state.ast_frame_bytes])
                         del buffer[:self.state.ast_frame_bytes]
                     else:
+                        # Send silence to maintain timing
                         chunk = self._silence()
 
-                    # Send to Asterisk
                     try:
                         self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                         await self.writer.drain()
-                        bytes_played += len(chunk)
+                        last_send_time = now
                     except (BrokenPipeError, ConnectionResetError, OSError) as e:
                         logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
                         await self.stop_call("Asterisk disconnected")
@@ -934,6 +907,9 @@ class TaxiBridgeV7:
                         logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
                         await self.stop_call("Write failed")
                         return
+
+                # Sleep for ~5ms to check again (allows responsive frame timing)
+                await asyncio.sleep(0.005)
         except asyncio.CancelledError:
             # 🔥 FIXED: Handle task cancellation gracefully
             logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
