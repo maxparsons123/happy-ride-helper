@@ -341,23 +341,21 @@ class TaxiBridgeV7:
     async def _detect_format(self, frame_len: int) -> None:
         """Detect Asterisk audio format from frame size.
         
-        v7.4: LOCKED TO ULAW - slin16 auto-detection was corrupting audio mid-call.
-        The format switching caused garbled audio when Asterisk changed codecs.
+        v7.6: LOCKED TO ULAW - ignore ALL format changes including frame size.
+        The variable frame sizes (160/320/640) were causing chipmunk audio.
         
         Frame sizes for 20ms:
         - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
-        # v7.4: LOCK TO ULAW - ignore format changes entirely
+        # v7.6: LOCK EVERYTHING - don't update ast_frame_bytes either!
+        # Changing ast_frame_bytes was causing playback pacing to use wrong timing
         if LOCK_FORMAT_ULAW:
-            if frame_len != self.state.ast_frame_bytes:
-                logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (locked to ulaw)",
-                              self.state.call_id, self.state.ast_frame_bytes, frame_len)
-            # Always treat as ulaw regardless of frame size
-            self.state.ast_codec = "ulaw"
-            self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = frame_len
+            if frame_len != 160:
+                logger.warning("[%s] ⚠️ Ignoring frame size %d (locked to 160-byte ulaw)",
+                              self.state.call_id, frame_len)
+            # Keep everything fixed - don't change any state
             return
         
         # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
@@ -868,20 +866,16 @@ class TaxiBridgeV7:
     async def queue_to_asterisk(self) -> None:
         """Stream audio from queue to Asterisk at correct pacing.
         
-        v7.6 FIX: Send exactly ONE frame per 20ms tick to prevent fast playback.
-        The old "catch up" logic was sending bursts of frames causing sped-up audio.
+        v7.6 FIX: Use FIXED 20ms pacing since we're locked to 160-byte ulaw frames.
+        Variable frame size detection was causing chipmunk audio.
         """
         buffer = bytearray()
+        FRAME_DURATION_MS = 20.0  # Fixed 20ms per 160-byte frame
+        FRAME_SIZE = 160         # Fixed ulaw frame size
         last_send_time = time.time()
 
         try:
             while self.running:
-                # Derive frame pacing from Asterisk's current frame size.
-                # IMPORTANT: Asterisk sometimes sends 40ms/80ms frames (320/640 bytes) even when locked to ulaw.
-                # If we always send every 20ms, playback sounds too fast.
-                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-                frame_duration_ms = max(1.0, (self.state.ast_frame_bytes / max(1, bytes_per_sec)) * 1000.0)
-
                 # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
@@ -890,15 +884,15 @@ class TaxiBridgeV7:
                 now = time.time()
                 elapsed_ms = (now - last_send_time) * 1000
 
-                # Only send ONE frame per calculated frame duration - strict real-time pacing
-                if elapsed_ms >= frame_duration_ms:
-                    if len(buffer) >= self.state.ast_frame_bytes:
+                # Send ONE 160-byte frame every 20ms - strict real-time pacing
+                if elapsed_ms >= FRAME_DURATION_MS:
+                    if len(buffer) >= FRAME_SIZE:
                         # Send one frame of real audio
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
+                        chunk = bytes(buffer[:FRAME_SIZE])
+                        del buffer[:FRAME_SIZE]
                     else:
-                        # Send silence to maintain timing
-                        chunk = self._silence()
+                        # Send silence (0xFF = ulaw silence)
+                        chunk = bytes([0xFF] * FRAME_SIZE)
 
                     try:
                         self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
