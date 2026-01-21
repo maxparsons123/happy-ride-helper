@@ -23,8 +23,8 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // OpenAI Realtime API config
-// NOTE: Switched back to the previous (working) paired-mode model.
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
+// Using full gpt-4o-realtime model for highest voice quality and consistency
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
 const VOICE = "shimmer";
 
 // ---------------------------------------------------------------------------
