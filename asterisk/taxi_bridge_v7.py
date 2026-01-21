@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.4 - LOUD AND CLEAR
+# Taxi AI Asterisk Bridge v7.5 - AGGRESSIVE AUDIO BOOST
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -66,6 +66,14 @@ if not WS_URL:
             )
     except (FileNotFoundError, json.JSONDecodeError):
         WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+
+# Normalize WS routing: if an env var still uses the less reliable ".supabase.co/functions/v1" domain,
+# rewrite it to the ".functions.supabase.co/functions/v1" subdomain.
+if WS_URL and (".supabase.co/functions/v1/" in WS_URL) and (".functions.supabase.co" not in WS_URL):
+    WS_URL = WS_URL.replace(
+        ".supabase.co/functions/v1/",
+        ".functions.supabase.co/functions/v1/",
+    )
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
@@ -919,7 +927,7 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.3 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.5 - AGGRESSIVE AUDIO BOOST (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
