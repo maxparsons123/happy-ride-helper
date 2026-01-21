@@ -733,6 +733,50 @@ const PHANTOM_PHRASES = [
   "amara.org",
   "次回へ続く", // Japanese "to be continued"
   "ご視聴ありがとうございました",
+  // Observed Whisper hallucinations from silence/noise
+  "carter, des moines",
+  "des moines",
+  "medical emergency",
+  "state. medical",
+  "fawziacademy",
+  "fawzi academy",
+  "continue watching",
+  "please subscribe",
+  "thanks for listening",
+  "thank you for listening",
+  "podcast",
+  "episode",
+  "outro",
+  "intro",
+  "commercial break",
+  "advertisement",
+  "narrator",
+  "transcription by",
+  "translated by",
+  "captions by",
+  "closed captioning",
+  "cc by",
+  "this video",
+  "this audio",
+  "chapter",
+  "segment",
+  "part one",
+  "part two",
+  "the end",
+  "roll credits",
+  "coming up next",
+  // Social media phantom phrases
+  "instagram",
+  "tiktok",
+  "youtube",
+  "patreon",
+  "discord",
+  "twitch",
+  "my website",
+  "check out my",
+  "link in the",
+  "bio",
+  "description below",
 ];
 
 // --- STT Corrections ---
@@ -881,6 +925,47 @@ const STT_CORRECTIONS: Record<string, string> = {
   "freight": "eight",
   "fright": "eight",
   "fate": "eight",
+  
+  // Whisper number hallucinations (spoken "three" misheard as random phrases)
+  "boston juice": "three",
+  "ozempic juice": "three",
+  "the free": "three",
+  "d3": "three",
+  "d 3": "three",
+  "b3": "three",
+  "b 3": "three",
+  "c3": "three",
+  "c 3": "three",
+  "t3": "three",
+  "t 3": "three",
+  "v3": "three",
+  "v 3": "three",
+  "3d": "three",
+  "3 d": "three",
+  "pré": "three",
+  "pre": "three",
+  "trois": "three",
+  "fry": "three",
+  "friday": "Friday",  // but standalone "fri" is often "three"
+  "stree": "three",
+  
+  // More number hallucinations
+  "to go": "two",
+  "for real": "four",
+  "for you": "four",
+  "few": "few",  // don't correct "few" to "four"
+  "six o": "six",
+  "sax": "six",
+  "seeks": "six",
+  // "fife" already defined above
+  "hive": "five",
+  "vibe": "five",
+  "dime": "nine",
+  "dying": "nine",
+  "mime": "nine",
+  "won't": "one",
+  "wand": "one",
+  "wun": "one",
   
   // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
@@ -1046,14 +1131,67 @@ function extractFullAddressFromTranscripts(
 
 function isPhantomHallucination(text: string): boolean {
   const lower = text.toLowerCase().trim();
+  
+  // Very short transcripts are likely noise
   if (lower.length < 2) return true;
+  
+  // Check against known phantom phrases
   for (const phrase of PHANTOM_PHRASES) {
     if (lower.includes(phrase.toLowerCase())) return true;
   }
+  
+  // URL detection - Whisper often hallucinates URLs during silence
+  // Matches: http://, https://, www., .com, .org, .net, .co.uk, etc.
+  if (/(?:https?:\/\/|www\.|\.[a-z]{2,4}(?:\/|$))/i.test(lower)) {
+    return true;
+  }
+  
+  // Domain-like patterns (word.word without spaces)
+  if (/\b[a-z]+\.[a-z]{2,6}\b/i.test(lower) && !lower.includes(" ")) {
+    return true;
+  }
+  
   // Detect non-Latin scripts that are unlikely to be real user input for UK taxi booking
   // Allow common accented characters but filter pure non-Latin
   const nonLatinRatio = (text.match(/[^\x00-\x7F\u00C0-\u017F]/g) || []).length / text.length;
   if (nonLatinRatio > 0.5 && text.length > 3) return true;
+  
+  // US locations that are unlikely in UK taxi booking (common Whisper hallucinations)
+  const usLocationHallucinations = [
+    /\bdes moines\b/i,
+    /\biowa\b/i,
+    /\boklahoma\b/i,
+    /\barkansas\b/i,
+    /\bkansas\b/i,
+    /\bnebraska\b/i,
+    /\bwyoming\b/i,
+    /\bmontana\b/i,
+    /\bnevada\b/i,
+    /\butah\b/i,
+    /\boregon\b/i,
+    /\bmississippi\b/i,
+    /\balabama\b/i,
+    /\bmissouri\b/i,
+    /\bindiana\b/i,
+    /\btennessee\b/i,
+  ];
+  for (const pattern of usLocationHallucinations) {
+    if (pattern.test(lower)) return true;
+  }
+  
+  // Gibberish detection: excessive punctuation or odd patterns
+  const punctCount = (text.match(/[.!?,:;]/g) || []).length;
+  if (punctCount > 5 && text.length < 30) return true;
+  
+  // All caps short phrases (likely noise interpretation)
+  if (text === text.toUpperCase() && text.length > 3 && text.length < 15) {
+    // Exception for real short answers like "ASAP", "NOW"
+    const validAllCaps = ["ASAP", "NOW", "YES", "NO", "OK", "OKAY"];
+    if (!validAllCaps.includes(text.trim())) {
+      return true;
+    }
+  }
+  
   return false;
 }
 
