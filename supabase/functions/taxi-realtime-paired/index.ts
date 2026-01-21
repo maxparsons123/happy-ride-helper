@@ -152,6 +152,22 @@ function ulawToPcm16(ulaw: Uint8Array): Int16Array {
   return out;
 }
 
+// Resample 8kHz PCM16 to 16kHz for Deepgram Flux (2x upsampling with linear interpolation)
+function resamplePcm8kTo16k(pcm: Int16Array): Int16Array {
+  const out = new Int16Array(pcm.length * 2);
+  for (let i = 0; i < pcm.length - 1; i++) {
+    const s0 = pcm[i];
+    const s1 = pcm[i + 1];
+    out[i * 2] = s0;
+    out[i * 2 + 1] = Math.round((s0 + s1) / 2); // Interpolated sample
+  }
+  // Handle last sample
+  const lastIdx = Math.max(pcm.length - 1, 0);
+  out[lastIdx * 2] = pcm[lastIdx] ?? 0;
+  out[lastIdx * 2 + 1] = pcm[lastIdx] ?? 0;
+  return out;
+}
+
 function resamplePcm16To24k(pcm: Int16Array, inputSampleRate: number): Int16Array {
   if (inputSampleRate === 24000) return pcm;
 
@@ -2258,64 +2274,64 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] 🎙️ Deepgram key detected (len=${DEEPGRAM_API_KEY.length})`);
     
     try {
-      // Keyword boosting for taxi booking context - helps with addresses
-      // NOTE: Keep keywords URL-safe (spaces encoded) to match proven working implementations
-      const keywords = [
-        "cancel:2", "cancel%20it:2", "book%20it:2", "yes:1.5", "no:1.5", "yeah:1.5",
-        "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Manchester:1.5", "London:1.5",
-        "Road:1.3", "Street:1.3", "Lane:1.3", "Avenue:1.3", "Drive:1.3", "Close:1.3",
-        "airport:1.5", "Birmingham%20Airport:1.8", "Heathrow:1.8",
-        "Sweet%20Spot:1.8", "Tesco:1.5", "hospital:1.5", "station:1.5"
-      ].join("&keywords=");
+      // Flux requires linear16 encoding - convert mulaw to linear16 at send time
+      // Flux only supports: 8000, 16000, 24000, 44100, 48000 Hz
+      const sampleRate = inboundSampleRate === 8000 ? 16000 : inboundSampleRate; // Upsample 8kHz to 16kHz for Flux
       
-      // Format for streaming: mulaw for 8kHz telephony, linear16 for slin/slin16
-      const encoding = inboundAudioFormat === "ulaw" ? "mulaw" : "linear16";
-      const sampleRate = inboundSampleRate;
-      
-      // Deepgram URL-based auth - works in Deno edge runtime
-      // The streaming API accepts Authorization header via custom request, or we can
-      // use the newer token-based URL authentication
-      const baseUrl = `wss://api.deepgram.com/v1/listen`;
+      // Deepgram Flux v2 endpoint - built for voice agents with native turn detection
+      // CRITICAL: Must use /v2/listen (not /v1/listen) for Flux
+      const baseUrl = `wss://api.deepgram.com/v2/listen`;
       const params = new URLSearchParams({
-        model: "nova-2-phonecall",
-        language: "en-GB",
-        encoding: encoding,
+        model: "flux-general-en",
+        encoding: "linear16",
         sample_rate: sampleRate.toString(),
         channels: "1",
+        // Flux-specific turn detection parameters
+        eot_threshold: "0.7",           // End-of-turn confidence threshold
+        eager_eot_threshold: "0.5",     // Enable early LLM response preparation
+        eot_timeout_ms: "3000",         // Max silence before forcing end-of-turn (reduced for snappy response)
+        // Standard options
         punctuate: "true",
-        interim_results: "true",
-        endpointing: "500",
-        vad_events: "true",
         smart_format: "true",
         numerals: "true",
-      });
-      // Add keywords separately (they need special encoding)
-      keywords.split("&keywords=").forEach(kw => {
-        if (kw) params.append("keywords", kw);
       });
       
       const url = `${baseUrl}?${params.toString()}`;
       
-      console.log(`[${callId}] 🎙️ Connecting to Deepgram nova-2-phonecall @ ${sampleRate}Hz...`);
+      console.log(`[${callId}] 🎙️ Connecting to Deepgram Flux (v2) @ ${sampleRate}Hz...`);
       
-      // Use subprotocol auth - this is the only method that works for Deepgram in Deno
-      // Format: ["token", "API_KEY"] where API_KEY is the actual key value
+      // Use subprotocol auth for Deno
       try {
         deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
       } catch (wsError) {
-        console.error(`[${callId}] ❌ Deepgram WebSocket creation failed:`, wsError);
+        console.error(`[${callId}] ❌ Deepgram Flux WebSocket creation failed:`, wsError);
         return false;
       }
       
       deepgramWs.onopen = () => {
-        console.log(`[${callId}] 🎙️ Deepgram STT connected (nova-2-phonecall @ ${sampleRate}Hz)`);
+        console.log(`[${callId}] 🎙️ Deepgram Flux connected (flux-general-en @ ${sampleRate}Hz)`);
       };
       
       deepgramWs.onmessage = (event: MessageEvent) => {
         try {
           const data = JSON.parse(event.data);
+          const msgType = data.type;
           
-          if (data.type === "Results" && data.channel?.alternatives?.[0]) {
+          // Handle Flux-specific events
+          if (msgType === "EagerEndOfTurn") {
+            // User is likely done speaking - can start preparing response
+            console.log(`[${callId}] 🎙️ Flux: EagerEndOfTurn (confidence=${data.confidence?.toFixed(2)})`);
+            // Could trigger early LLM processing here
+          } else if (msgType === "EndOfTurn") {
+            // Definitive end of user's turn
+            console.log(`[${callId}] 🎙️ Flux: EndOfTurn (final)`);
+          } else if (msgType === "TurnResumed") {
+            // User continued speaking after EagerEndOfTurn - cancel draft response
+            console.log(`[${callId}] 🎙️ Flux: TurnResumed (user continued speaking)`);
+          } else if (msgType === "Connected") {
+            console.log(`[${callId}] 🎙️ Flux: Connected to Deepgram`);
+          } else if (data.channel?.alternatives?.[0]) {
+            // Regular transcript result (Results type)
             const alt = data.channel.alternatives[0];
             const transcript = alt.transcript?.trim() || "";
             const isFinal = data.is_final === true;
@@ -2328,7 +2344,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 if (deepgramTranscriptBuffer.length > 5) {
                   deepgramTranscriptBuffer.shift(); // Keep last 5
                 }
-                console.log(`[${callId}] 🎙️ DG FINAL: "${transcript}"`);
+                console.log(`[${callId}] 🎙️ Flux FINAL: "${transcript}" (conf=${alt.confidence?.toFixed(2)})`);
                 
                 // Send to client for logging/display
                 if (socket.readyState === WebSocket.OPEN) {
@@ -2341,27 +2357,27 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 }
               } else {
                 // Interim result - log but don't store
-                console.log(`[${callId}] 🎙️ DG interim: "${transcript}"`);
+                console.log(`[${callId}] 🎙️ Flux interim: "${transcript}"`);
               }
             }
           }
         } catch (e) {
-          console.error(`[${callId}] Deepgram parse error:`, e);
+          console.error(`[${callId}] Deepgram Flux parse error:`, e);
         }
       };
       
       deepgramWs.onerror = (error: Event) => {
-        console.error(`[${callId}] ❌ Deepgram WebSocket error:`, error);
+        console.error(`[${callId}] ❌ Deepgram Flux WebSocket error:`, error);
       };
       
       deepgramWs.onclose = (event: CloseEvent) => {
-        console.log(`[${callId}] 🎙️ Deepgram closed: code=${event.code}, reason="${event.reason || 'none'}"`);
+        console.log(`[${callId}] 🎙️ Deepgram Flux closed: code=${event.code}, reason="${event.reason || 'none'}"`);
         deepgramWs = null;
       };
       
       return true;
     } catch (e) {
-      console.error(`[${callId}] Failed to connect to Deepgram:`, e);
+      console.error(`[${callId}] Failed to connect to Deepgram Flux:`, e);
       return false;
     }
   };
@@ -4157,9 +4173,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
 
-            // PARALLEL: Send raw audio to Deepgram for telephony-optimized STT
+            // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
+            // Flux requires linear16 @ 16kHz - we already have pcmInput as Int16Array
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              deepgramWs.send(audioBytes);
+              // Resample to 16kHz if coming from 8kHz (Flux works best at 16kHz)
+              const pcm16k = inboundSampleRate === 8000 
+                ? resamplePcm8kTo16k(pcmInput) 
+                : pcmInput;
+              const pcmBytes = new Uint8Array(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
+              deepgramWs.send(pcmBytes);
             }
 
             return;
@@ -4194,10 +4216,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
             audio: base64Audio,
           }));
 
-          // PARALLEL: Send raw audio to Deepgram for telephony-optimized STT
-          // Deepgram nova-2-phonecall is better at 8kHz than Whisper
+          // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
+          // Flux requires linear16 @ 16kHz
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            deepgramWs.send(audioBytes);
+            // Resample to 16kHz if coming from 8kHz (Flux works best at 16kHz)
+            const pcm16k = inboundSampleRate === 8000 
+              ? resamplePcm8kTo16k(pcmInput) 
+              : pcmInput;
+            const pcmBytes = new Uint8Array(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
+            deepgramWs.send(pcmBytes);
           }
         }
         return;
