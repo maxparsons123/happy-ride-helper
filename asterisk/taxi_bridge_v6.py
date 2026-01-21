@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Taxi AI Asterisk Bridge v6.1 - Fixed Memory Leaks
+"""Taxi AI Asterisk Bridge v6.2 - Fixed slin16 format handling
 
-Fixed memory leaks:
+Changes in v6.2:
+- Fixed inbound_format in init message to reflect what's actually SENT
+- Wait for first audio frame to detect format before connecting
+- Properly buffer first audio frame for processing
+
+Fixed memory leaks (v6.1):
 1. asyncio.gather with return_exceptions=True causing task accumulation
 2. Unbounded audio_queue growing during disconnections
 3. Incomplete task cancellation in nested loops
@@ -289,14 +294,17 @@ class TaxiBridgeV6:
 
         try:
             # ═══════════════════════════════════════════════════════════════
-            # STEP 1: Wait for UUID message from Asterisk (contains phone)
-            # This ensures we have the correct phone for language detection
+            # STEP 1: Wait for UUID + first AUDIO frame from Asterisk
+            # UUID contains phone number for language detection
+            # First audio frame tells us the codec format (ulaw vs slin16)
             # ═══════════════════════════════════════════════════════════════
             logger.info(f"[{self.call_id}] ⏳ Waiting for phone number from Asterisk...")
             phone_received = False
+            format_detected = False
             wait_start = time.time()
+            first_audio_payload = None  # Buffer first audio frame
             
-            while not phone_received and self.running:
+            while (not phone_received or not format_detected) and self.running:
                 try:
                     header = await asyncio.wait_for(self.reader.readexactly(3), timeout=2.0)
                     m_type, m_len = header[0], struct.unpack(">H", header[1:3])[0]
@@ -308,37 +316,66 @@ class TaxiBridgeV6:
                             self.phone = raw_hex[-12:]
                         logger.info(f"[{self.call_id}] 👤 Phone received: {self.phone}")
                         phone_received = True
+                    elif m_type == MSG_AUDIO and not format_detected:
+                        # First audio frame - detect format
+                        self._detect_format(m_len)
+                        format_detected = True
+                        first_audio_payload = payload  # Buffer for later
                     elif m_type == MSG_HANGUP:
                         logger.info(f"[{self.call_id}] 📴 Hangup before init")
                         return
-                    # Ignore audio frames during this phase
                     
                 except asyncio.TimeoutError:
-                    # If no UUID after 2s, proceed with unknown phone
+                    # If no UUID/audio after 2s, proceed with defaults
                     elapsed = time.time() - wait_start
                     if elapsed > 2.0:
-                        logger.warning(f"[{self.call_id}] ⚠️ No phone after 2s, proceeding with unknown")
+                        if not phone_received:
+                            logger.warning(f"[{self.call_id}] ⚠️ No phone after 2s, proceeding with unknown")
+                        if not format_detected:
+                            logger.warning(f"[{self.call_id}] ⚠️ No audio after 2s, assuming ulaw")
                         break
             
             # ═══════════════════════════════════════════════════════════════
-            # STEP 2: Connect to WebSocket and send init WITH phone number
-            # This enables correct language detection from the start!
+            # STEP 2: Connect to WebSocket and send init WITH phone + format
+            # This enables correct language detection AND audio processing!
             # ═══════════════════════════════════════════════════════════════
             if not await self.connect_websocket():
                 logger.error(f"[{self.call_id}] ❌ Connection failed")
                 return
             
-            # Send init with ACTUAL phone - language detected correctly!
+            # Send init with ACTUAL phone AND the format we're SENDING (not receiving)
+            # When SEND_NATIVE_ULAW=True, we always send ulaw @ 8kHz regardless of input
+            # When SEND_NATIVE_ULAW=False, we resample to 24kHz PCM
+            if SEND_NATIVE_ULAW:
+                send_format = "ulaw"
+                send_rate = 8000
+            else:
+                send_format = "slin"  # PCM16 @ 24kHz after resampling
+                send_rate = 24000
+            
             init_msg = {
                 "type": "init",
                 "call_id": self.call_id,
                 "phone": self.phone if self.phone != "Unknown" else "unknown",
                 "user_phone": self.phone if self.phone != "Unknown" else "unknown",
                 "addressTtsSplicing": True,
+                "inbound_format": send_format,  # Format being SENT to edge function
+                "inbound_sample_rate": send_rate,
             }
             await self.ws.send(json.dumps(init_msg))
             self.init_sent = True
-            logger.info(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}")
+            logger.info(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}, format: {send_format} @ {send_rate}Hz (ast: {self.ast_codec})")
+            
+            # Process the buffered first audio frame if we have one
+            if first_audio_payload and self.ws_connected and self.ws:
+                linear16 = ulaw2lin(first_audio_payload) if self.ast_codec == "ulaw" else first_audio_payload
+                cleaned, self.last_gain = apply_noise_reduction(linear16, self.last_gain)
+                if SEND_NATIVE_ULAW:
+                    audio_to_send = lin2ulaw(cleaned)
+                else:
+                    audio_to_send = resample_audio(cleaned, AST_RATE, AI_RATE)
+                await self.ws.send(audio_to_send)
+                self.binary_audio_count += 1
 
             # 🔥 FIXED: Simplified main loop with proper exception handling
             while self.running:
