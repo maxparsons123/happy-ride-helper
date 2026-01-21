@@ -2326,6 +2326,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Handle Nova-2 specific events
           if (msgType === "SpeechStarted") {
             console.log(`[${callId}] 🎙️ Nova-2: Speech started`);
+            // Reset no-reply timer immediately when user starts speaking
+            if (USE_DEEPGRAM_AS_PRIMARY) {
+              sessionState.lastUserActivityAt = Date.now();
+              console.log(`[${callId}] ⏳ User activity detected (SpeechStarted)`);
+            }
           } else if (msgType === "UtteranceEnd") {
             // End of utterance detected
             console.log(`[${callId}] 🎙️ Nova-2: UtteranceEnd`);
@@ -2358,6 +2363,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 // PRIMARY MODE: Inject Deepgram transcript into OpenAI as user text
                 if (USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
                   console.log(`[${callId}] 🎙️ Injecting Deepgram transcript into OpenAI: "${transcript}"`);
+                  
+                  // CRITICAL: Reset no-reply timer state - user has spoken!
+                  sessionState.lastUserActivityAt = Date.now();
+                  sessionState.noReplyRepromptCount = 0;
+                  console.log(`[${callId}] ⏳ Reset no-reply timer (Deepgram transcript received)`);
                   
                   // Create a conversation item with the user's text
                   openaiWs.send(JSON.stringify({
