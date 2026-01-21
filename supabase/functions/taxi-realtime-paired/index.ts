@@ -31,6 +31,90 @@ const VOICE = "shimmer";
 // Theory: Whisper handles format conversion internally, our processing may degrade quality
 const DIRECT_AUDIO_PASSTHROUGH = true;
 
+// Use AI extraction (Gemini via taxi-extract-unified) instead of regex patterns
+const USE_AI_EXTRACTION = true;
+
+// ---------------------------------------------------------------------------
+// AI-Based Extraction (calls taxi-extract-unified edge function)
+// More accurate than regex patterns for extracting booking details
+// ---------------------------------------------------------------------------
+interface AIExtractionResult {
+  pickup: string | null;
+  destination: string | null;
+  passengers: number | null;
+  pickup_time: string | null;
+  confidence: string;
+  fields_changed?: string[];
+}
+
+async function extractBookingWithAI(
+  conversationHistory: Array<{ role: string; content: string; timestamp: number }>,
+  currentBooking: { pickup: string | null; destination: string | null; passengers: number | null; pickupTime: string | null },
+  callerPhone: string | null,
+  callId: string
+): Promise<AIExtractionResult | null> {
+  try {
+    // Convert history to extraction format
+    const conversation = conversationHistory.map(msg => ({
+      role: msg.role as "user" | "assistant" | "system",
+      text: msg.content,
+      timestamp: new Date(msg.timestamp).toISOString()
+    }));
+
+    // Only extract if we have conversation
+    if (conversation.length === 0) {
+      return null;
+    }
+
+    const extractionRequest = {
+      conversation,
+      current_booking: {
+        pickup: currentBooking.pickup,
+        destination: currentBooking.destination,
+        passengers: currentBooking.passengers,
+        pickup_time: currentBooking.pickupTime
+      },
+      caller_phone: callerPhone,
+      is_modification: !!(currentBooking.pickup || currentBooking.destination)
+    };
+
+    console.log(`[${callId}] 🧠 AI EXTRACTION: Calling taxi-extract-unified...`);
+    const startTime = Date.now();
+
+    // Call the extraction function directly (internal call)
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/taxi-extract-unified`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+      },
+      body: JSON.stringify(extractionRequest)
+    });
+
+    if (!response.ok) {
+      console.error(`[${callId}] ❌ AI extraction failed: ${response.status}`);
+      return null;
+    }
+
+    const result = await response.json();
+    const latency = Date.now() - startTime;
+    
+    console.log(`[${callId}] 🧠 AI EXTRACTION (${latency}ms): pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, conf=${result.confidence}`);
+    
+    return {
+      pickup: result.pickup || null,
+      destination: result.destination || null,
+      passengers: result.passengers ?? null,
+      pickup_time: result.pickup_time || null,
+      confidence: result.confidence || "low",
+      fields_changed: result.fields_changed
+    };
+  } catch (error) {
+    console.error(`[${callId}] ❌ AI extraction error:`, error);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phone Number to Language Mapping (match taxi-realtime-simple)
 // ---------------------------------------------------------------------------
@@ -2450,31 +2534,48 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             
             // ═══════════════════════════════════════════════════════════════════
-            // "TRUST ADA'S FIRST ECHO" MODE
-            // When Ada immediately acknowledges an address, use HER interpretation
-            // as the canonical value (she's often more accurate than raw STT).
-            // Only applies to immediate echoes, NOT summaries.
+            // AI-BASED EXTRACTION (replaces buggy regex "Ada First Echo" mode)
+            // Uses Gemini to accurately extract booking details from transcripts
             // ═══════════════════════════════════════════════════════════════════
-            if (!isSummary) {
-              const adaEcho = extractAdaFirstEcho(data.transcript, sessionState.lastQuestionAsked);
-              if (adaEcho.type && adaEcho.address) {
-                const currentValue = adaEcho.type === "pickup" 
-                  ? sessionState.booking.pickup 
-                  : sessionState.booking.destination;
+            if (!isSummary && USE_AI_EXTRACTION && sessionState.conversationHistory.length > 0) {
+              // Run AI extraction in the background (non-blocking)
+              extractBookingWithAI(
+                sessionState.conversationHistory,
+                sessionState.booking,
+                sessionState.callerPhone,
+                callId
+              ).then(async (aiResult) => {
+                if (!aiResult || aiResult.confidence === "low") return;
                 
-                // Only update if different from current value (prevents loops)
-                if (currentValue !== adaEcho.address) {
-                  console.log(`[${callId}] 🎯 ADA FIRST ECHO: Trusting Ada's interpretation for ${adaEcho.type}: "${currentValue}" → "${adaEcho.address}"`);
-                  
-                  if (adaEcho.type === "pickup") {
-                    sessionState.booking.pickup = adaEcho.address;
-                  } else {
-                    sessionState.booking.destination = adaEcho.address;
-                  }
-                  
+                let updated = false;
+                
+                // Update pickup if AI found one and it's different
+                if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
+                  console.log(`[${callId}] 🧠 AI UPDATE pickup: "${sessionState.booking.pickup}" → "${aiResult.pickup}"`);
+                  sessionState.booking.pickup = aiResult.pickup;
+                  updated = true;
+                }
+                
+                // Update destination if AI found one and it's different
+                if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
+                  console.log(`[${callId}] 🧠 AI UPDATE destination: "${sessionState.booking.destination}" → "${aiResult.destination}"`);
+                  sessionState.booking.destination = aiResult.destination;
+                  updated = true;
+                }
+                
+                // Update passengers if AI found them and they're different
+                if (aiResult.passengers !== null && aiResult.passengers !== sessionState.booking.passengers) {
+                  console.log(`[${callId}] 🧠 AI UPDATE passengers: ${sessionState.booking.passengers} → ${aiResult.passengers}`);
+                  sessionState.booking.passengers = aiResult.passengers;
+                  updated = true;
+                }
+                
+                if (updated) {
                   await updateLiveCall(sessionState);
                 }
-              }
+              }).catch(err => {
+                console.error(`[${callId}] AI extraction background error:`, err);
+              });
             }
             
             // AUTO-TRIGGER WEBHOOK: If Ada says "check the price" but the mini model didn't call the tool,
