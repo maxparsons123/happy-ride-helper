@@ -740,6 +740,50 @@ function applyPreEmphasis(pcm: Int16Array): Int16Array {
   return output;
 }
 
+// Volume boost for telephony audio (phone mics are quieter than browser)
+// Matches C# desktop bridge 1.4x gain
+const TELEPHONY_VOLUME_BOOST = 1.4;
+
+function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST): Int16Array {
+  if (pcm.length === 0 || gain === 1.0) return pcm;
+  const output = new Int16Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) {
+    const val = Math.round(pcm[i] * gain);
+    output[i] = Math.max(-32768, Math.min(32767, val));
+  }
+  return output;
+}
+
+// 3-tap low-pass filter to prevent aliasing (from C# desktop bridge)
+// Simple moving average: y[n] = (x[n-1] + x[n] + x[n+1]) / 3
+function applyLowPassFilter(pcm: Int16Array): Int16Array {
+  if (pcm.length < 3) return pcm;
+  const output = new Int16Array(pcm.length);
+  output[0] = pcm[0];
+  for (let i = 1; i < pcm.length - 1; i++) {
+    output[i] = Math.round((pcm[i - 1] + pcm[i] + pcm[i + 1]) / 3);
+  }
+  output[pcm.length - 1] = pcm[pcm.length - 1];
+  return output;
+}
+
+// Fade-in to prevent click artifacts at audio start (80 samples @ 24kHz = ~3.3ms)
+const FADE_IN_SAMPLES = 80;
+
+function applyFadeIn(pcm: Int16Array, isFirstFrame: boolean): Int16Array {
+  if (!isFirstFrame || pcm.length === 0) return pcm;
+  const output = new Int16Array(pcm.length);
+  const fadeLen = Math.min(FADE_IN_SAMPLES, pcm.length);
+  for (let i = 0; i < fadeLen; i++) {
+    const gain = i / fadeLen;
+    output[i] = Math.round(pcm[i] * gain);
+  }
+  for (let i = fadeLen; i < pcm.length; i++) {
+    output[i] = pcm[i];
+  }
+  return output;
+}
+
 // Whisper "phantom radio host" hallucinations - triggered by silence/static
 const PHANTOM_PHRASES = [
   "thanks for tuning in",
@@ -4030,9 +4074,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
             // Speech-like: build a short streak before forwarding to reduce false triggers.
             bargeInSpeechStreak++;
 
-            // Apply pre-emphasis for better STT consonant clarity, then resample
-            const pcmEmph = applyPreEmphasis(pcmInput);
-            const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
+            // Full DSP pipeline (matching C# desktop bridge):
+            // 1. Volume boost (1.4x) - phone mics are quieter
+            // 2. Low-pass filter - prevent aliasing
+            // 3. Pre-emphasis - boost consonants for STT
+            // 4. Resample to 24kHz for OpenAI
+            let processed = applyVolumeBoost(pcmInput);
+            processed = applyLowPassFilter(processed);
+            processed = applyPreEmphasis(processed);
+            const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
             const base64Audio = pcm16ToBase64(pcm24k);
 
             // Backpressure guard: avoid huge buffered sends causing latency/hit-and-miss hearing.
@@ -4069,9 +4119,15 @@ Do NOT skip any part. Say ALL of it warmly.]`
           bargeInSpeechStreak = 0;
           bufferedBargeInFrame = null;
 
-          // Apply pre-emphasis for better STT consonant clarity, then resample
-          const pcmEmph = applyPreEmphasis(pcmInput);
-          const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
+          // Full DSP pipeline (matching C# desktop bridge):
+          // 1. Volume boost (1.4x) - phone mics are quieter
+          // 2. Low-pass filter - prevent aliasing  
+          // 3. Pre-emphasis - boost consonants for STT
+          // 4. Resample to 24kHz for OpenAI
+          let processed = applyVolumeBoost(pcmInput);
+          processed = applyLowPassFilter(processed);
+          processed = applyPreEmphasis(processed);
+          const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
           // Backpressure guard
