@@ -2194,7 +2194,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         `vad_events=true&smart_format=true&numerals=true&` +
         `keywords=${keywords}`;
       
-      deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+      // Use Authorization header instead of WebSocket subprotocol for Deno compatibility
+      deepgramWs = new WebSocket(url, {
+        headers: {
+          "Authorization": `Token ${DEEPGRAM_API_KEY}`
+        }
+      } as any);
       
       deepgramWs.onopen = () => {
         console.log(`[${callId}] 🎙️ Deepgram STT connected (nova-2-phonecall @ ${sampleRate}Hz)`);
