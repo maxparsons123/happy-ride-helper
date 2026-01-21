@@ -2241,8 +2241,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // ADDRESS QUALITY FIX: Increased padding to capture full addresses
           // Users often pause mid-address (e.g., "52A... Lifford Lane")
           threshold: 0.5,
-          prefix_padding_ms: 500,        // Was 300 - captures address start better
-          silence_duration_ms: 1500,     // Was 1000 - more time for full addresses
+          prefix_padding_ms: 650,        // Was 500 - capture the very start of speech
+          silence_duration_ms: 2000,     // Was 1500 - allow longer pauses within addresses
         },
         tools: TOOLS,
         tool_choice: "auto",
