@@ -26,6 +26,14 @@ const DEFAULT_COMPANY = "247 Radio Carz";
 const DEFAULT_AGENT = "Ada";
 const DEFAULT_VOICE = "shimmer";
 
+// === PROTECTION WINDOWS (ported from paired mode) ===
+// Greeting protection: 12s window to prevent background noise from triggering barge-in during Ada's intro
+const GREETING_PROTECTION_MS = 12000;
+// Summary protection: 8s window during fare quotes/summaries to prevent interruption
+const SUMMARY_PROTECTION_MS = 8000;
+// Audio diagnostics logging interval (every N packets)
+const AUDIO_DIAGNOSTICS_LOG_INTERVAL = 200;
+
 // Language code to name mapping (for prompt injection)
 const LANGUAGE_NAMES: Record<string, string> = {
   en: "English",
@@ -1356,6 +1364,25 @@ interface SessionState {
   // Speech timing diagnostics
   speechStartTime: number | null;
   speechStopTime: number | null;
+
+  // === PROTECTION WINDOWS (ported from paired mode) ===
+  // Greeting protection: ignore inbound audio right after connect
+  greetingProtectionUntil: number;
+  // Summary protection: block interruptions while Ada is recapping/quoting
+  summaryProtectionUntil: number;
+
+  // === AUDIO DIAGNOSTICS (ported from paired mode) ===
+  audioDiagnostics: {
+    packetsReceived: number;
+    packetsForwarded: number;
+    packetsSkippedNoise: number;
+    packetsSkippedEcho: number;
+    packetsSkippedBotSpeaking: number;
+    packetsSkippedGreeting: number;
+    packetsSkippedSummary: number;
+    lastRmsValues: number[];
+    avgRms: number;
+  };
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
@@ -4503,6 +4530,10 @@ Do NOT say 'booked' until the tool returns success.]`
               // ✅ CRITICAL: Enable audio immediately - booking is fully confirmed
               sessionState.discardCurrentResponseAudio = false;
               sessionState.audioVerified = true;
+              
+              // ✅ SUMMARY PROTECTION: Block barge-in during booking confirmation speech
+              sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+              console.log(`[${sessionState.callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (booking confirm)`);
 
               // ✅ Prepare "anything else" wait-state, but DON'T start grace timer until Ada finishes speaking.
               // If we set askedAnythingElseAt here, the response.created guard can cancel Ada's own prompt.
@@ -5322,6 +5353,11 @@ Do NOT say 'booked' until the tool returns success.]`
                      console.log(`[${sessionState.callId}] 🧹 Clearing pendingModification (polling) - fare quote received`);
                      sessionState.pendingModification = null;
                    }
+                   
+                   // ✅ SUMMARY PROTECTION: Block barge-in during fare quote (polling path)
+                   sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                   console.log(`[${sessionState.callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (polling fare)`);
+
 
                    dispatchResult = {
                      needs_fare_confirm: true,
@@ -5588,6 +5624,11 @@ Do NOT say 'booked' until the tool returns success.]`
                   openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                 }
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                
+                // ✅ SUMMARY PROTECTION: Block barge-in during fallback fare quote
+                sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                console.log(`[${sessionState.callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (fallback fare)`);
+                
                 
                 openaiWs.send(JSON.stringify({
                   type: "conversation.item.create",
@@ -5972,6 +6013,21 @@ Do NOT say 'booked' until the tool returns success.]`
           console.log(`[${sessionState.callId}]   Avg speech duration:    ${m.avgSpeechDurationMs.toFixed(0)}ms`);
           console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
           
+          // === AUDIO DIAGNOSTICS SUMMARY ===
+          const ad = sessionState.audioDiagnostics;
+          console.log(`[${sessionState.callId}] 📊 AUDIO DIAGNOSTICS SUMMARY`);
+          console.log(`[${sessionState.callId}] ───────────────────────────────────────────────────────────`);
+          console.log(`[${sessionState.callId}]   Packets received:       ${ad.packetsReceived}`);
+          console.log(`[${sessionState.callId}]   Packets forwarded:      ${ad.packetsForwarded}`);
+          console.log(`[${sessionState.callId}]   Skipped (noise):        ${ad.packetsSkippedNoise}`);
+          console.log(`[${sessionState.callId}]   Skipped (echo):         ${ad.packetsSkippedEcho}`);
+          console.log(`[${sessionState.callId}]   Skipped (bot speaking): ${ad.packetsSkippedBotSpeaking}`);
+          console.log(`[${sessionState.callId}]   Skipped (greeting):     ${ad.packetsSkippedGreeting}`);
+          console.log(`[${sessionState.callId}]   Skipped (summary):      ${ad.packetsSkippedSummary}`);
+          console.log(`[${sessionState.callId}]   Avg RMS:                ${ad.avgRms.toFixed(0)}`);
+          console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
+          
+          
           // Immediate flush on call end - capture all transcripts
           immediateFlush(sessionState);
           // Update call status
@@ -6238,63 +6294,85 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             pcmInput = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
           }
 
-          // FULL-DUPLEX echo suppression + barge-in:
-          // - If Ada is speaking and we detect REAL user energy, cancel the AI response (barge-in) and then forward audio.
-          // - Otherwise, drop audio while Ada is speaking to prevent VAD/Whisper echo hallucinations.
-          const pendingQuoteActive = state.pendingQuote && Date.now() - state.pendingQuote.timestamp < 15000;
+          // === AUDIO DIAGNOSTICS: Track packet and compute RMS ===
+          state.audioDiagnostics.packetsReceived++;
+          
+          let sumSq = 0;
+          for (let i = 0; i < pcmInput.length; i++) {
+            const s = pcmInput[i];
+            sumSq += s * s;
+          }
+          const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
+          
+          // Track RMS for diagnostics (keep last 50 values)
+          state.audioDiagnostics.lastRmsValues.push(rms);
+          if (state.audioDiagnostics.lastRmsValues.length > 50) {
+            state.audioDiagnostics.lastRmsValues.shift();
+          }
+          state.audioDiagnostics.avgRms = state.audioDiagnostics.lastRmsValues.reduce((a, b) => a + b, 0) / state.audioDiagnostics.lastRmsValues.length;
+          
+          // Log audio diagnostics every N packets
+          if (state.audioDiagnostics.packetsReceived % AUDIO_DIAGNOSTICS_LOG_INTERVAL === 0) {
+            const d = state.audioDiagnostics;
+            console.log(`[${state.callId}] 📊 Audio: rx=${d.packetsReceived}, fwd=${d.packetsForwarded}, noise=${d.packetsSkippedNoise}, echo=${d.packetsSkippedEcho}, bot=${d.packetsSkippedBotSpeaking}, greet=${d.packetsSkippedGreeting}, summary=${d.packetsSkippedSummary}, avgRMS=${d.avgRms.toFixed(0)}`);
+          }
 
-          if (state.isAdaSpeaking && !state.halfDuplex) {
-            if (pendingQuoteActive) {
-              // User should answer after the fare is read; dropping during this window prevents echo loops.
-              if (Math.random() < 0.01) {
-                console.log(`[${state.callId}] 🔇 Dropping audio while speaking (fare window)`);
-              }
-              return;
-            }
+          // === GREETING PROTECTION: Block barge-in during Ada's intro (12 seconds) ===
+          if (Date.now() < state.greetingProtectionUntil) {
+            state.audioDiagnostics.packetsSkippedGreeting++;
+            // Still forward audio for STT but don't allow barge-in cancellation
+            // Skip to audio forwarding without barge-in processing
+          } else if (Date.now() < state.summaryProtectionUntil) {
+            // === SUMMARY PROTECTION: Block barge-in during fare quotes/summaries (8 seconds) ===
+            state.audioDiagnostics.packetsSkippedSummary++;
+            // Still forward audio for STT but don't allow barge-in cancellation
+          } else {
+            // FULL-DUPLEX echo suppression + barge-in:
+            // - If Ada is speaking and we detect REAL user energy, cancel the AI response (barge-in) and then forward audio.
+            // - Otherwise, drop audio while Ada is speaking to prevent VAD/Whisper echo hallucinations.
+            const pendingQuoteActive = state.pendingQuote && Date.now() - state.pendingQuote.timestamp < 15000;
 
-            // Skip barge-in checks briefly at the start of Ada speech (startup echo), but still drop audio.
-            const inStartupEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
-            if (inStartupEchoGuard || !state.openAiResponseActive) {
-              return;
-            }
-            
-            // GREETING PROTECTION: Don't allow barge-in during the first 3 seconds of the call
-            // This prevents phone line connection noise from cancelling the greeting
-            const callAgeMs = Date.now() - state.callStartedAt;
-            if (callAgeMs < 3000) {
-              // Drop audio silently during greeting protection window
-              return;
-            }
-
-            let sumSq = 0;
-            for (let i = 0; i < pcmInput.length; i++) {
-              const s = pcmInput[i];
-              sumSq += s * s;
-            }
-            const rms = Math.sqrt(sumSq / Math.max(1, pcmInput.length));
-
-            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <1000)
-            // Raised threshold from 650 to 1000 to reduce false barge-ins from phone line noise
-            const isRealBargeIn = rms >= 1000 && rms < 20000;
-
-            if (isRealBargeIn) {
-              console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
-              try {
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-              } catch (e) {
-                console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+            if (state.isAdaSpeaking && !state.halfDuplex) {
+              if (pendingQuoteActive) {
+                // User should answer after the fare is read; dropping during this window prevents echo loops.
+                state.audioDiagnostics.packetsSkippedBotSpeaking++;
+                return;
               }
 
-              // Allow audio to flow immediately after cancelling.
-              state.isAdaSpeaking = false;
-              state.echoGuardUntil = Date.now() + 200;
-              socket.send(JSON.stringify({ type: "ai_interrupted" }));
-            } else {
-              // Not a real barge-in → drop to prevent echo.
-              return;
+              // Skip barge-in checks briefly at the start of Ada speech (startup echo), but still drop audio.
+              const inStartupEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
+              if (inStartupEchoGuard || !state.openAiResponseActive) {
+                state.audioDiagnostics.packetsSkippedEcho++;
+                return;
+              }
+
+              // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <1000)
+              // Raised threshold from 650 to 1000 to reduce false barge-ins from phone line noise
+              const isRealBargeIn = rms >= 1000 && rms < 20000;
+
+              if (isRealBargeIn) {
+                console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
+                try {
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                } catch (e) {
+                  console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
+                }
+
+                // Allow audio to flow immediately after cancelling.
+                state.isAdaSpeaking = false;
+                state.echoGuardUntil = Date.now() + 200;
+                socket.send(JSON.stringify({ type: "ai_interrupted" }));
+              } else {
+                // Not a real barge-in → drop to prevent echo.
+                state.audioDiagnostics.packetsSkippedNoise++;
+                return;
+              }
             }
           }
+
+          // Track forwarded packets
+          state.audioDiagnostics.packetsForwarded++;
 
           // Step 2: Upsample to 24kHz (OpenAI Realtime API requirement)
           // Handle different input sample rates: 8kHz (ulaw/slin) or 16kHz (slin16)
@@ -6411,6 +6489,19 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           deferredResponseCreate: false,
           speechStartTime: null,
           speechStopTime: null,
+          greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
+          summaryProtectionUntil: 0,
+          audioDiagnostics: {
+            packetsReceived: 0,
+            packetsForwarded: 0,
+            packetsSkippedNoise: 0,
+            packetsSkippedEcho: 0,
+            packetsSkippedBotSpeaking: 0,
+            packetsSkippedGreeting: 0,
+            packetsSkippedSummary: 0,
+            lastRmsValues: [],
+            avgRms: 0,
+          },
           callEnded: false,
           callStartedAt: Date.now(),
           finalGoodbyePending: false,
@@ -6537,6 +6628,19 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             deferredResponseCreate: false,
              speechStartTime: null,
              speechStopTime: null,
+             greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
+             summaryProtectionUntil: 0,
+             audioDiagnostics: {
+               packetsReceived: 0,
+               packetsForwarded: 0,
+               packetsSkippedNoise: 0,
+               packetsSkippedEcho: 0,
+               packetsSkippedBotSpeaking: 0,
+               packetsSkippedGreeting: 0,
+               packetsSkippedSummary: 0,
+               lastRmsValues: [],
+               avgRms: 0,
+             },
              callEnded: false,
              callStartedAt: Date.now(),
              finalGoodbyePending: false,
@@ -6893,6 +6997,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             state.bookingConfirmedThisTurn = false;
             state.audioVerified = false;
             state.pendingAudioBuffer = [];
+            // ✅ SUMMARY PROTECTION: Block barge-in during fare quote speech
+            state.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+            console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (fare quote)`);
           }
 
           // Wait longer for any in-flight response to complete before cancelling
