@@ -84,8 +84,9 @@ LOCK_FORMAT_ULAW = True  # NEW: Prevent any format switching
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
 PRE_EMPHASIS_COEFF = float(os.environ.get("PRE_EMPHASIS_COEFF", "0.95"))
 
-# Send native format to edge function (edge handles resampling to 24kHz)
-SEND_NATIVE_FORMAT = True
+# CRITICAL: Send PCM16 not µ-law - re-encoding to µ-law loses the AGC boost!
+# The edge function handles resampling to 24kHz anyway
+SEND_NATIVE_FORMAT = False  # Changed from True - send PCM16 after processing
 
 # Reconnection settings
 MAX_RECONNECT_ATTEMPTS = 5  # Increased for mobile network resilience
