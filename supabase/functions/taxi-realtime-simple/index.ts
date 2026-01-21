@@ -6277,6 +6277,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         // Also update settings from init message if pre-connected
         if (state && preConnected) {
+          state.inboundAudioFormat = (message.inbound_format as "ulaw" | "slin" | "slin16") ?? state.inboundAudioFormat;
+          state.inboundSampleRate = message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000);
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
           state.halfDuplex = message.half_duplex ?? false;
           state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
