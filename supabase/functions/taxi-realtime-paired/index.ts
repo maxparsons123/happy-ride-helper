@@ -685,16 +685,15 @@ function getCurrentStepName(index: number): BookingStep | "confirmation" | "none
   return BOOKING_STEPS[index];
 }
 
-// Timing constants - ALIGNED WITH DESKTOP for smoother interaction
-const ECHO_GUARD_MS = 150; // Reduced from 250ms for faster response
-const GREETING_PROTECTION_MS = 2000; // Reduced from 12000ms - desktop is cleaner
-const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms for quicker confirmations
-const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms for snappier turns
-// No-reply reprompt tuning
-// (3s was too aggressive and caused rapid repeated questions)
-const NO_REPLY_TIMEOUT_FIRST_MS = 8000;  // first reprompt after 8s of silence
-const NO_REPLY_TIMEOUT_REPEAT_MS = 12000; // subsequent reprompts after 12s
-const MAX_NO_REPLY_REPROMPTS = 2; // Max times to re-ask before asking "Are you still there?"
+// Timing constants - RELAXED PACING to avoid intimidating rapid questions
+const ECHO_GUARD_MS = 150;
+const GREETING_PROTECTION_MS = 3000; // Give 3s before processing user audio
+const SUMMARY_PROTECTION_MS = 8000; // Protect summaries for 8s
+const ASSISTANT_LEADIN_IGNORE_MS = 800; // Ignore audio for 800ms after Ada starts speaking
+// No-reply reprompt tuning - SLOWER to avoid rapid repetition
+const NO_REPLY_TIMEOUT_FIRST_MS = 12000;  // Wait 12s before first reprompt (was 8s)
+const NO_REPLY_TIMEOUT_REPEAT_MS = 18000; // Wait 18s for subsequent reprompts (was 12s)
+const MAX_NO_REPLY_REPROMPTS = 2;
 
 function getNoReplyTimeoutMs(repromptCount: number): number {
   return repromptCount <= 0 ? NO_REPLY_TIMEOUT_FIRST_MS : NO_REPLY_TIMEOUT_REPEAT_MS;
@@ -2442,11 +2441,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // ADDRESS QUALITY FIX: Increased padding to capture full addresses
-          // Users often pause mid-address (e.g., "52A... Lifford Lane")
-          threshold: 0.5,
-          prefix_padding_ms: 650,        // Was 500 - capture the very start of speech
-          silence_duration_ms: 2000,     // Was 1500 - allow longer pauses within addresses
+          // RELAXED PACING: Let users pause and think without Ada jumping in
+          threshold: 0.55,               // Slightly higher to avoid false triggers
+          prefix_padding_ms: 700,        // Capture the start of speech
+          silence_duration_ms: 2500,     // Wait 2.5s of silence before Ada responds (was 2s)
         },
         tools: TOOLS,
         tool_choice: "auto",
