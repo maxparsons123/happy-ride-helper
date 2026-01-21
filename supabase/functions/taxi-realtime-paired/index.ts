@@ -2326,6 +2326,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             } else {
               console.log(`[${callId}] ⚠️ Socket not open (state: ${socket.readyState}), can't send audio`);
             }
+            
+            // NON-BLOCKING: Stream AI audio to monitoring panel (fire and forget - no jitter)
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: data.delta,
+              audio_source: "ai",
+              created_at: new Date().toISOString(),
+            });
           }
           break;
 
@@ -3541,6 +3549,17 @@ Do NOT skip any part. Say ALL of it warmly.]`
             type: "input_audio_buffer.append",
             audio: base64Audio,
           }));
+          
+          // NON-BLOCKING: Stream user audio to monitoring panel (fire and forget)
+          // Downsample every Nth packet to reduce DB load (1 in 5 = ~200ms chunks)
+          if (audioDiag.packetsForwarded % 5 === 0) {
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: base64Audio,
+              audio_source: "user",
+              created_at: new Date().toISOString(),
+            });
+          }
         }
         return;
       }
@@ -3575,6 +3594,14 @@ Do NOT skip any part. Say ALL of it warmly.]`
               type: "input_audio_buffer.append",
               audio: data.audio,
             }));
+            
+            // NON-BLOCKING: Stream user audio to monitoring panel (fire and forget)
+            void supabase.from("live_call_audio").insert({
+              call_id: callId,
+              audio_chunk: data.audio,
+              audio_source: "user",
+              created_at: new Date().toISOString(),
+            });
           }
         } else if (data.type === "audio" && data.audio) {
           // Legacy handler: receive base64 audio, assume 8kHz ulaw unless told otherwise.
