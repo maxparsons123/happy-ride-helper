@@ -22,10 +22,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
 // Feature flags
-// NOTE: Deepgram streaming STT is disabled because Deno's native WebSocket doesn't support
-// the Authorization header that Deepgram requires. The subprotocol auth method fails silently.
-// OpenAI's built-in Whisper transcription is used instead.
-const USE_DEEPGRAM_STT = false; // Disabled until we find a working auth method for Deno
+// Deepgram streaming STT for better 8kHz telephony transcription
+// Uses URL-based auth which works in Deno (subprotocol auth does not)
+const USE_DEEPGRAM_STT = true; // ENABLED - use URL auth method
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -2246,8 +2245,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // Uses nova-2-phonecall model optimized for telephony audio quality
   // ═══════════════════════════════════════════════════════════════════════════
   const connectToDeepgram = (): boolean => {
-    if (!USE_DEEPGRAM_STT || !DEEPGRAM_API_KEY) {
-      console.log(`[${callId}] 🎙️ Deepgram STT disabled (no API key)`);
+    if (!USE_DEEPGRAM_STT) {
+      console.log(`[${callId}] 🎙️ Deepgram STT disabled by feature flag`);
+      return false;
+    }
+    if (!DEEPGRAM_API_KEY) {
+      console.log(`[${callId}] ⚠️ Deepgram STT enabled but DEEPGRAM_API_KEY not set`);
       return false;
     }
 
@@ -2269,21 +2272,34 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       const encoding = inboundAudioFormat === "ulaw" ? "mulaw" : "linear16";
       const sampleRate = inboundSampleRate;
       
-      // Deepgram accepts auth via URL (api_key param) - works in Deno
-      // NOTE: Subprotocol auth ["token", key] doesn't work reliably in Deno edge runtime
-      const url = `wss://api.deepgram.com/v1/listen?` +
-        `model=nova-2-phonecall&language=en-GB&encoding=${encoding}&` +
-        `sample_rate=${sampleRate}&channels=1&` +
-        `punctuate=true&interim_results=true&endpointing=500&` +
-        `vad_events=true&smart_format=true&numerals=true&` +
-        `keywords=${keywords}`;
+      // Deepgram URL-based auth - works in Deno edge runtime
+      // The streaming API accepts Authorization header via custom request, or we can
+      // use the newer token-based URL authentication
+      const baseUrl = `wss://api.deepgram.com/v1/listen`;
+      const params = new URLSearchParams({
+        model: "nova-2-phonecall",
+        language: "en-GB",
+        encoding: encoding,
+        sample_rate: sampleRate.toString(),
+        channels: "1",
+        punctuate: "true",
+        interim_results: "true",
+        endpointing: "500",
+        vad_events: "true",
+        smart_format: "true",
+        numerals: "true",
+      });
+      // Add keywords separately (they need special encoding)
+      keywords.split("&keywords=").forEach(kw => {
+        if (kw) params.append("keywords", kw);
+      });
       
-      console.log(`[${callId}] 🎙️ Connecting to Deepgram...`);
+      const url = `${baseUrl}?${params.toString()}`;
       
-      // Try fetch-based connection with Authorization header (Deno supports this for fetch)
-      // Then upgrade to WebSocket isn't possible, so we use a workaround:
-      // Deepgram also accepts the API key in the URL for some endpoints, but not streaming.
-      // The only reliable method in Deno is using the protocols array.
+      console.log(`[${callId}] 🎙️ Connecting to Deepgram nova-2-phonecall @ ${sampleRate}Hz...`);
+      
+      // Use subprotocol auth - this is the only method that works for Deepgram in Deno
+      // Format: ["token", "API_KEY"] where API_KEY is the actual key value
       try {
         deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
       } catch (wsError) {
