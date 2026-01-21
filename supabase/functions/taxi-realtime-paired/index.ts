@@ -4027,12 +4027,19 @@ Do NOT skip any part. Say ALL of it warmly.]`
           pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
         }
 
-        const rms = computeRms(pcmInput);
+        // Compute RMS on raw input for debugging, but use a boosted RMS for barge-in gating.
+        // This prevents "quiet caller" scenarios where the user speaks over Ada but never trips
+        // the barge-in threshold (causing repeated questions / no-reply reprompts).
+        const rmsRaw = computeRms(pcmInput);
+        const rmsBoosted = computeRms(applyVolumeBoost(pcmInput));
+        const rms = rmsBoosted;
         updateRmsAverage(audioDiag, rms);
 
         // Log audio stats periodically
         if (audioDiag.packetsReceived <= 3) {
-          console.log(`[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)}`);
+          console.log(
+            `[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS(raw)=${rmsRaw.toFixed(0)}, RMS(boosted)=${rmsBoosted.toFixed(0)}`
+          );
         } else if (audioDiag.packetsReceived % 200 === 0) {
           console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
         }
