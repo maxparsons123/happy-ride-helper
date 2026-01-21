@@ -349,13 +349,23 @@ class TaxiBridgeV7:
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
-        # v7.6: LOCK EVERYTHING - don't update ast_frame_bytes either!
-        # Changing ast_frame_bytes was causing playback pacing to use wrong timing
+        # v7.6.1: Keep codec/rate locked to ulaw for stability, BUT adapt frame size.
+        # Asterisk often sends 40ms/80ms packets (e.g., 320/640 bytes) even when the
+        # codec is still ulaw. If we hardcode 160-byte/20ms pacing, playback can run
+        # too fast or too slow depending on AudioSocket timing.
         if LOCK_FORMAT_ULAW:
-            if frame_len != 160:
-                logger.warning("[%s] ⚠️ Ignoring frame size %d (locked to 160-byte ulaw)",
-                              self.state.call_id, frame_len)
-            # Keep everything fixed - don't change any state
+            if frame_len != self.state.ast_frame_bytes:
+                logger.warning(
+                    "[%s] ⚠️ Frame size %d→%d while locked to ulaw; adapting frame pacing",
+                    self.state.call_id,
+                    self.state.ast_frame_bytes,
+                    frame_len,
+                )
+                # IMPORTANT: update pacing only (do not switch codec)
+                self.state.ast_frame_bytes = frame_len
+
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = ULAW_RATE
             return
         
         # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
@@ -866,12 +876,10 @@ class TaxiBridgeV7:
     async def queue_to_asterisk(self) -> None:
         """Stream audio from queue to Asterisk at correct pacing.
         
-        v7.6 FIX: Use FIXED 20ms pacing since we're locked to 160-byte ulaw frames.
-        Variable frame size detection was causing chipmunk audio.
+        v7.6.1 FIX: Pace based on the *actual* AudioSocket frame size (160/320/640...)
+        while keeping the codec locked to ulaw for stability.
         """
         buffer = bytearray()
-        FRAME_DURATION_MS = 20.0  # Fixed 20ms per 160-byte frame
-        FRAME_SIZE = 160         # Fixed ulaw frame size
         last_send_time = time.time()
 
         try:
@@ -884,15 +892,19 @@ class TaxiBridgeV7:
                 now = time.time()
                 elapsed_ms = (now - last_send_time) * 1000
 
-                # Send ONE 160-byte frame every 20ms - strict real-time pacing
-                if elapsed_ms >= FRAME_DURATION_MS:
-                    if len(buffer) >= FRAME_SIZE:
+                # Derive pacing from Asterisk's current (locked/adapted) frame size.
+                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                frame_duration_ms = max(1.0, (self.state.ast_frame_bytes / max(1, bytes_per_sec)) * 1000.0)
+
+                # Send ONE frame per tick - strict real-time pacing (no catch-up bursts)
+                if elapsed_ms >= frame_duration_ms:
+                    if len(buffer) >= self.state.ast_frame_bytes:
                         # Send one frame of real audio
-                        chunk = bytes(buffer[:FRAME_SIZE])
-                        del buffer[:FRAME_SIZE]
+                        chunk = bytes(buffer[: self.state.ast_frame_bytes])
+                        del buffer[: self.state.ast_frame_bytes]
                     else:
                         # Send silence (0xFF = ulaw silence)
-                        chunk = bytes([0xFF] * FRAME_SIZE)
+                        chunk = bytes([0xFF] * self.state.ast_frame_bytes)
 
                     try:
                         self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
