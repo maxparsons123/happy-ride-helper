@@ -55,10 +55,11 @@ if not WS_URL:
                 edge.get("taxi_realtime_paired_ws")
                 or edge.get("taxi_realtime_ws")
                 or edge.get("taxi_realtime_simple_ws")
-                or "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
+                # IMPORTANT: WebSocket routing is more reliable via the .functions subdomain.
+                or "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
             )
     except (FileNotFoundError, json.JSONDecodeError):
-        WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-paired"
+        WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
@@ -407,6 +408,8 @@ class TaxiBridgeV7:
                         "call_id": self.state.call_id,
                         "phone": None if self.state.phone == "Unknown" else self.state.phone,
                         "reconnect": True,
+                        "inbound_format": self.state.ast_codec,
+                        "inbound_sample_rate": self.state.ast_rate,
                     }
                     await self.ws.send(json.dumps(reinit_payload))
                     logger.info("[%s] 🔁 Sent reconnect init", self.state.call_id)
@@ -485,29 +488,32 @@ class TaxiBridgeV7:
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
 
         try:
-            # Connect to WebSocket
-            if not await self.connect_websocket():
-                logger.error("[%s] ❌ Initial connection failed", self.state.call_id)
-                return
-
-            # EAGER INIT: start AI immediately with audio format info
-            eager_init = {
-                "type": "init",
-                "call_id": self.state.call_id,
-                "phone": "unknown",
-                "user_phone": "unknown",
-                "addressTtsSplicing": True,
-                "eager_init": True,
-                "inbound_format": self.state.ast_codec,  # ulaw, slin, or slin16
-                "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
-            }
-            await self.ws.send(json.dumps(eager_init))
-            self.state.init_sent = True
-            logger.info("[%s] 🚀 Sent eager init (format=%s @ %dHz)", 
-                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
-
-            # Main processing loop
+            # Outer loop: keep the phone call alive even if the backend WS drops.
             while self.running:
+                # (Re)connect WS if needed
+                if not self.state.ws_connected:
+                    if not await self.connect_websocket():
+                        logger.error("[%s] ❌ WebSocket (re)connect failed", self.state.call_id)
+                        await self.stop_call("WebSocket reconnect failed")
+                        break
+
+                    # Only send eager init once (first ever connection).
+                    if not self.state.init_sent and self.ws:
+                        eager_init = {
+                            "type": "init",
+                            "call_id": self.state.call_id,
+                            "phone": "unknown",
+                            "user_phone": "unknown",
+                            "addressTtsSplicing": True,
+                            "eager_init": True,
+                            "inbound_format": self.state.ast_codec,  # ulaw, slin, or slin16
+                            "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
+                        }
+                        await self.ws.send(json.dumps(eager_init))
+                        self.state.init_sent = True
+                        logger.info("[%s] 🚀 Sent eager init (format=%s @ %dHz)",
+                                   self.state.call_id, self.state.ast_codec, self.state.ast_rate)
+
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
                 ai_task = asyncio.create_task(self.ai_to_queue())
 
@@ -520,34 +526,55 @@ class TaxiBridgeV7:
                     t.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
 
+                # If the completed task threw, handle it.
+                exc: Optional[BaseException] = None
                 for t in done:
                     exc = t.exception()
                     if exc:
-                        raise exc
+                        break
+
+                if exc is None:
+                    # Task ended cleanly (usually means call ended somewhere else).
+                    break
+
+                if isinstance(exc, RedirectException):
+                    logger.info("[%s] 🔀 Redirect to %s", self.state.call_id, exc.url)
+                    self.state.ws_connected = False
+                    try:
+                        if self.ws:
+                            await self.ws.close(code=1000, reason="Redirecting")
+                    except Exception:
+                        pass
+                    self.state.reconnect_attempts = 0
+                    if not await self.connect_websocket(url=exc.url, init_data=exc.init_data):
+                        logger.error("[%s] ❌ Redirect failed", self.state.call_id)
+                        await self.stop_call("Redirect failed")
+                        break
+                    # Continue loop with new WS
+                    continue
+
+                if isinstance(exc, CallEndedException):
+                    logger.info("[%s] 📴 Call formally ended", self.state.call_id)
+                    break
+
+                if isinstance(exc, (ConnectionClosed, WebSocketException)):
+                    logger.warning("[%s] 🔌 WebSocket closed: %s", self.state.call_id, exc)
+                    self.state.ws_connected = False
+                    # Mark this as a reconnect attempt so connect_websocket sends reconnect init.
+                    self.state.reconnect_attempts = max(self.state.reconnect_attempts, 1)
+                    try:
+                        if self.ws:
+                            await self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
+                    # Continue loop to reconnect while keeping AudioSocket alive.
+                    continue
+
+                logger.error("[%s] ❌ Error: %s", self.state.call_id, exc)
+                await self.stop_call("Unhandled error")
                 break
 
-        except RedirectException as e:
-            logger.info("[%s] 🔀 Redirect to %s", self.state.call_id, e.url)
-            self.state.ws_connected = False
-            try:
-                if self.ws:
-                    await self.ws.close(code=1000, reason="Redirecting")
-            except Exception:
-                pass
-
-            self.state.reconnect_attempts = 0
-            if await self.connect_websocket(url=e.url, init_data=e.init_data):
-                logger.info("[%s] ✅ Redirect successful", self.state.call_id)
-                await self.run()  # Recurse with new connection
-            else:
-                logger.error("[%s] ❌ Redirect failed", self.state.call_id)
-
-        except CallEndedException:
-            logger.info("[%s] 📴 Call formally ended", self.state.call_id)
-        except (ConnectionClosed, WebSocketException) as e:
-            logger.warning("[%s] 🔌 WebSocket closed: %s", self.state.call_id, e)
-        except Exception as e:
-            logger.error("[%s] ❌ Error: %s", self.state.call_id, e)
         finally:
             self.running = False
             # 🔥 FIXED: Proper task cancellation - cancel then await
@@ -555,9 +582,8 @@ class TaxiBridgeV7:
             for task in tasks_to_cancel:
                 if not task.done():
                     task.cancel()
-            # Wait for cancellation to complete
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-            logger.info("[%s] 📊 Frames sent: %d", 
+            logger.info("[%s] 📊 Frames sent: %d",
                        self.state.call_id, self.state.binary_audio_count)
             await self.cleanup()
 
