@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.5 - AGGRESSIVE AUDIO BOOST
+# Taxi AI Asterisk Bridge v7.6 - SMART BOOST (prevents clipping)
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -101,20 +101,23 @@ MAX_RECONNECT_ATTEMPTS = 5  # Increased for mobile network resilience
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
-# Audio processing - ENABLED for quiet telephony lines
-# v7.5: AGGRESSIVE boost - avgRMS was still 8-89, needs to be 300+
+# Audio processing - SMART BOOST for quiet lines, protection for loud lines
+# v7.6: Smart boost - only amplify quiet audio, allow reduction for loud
 ENABLE_NOISE_REDUCTION = False  # Keep disabled - causes muting issues
-ENABLE_VOLUME_BOOST = True      # Apply fixed boost to quiet lines
+ENABLE_VOLUME_BOOST = True      # Apply CONDITIONAL boost (only if quiet)
 ENABLE_AGC = True               # Automatic gain control
 
-VOLUME_BOOST_FACTOR = 6.0       # INCREASED from 3.0 - audio still too quiet
+# SMART BOOST: Only apply boost when input RMS is below this threshold
+# Lines above this are already loud enough and don't need boosting
+QUIET_LINE_THRESHOLD = 500      # Input RMS below this = quiet line, apply boost
+VOLUME_BOOST_FACTOR = 4.0       # Reduced from 6.0 - was causing clipping
 NOISE_GATE_THRESHOLD = 15       # Lower threshold if enabled
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 60
-TARGET_RMS = 500                # INCREASED from 300 - target louder output
-MAX_GAIN = 20.0                 # INCREASED from 15.0 for very quiet lines
-MIN_GAIN = 1.0                  # Never reduce volume
-GAIN_SMOOTHING_FACTOR = 0.2     # Faster adaptation
+TARGET_RMS = 300                # Reduced from 500 - prevents clipping
+MAX_GAIN = 10.0                 # Reduced from 20.0 - prevents distortion
+MIN_GAIN = 0.1                  # CHANGED: Allow gain REDUCTION for loud lines
+GAIN_SMOOTHING_FACTOR = 0.15    # Slightly slower for stability
 
 # Debug logging for audio levels
 LOG_AUDIO_LEVELS = True         # Log RMS before/after processing
@@ -699,11 +702,17 @@ class TaxiBridgeV7:
                         # Calculate input RMS for debugging
                         input_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
                         
-                        # v7.5: Apply VOLUME BOOST first (6x) to bring quiet lines up
+                        # v7.6: SMART BOOST - only apply to QUIET lines
+                        # Lines with input RMS > threshold are already loud - don't clip them!
+                        applied_boost = 1.0
                         if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
-                            pcm_array *= VOLUME_BOOST_FACTOR
+                            if input_rms < QUIET_LINE_THRESHOLD:
+                                # Quiet line - apply boost
+                                pcm_array *= VOLUME_BOOST_FACTOR
+                                applied_boost = VOLUME_BOOST_FACTOR
+                            # else: loud line - skip boost to prevent clipping
                         
-                        # v7.5: Apply AGC to normalize levels
+                        # v7.6: AGC now can REDUCE volume on loud lines (MIN_GAIN=0.1)
                         if ENABLE_AGC and pcm_array.size > 0:
                             rms = float(np.sqrt(np.mean(pcm_array ** 2)))
                             if rms > 10:  # Only apply AGC if there's actual audio
@@ -716,9 +725,10 @@ class TaxiBridgeV7:
                         
                         # Log audio levels periodically (every ~1 second = 50 frames @ 20ms)
                         if LOG_AUDIO_LEVELS and self.state.binary_audio_count % 50 == 0:
-                            logger.info("[%s] 🔊 Audio: inRMS=%.0f → outRMS=%.0f (gain=%.1fx, boost=%.0fx)",
-                                       self.state.call_id, input_rms, output_rms, 
-                                       self.state.last_gain, VOLUME_BOOST_FACTOR)
+                            boost_status = "🔊" if applied_boost > 1 else "🔇"
+                            logger.info("[%s] %s Audio: inRMS=%.0f → outRMS=%.0f (gain=%.2fx, boost=%.0fx)",
+                                       self.state.call_id, boost_status, input_rms, output_rms, 
+                                       self.state.last_gain, applied_boost)
                         
                         # Apply pre-emphasis to boost consonants before STT
                         emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
