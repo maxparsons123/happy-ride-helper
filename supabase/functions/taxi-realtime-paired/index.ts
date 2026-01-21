@@ -27,9 +27,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
 const VOICE = "shimmer";
 
-// EXPERIMENT: Send raw audio directly to OpenAI without pre-emphasis/resampling
-// Theory: Whisper handles format conversion internally, our processing may degrade quality
-const DIRECT_AUDIO_PASSTHROUGH = true;
+// EXPERIMENT (disabled): Direct passthrough was starving server VAD / degrading STT.
+// OpenAI Realtime input expects PCM16 @ 24kHz, so we keep DSP + resample.
+const DIRECT_AUDIO_PASSTHROUGH = false;
 
 // Use AI extraction (Gemini via taxi-extract-unified) instead of regex patterns
 const USE_AI_EXTRACTION = true;
