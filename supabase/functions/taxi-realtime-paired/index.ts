@@ -26,6 +26,10 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "
 // Uses URL-based auth which works in Deno (subprotocol auth does not)
 const USE_DEEPGRAM_STT = true; // ENABLED - use URL auth method
 
+// When true, use Deepgram as PRIMARY STT (inject transcripts into OpenAI as text)
+// When false, use OpenAI Whisper as primary and Deepgram for logging only
+const USE_DEEPGRAM_AS_PRIMARY = true; // TEST MODE - Deepgram drives the conversation
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // OpenAI Realtime API config
@@ -2350,6 +2354,29 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                     confidence: alt.confidence || 0
                   }));
                 }
+                
+                // PRIMARY MODE: Inject Deepgram transcript into OpenAI as user text
+                if (USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  console.log(`[${callId}] 🎙️ Injecting Deepgram transcript into OpenAI: "${transcript}"`);
+                  
+                  // Create a conversation item with the user's text
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: transcript
+                      }]
+                    }
+                  }));
+                  
+                  // Trigger response generation
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create"
+                  }));
+                }
               } else {
                 // Interim result - log but don't store
                 console.log(`[${callId}] 🎙️ Nova-2 interim: "${transcript}"`);
@@ -4164,11 +4191,17 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }
 
             audioDiag.packetsForwarded++;
-            if (bufferedBargeInFrame) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bufferedBargeInFrame }));
-              bufferedBargeInFrame = null;
+            
+            // Only send audio to OpenAI if NOT using Deepgram as primary STT
+            if (!USE_DEEPGRAM_AS_PRIMARY) {
+              if (bufferedBargeInFrame) {
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bufferedBargeInFrame }));
+                bufferedBargeInFrame = null;
+              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
+            } else {
+              bufferedBargeInFrame = null; // Clear buffered frame when Deepgram is primary
             }
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
 
             // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
             // Nova-2 phonecall model supports 8kHz natively - no resampling needed
@@ -4203,11 +4236,14 @@ Do NOT skip any part. Say ALL of it warmly.]`
             return;
           }
 
-          audioDiag.packetsForwarded++;
-          openaiWs.send(JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: base64Audio,
-          }));
+          // Only send audio to OpenAI if NOT using Deepgram as primary STT
+          if (!USE_DEEPGRAM_AS_PRIMARY) {
+            audioDiag.packetsForwarded++;
+            openaiWs.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: base64Audio,
+            }));
+          }
 
           // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
           // Nova-2 phonecall model supports 8kHz natively - no resampling needed
@@ -4244,7 +4280,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
 
           // Forward directly to OpenAI - C# bridge already sends PCM16 @ 24kHz
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          // Only send audio to OpenAI if NOT using Deepgram as primary STT
+          if (!USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "input_audio_buffer.append",
               audio: data.audio,
@@ -4268,7 +4305,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
           const pcm24k = resamplePcm16To24k(pcmInput, assumedRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          // Only send audio to OpenAI if NOT using Deepgram as primary STT
+          if (!USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "input_audio_buffer.append",
               audio: base64Audio,
