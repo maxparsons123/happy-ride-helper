@@ -72,14 +72,13 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
 # Audio rates
 ULAW_RATE = 8000    # µ-law telephony (8kHz)
-SLIN16_RATE = 16000 # slin16 = signed linear 16kHz (PREFERRED for best STT)
+SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
 AI_RATE = 24000     # OpenAI TTS
 
-# Audio quality settings
-# PREFER_SLIN16: When True, optimizes for 16kHz audio (better consonant recognition)
-# STABILITY NOTE: Set to False for more stable connections - slin16 creates 4x more data
-# and requires heavier DSP processing which can cause disconnects under load.
-PREFER_SLIN16 = os.environ.get("PREFER_SLIN16", "false").lower() == "true"
+# LOCK TO ULAW: Disable slin16 auto-detection - it was corrupting audio
+# The format detection was switching mid-call causing garbled audio
+PREFER_SLIN16 = False
+LOCK_FORMAT_ULAW = True  # NEW: Prevent any format switching
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -327,46 +326,51 @@ class TaxiBridgeV7:
     async def _detect_format(self, frame_len: int) -> None:
         """Detect Asterisk audio format from frame size.
         
+        v7.4: LOCKED TO ULAW - slin16 auto-detection was corrupting audio mid-call.
+        The format switching caused garbled audio when Asterisk changed codecs.
+        
         Frame sizes for 20ms:
         - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
-        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02) ← OPTIMAL
+        - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
-        
-        Once a format is locked (after first detection), ignore changes for 5 seconds
-        to prevent flip-flopping during codec negotiation.
         """
-        # DEBOUNCE: If format is locked and within lock window, just update frame bytes silently
-        FORMAT_LOCK_DURATION = 5.0  # seconds
+        # v7.4: LOCK TO ULAW - ignore format changes entirely
+        if LOCK_FORMAT_ULAW:
+            if frame_len != self.state.ast_frame_bytes:
+                logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (locked to ulaw)",
+                              self.state.call_id, self.state.ast_frame_bytes, frame_len)
+            # Always treat as ulaw regardless of frame size
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = frame_len
+            return
+        
+        # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
+        FORMAT_LOCK_DURATION = 5.0
         if self.state.format_locked:
             if time.time() - self.state.format_lock_time < FORMAT_LOCK_DURATION:
-                # Still within lock window - silently accept frames of different sizes
-                # but don't change the negotiated format
                 self.state.ast_frame_bytes = frame_len
                 return
-            # Lock expired - allow re-detection
             self.state.format_locked = False
         
         old_codec = self.state.ast_codec
         
         if frame_len == 640:
-            # slin16 = 16kHz signed linear - OPTIMAL for STT
             self.state.ast_codec = "slin16"
             self.state.ast_rate = SLIN16_RATE
             self.state.ast_frame_bytes = 640
-            logger.info("[%s] ✅ OPTIMAL: slin16 @ 16kHz (best STT quality)", self.state.call_id)
+            logger.info("[%s] ✅ Detected: slin16 @ 16kHz", self.state.call_id)
         elif frame_len == 320:
-            # slin = 8kHz signed linear
             self.state.ast_codec = "slin"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 320
-            logger.info("[%s] 🔎 Detected: slin @ 8kHz (consider slin16 for better STT)", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: slin @ 8kHz", self.state.call_id)
         elif frame_len == 160:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 160
-            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz (consider slin16 for better STT)", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz", self.state.call_id)
         else:
-            # Fallback: assume format based on size
             if frame_len > 400:
                 self.state.ast_codec = "slin16"
                 self.state.ast_rate = SLIN16_RATE
@@ -377,11 +381,9 @@ class TaxiBridgeV7:
             logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
                           self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
         
-        # LOCK FORMAT: Once detected, lock for 5 seconds to prevent flip-flopping
         self.state.format_locked = True
         self.state.format_lock_time = time.time()
         
-        # Notify edge function of format change
         if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
             await self.ws.send(json.dumps({
                 "type": "update_format",
@@ -389,8 +391,8 @@ class TaxiBridgeV7:
                 "inbound_format": self.state.ast_codec,
                 "inbound_sample_rate": self.state.ast_rate,
             }))
-            logger.info("[%s] 📡 Sent format update: %s @ %dHz (locked for %.1fs)", 
-                       self.state.call_id, self.state.ast_codec, self.state.ast_rate, FORMAT_LOCK_DURATION)
+            logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
