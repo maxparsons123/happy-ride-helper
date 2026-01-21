@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.3 - HIGH-FIDELITY AUDIO
+# Taxi AI Asterisk Bridge v7.4 - LOUD AND CLEAR
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -9,6 +9,12 @@
 # 5) Pre-emphasis filter for consonant clarity (prevents 'Russell' → 'Ruffles')
 # 6) Improved error handling and connection resilience
 # 7) resample_poly for ALL audio paths (no more linear interpolation)
+#
+# v7.4 Audio Quality Fixes (CRITICAL - voice wasn't reaching Whisper):
+# - Added 3x VOLUME BOOST before AGC to amplify quiet telephony lines
+# - Added AGC with 15x max gain to normalize to TARGET_RMS=300
+# - Pipeline order: Decode → Volume Boost (3x) → AGC → Pre-emphasis → Send
+# - This matches the backend DSP pipeline for consistent audio levels
 #
 # v7.3 Audio Quality Fixes:
 # - Replaced linear interpolation with resample_poly for upsampling
@@ -87,16 +93,20 @@ MAX_RECONNECT_ATTEMPTS = 5  # Increased for mobile network resilience
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
-# Audio processing - DISABLED for cleaner STT
-# OpenAI Whisper handles noise well, noise reduction was muting speech
-ENABLE_NOISE_REDUCTION = False  # Set True to re-enable
+# Audio processing - ENABLED for quiet telephony lines
+# v7.4: AGC + volume boost to bring quiet input (RMS 5-20) up to usable levels
+ENABLE_NOISE_REDUCTION = False  # Keep disabled - causes muting issues
+ENABLE_VOLUME_BOOST = True      # NEW: Apply 3x boost to quiet lines
+ENABLE_AGC = True               # NEW: Automatic gain control
+
+VOLUME_BOOST_FACTOR = 3.0       # Fixed multiplier for all audio (before AGC)
 NOISE_GATE_THRESHOLD = 15       # Lower threshold if enabled
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 60
-TARGET_RMS = 2500
-MAX_GAIN = 2.0                  # Less aggressive gain
-MIN_GAIN = 0.9
-GAIN_SMOOTHING_FACTOR = 0.1
+TARGET_RMS = 300                # Target RMS after AGC (was 2500, now matches backend)
+MAX_GAIN = 15.0                 # Match backend AGC (was 2.0)
+MIN_GAIN = 1.0                  # Never reduce volume (was 0.9)
+GAIN_SMOOTHING_FACTOR = 0.15    # Slightly faster adaptation
 
 # Asterisk message types
 MSG_HANGUP = 0x00
@@ -671,14 +681,23 @@ class TaxiBridgeV7:
                         # Decode µ-law to linear PCM if needed
                         linear = ulaw2lin(payload) if self.state.ast_codec == "ulaw" else payload
                         
-                        # Optional noise reduction (disabled by default - Whisper handles noise well)
-                        cleaned, self.state.last_gain = apply_noise_reduction(
-                            linear, self.state.last_gain
-                        )
-
+                        # Convert to numpy for processing
+                        pcm_array = np.frombuffer(linear, dtype=np.int16).astype(np.float32)
+                        
+                        # v7.4: Apply VOLUME BOOST first (3x) to bring quiet lines up
+                        if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
+                            pcm_array *= VOLUME_BOOST_FACTOR
+                        
+                        # v7.4: Apply AGC to normalize levels
+                        if ENABLE_AGC and pcm_array.size > 0:
+                            rms = float(np.sqrt(np.mean(pcm_array ** 2)))
+                            if rms > 10:  # Only apply AGC if there's actual audio
+                                target_gain = float(np.clip(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN))
+                                self.state.last_gain = self.state.last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - self.state.last_gain)
+                                pcm_array *= self.state.last_gain
+                        
                         # Apply pre-emphasis to boost consonants before STT
                         # This helps OpenAI distinguish 'S' vs 'F' sounds (Russell vs Ruffles)
-                        pcm_array = np.frombuffer(cleaned, dtype=np.int16).astype(np.float32)
                         emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
                         cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
 
