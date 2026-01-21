@@ -872,11 +872,16 @@ class TaxiBridgeV7:
         The old "catch up" logic was sending bursts of frames causing sped-up audio.
         """
         buffer = bytearray()
-        frame_duration_ms = 20  # 20ms per frame
         last_send_time = time.time()
 
         try:
             while self.running:
+                # Derive frame pacing from Asterisk's current frame size.
+                # IMPORTANT: Asterisk sometimes sends 40ms/80ms frames (320/640 bytes) even when locked to ulaw.
+                # If we always send every 20ms, playback sounds too fast.
+                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                frame_duration_ms = max(1.0, (self.state.ast_frame_bytes / max(1, bytes_per_sec)) * 1000.0)
+
                 # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
@@ -885,7 +890,7 @@ class TaxiBridgeV7:
                 now = time.time()
                 elapsed_ms = (now - last_send_time) * 1000
 
-                # Only send ONE frame every 20ms - strict real-time pacing
+                # Only send ONE frame per calculated frame duration - strict real-time pacing
                 if elapsed_ms >= frame_duration_ms:
                     if len(buffer) >= self.state.ast_frame_bytes:
                         # Send one frame of real audio
@@ -932,11 +937,11 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.5 - AGGRESSIVE AUDIO BOOST (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.6 - SMART BOOST + FIXED PACING (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
-        f"   Volume boost: {VOLUME_BOOST_FACTOR}x, AGC target: {TARGET_RMS} RMS",
+        f"   Smart boost: {VOLUME_BOOST_FACTOR}x when inRMS<{QUIET_LINE_THRESHOLD}, AGC target: {TARGET_RMS} RMS",
         f"   Preferred codec: ulaw @ 8kHz (locked)",
     ]
     for line in startup_lines:
