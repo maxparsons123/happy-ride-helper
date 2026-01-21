@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
@@ -6,8 +7,8 @@ using System.Collections.Concurrent;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Direct OpenAI Realtime API client - no edge function required.
-/// Replicates the taxi-realtime-desktop edge function logic locally.
+/// Direct OpenAI Realtime API client - FULLY LOCALIZED.
+/// No edge function required - connects directly to OpenAI with dispatch webhook support.
 /// </summary>
 public class OpenAIRealtimeClient : IAudioAIClient
 {
@@ -16,6 +17,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private readonly string _voice;
     private readonly string _systemPrompt;
     private readonly string? _dispatchWebhookUrl;
+    private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
     
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
@@ -27,11 +29,22 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
     
+    // Pre-emphasis for telephony clarity (matches edge function)
+    private const float PRE_EMPHASIS_COEFF = 0.97f;
+    private short _lastSample = 0;
+    
     // Session state
     private string? _callerId;
+    private string _callId;
     private string _lastQuestionAsked = "pickup";
     private BookingState _booking = new();
     private bool _greetingSent = false;
+    private bool _waitingForQuote = false;
+    private bool _responseActive = false;
+    
+    // Echo guard timing (ms)
+    private const int ECHO_GUARD_MS = 700;
+    private long _lastAdaFinishedAt = 0;
 
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
@@ -44,18 +57,19 @@ public class OpenAIRealtimeClient : IAudioAIClient
     // Tool call events for external handling
     public event Action<string, Dictionary<string, object>>? OnToolCall;
     public event Action<BookingState>? OnBookingUpdated;
+    public event Action? OnCallEnded;
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
     public int PendingFrameCount => _outboundQueue.Count;
 
     /// <summary>
-    /// Create a direct OpenAI Realtime client.
+    /// Create a direct OpenAI Realtime client (FULLY LOCALIZED - no edge function).
     /// </summary>
     /// <param name="apiKey">OpenAI API key</param>
     /// <param name="model">Model name (default: gpt-4o-mini-realtime-preview-2024-12-17)</param>
     /// <param name="voice">Voice name (default: shimmer)</param>
     /// <param name="systemPrompt">Custom system prompt (null for default taxi booking prompt)</param>
-    /// <param name="dispatchWebhookUrl">Optional webhook URL for dispatch integration</param>
+    /// <param name="dispatchWebhookUrl">Webhook URL for dispatch integration (required for real bookings)</param>
     public OpenAIRealtimeClient(
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
@@ -68,6 +82,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _voice = voice;
         _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
         _dispatchWebhookUrl = dispatchWebhookUrl;
+        _callId = $"local-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
     }
 
     public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
@@ -108,21 +123,36 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
+        
+        // Echo guard - ignore audio right after Ada finishes speaking
+        if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+            return;
 
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
+        
+        // Apply pre-emphasis for consonant clarity (matches edge function)
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
+            _lastSample = current;
+        }
+        
+        // Volume boost for telephony (1.4x like edge function)
+        for (int i = 0; i < pcm8k.Length; i++)
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 1.4, short.MinValue, short.MaxValue);
+        
         // Resample 8kHz → 24kHz
         var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
+        // Send as binary (33% more efficient than Base64)
         try
         {
             await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
+                new ArraySegment<byte>(pcmBytes),
+                WebSocketMessageType.Binary,
                 true,
                 _cts?.Token ?? CancellationToken.None);
         }
@@ -279,11 +309,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 case "response.created":
                     Log("🤖 Response started");
                     _needsFadeIn = true;
+                    _responseActive = true;
                     OnResponseStarted?.Invoke();
                     break;
 
                 case "response.done":
                     Log("✅ Response done");
+                    _responseActive = false;
+                    _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
@@ -480,35 +513,143 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 
                 if (action == "request_quote")
                 {
-                    // Simulate quote response (or call dispatch webhook)
-                    await SendToolResultAsync(callId, new { 
-                        success = true, 
-                        fare = "£12.50", 
-                        eta = "5 minutes",
-                        message = "Quote: £12.50, driver arrives in 5 minutes"
-                    });
+                    _waitingForQuote = true;
+                    
+                    // Call real dispatch webhook if configured
+                    if (!string.IsNullOrEmpty(_dispatchWebhookUrl))
+                    {
+                        var quoteResult = await CallDispatchWebhookAsync("request_quote");
+                        if (quoteResult.success)
+                        {
+                            _booking.Fare = quoteResult.fare;
+                            _booking.Eta = quoteResult.eta;
+                            OnBookingUpdated?.Invoke(_booking);
+                            await SendToolResultAsync(callId, new { 
+                                success = true, 
+                                fare = quoteResult.fare, 
+                                eta = quoteResult.eta,
+                                message = quoteResult.message ?? $"Your fare is {quoteResult.fare} and the driver will arrive in {quoteResult.eta}"
+                            });
+                        }
+                        else
+                        {
+                            await SendToolResultAsync(callId, new { 
+                                success = false, 
+                                error = quoteResult.error ?? "Failed to get quote"
+                            });
+                        }
+                    }
+                    else
+                    {
+                        // Mock response for testing without webhook
+                        await SendToolResultAsync(callId, new { 
+                            success = true, 
+                            fare = "£12.50", 
+                            eta = "5 minutes",
+                            message = "Your fare is £12.50 and your driver will arrive in 5 minutes. Would you like me to book that?"
+                        });
+                    }
+                    _waitingForQuote = false;
                 }
                 else if (action == "confirmed")
                 {
-                    _booking.Confirmed = true;
-                    OnBookingUpdated?.Invoke(_booking);
-                    await SendToolResultAsync(callId, new { 
-                        success = true, 
-                        booking_ref = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}",
-                        message = "Booking confirmed!"
-                    });
+                    if (!string.IsNullOrEmpty(_dispatchWebhookUrl))
+                    {
+                        var confirmResult = await CallDispatchWebhookAsync("confirmed");
+                        if (confirmResult.success)
+                        {
+                            _booking.Confirmed = true;
+                            _booking.BookingRef = confirmResult.bookingRef;
+                            OnBookingUpdated?.Invoke(_booking);
+                            await SendToolResultAsync(callId, new { 
+                                success = true, 
+                                booking_ref = confirmResult.bookingRef,
+                                message = confirmResult.message ?? "Your taxi is booked!"
+                            });
+                        }
+                        else
+                        {
+                            await SendToolResultAsync(callId, new { success = false, error = confirmResult.error });
+                        }
+                    }
+                    else
+                    {
+                        _booking.Confirmed = true;
+                        _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
+                        OnBookingUpdated?.Invoke(_booking);
+                        await SendToolResultAsync(callId, new { 
+                            success = true, 
+                            booking_ref = _booking.BookingRef,
+                            message = "Your taxi is booked! Your driver will arrive shortly."
+                        });
+                    }
                 }
                 break;
 
             case "end_call":
                 Log("📞 End call requested");
                 await SendToolResultAsync(callId, new { success = true });
-                // Optionally trigger disconnect after a delay
+                OnCallEnded?.Invoke();
                 break;
 
             default:
                 await SendToolResultAsync(callId, new { error = $"Unknown tool: {toolName}" });
                 break;
+        }
+    }
+    
+    /// <summary>
+    /// Call the dispatch webhook for quotes and confirmations.
+    /// </summary>
+    private async Task<(bool success, string? fare, string? eta, string? bookingRef, string? message, string? error)> CallDispatchWebhookAsync(string action)
+    {
+        try
+        {
+            var payload = new
+            {
+                job_id = Guid.NewGuid().ToString(),
+                call_id = _callId,
+                caller_phone = _callerId,
+                action = action,
+                ada_pickup = _booking.Pickup,
+                ada_destination = _booking.Destination,
+                passengers = _booking.Passengers ?? 1,
+                pickup_time = _booking.PickupTime ?? "now",
+                timestamp = DateTime.UtcNow.ToString("o")
+            };
+            
+            var json = JsonSerializer.Serialize(payload);
+            Log($"📡 Calling dispatch: {action}");
+            
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            content.Headers.Add("X-Call-ID", _callId);
+            
+            var response = await _httpClient.PostAsync(_dispatchWebhookUrl, content);
+            var responseBody = await response.Content.ReadAsStringAsync();
+            
+            Log($"📬 Dispatch response: {response.StatusCode}");
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                return (false, null, null, null, null, $"HTTP {(int)response.StatusCode}");
+            }
+            
+            using var doc = JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+            
+            var fare = root.TryGetProperty("fare", out var f) ? f.GetString() : 
+                       root.TryGetProperty("estimated_fare", out var ef) ? ef.GetString() : null;
+            var eta = root.TryGetProperty("eta", out var e) ? e.GetString() : 
+                      root.TryGetProperty("eta_minutes", out var em) ? $"{em.GetInt32()} minutes" : null;
+            var bookingRef = root.TryGetProperty("booking_ref", out var br) ? br.GetString() : null;
+            var message = root.TryGetProperty("message", out var m) ? m.GetString() : null;
+            
+            return (true, fare, eta, bookingRef, message, null);
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Dispatch error: {ex.Message}");
+            return (false, null, null, null, null, ex.Message);
         }
     }
 
@@ -624,35 +765,49 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
     };
 
-    private static string GetDefaultSystemPrompt() => @"You are Ada, a friendly and efficient taxi booking assistant.
-Speak in English.
+    private static string GetDefaultSystemPrompt() => @"You are Ada, a professional taxi booking assistant for a UK taxi company.
+
+# PERSONALITY
+- Warm, efficient, and professional
+- Brief responses (under 20 words when possible)
+- Natural British English
 
 # BOOKING FLOW (STRICT ORDER)
-1. Ask for PICKUP address → call sync_booking_data(pickup=...)
-2. Ask for DESTINATION address → call sync_booking_data(destination=...)
-3. Ask for NUMBER OF PASSENGERS → call sync_booking_data(passengers=...)
-4. Ask if they need it NOW or schedule → call sync_booking_data(pickup_time=...)
-5. Summarize ALL details, then call book_taxi(action=""request_quote"")
-6. Wait for fare/ETA from dispatch, then ask customer to confirm
-7. If confirmed → call book_taxi(action=""confirmed"")
-8. Deliver closing script → call end_call()
+1. Greet → Ask for PICKUP address
+2. Acknowledge pickup → Ask for DESTINATION  
+3. Acknowledge destination → Ask for NUMBER OF PASSENGERS
+4. Acknowledge passengers → Ask if NOW or scheduled time
+5. Summarize briefly → Call book_taxi(action=""request_quote"")
+6. When you receive fare/ETA, tell customer and ask: ""Would you like me to book that?""
+7. If YES/confirm → Call book_taxi(action=""confirmed"")
+8. Thank them, give booking ref → Call end_call()
 
-# ADDRESS HANDLING
+# CRITICAL RULES
 ✅ Accept ANY address exactly as spoken - NEVER ask for clarification
-✅ Move to the next question immediately after receiving any address
-❌ NEVER ask for house numbers, postcodes, or more details
+✅ Move to next question immediately after each answer
+✅ When customer confirms (yes, yeah, go ahead, book it, please) → IMMEDIATELY call book_taxi(action=""confirmed"")
+✅ After confirmation, give booking reference and say goodbye
 
-# CONTEXT PAIRING (CRITICAL)
-When the user responds, check what question you just asked them:
-- If you asked for PICKUP → their response is the pickup location
-- If you asked for DESTINATION → their response is the destination  
-- If you asked for PASSENGERS → their response is the passenger count
-NEVER swap fields. Trust the question context.
+❌ NEVER ask for house numbers, postcodes, or spell addresses
+❌ NEVER make up fares or arrival times - wait for book_taxi response
+❌ NEVER repeat the full booking summary more than once
+
+# CONTEXT PAIRING
+Map user responses to the question you just asked:
+- Asked PICKUP → response is pickup
+- Asked DESTINATION → response is destination
+- Asked PASSENGERS → response is passenger count
+- Asked TIME → response is pickup time
+- Asked to CONFIRM → ""yes""/""yeah""/""correct"" means confirmed
+
+# HANDLING RESPONSES
+- For ""yes"", ""yeah"", ""correct"", ""go ahead"", ""book it"" after fare quote → Call book_taxi(action=""confirmed"")
+- For ""no"", ""cancel"", ""too much"" → ""No problem, is there anything else I can help with?""
 
 # TOOLS
-- sync_booking_data: Save user answers to the correct field
-- book_taxi: Request quote or confirm booking
-- end_call: Disconnect after goodbye";
+- sync_booking_data: Save each field as collected
+- book_taxi: action=""request_quote"" for pricing, action=""confirmed"" after customer says yes
+- end_call: After confirmed booking and goodbye";
 
     private void Log(string message)
     {

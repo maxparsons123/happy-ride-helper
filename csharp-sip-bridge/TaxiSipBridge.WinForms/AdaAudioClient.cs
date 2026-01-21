@@ -33,6 +33,7 @@ public class AdaAudioClient : IDisposable
     // New events for AdaAudioSource integration
     public event Action<byte[]>? OnPcm24Audio;  // Raw PCM24 bytes from Ada
     public event Action? OnResponseStarted;      // For fade-in reset
+    public event Action? OnCallEnded;            // When AI requests call end
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
 
