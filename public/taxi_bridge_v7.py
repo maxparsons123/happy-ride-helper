@@ -85,15 +85,13 @@ AI_RATE = 24000     # OpenAI TTS
 
 # Format handling
 #
-# IMPORTANT:
-# - Some setups deliver AudioSocket frames as slin (PCM16) even if the SIP leg is ulaw.
-# - If we force ulaw while Asterisk is actually sending slin (320-byte frames), the
-#   return audio will be encoded wrong and can sound "too fast"/garbled.
+# CRITICAL FIX: Asterisk often sends 40ms µ-law frames (320 bytes) instead of 20ms (160 bytes).
+# These are still ULAW - just longer chunks. Frame-size-based detection was wrong.
 #
-# Default to AUTO-detect based on frame size. You can re-lock to ulaw by setting:
-#   LOCK_FORMAT_ULAW=1
+# LOCK_FORMAT_ULAW = True (default) keeps ulaw decoding but adapts pacing to frame size.
+# Set LOCK_FORMAT_ULAW=0 only if your Asterisk genuinely sends slin (rare).
 PREFER_SLIN16 = False
-LOCK_FORMAT_ULAW = os.environ.get("LOCK_FORMAT_ULAW", "0").lower() in ("1", "true", "yes")
+LOCK_FORMAT_ULAW = os.environ.get("LOCK_FORMAT_ULAW", "1").lower() in ("1", "true", "yes")
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -950,12 +948,12 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.6 - SMART BOOST + FIXED PACING (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.6.1 - ULAW LOCKED + ADAPTIVE PACING (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
         f"   Smart boost: {VOLUME_BOOST_FACTOR}x when inRMS<{QUIET_LINE_THRESHOLD}, AGC target: {TARGET_RMS} RMS",
-        f"   Format mode: {'ulaw-locked' if LOCK_FORMAT_ULAW else 'auto-detect (prefers ulaw, may switch to slin/slin16 based on frame size)'}",
+        f"   Format: ulaw @ 8kHz (locked={LOCK_FORMAT_ULAW}, pacing adapts to frame size)",
     ]
     for line in startup_lines:
         print(line, flush=True)
