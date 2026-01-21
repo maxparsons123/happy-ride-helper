@@ -681,7 +681,9 @@ const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms for snappier turns
 
 // RMS thresholds for audio quality (aligned with desktop mode)
 const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
-const RMS_BARGE_IN_MIN = 800;  // Minimum for barge-in during Ada speech
+// NOTE: Telephony RMS can be very low; lowering this improves barge-in reliability.
+// We mitigate false-positives by requiring 2 consecutive frames before forwarding.
+const RMS_BARGE_IN_MIN = 500;  // Minimum for barge-in during Ada speech
 const RMS_BARGE_IN_MAX = 25000; // Above = likely echo/clipping (increased headroom)
 const RMS_ECHO_CEILING = 20000; // Hard ceiling for echo detection
 
@@ -3793,6 +3795,11 @@ Do NOT skip any part. Say ALL of it warmly.]`
   // Audio diagnostics for this session
   const audioDiag = createAudioDiagnostics();
 
+  // Barge-in smoothing: require a short streak of speech-like frames to avoid
+  // random noise triggering (and to make quieter speakers more reliable).
+  let bargeInSpeechStreak = 0;
+  let bufferedBargeInFrame: string | null = null;
+
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
     try {
@@ -3882,27 +3889,78 @@ Do NOT skip any part. Say ALL of it warmly.]`
               return;
             }
 
-            if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
+            const speechLike = rms >= RMS_BARGE_IN_MIN && rms <= RMS_BARGE_IN_MAX;
+
+            if (!speechLike) {
+              // Reset streak/buffer when audio doesn't look like genuine speech.
+              bargeInSpeechStreak = 0;
+              bufferedBargeInFrame = null;
               audioDiag.packetsSkippedEcho++;
               return; // Not real speech, likely echo or noise
             }
+
+            // Speech-like: build a short streak before forwarding to reduce false triggers.
+            bargeInSpeechStreak++;
+
+            // Apply pre-emphasis for better STT consonant clarity, then resample
+            const pcmEmph = applyPreEmphasis(pcmInput);
+            const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
+            const base64Audio = pcm16ToBase64(pcm24k);
+
+            // Backpressure guard: avoid huge buffered sends causing latency/hit-and-miss hearing.
+            // If we fall behind, it's better to drop frames than queue seconds of audio.
+            const buffered = (openaiWs as any).bufferedAmount as number | undefined;
+            if (typeof buffered === "number" && buffered > 2_000_000) {
+              bargeInSpeechStreak = 0;
+              bufferedBargeInFrame = null;
+              return;
+            }
+
+            // Require 2 consecutive frames before we start forwarding.
+            if (bargeInSpeechStreak === 1) {
+              bufferedBargeInFrame = base64Audio;
+              return;
+            }
+
+            audioDiag.packetsForwarded++;
+            if (bufferedBargeInFrame) {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bufferedBargeInFrame }));
+              bufferedBargeInFrame = null;
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
+
+            // PARALLEL: Send raw audio to Deepgram for telephony-optimized STT
+            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.send(audioBytes);
+            }
+
+            return;
           }
+
+          // Not speaking: forward immediately (no barge-in streak needed)
+          bargeInSpeechStreak = 0;
+          bufferedBargeInFrame = null;
 
           // Apply pre-emphasis for better STT consonant clarity, then resample
           const pcmEmph = applyPreEmphasis(pcmInput);
           const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
+          // Backpressure guard
+          const buffered = (openaiWs as any).bufferedAmount as number | undefined;
+          if (typeof buffered === "number" && buffered > 2_000_000) {
+            return;
+          }
+
           audioDiag.packetsForwarded++;
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
             audio: base64Audio,
           }));
-          
+
           // PARALLEL: Send raw audio to Deepgram for telephony-optimized STT
           // Deepgram nova-2-phonecall is better at 8kHz than Whisper
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            // Send original audio bytes (before resampling) to Deepgram
             deepgramWs.send(audioBytes);
           }
         }
