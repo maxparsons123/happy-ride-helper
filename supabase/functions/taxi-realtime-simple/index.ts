@@ -3234,15 +3234,63 @@ Do NOT say 'booked' until the tool returns success.]`
             }
           }
           
-          // Detect if user just confirmed addresses - start audio buffering
-          // This catches "yes", "yeah", "that's correct" etc. that trigger book_taxi
+          // Detect if user just confirmed summary - start audio buffering.
+          // This catches "yes", "yeah", "that's correct" etc.
           const isConfirmationPhrase = /\b(yes|yeah|yep|correct|that's right|that's correct|right|go ahead|sure|ok|okay|please|ja|jawel|prima|goed|akkoord|doe maar|naturlich|klar|genau|oui|d'accord|sí|claro|correcto)\b/i.test(lowerUserText);
-          
+
           // If user just confirmed and we don't have a confirmed booking yet, start buffering
           if (isConfirmationPhrase && !sessionState.bookingConfirmedThisTurn && sessionState.booking.version === 0) {
             console.log(`[${sessionState.callId}] 🔒 User confirmed - starting audio buffering until book_taxi succeeds`);
             sessionState.audioVerified = false;
             sessionState.pendingAudioBuffer = [];
+
+            // FAILSAFE: If we're in SUMMARY and the checklist is complete, force Ada to call book_taxi(request_quote)
+            // immediately. Without this, if Ada fails to invoke the tool, we stay buffering (silence) and the bridge may hang up.
+            const hasFullChecklist =
+              !!sessionState.booking?.pickup &&
+              !!sessionState.booking?.destination &&
+              sessionState.booking?.passengers !== null &&
+              !!sessionState.booking?.pickup_time;
+
+            const quoteAlreadyInProgress =
+              !!sessionState.quoteRequestedAt ||
+              !!sessionState.pendingQuote ||
+              !!sessionState.awaitingDispatchCallback;
+
+            if (
+              sessionState.bookingStep === "summary" &&
+              hasFullChecklist &&
+              !quoteAlreadyInProgress &&
+              openaiWs &&
+              openaiConnected &&
+              !sessionState.callEnded
+            ) {
+              console.log(`[${sessionState.callId}] 🔄 AUTO-HANDOFF: User confirmed summary but no quote in progress → forcing book_taxi(request_quote)`);
+
+              // Ensure nothing else is speaking; keep the flow deterministic.
+              sessionState.discardCurrentResponseAudio = true;
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+              openaiWs.send(
+                JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [
+                      {
+                        type: "input_text",
+                        text:
+                          `[SYSTEM: The customer has confirmed the journey summary. You MUST say EXACTLY: "One moment please." Then you MUST call book_taxi immediately with action: "request_quote". Do not ask any more questions. Do not repeat the summary.]`,
+                      },
+                    ],
+                  },
+                })
+              );
+
+              safeResponseCreate(sessionState, "summary-confirm-auto-quote");
+            }
           }
 
           // Existing booking context for modification logic
