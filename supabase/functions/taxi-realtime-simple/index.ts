@@ -1765,6 +1765,11 @@ interface SessionState {
     avgSpeechDurationMs: number;
     speechDurations: number[];
   };
+  
+  // === CONFIRMATION FAILSAFE ===
+  // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
+  confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
+  confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
 }
 
 serve(async (req) => {
@@ -6131,6 +6136,51 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.pendingAudioBuffer = [];
           }
           
+          // 🔧 FAILSAFE: If dispatch_confirm broadcast doesn't arrive within 3s, trigger confirmation directly
+          // This prevents Ada from going silent if the dispatch system doesn't send the broadcast
+          const confirmationTimeoutMs = 3000;
+          sessionState.confirmationFailsafeTimerId = setTimeout(() => {
+            // Only trigger if booking was confirmed and we haven't already spoken
+            if (sessionState.bookingFullyConfirmed && 
+                !sessionState.confirmationSpoken && 
+                openaiWs && 
+                openaiConnected) {
+              console.log(`[${sessionState.callId}] ⏰ FAILSAFE: dispatch_confirm not received in ${confirmationTimeoutMs}ms - triggering confirmation directly`);
+              sessionState.confirmationSpoken = true;
+              
+              const langCode = sessionState.language || "en";
+              const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
+              const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
+              
+              // Cancel any stale response and clear buffers
+              sessionState.discardCurrentResponseAudio = true;
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // Inject confirmation message
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.` }]
+                }
+              }));
+              
+              // Reset discard flag before response
+              sessionState.discardCurrentResponseAudio = false;
+              
+              // Trigger Ada to speak
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say EXACTLY: "${confirmationScript}" Do not add extra details.`
+                }
+              }));
+            }
+          }, confirmationTimeoutMs);
+          
         }
 
         case "cancel_booking": {
@@ -6967,6 +7017,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           greetingDelivered: false,
           bookingStep: "pickup", // Start at pickup step
           bookingStepAdvancedAt: null,
+          confirmationSpoken: false,
+          confirmationFailsafeTimerId: null,
         };
         
         preConnected = true;
@@ -7106,6 +7158,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             greetingDelivered: false,
             bookingStep: "pickup", // Start at pickup step
             bookingStepAdvancedAt: null,
+            confirmationSpoken: false,
+            confirmationFailsafeTimerId: null,
           };
         }
         
@@ -7619,6 +7673,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             state.askedAnythingElse = true;
             // Mark that we're about to send the confirmation response (bypass the guard)
             state.confirmationResponsePending = true;
+            
+            // ✅ Mark confirmation as spoken to prevent failsafe from firing
+            state.confirmationSpoken = true;
+            if (state.confirmationFailsafeTimerId) {
+              clearTimeout(state.confirmationFailsafeTimerId);
+              state.confirmationFailsafeTimerId = null;
+              console.log(`[${callId}] 🔄 dispatch_confirm received - cancelled failsafe timer`);
+            }
           }
           
           // Build the confirmation message for Ada to speak
