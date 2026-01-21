@@ -2372,16 +2372,25 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                   const lowerV = v.toLowerCase().trim();
                   let parsedCount: number | null = null;
                   
-                  // First try digit match
-                  const digitMatch = v.match(/\b(\d+)\b/);
-                  if (digitMatch) {
-                    parsedCount = parseInt(digitMatch[1], 10);
-                  } else {
-                    // Try word match (e.g., "three" → 3)
-                    for (const [word, num] of Object.entries(wordToNum)) {
-                      if (lowerV === word || lowerV.includes(word)) {
-                        parsedCount = num;
-                        break;
+                  // IMPORTANT: Only accept passenger counts that LOOK like just a number.
+                  // Reject if transcript looks like an address (contains street/road keywords or is too long).
+                  const looksLikeAddress = /\b(street|road|lane|avenue|drive|place|close|way|court|crescent|grove|terrace|gardens|park|square|hill|view|row)\b/i.test(lowerV) ||
+                                           lowerV.length > 30;
+                  
+                  if (!looksLikeAddress) {
+                    // First try exact digit-only match (e.g., "4", "4 passengers", "four")
+                    // Only match if the entire transcript is essentially just a number
+                    const digitOnlyMatch = v.match(/^\s*(\d+)\s*(?:passengers?|people|pax)?\s*$/i);
+                    if (digitOnlyMatch) {
+                      parsedCount = parseInt(digitOnlyMatch[1], 10);
+                    } else {
+                      // Try word match (e.g., "three", "three passengers")
+                      for (const [word, num] of Object.entries(wordToNum)) {
+                        const wordPattern = new RegExp(`^\\s*${word}\\s*(?:passengers?|people|pax)?\\s*$`, "i");
+                        if (wordPattern.test(lowerV) || lowerV === word) {
+                          parsedCount = num;
+                          break;
+                        }
                       }
                     }
                   }
@@ -2389,6 +2398,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                   if (parsedCount !== null && parsedCount > 0 && parsedCount <= 20) {
                     sessionState.booking.passengers = parsedCount;
                     console.log(`[${callId}] 📍 Backfilled passengers from user context: ${sessionState.booking.passengers} (raw: "${v}")`);
+                  } else if (v && v.length > 0) {
+                    console.log(`[${callId}] ⚠️ Passenger backfill rejected (looks like address or invalid): "${v}"`);
                   }
                 }
               }
