@@ -16,19 +16,9 @@ const corsHeaders = {
 
 // Environment
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
-const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY") || "";
 const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL") || "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-
-// Feature flags
-// Deepgram streaming STT for better 8kHz telephony transcription
-// Uses URL-based auth which works in Deno (subprotocol auth does not)
-const USE_DEEPGRAM_STT = true; // ENABLED - use URL auth method
-
-// When true, use Deepgram as PRIMARY STT (inject transcripts into OpenAI as text)
-// When false, use OpenAI Whisper as primary and Deepgram for logging only
-const USE_DEEPGRAM_AS_PRIMARY = false; // RESET - OpenAI Whisper is primary STT
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -153,22 +143,6 @@ function ulawToPcm16(ulaw: Uint8Array): Int16Array {
     sample -= 0x84;
     out[i] = sign * sample;
   }
-  return out;
-}
-
-// Resample 8kHz PCM16 to 16kHz for Deepgram Flux (2x upsampling with linear interpolation)
-function resamplePcm8kTo16k(pcm: Int16Array): Int16Array {
-  const out = new Int16Array(pcm.length * 2);
-  for (let i = 0; i < pcm.length - 1; i++) {
-    const s0 = pcm[i];
-    const s1 = pcm[i + 1];
-    out[i * 2] = s0;
-    out[i * 2 + 1] = Math.round((s0 + s1) / 2); // Interpolated sample
-  }
-  // Handle last sample
-  const lastIdx = Math.max(pcm.length - 1, 0);
-  out[lastIdx * 2] = pcm[lastIdx] ?? 0;
-  out[lastIdx * 2 + 1] = pcm[lastIdx] ?? 0;
   return out;
 }
 
@@ -433,20 +407,15 @@ function buildSystemPrompt(language: string): string {
   return `
 # IDENTITY
 You are Ada, the professional taxi booking assistant for the Taxibot demo.
-Voice: Warm, clear, professionally casual.
+Voice: Warm, clear, professionally casual. Speak at a SLOWER, relaxed pace - not rushed.
 
 ${langInstruction}
 
-# 🐢 SPEAKING PACE - CRITICALLY IMPORTANT 🐢
-⚠️ YOU MUST SPEAK SLOWLY. This is a phone call - rushing makes you hard to understand.
-- Speak... at... a... deliberate... measured... pace.
-- Insert PAUSES between sentences. Count "one-one-thousand" silently between each sentence.
-- NEVER rush. NEVER speed up. NEVER speak quickly.
-- Pronounce every syllable clearly and distinctly.
-- Take 2-3 seconds of silence between your sentences.
-- Imagine you are speaking to someone hard of hearing - clear and slow.
-- Addresses and numbers need EXTRA slowness: "Fifty... two... A... David... Road"
-- If in doubt, speak SLOWER than feels natural.
+# SPEAKING STYLE
+- Speak slowly and clearly, with natural pauses between sentences.
+- Do not rush through your responses.
+- Take your time with each word, especially addresses and numbers.
+- Use a calm, measured pace that is easy to understand over the phone.
 
 # 🛑 CRITICAL LOGIC GATE: THE CHECKLIST
 You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [Time].
@@ -555,14 +524,6 @@ When the user responds, ALWAYS check what question you just asked them:
 - If you asked for PASSENGERS and they respond → it's the passenger count
 - If you asked for TIME and they respond → it's the pickup time
 NEVER swap fields. Trust the question context.
-
-# 🔊 SPEECH-TO-TEXT HALLUCINATION CORRECTIONS (CRITICAL)
-The phone line's speech recognition sometimes mishears certain words. When you see these in user input, interpret them as follows:
-- "Boston Juice", "Ozempic Juice", "the free", "d3", "tree" → user said "THREE" (3)
-- "for" (standalone), "four" → may be "FOUR" (4) - check context
-- "to", "too" → may be "TWO" (2) - check context
-- "Sweets Puffs" → user said "Sweet Spot" (a location name)
-When asking for passengers and the user says something like "Boston Juice passengers" or "Ozempic Juice", they mean 3 passengers.
 `;
 }
 
@@ -627,13 +588,6 @@ const TOOLS = [
   }
 ];
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// STRICT STATE MACHINE: Index-locked booking progression
-// Ada CANNOT advance to step N+1 until step N is marked complete by user answer
-// ═══════════════════════════════════════════════════════════════════════════════
-const BOOKING_STEPS = ["pickup", "destination", "passengers", "time"] as const;
-type BookingStep = typeof BOOKING_STEPS[number];
-
 // Session state interface
 interface SessionState {
   callId: string;
@@ -645,19 +599,7 @@ interface SessionState {
     passengers: number | null;
     pickupTime: string | null;
   };
-  // OpenAI reconnection tracking
-  openAiReconnectAttempts: number;
-  lastOpenAiConnectedAt: number;
-  // STRICT STATE MACHINE: Current step index (0=pickup, 1=destination, 2=passengers, 3=time)
-  currentStepIndex: number;
-  // Track which steps are completed - user must answer before we advance
-  stepCompleted: [boolean, boolean, boolean, boolean];
-  // Legacy field for compatibility - will be derived from currentStepIndex
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
-  // CONTEXT CAPTURE: Snapshot of step index when user started speaking
-  // This prevents race conditions where Ada's response changes step before transcript arrives
-  contextAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
-  stepIndexAtSpeechStart: number;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -691,42 +633,25 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
-  // No-reply reprompt tracking (3-second timeout)
-  noReplyRepromptCount: number;
-  lastUserActivityAt: number;
-  awaitingReplyAt: number;
-  lastRepromptSentAt: number; // Prevent rapid-fire reprompts
 }
 
-// Helper to get current step name from index
-function getCurrentStepName(index: number): BookingStep | "confirmation" | "none" {
-  if (index < 0) return "none";
-  if (index >= BOOKING_STEPS.length) return "confirmation";
-  return BOOKING_STEPS[index];
-}
+const ECHO_GUARD_MS = 250;
 
-// Timing constants - RELAXED PACING to avoid intimidating rapid questions
-const ECHO_GUARD_MS = 150;
-const GREETING_PROTECTION_MS = 3000; // Give 3s before processing user audio
-const SUMMARY_PROTECTION_MS = 8000; // Protect summaries for 8s
-const ASSISTANT_LEADIN_IGNORE_MS = 800; // Ignore audio for 800ms after Ada starts speaking
-// No-reply reprompt tuning - SLOWER to avoid rapid repetition
-const NO_REPLY_TIMEOUT_FIRST_MS = 12000;  // Wait 12s before first reprompt (was 8s)
-const NO_REPLY_TIMEOUT_REPEAT_MS = 18000; // Wait 18s for subsequent reprompts (was 12s)
-const MAX_NO_REPLY_REPROMPTS = 2;
+// Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
+// so Ada's initial greeting doesn't get cut off mid-sentence.
+const GREETING_PROTECTION_MS = 12000;
 
-function getNoReplyTimeoutMs(repromptCount: number): number {
-  return repromptCount <= 0 ? NO_REPLY_TIMEOUT_FIRST_MS : NO_REPLY_TIMEOUT_REPEAT_MS;
-}
+// Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
+const SUMMARY_PROTECTION_MS = 8000;
+
+// While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
+const ASSISTANT_LEADIN_IGNORE_MS = 700;
 
 // RMS thresholds for audio quality
-// CRITICAL: Asterisk 8kHz audio comes in EXTREMELY quiet (raw RMS 1-10)
-// With AGC boost, we can detect speech at much lower thresholds
-// With DSP disabled, use raw RMS thresholds appropriate for 8kHz telephony
-const RMS_NOISE_FLOOR = 100;    // Below = digital silence (raw audio)
-const RMS_BARGE_IN_MIN = 200;   // Minimum for barge-in (raw audio levels)
-const RMS_BARGE_IN_MAX = 32000; // Above = clipping
-const RMS_ECHO_CEILING = 28000; // Hard ceiling for echo detection
+// NOTE: Telephony audio often has very low RMS (1-200) due to codec compression
+// Only apply barge-in filtering when Ada is actively speaking to prevent echo
+const RMS_BARGE_IN_MIN = 800;   // Minimum for barge-in during Ada speech
+const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
@@ -772,66 +697,6 @@ function applyPreEmphasis(pcm: Int16Array): Int16Array {
   return output;
 }
 
-// Volume boost for telephony audio (phone mics are quieter than browser)
-// REDUCED: Previous 8x was too aggressive and distorting speech
-const TELEPHONY_VOLUME_BOOST = 2.0; // Gentle boost only
-
-// Automatic Gain Control (AGC) - dynamically boost quiet audio to target RMS
-// REDUCED: Max gain 4x prevents distortion while still helping quiet callers
-const AGC_TARGET_RMS = 2000; // Lowered target for more natural sound
-const AGC_MIN_GAIN = 1.0;
-const AGC_MAX_GAIN = 4.0; // Reduced from 20x - was causing distortion
-
-// Feature flag to disable DSP entirely for testing
-const ENABLE_DSP_PIPELINE = false; // DISABLED - DSP was causing transcription issues
-
-function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST): Int16Array {
-  if (pcm.length === 0 || gain === 1.0) return pcm;
-  const output = new Int16Array(pcm.length);
-  for (let i = 0; i < pcm.length; i++) {
-    const val = Math.round(pcm[i] * gain);
-    output[i] = Math.max(-32768, Math.min(32767, val));
-  }
-  return output;
-}
-
-// AGC: Calculate gain needed to reach target RMS, with limits
-function calculateAgcGain(rms: number): number {
-  if (rms < 10) return AGC_MAX_GAIN; // Very quiet - max boost
-  const idealGain = AGC_TARGET_RMS / rms;
-  return Math.max(AGC_MIN_GAIN, Math.min(AGC_MAX_GAIN, idealGain));
-}
-
-// 3-tap low-pass filter to prevent aliasing (from C# desktop bridge)
-// Simple moving average: y[n] = (x[n-1] + x[n] + x[n+1]) / 3
-function applyLowPassFilter(pcm: Int16Array): Int16Array {
-  if (pcm.length < 3) return pcm;
-  const output = new Int16Array(pcm.length);
-  output[0] = pcm[0];
-  for (let i = 1; i < pcm.length - 1; i++) {
-    output[i] = Math.round((pcm[i - 1] + pcm[i] + pcm[i + 1]) / 3);
-  }
-  output[pcm.length - 1] = pcm[pcm.length - 1];
-  return output;
-}
-
-// Fade-in to prevent click artifacts at audio start (80 samples @ 24kHz = ~3.3ms)
-const FADE_IN_SAMPLES = 80;
-
-function applyFadeIn(pcm: Int16Array, isFirstFrame: boolean): Int16Array {
-  if (!isFirstFrame || pcm.length === 0) return pcm;
-  const output = new Int16Array(pcm.length);
-  const fadeLen = Math.min(FADE_IN_SAMPLES, pcm.length);
-  for (let i = 0; i < fadeLen; i++) {
-    const gain = i / fadeLen;
-    output[i] = Math.round(pcm[i] * gain);
-  }
-  for (let i = fadeLen; i < pcm.length; i++) {
-    output[i] = pcm[i];
-  }
-  return output;
-}
-
 // Whisper "phantom radio host" hallucinations - triggered by silence/static
 const PHANTOM_PHRASES = [
   "thanks for tuning in",
@@ -868,11 +733,6 @@ const PHANTOM_PHRASES = [
   "amara.org",
   "次回へ続く", // Japanese "to be continued"
   "ご視聴ありがとうございました",
-  // Common "three" hallucinations - Whisper mishears this number frequently
-  "boston juice",
-  "ozempic juice",
-  "as many as possible",
-  "as much as possible",
 ];
 
 // --- STT Corrections ---
@@ -1011,9 +871,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   // Number mishearings - standalone numbers
   "free": "three",
   "tree": "three",
-  "the free": "three",
-  "the tree": "three",
-  "d3": "three",
   "for": "four",
   "to": "two",
   "too": "two",
@@ -1024,9 +881,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   "freight": "eight",
   "fright": "eight",
   "fate": "eight",
-  // "Three" hallucinations that survive as transcripts (filter in PHANTOM_PHRASES too)
-  "boston juice": "three",
-  "ozempic juice": "three",
   
   // Number mishearings - with "passengers"
   "for passengers": "4 passengers",
@@ -1068,61 +922,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   "5208 david": "52A David",
   "five two a david": "52A David",
   "fifty two a david": "52A David",
-  "52 a david": "52A David",
-  "fifty two a david road": "52A David Road",
-  "52 a david road": "52A David Road",
-  "52a david road": "52A David Road",
-  "52 david road": "52A David Road",
-  "fifty two david road": "52A David Road",
-  "fifty two david": "52A David",
-  
-  // Prevent "52A" from being misheard/spoken as "28"
-  "28 david road": "52A David Road",
-  "28 david": "52A David",
-  "twenty eight david road": "52A David Road",
-  "twenty eight david": "52A David",
-  "28a david road": "52A David Road",
-  "28a david": "52A David",
-  
-  // House number suffix preservation (additional)
-  "52 b": "52B",
-  "52 c": "52C",
-  "18 a": "18A",
-  "18 b": "18B",
-  "7 a": "7A",
-  "7 b": "7B",
-  
-  // 1214A address preservation - common mishearings
-  "1214 a": "1214A",
-  "twelve fourteen a": "1214A",
-  "twelve 14 a": "1214A",
-  "1214a": "1214A",
-  "one two one four a": "1214A",
-  "1214 8": "1214A",
-  "12148": "1214A",
-  "twelve fourteen eight": "1214A",
-  "one two one four eight": "1214A",
-  
-  // Generic letter suffix patterns for 4-digit addresses
-  "1000 a": "1000A",
-  "1000 b": "1000B",
-  "1001 a": "1001A",
-  "1001 b": "1001B",
-  "1100 a": "1100A",
-  "1100 b": "1100B",
-  "1200 a": "1200A",
-  "1200 b": "1200B",
-  "1210 a": "1210A",
-  "1210 b": "1210B",
-  "1211 a": "1211A",
-  "1212 a": "1212A",
-  "1213 a": "1213A",
-  "1214 b": "1214B",
-  "1215 a": "1215A",
-  "1220 a": "1220A",
-  "1300 a": "1300A",
-  "1400 a": "1400A",
-  "1500 a": "1500A",
 };
 
 // Pre-compiled regex pattern for O(1) STT correction lookups
@@ -1140,14 +939,8 @@ function correctTranscript(text: string): string {
   if (!text || text.length === 0) return "";
   
   // Single-pass replacement using pre-compiled pattern
-  let corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
+  const corrected = text.replace(STT_CORRECTION_PATTERN, (matched) => {
     return STT_CORRECTIONS_LOWER.get(matched.toLowerCase()) || matched;
-  });
-  
-  // DYNAMIC SUFFIX PRESERVATION: Handle ANY "number space letter" pattern
-  // E.g., "1214 A" → "1214A", "52 B" → "52B", "7 C" → "7C"
-  corrected = corrected.replace(/\b(\d+)\s+([ABCabc])\b/g, (_, num, letter) => {
-    return num + letter.toUpperCase();
   });
   
   // Capitalize first letter and return
@@ -1551,15 +1344,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       passengers: null,
       pickupTime: null
     },
-    // OpenAI reconnection tracking
-    openAiReconnectAttempts: 0,
-    lastOpenAiConnectedAt: 0,
-    // STRICT STATE MACHINE: Start at step 0 (pickup)
-    currentStepIndex: 0,
-    stepCompleted: [false, false, false, false],
-    stepIndexAtSpeechStart: 0,
-    lastQuestionAsked: "pickup", // Will be derived from currentStepIndex
-    contextAtSpeechStart: "pickup",
+    lastQuestionAsked: "none",
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -1579,12 +1364,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false,
-    // No-reply reprompt tracking
-    noReplyRepromptCount: 0,
-    lastUserActivityAt: Date.now(),
-    awaitingReplyAt: 0,
-    lastRepromptSentAt: 0
+    saidOneMoment: false
   };
 }
 
@@ -1861,17 +1641,12 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   
   const sessionState = createSessionState(callId, callerPhone, effectiveLanguage);
   let openaiWs: WebSocket | null = null;
-  let deepgramWs: WebSocket | null = null;  // Parallel Deepgram STT for better 8kHz telephony recognition
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
   let inboundSampleRate = 8000;
-  
-  // Deepgram transcript tracking for better address capture
-  let lastDeepgramTranscript = "";
-  let deepgramTranscriptBuffer: string[] = [];  // Rolling buffer of last few transcripts
   
   // MEMORY LEAK FIX: Track all active timers for cleanup
   const activeTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -1958,18 +1733,6 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
-    }
-    
-    // Close Deepgram connection
-    if (deepgramWs) {
-      try {
-        if (deepgramWs.readyState === WebSocket.OPEN) {
-          deepgramWs.close();
-        }
-      } catch (e) {
-        console.error(`[${callId}] Error closing Deepgram:`, e);
-      }
-      deepgramWs = null;
     }
   };
 
@@ -2204,227 +1967,19 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] 📡 Dispatch channel status: ${status}`);
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // OpenAI WebSocket Connection with Auto-Reconnect
-  // If OpenAI drops mid-call, attempt to reconnect without dropping bridge connection
-  // ═══════════════════════════════════════════════════════════════════════════
-  const MAX_OPENAI_RECONNECT_ATTEMPTS = 3;
-  const OPENAI_RECONNECT_DELAY_MS = 1000;
-  
-  const connectToOpenAI = (): boolean => {
-    try {
-      const wsUrl = `${OPENAI_REALTIME_URL}`;
-      openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
-      sessionState.lastOpenAiConnectedAt = Date.now();
-      console.log(`[${callId}] 🔌 Connecting to OpenAI Realtime (attempt ${sessionState.openAiReconnectAttempts + 1})...`);
-      return true;
-    } catch (e) {
-      console.error(`[${callId}] ❌ Failed to connect to OpenAI:`, e);
-      return false;
-    }
-  };
-  
-  const attemptOpenAiReconnect = () => {
-    if (cleanedUp) {
-      console.log(`[${callId}] 🚫 Not reconnecting - session cleaned up`);
-      return;
-    }
-    
-    if (sessionState.openAiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
-      console.error(`[${callId}] ❌ Max OpenAI reconnect attempts reached (${MAX_OPENAI_RECONNECT_ATTEMPTS}), ending call`);
-      // Notify bridge that we're having issues
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ 
-          type: "error", 
-          message: "Connection to AI service lost. Please try again.",
-          code: "OPENAI_RECONNECT_FAILED"
-        }));
-      }
-      cleanupWithKeepalive();
-      return;
-    }
-    
-    sessionState.openAiReconnectAttempts++;
-    const delay = OPENAI_RECONNECT_DELAY_MS * sessionState.openAiReconnectAttempts;
-    console.log(`[${callId}] 🔄 Scheduling OpenAI reconnect in ${delay}ms (attempt ${sessionState.openAiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS})`);
-    
-    trackedTimeout(() => {
-      if (cleanedUp) return;
-      
-      if (connectToOpenAI()) {
-        // Connection will trigger onopen which handles session setup
-        console.log(`[${callId}] 🔄 Reconnection initiated, awaiting session.created...`);
-      } else {
-        attemptOpenAiReconnect();
-      }
-    }, delay);
-  };
-  
-  // Initial connection
-  if (!connectToOpenAI()) {
-    console.error(`[${callId}] ❌ Initial OpenAI connection failed`);
+  // Connect to OpenAI Realtime
+  // Note: Deno WebSocket requires headers as second argument array for protocols,
+  // but OpenAI needs Authorization header. Use the URL with query param workaround
+  // or rely on the proper Deno fetch-based approach.
+  try {
+    // For Deno, we need to use a different approach - create WebSocket with protocols
+    const wsUrl = `${OPENAI_REALTIME_URL}`;
+    openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
+  } catch (e) {
+    console.error(`[${callId}] Failed to connect to OpenAI:`, e);
     socket.close();
     return;
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Deepgram Streaming STT - Parallel transcription for better 8kHz telephony
-  // Uses nova-2-phonecall model optimized for telephony audio quality
-  // ═══════════════════════════════════════════════════════════════════════════
-  const connectToDeepgram = (): boolean => {
-    if (!USE_DEEPGRAM_STT) {
-      console.log(`[${callId}] 🎙️ Deepgram STT disabled by feature flag`);
-      return false;
-    }
-    if (!DEEPGRAM_API_KEY) {
-      console.log(`[${callId}] ⚠️ Deepgram STT enabled but DEEPGRAM_API_KEY not set`);
-      return false;
-    }
-
-    // Safe debug: confirm key is present without logging it
-    console.log(`[${callId}] 🎙️ Deepgram key detected (len=${DEEPGRAM_API_KEY.length})`);
-    
-    try {
-      // Use Nova-2 phonecall model optimized for 8kHz telephony
-      // Nova-2 supports native 8kHz so no upsampling needed
-      const sampleRate = inboundSampleRate; // Keep native 8kHz for telephony
-      
-      // Deepgram v1 endpoint with Nova-2 (widely available)
-      const baseUrl = `wss://api.deepgram.com/v1/listen`;
-      const params = new URLSearchParams({
-        model: "nova-2-phonecall",       // Optimized for telephony audio
-        encoding: "linear16",
-        sample_rate: sampleRate.toString(),
-        channels: "1",
-        // Streaming options
-        interim_results: "true",          // Get partial results for responsiveness
-        utterance_end_ms: "1500",         // Detect end of speech
-        vad_events: "true",               // Voice activity detection
-        endpointing: "300",               // Quick endpointing for snappy response
-        // Formatting
-        punctuate: "true",
-        smart_format: "true",
-        numerals: "true",
-        // Keyword boosting for taxi context
-        keywords: "pickup:2,destination:2,taxi:1.5,passengers:1.5,address:1.5,street:1.5,road:1.5",
-      });
-      
-      const url = `${baseUrl}?${params.toString()}`;
-      
-      console.log(`[${callId}] 🎙️ Connecting to Deepgram Nova-2 (v1) @ ${sampleRate}Hz...`);
-      
-      // Use subprotocol auth for Deno compatibility
-      try {
-        deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
-      } catch (wsError) {
-        console.error(`[${callId}] ❌ Deepgram WebSocket creation failed:`, wsError);
-        return false;
-      }
-      
-      deepgramWs.onopen = () => {
-        console.log(`[${callId}] 🎙️ Deepgram Nova-2 connected (nova-2-phonecall @ ${sampleRate}Hz)`);
-      };
-      
-      deepgramWs.onmessage = (event: MessageEvent) => {
-        try {
-          const data = JSON.parse(event.data);
-          const msgType = data.type;
-          
-          // Handle Nova-2 specific events
-          if (msgType === "SpeechStarted") {
-            console.log(`[${callId}] 🎙️ Nova-2: Speech started`);
-            // Reset no-reply timer immediately when user starts speaking
-            if (USE_DEEPGRAM_AS_PRIMARY) {
-              sessionState.lastUserActivityAt = Date.now();
-              console.log(`[${callId}] ⏳ User activity detected (SpeechStarted)`);
-            }
-          } else if (msgType === "UtteranceEnd") {
-            // End of utterance detected
-            console.log(`[${callId}] 🎙️ Nova-2: UtteranceEnd`);
-          } else if (data.channel?.alternatives?.[0]) {
-            // Regular transcript result (Results type)
-            const alt = data.channel.alternatives[0];
-            const transcript = alt.transcript?.trim() || "";
-            const isFinal = data.is_final === true;
-            
-            if (transcript) {
-              if (isFinal) {
-                // Final transcript - store for address extraction
-                lastDeepgramTranscript = transcript;
-                deepgramTranscriptBuffer.push(transcript);
-                if (deepgramTranscriptBuffer.length > 5) {
-                  deepgramTranscriptBuffer.shift(); // Keep last 5
-                }
-                console.log(`[${callId}] 🎙️ Nova-2 FINAL: "${transcript}" (conf=${alt.confidence?.toFixed(2)})`);
-                
-                // Send to client for logging/display
-                if (socket.readyState === WebSocket.OPEN) {
-                  socket.send(JSON.stringify({
-                    type: "deepgram_transcript",
-                    transcript,
-                    is_final: true,
-                    confidence: alt.confidence || 0
-                  }));
-                }
-                
-                // PRIMARY MODE: Inject Deepgram transcript into OpenAI as user text
-                if (USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  console.log(`[${callId}] 🎙️ Injecting Deepgram transcript into OpenAI: "${transcript}"`);
-                  
-                  // CRITICAL: Reset no-reply timer state - user has spoken!
-                  sessionState.lastUserActivityAt = Date.now();
-                  sessionState.noReplyRepromptCount = 0;
-                  console.log(`[${callId}] ⏳ Reset no-reply timer (Deepgram transcript received)`);
-                  
-                  // Create a conversation item with the user's text
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{
-                        type: "input_text",
-                        text: transcript
-                      }]
-                    }
-                  }));
-                  
-                  // Trigger response generation
-                  openaiWs.send(JSON.stringify({
-                    type: "response.create"
-                  }));
-                }
-              } else {
-                // Interim result - log but don't store
-                console.log(`[${callId}] 🎙️ Nova-2 interim: "${transcript}"`);
-              }
-            }
-          }
-        } catch (e) {
-          console.error(`[${callId}] Deepgram Nova-2 parse error:`, e);
-        }
-      };
-      
-      deepgramWs.onerror = (error: Event) => {
-        console.error(`[${callId}] ❌ Deepgram Nova-2 WebSocket error:`, error);
-      };
-      
-      deepgramWs.onclose = (event: CloseEvent) => {
-        console.log(`[${callId}] 🎙️ Deepgram Nova-2 closed: code=${event.code}, reason="${event.reason || 'none'}"`);
-        deepgramWs = null;
-      };
-      
-      return true;
-    } catch (e) {
-      console.error(`[${callId}] Failed to connect to Deepgram Nova-2:`, e);
-      return false;
-    }
-  };
-  
-  // Connect to Deepgram for parallel STT
-  console.log(`[${callId}] 🎙️ Attempting Deepgram connection (USE_DEEPGRAM_STT=${USE_DEEPGRAM_STT}, hasKey=${!!DEEPGRAM_API_KEY})`);
-  const deepgramConnected = connectToDeepgram();
-  console.log(`[${callId}] 🎙️ Deepgram connection result: ${deepgramConnected}`);
 
   // OpenAI WebSocket handlers
   // Flag to prevent duplicate greetings
@@ -2461,10 +2016,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       }
     }));
     
-    // STATE MACHINE: Greeting asks about pickup (step 0)
-    sessionState.currentStepIndex = 0;
     sessionState.lastQuestionAsked = "pickup";
-    console.log(`[${callId}] ✅ Greeting sent - STATE MACHINE at step 0 (pickup)`);
+    console.log(`[${callId}] ✅ Greeting sent - will NOT retry`);
   };
   
   // Fallback: if session.updated never arrives, send greeting after 2 seconds
@@ -2526,10 +2079,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // RELAXED PACING: Let users pause and think without Ada jumping in
-          threshold: 0.55,               // Slightly higher to avoid false triggers
-          prefix_padding_ms: 700,        // Capture the start of speech
-          silence_duration_ms: 2500,     // Wait 2.5s of silence before Ada responds (was 2s)
+          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
         },
         tools: TOOLS,
         tool_choice: "auto",
@@ -2541,15 +2094,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify(sessionConfig));
   };
 
-  // Setup OpenAI handlers immediately (using non-null assertion since we return early if null)
-  openaiWs!.onopen = () => {
+  openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
-    // Reset reconnect counter on successful connection
-    sessionState.openAiReconnectAttempts = 0;
-    sessionState.lastOpenAiConnectedAt = Date.now();
   };
 
-  openaiWs!.onmessage = async (event: MessageEvent) => {
+  openaiWs.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data);
       
@@ -2872,7 +2421,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               
               // Send webhook in background
               (async () => {
-                const AUTO_QUOTE_TIMEOUT_MS = 3000; // 3 seconds - if no quote, proceed with normal flow
+                const AUTO_QUOTE_TIMEOUT_MS = 30000;
 
                 try {
                   const result = await sendDispatchWebhook(sessionState, "request_quote", {
@@ -2925,41 +2474,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                       }));
                     }
                   } else {
-                    console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback (max ${AUTO_QUOTE_TIMEOUT_MS}ms)...`);
+                    console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback...`);
 
-                    // 3-SECOND TIMEOUT: If callback never arrives, proceed with normal booking flow
+                    // Safety: if callback never arrives, allow a retry later.
                     // MEMORY LEAK FIX: Use tracked timeout
                     trackedTimeout(() => {
                       if (cleanedUp) return;
                       if (sessionState.quoteInFlight && !sessionState.awaitingConfirmation && !sessionState.pendingFare) {
-                        console.log(`[${callId}] ⏰ Quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - proceeding with normal booking flow (no quote)`);
+                        console.log(`[${callId}] ⏰ Auto-trigger quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - clearing quoteInFlight to allow retry`);
                         sessionState.quoteInFlight = false;
-                        sessionState.awaitingConfirmation = true;
-                        sessionState.lastQuestionAsked = "confirmation";
-                        
-                        // Tell Ada to proceed WITHOUT a specific fare - just confirm the booking
-                        if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                          
-                          sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-                          
-                          const noQuoteMessage = `I wasn't able to get an exact fare quote, but shall I go ahead and book the taxi for you? The driver will confirm the fare when they arrive.`;
-                          
-                          openaiWs.send(JSON.stringify({
-                            type: "conversation.item.create",
-                            item: {
-                              type: "message",
-                              role: "user", 
-                              content: [{ type: "input_text", text: `[QUOTE UNAVAILABLE - PROCEED WITHOUT FARE]: Say to the customer: "${noQuoteMessage}". Then WAIT for their YES or NO answer. Do NOT call book_taxi until they explicitly say yes.` }]
-                            }
-                          }));
-                          
-                          openaiWs.send(JSON.stringify({
-                            type: "response.create",
-                            response: { modalities: ["audio", "text"], instructions: `Say exactly: "${noQuoteMessage}" - then STOP and WAIT for user response.` }
-                          }));
-                        }
                       }
                     }, AUTO_QUOTE_TIMEOUT_MS);
                   }
@@ -3052,92 +2575,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             console.log(`[${callId}] 🚀 Flushing queued post-confirmation goodbye response`);
             openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
           }
-          
-          // ARM NO-REPLY TIMER: If Ada just asked a question, set a timer
-          // If user doesn't respond, re-ask the question
-          // GUARD: Don't re-arm if we've already exceeded max reprompts
-          if (
-            !sessionState.bookingConfirmed &&
-            !sessionState.waitingForQuoteSilence &&
-            sessionState.lastQuestionAsked !== "none" &&
-            sessionState.noReplyRepromptCount <= MAX_NO_REPLY_REPROMPTS && // Don't keep arming after max
-            openaiWs &&
-            openaiWs.readyState === WebSocket.OPEN &&
-            !cleanedUp
-          ) {
-            sessionState.awaitingReplyAt = Date.now();
-            const noReplyDelayMs = getNoReplyTimeoutMs(sessionState.noReplyRepromptCount);
-            console.log(
-              `[${callId}] ⏳ Armed no-reply timer (${noReplyDelayMs}ms) for ${sessionState.lastQuestionAsked} (repromptCount=${sessionState.noReplyRepromptCount})`
-            );
-            
-            trackedTimeout(() => {
-              if (cleanedUp) return;
-              // Check if user spoke since we armed the timer
-              if (sessionState.lastUserActivityAt > sessionState.awaitingReplyAt) {
-                console.log(`[${callId}] ⏳ No-reply timer: User spoke, skipping reprompt`);
-                return;
-              }
-              // Don't reprompt if Ada is speaking or we're waiting for quote
-              if (sessionState.openAiResponseActive || sessionState.waitingForQuoteSilence) {
-                console.log(`[${callId}] ⏳ No-reply timer: Ada speaking or waiting for quote, skipping`);
-                return;
-              }
-              // Don't reprompt if booking is confirmed
-              if (sessionState.bookingConfirmed) return;
-              
-              // COOLDOWN: Prevent rapid-fire reprompts (minimum 5s between reprompts)
-              const timeSinceLastReprompt = Date.now() - sessionState.lastRepromptSentAt;
-              if (timeSinceLastReprompt < 5000) {
-                console.log(`[${callId}] ⏳ No-reply timer: Cooldown active (${timeSinceLastReprompt}ms since last), skipping`);
-                return;
-              }
-              
-              sessionState.noReplyRepromptCount++;
-              sessionState.lastRepromptSentAt = Date.now();
-              console.log(`[${callId}] 🔁 No-reply reprompt #${sessionState.noReplyRepromptCount}`);
-              
-              if (sessionState.noReplyRepromptCount > MAX_NO_REPLY_REPROMPTS) {
-                // After max reprompts, ask if they're still there - but DON'T trigger another response.create
-                // Just log it and let the call timeout naturally
-                console.log(`[${callId}] 🔁 Max reprompts reached - no more questions, waiting for user or timeout`);
-                return; // Don't send another response - prevents infinite loop
-              } else {
-                // Re-ask the current question
-                const stepQuestions: Record<string, string> = {
-                  pickup: "Where would you like to be picked up?",
-                  destination: "And what is your destination?",
-                  passengers: "How many passengers will there be?",
-                  time: "What time would you like the taxi?",
-                  confirmation: "Would you like me to book this for you?"
-                };
-                const question = stepQuestions[sessionState.lastQuestionAsked] || "I didn't catch that. Could you repeat?";
-                
-                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system", 
-                      content: [{ type: "input_text", text: `[NO REPLY - REPEAT QUESTION] The user didn't respond. Say exactly: "${question}" and wait for their answer.` }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({ type: "response.create" }));
-                }
-              }
-            }, noReplyDelayMs);
-          }
           break;
 
         case "input_audio_buffer.speech_started":
-          // CRITICAL: Capture the step index AT THE MOMENT the user starts speaking
-          // This prevents race conditions where Ada's response advances the step before transcript arrives
-          sessionState.stepIndexAtSpeechStart = sessionState.currentStepIndex;
-          sessionState.contextAtSpeechStart = getCurrentStepName(sessionState.currentStepIndex);
-          // Mark user activity to cancel any pending no-reply timer
-          sessionState.lastUserActivityAt = Date.now();
-          sessionState.noReplyRepromptCount = 0; // Reset reprompt count on user speech
-          console.log(`[${callId}] 🎤 User started speaking (step ${sessionState.stepIndexAtSpeechStart}: ${sessionState.contextAtSpeechStart})`);
+          console.log(`[${callId}] 🎤 User started speaking`);
           break;
 
         case "conversation.item.input_audio_transcription.completed":
@@ -3193,13 +2634,7 @@ Otherwise, say goodbye warmly and call end_call().`
               }
             }
             
-            // ═══════════════════════════════════════════════════════════════════════════
-            // STRICT STATE MACHINE: Use step index captured at speech start
-            // This prevents race conditions where Ada advances before transcript arrives
-            // ═══════════════════════════════════════════════════════════════════════════
-            const stepIndexForThisAnswer = sessionState.stepIndexAtSpeechStart;
-            const stepNameForThisAnswer = getCurrentStepName(stepIndexForThisAnswer);
-            console.log(`[${callId}] 👤 User answer for step ${stepIndexForThisAnswer} (${stepNameForThisAnswer}): "${userText}"`);
+            console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
@@ -3248,270 +2683,73 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
               
               await updateLiveCall(sessionState);
-              break; // Correction handled, don't run normal state machine flow
+              break; // Correction handled, don't run normal context pairing
             }
             
-            // ═══════════════════════════════════════════════════════════════════════════
-            // STRICT STATE MACHINE: Auto-save user answer to current step field
-            // ═══════════════════════════════════════════════════════════════════════════
-            let answerSaved = false;
-            let nextStepIndex = stepIndexForThisAnswer;
-            
-            if (stepIndexForThisAnswer < BOOKING_STEPS.length && !sessionState.stepCompleted[stepIndexForThisAnswer]) {
-              const currentStep = BOOKING_STEPS[stepIndexForThisAnswer];
+            // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
+            if (sessionState.lastQuestionAsked === "passengers") {
+              // Check if response looks like an address rather than a number
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
+              const isJustNumber = /^[1-9]$|^1[0-9]$|^20$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(userText.trim());
               
-              // CRITICAL: Validate that response looks like an address for pickup/destination
-              // Filter out hallucinations like "Passengers will be traveling", "Thank you for watching", etc.
-              const looksLikeValidAddress = (text: string): boolean => {
-                const lower = text.toLowerCase();
+              if (looksLikeAddress && !hasNumber && !isJustNumber) {
+                console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
                 
-                // REJECT: Known hallucination patterns
-                const hallucinations = [
-                  "passengers will",
-                  "traveling",
-                  "travelling",
-                  "thank you",
-                  "thanks for",
-                  "one moment",
-                  "please hold",
-                  "checking",
-                  "booking",
-                  "confirmed",
-                  "i'm ada",
-                  "your taxi",
-                  "would you like",
-                  "yes please",
-                  "no thank",
-                ];
-                if (hallucinations.some(h => lower.includes(h))) {
-                  return false;
-                }
+                // Store the address for later (might be a correction they want to make)
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
+                  timestamp: Date.now()
+                });
                 
-                // REJECT: Numeric-only responses (likely passenger count said at wrong time)
-                if (/^(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\.?$/i.test(text.trim())) {
-                  return false;
-                }
-                
-                // ACCEPT: Has address keywords (road, street, airport, etc.)
-                const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "airport", "station", "hotel", "hospital", "mall", "centre", "center", "square", "park", "building", "house", "flat", "apartment", "estate", "gardens", "grove", "hill", "view", "rise", "heath", "green"];
-                if (addressKeywords.some(kw => lower.includes(kw))) {
-                  return true;
-                }
-                
-                // ACCEPT: Has house number pattern (e.g., "52A", "123", "14 Main")
-                if (/^\d+[a-zA-Z]?\s+\w/.test(text) || /\b\d+[a-zA-Z]?\b/.test(text)) {
-                  return true;
-                }
-                
-                // ACCEPT: Known landmarks/businesses (2+ words, not a hallucination)
-                if (text.split(/\s+/).length >= 2 && text.length > 5) {
-                  return true;
-                }
-                
-                return false;
-              };
-              
-              switch (currentStep) {
-                case "pickup":
-                  // Validate before saving pickup address
-                  if (!looksLikeValidAddress(userText)) {
-                    console.log(`[${callId}] 🚫 REJECTED PICKUP: "${userText}" - doesn't look like a valid address`);
-                    // Don't advance, ask again
-                    openaiWs!.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[PICKUP NEEDED] The user said: "${userText}" which doesn't sound like an address. Ask again: "Where would you like to be picked up?"`
-                        }]
-                      }
-                    }));
-                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                    await updateLiveCall(sessionState);
-                    break; // Don't advance
+                // Force immediate re-prompt for passengers
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[PASSENGER CLARIFICATION NEEDED] You asked for the number of passengers, but the user said: "${userText}" which sounds like an address.
+
+DO NOT interpret this as passenger count. Politely clarify:
+- Acknowledge you might have misheard
+- Ask specifically for the NUMBER of passengers traveling
+- Keep it brief: "Sorry, I missed that. How many passengers will be traveling?"
+
+Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=NOT YET SET`
+                    }]
                   }
-                  sessionState.booking.pickup = userText;
-                  sessionState.stepCompleted[0] = true;
-                  nextStepIndex = 1;
-                  answerSaved = true;
-                  console.log(`[${callId}] ✅ STATE MACHINE: Step 0 (pickup) COMPLETE → "${userText}"`);
-                  break;
-                  
-                case "destination":
-                  // Validate before saving destination address
-                  if (!looksLikeValidAddress(userText)) {
-                    console.log(`[${callId}] 🚫 REJECTED DESTINATION: "${userText}" - doesn't look like a valid address`);
-                    // Don't advance, ask again
-                    openaiWs!.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[DESTINATION NEEDED] The user said: "${userText}" which doesn't sound like an address. Ask again: "Where would you like to go?"`
-                        }]
-                      }
-                    }));
-                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                    await updateLiveCall(sessionState);
-                    break; // Don't advance
-                  }
-                  sessionState.booking.destination = userText;
-                  sessionState.stepCompleted[1] = true;
-                  nextStepIndex = 2;
-                  answerSaved = true;
-                  console.log(`[${callId}] ✅ STATE MACHINE: Step 1 (destination) COMPLETE → "${userText}"`);
-                  break;
-                  
-                case "passengers":
-                  // Parse passenger count - check if response looks like an address first
-                  const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
-                  
-                  if (looksLikeAddress) {
-                    console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
-                    
-                    // Store the address for later (might be a correction they want to make)
-                    sessionState.conversationHistory.push({
-                      role: "user",
-                      content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
-                      timestamp: Date.now()
-                    });
-                    
-                    // Force immediate re-prompt for passengers - DON'T advance step
-                    openaiWs!.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[PASSENGER CLARIFICATION NEEDED] You asked for passengers, but the user said: "${userText}" which sounds like an address.
-Ask: "Sorry, I need the number of passengers traveling. How many will there be?"`
-                        }]
-                      }
-                    }));
-                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                    await updateLiveCall(sessionState);
-                    break; // Exit switch, don't advance
-                  }
-                  
-                  // Parse the number
-                  const wordToNum: Record<string, number> = {
-                    one: 1, two: 2, three: 3, four: 4, five: 5,
-                    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
-                  };
-                  
-                  const lowerV = userText.toLowerCase().trim();
-                  let parsedCount: number | null = null;
-                  
-                  // First try digit match
-                  const digitMatch = userText.match(/\b(\d+)\b/);
-                  if (digitMatch) {
-                    parsedCount = parseInt(digitMatch[1], 10);
-                  } else {
-                    // Try word match (e.g., "three" → 3)
-                    for (const [word, num] of Object.entries(wordToNum)) {
-                      if (lowerV === word || lowerV.includes(word)) {
-                        parsedCount = num;
-                        break;
-                      }
-                    }
-                  }
-                  
-                  if (parsedCount !== null && parsedCount > 0 && parsedCount <= 20) {
-                    sessionState.booking.passengers = parsedCount;
-                    sessionState.stepCompleted[2] = true;
-                    nextStepIndex = 3;
-                    answerSaved = true;
-                    console.log(`[${callId}] ✅ STATE MACHINE: Step 2 (passengers) COMPLETE → ${parsedCount}`);
-                  } else {
-                    console.log(`[${callId}] ⚠️ Could not parse passenger count from: "${userText}"`);
-                  }
-                  break;
-                  
-                case "time":
-                  // Save pickup time
-                  const lowerTime = userText.toLowerCase();
-                  if (
-                    lowerTime.includes("now") ||
-                    lowerTime.includes("asap") ||
-                    lowerTime.includes("right away") ||
-                    lowerTime.includes("immediately") ||
-                    lowerTime.includes("straightaway")
-                  ) {
-                    sessionState.booking.pickupTime = "ASAP";
-                  } else {
-                    sessionState.booking.pickupTime = userText;
-                  }
-                  sessionState.stepCompleted[3] = true;
-                  nextStepIndex = 4; // Move to confirmation phase
-                  answerSaved = true;
-                  console.log(`[${callId}] ✅ STATE MACHINE: Step 3 (time) COMPLETE → "${sessionState.booking.pickupTime}"`);
-                  break;
-              }
-              
-              // Advance to next step if answer was saved
-              if (answerSaved) {
-                sessionState.currentStepIndex = nextStepIndex;
-                sessionState.lastQuestionAsked = getCurrentStepName(nextStepIndex);
-                console.log(`[${callId}] ➡️ STATE MACHINE: Advanced to step ${nextStepIndex} (${sessionState.lastQuestionAsked})`);
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break; // Don't run normal context pairing
               }
             }
             
-            // Add to conversation history
+            // Add to history with context annotation (normal flow)
             sessionState.conversationHistory.push({
               role: "user",
-              content: `[STEP ${stepIndexForThisAnswer}: ${stepNameForThisAnswer}] ${userText}`,
+              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
               timestamp: Date.now()
             });
             
-            // Send state-aware prompt to OpenAI with STRICT instructions
-            const allStepsComplete = sessionState.stepCompleted.every(s => s);
-            const nextStepName = getCurrentStepName(sessionState.currentStepIndex);
-            
-            let nextInstruction = "";
-            if (allStepsComplete) {
-              nextInstruction = "ALL 4 STEPS COMPLETE. Now summarize the booking and ask if correct.";
-            } else if (sessionState.currentStepIndex < BOOKING_STEPS.length) {
-              const stepQuestions: Record<BookingStep, string> = {
-                pickup: "Where would you like to be picked up?",
-                destination: "And what is your destination?",
-                passengers: "How many passengers will be traveling?",
-                time: "What time would you like the taxi?"
-              };
-              nextInstruction = `NOW ASK STEP ${sessionState.currentStepIndex} (${nextStepName}): "${stepQuestions[BOOKING_STEPS[sessionState.currentStepIndex]]}"`;
-            }
-            
-            const statePrompt = {
+            // Send context-aware prompt to OpenAI
+            const contextPrompt = {
               type: "conversation.item.create",
               item: {
                 type: "message",
                 role: "system",
                 content: [{
                   type: "input_text",
-                  text: `[STATE MACHINE UPDATE] User answered step ${stepIndexForThisAnswer} (${stepNameForThisAnswer}): "${userText}"
-
-CURRENT STATE:
-- Step 0 (pickup): ${sessionState.stepCompleted[0] ? "✅ " + sessionState.booking.pickup : "❌ NOT SET"}
-- Step 1 (destination): ${sessionState.stepCompleted[1] ? "✅ " + sessionState.booking.destination : "❌ NOT SET"}
-- Step 2 (passengers): ${sessionState.stepCompleted[2] ? "✅ " + sessionState.booking.passengers : "❌ NOT SET"}
-- Step 3 (time): ${sessionState.stepCompleted[3] ? "✅ " + sessionState.booking.pickupTime : "❌ NOT SET"}
-
-NEXT ACTION: ${nextInstruction}
-
-CRITICAL: You CANNOT ask about a later step until the current step is complete. Follow the sequence strictly.`
+                  text: `[CONTEXT PAIRING] You just asked about "${sessionState.lastQuestionAsked}". The user responded: "${userText}". 
+                  
+If this is a valid answer to your ${sessionState.lastQuestionAsked} question, use sync_booking_data to save it to the CORRECT field.
+Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
                 }]
               }
             };
-            openaiWs!.send(JSON.stringify(statePrompt));
-            
-            // NOTE: Do NOT send response.create here!
-            // OpenAI's VAD already triggered a response from the user's speech.
-            // The system message injection guides what Ada says - sending response.create
-            // here causes duplicate responses (Ada asks the same question twice).
+            openaiWs!.send(JSON.stringify(contextPrompt));
             
             await updateLiveCall(sessionState);
           }
@@ -4036,40 +3274,25 @@ Do NOT skip any part. Say ALL of it warmly.]`
     }
   };
 
-  openaiWs!.onerror = (error: Event) => {
-    console.error(`[${callId}] ❌ OpenAI WebSocket error:`, error);
+  openaiWs.onerror = (error) => {
+    console.error(`[${callId}] OpenAI WebSocket error:`, error);
   };
 
-  openaiWs!.onclose = (ev: CloseEvent) => {
-    const code = ev.code;
-    const reason = ev.reason || "no reason";
-    console.log(`[${callId}] 🔌 OpenAI WebSocket closed code=${code} reason=${reason}`);
-    
-    // Check if this was an unexpected disconnect (not a normal close)
-    const wasConnectedRecently = (Date.now() - sessionState.lastOpenAiConnectedAt) > 5000;
-    const isUnexpectedClose = code !== 1000 && code !== 1001;
-    
-    if (isUnexpectedClose && wasConnectedRecently && !cleanedUp) {
-      console.log(`[${callId}] ⚠️ Unexpected OpenAI disconnect - notifying bridge`);
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ 
-          type: "error", 
-          message: "AI connection interrupted. The call may need to be restarted.",
-          code: "OPENAI_DISCONNECTED"
-        }));
-      }
-    }
-    
+  openaiWs.onclose = (ev) => {
+    // Include close codes/reasons to debug unexpected disconnects.
+    // NOTE: Deno's WS close event may not always include reason.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyEv: any = ev;
+    console.log(
+      `[${callId}] OpenAI WebSocket closed` +
+        (anyEv?.code ? ` code=${anyEv.code}` : "") +
+        (anyEv?.reason ? ` reason=${anyEv.reason}` : ""),
+    );
     cleanupWithKeepalive();
   };
 
   // Audio diagnostics for this session
   const audioDiag = createAudioDiagnostics();
-
-  // Barge-in smoothing: require a short streak of speech-like frames to avoid
-  // random noise triggering (and to make quieter speakers more reliable).
-  let bargeInSpeechStreak = 0;
-  let bufferedBargeInFrame: string | null = null;
 
   // Client WebSocket handlers
   socket.onmessage = async (event) => {
@@ -4079,26 +3302,6 @@ Do NOT skip any part. Say ALL of it warmly.]`
         const audioBytes = event.data instanceof ArrayBuffer
           ? new Uint8Array(event.data)
           : event.data;
-
-        // FORMAT AUTODETECT (CRITICAL FIX): Always verify format on the first 5 packets.
-        // The Python bridge might send "update_format" AFTER audio starts, or might not match
-        // what we expect. Frame sizes tell us the truth:
-        // - 160 bytes: ulaw@8k (8000 samples/sec * 1 byte/sample * 20ms = 160)
-        // - 320 bytes: slin@8k (8000 samples/sec * 2 bytes/sample * 20ms = 320) 
-        // - 640 bytes: slin16@16k (16000 samples/sec * 2 bytes/sample * 20ms = 640)
-        if (audioDiag.packetsReceived < 5) {
-          const detectedFormat = audioBytes.length === 160 ? "ulaw" 
-            : audioBytes.length === 320 ? "slin" 
-            : audioBytes.length === 640 ? "slin16" 
-            : null;
-          
-          if (detectedFormat && detectedFormat !== inboundAudioFormat) {
-            const oldFormat = inboundAudioFormat;
-            inboundAudioFormat = detectedFormat;
-            inboundSampleRate = detectedFormat === "slin16" ? 16000 : 8000;
-            console.log(`[${callId}] 🔎 FORMAT FIX: ${oldFormat} → ${detectedFormat} (detected from ${audioBytes.length}b frames)`);
-          }
-        }
 
         audioDiag.packetsReceived++;
 
@@ -4111,17 +3314,12 @@ Do NOT skip any part. Say ALL of it warmly.]`
           pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
         }
 
-        // Compute RMS - use raw values when DSP is disabled
-        const rmsRaw = computeRms(pcmInput);
-        // When DSP is disabled, use raw RMS directly; otherwise use boosted for barge-in gating
-        const rms = ENABLE_DSP_PIPELINE ? computeRms(applyVolumeBoost(pcmInput)) : rmsRaw;
+        const rms = computeRms(pcmInput);
         updateRmsAverage(audioDiag, rms);
 
         // Log audio stats periodically
         if (audioDiag.packetsReceived <= 3) {
-          console.log(
-            `[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)} (DSP=${ENABLE_DSP_PIPELINE ? 'on' : 'off'})`
-          );
+          console.log(`[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)}`);
         } else if (audioDiag.packetsReceived % 200 === 0) {
           console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
         }
@@ -4165,122 +3363,22 @@ Do NOT skip any part. Say ALL of it warmly.]`
               return;
             }
 
-            const speechLike = rms >= RMS_BARGE_IN_MIN && rms <= RMS_BARGE_IN_MAX;
-
-            if (!speechLike) {
-              // Reset streak/buffer when audio doesn't look like genuine speech.
-              bargeInSpeechStreak = 0;
-              bufferedBargeInFrame = null;
+            if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
               audioDiag.packetsSkippedEcho++;
               return; // Not real speech, likely echo or noise
             }
-
-            // Speech-like: build a short streak before forwarding to reduce false triggers.
-            bargeInSpeechStreak++;
-
-            // DSP pipeline (can be disabled for testing)
-            let pcm24k: Int16Array;
-            if (ENABLE_DSP_PIPELINE) {
-              // Full DSP pipeline with AGC for quiet telephony:
-              // 1. Calculate dynamic gain based on current RMS
-              // 2. Apply AGC + fixed boost  
-              // 3. Low-pass filter - prevent aliasing
-              // 4. Pre-emphasis - boost consonants for STT
-              // 5. Resample to 24kHz for OpenAI
-              const agcGain = calculateAgcGain(rms);
-              let processed = applyVolumeBoost(pcmInput, agcGain);
-              processed = applyLowPassFilter(processed);
-              processed = applyPreEmphasis(processed);
-              pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
-            } else {
-              // BYPASS DSP: Just resample directly for cleaner audio
-              pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
-            }
-            const base64Audio = pcm16ToBase64(pcm24k);
-
-            // Backpressure guard: avoid huge buffered sends causing latency/hit-and-miss hearing.
-            // If we fall behind, it's better to drop frames than queue seconds of audio.
-            const buffered = (openaiWs as any).bufferedAmount as number | undefined;
-            if (typeof buffered === "number" && buffered > 2_000_000) {
-              bargeInSpeechStreak = 0;
-              bufferedBargeInFrame = null;
-              return;
-            }
-
-            // Require 2 consecutive frames before we start forwarding.
-            if (bargeInSpeechStreak === 1) {
-              bufferedBargeInFrame = base64Audio;
-              return;
-            }
-
-            audioDiag.packetsForwarded++;
-            
-            // Only send audio to OpenAI if NOT using Deepgram as primary STT
-            if (!USE_DEEPGRAM_AS_PRIMARY) {
-              if (bufferedBargeInFrame) {
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: bufferedBargeInFrame }));
-                bufferedBargeInFrame = null;
-              }
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64Audio }));
-            } else {
-              bufferedBargeInFrame = null; // Clear buffered frame when Deepgram is primary
-            }
-
-            // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
-            // Nova-2 phonecall model supports 8kHz natively - no resampling needed
-            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              const pcmBytes = new Uint8Array(pcmInput.buffer, pcmInput.byteOffset, pcmInput.byteLength);
-              deepgramWs.send(pcmBytes);
-            }
-
-            return;
           }
 
-          // Not speaking: forward immediately (no barge-in streak needed)
-          bargeInSpeechStreak = 0;
-          bufferedBargeInFrame = null;
-
-          // DSP pipeline (can be disabled for testing)
-          let pcm24k: Int16Array;
-          if (ENABLE_DSP_PIPELINE) {
-            // Full DSP pipeline with AGC for quiet telephony:
-            // 1. Calculate dynamic gain based on current RMS
-            // 2. Apply AGC boost
-            // 3. Low-pass filter - prevent aliasing  
-            // 4. Pre-emphasis - boost consonants for STT
-            // 5. Resample to 24kHz for OpenAI
-            const agcGain = calculateAgcGain(rms);
-            let processed = applyVolumeBoost(pcmInput, agcGain);
-            processed = applyLowPassFilter(processed);
-            processed = applyPreEmphasis(processed);
-            pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
-          } else {
-            // BYPASS DSP: Just resample directly for cleaner audio
-            pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
-          }
+          // Apply pre-emphasis for better STT consonant clarity, then resample
+          const pcmEmph = applyPreEmphasis(pcmInput);
+          const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
-          // Backpressure guard
-          const buffered = (openaiWs as any).bufferedAmount as number | undefined;
-          if (typeof buffered === "number" && buffered > 2_000_000) {
-            return;
-          }
-
-          // Only send audio to OpenAI if NOT using Deepgram as primary STT
-          if (!USE_DEEPGRAM_AS_PRIMARY) {
-            audioDiag.packetsForwarded++;
-            openaiWs.send(JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: base64Audio,
-            }));
-          }
-
-          // PARALLEL: Send to Deepgram Flux for telephony-optimized STT
-          // Nova-2 phonecall model supports 8kHz natively - no resampling needed
-          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            const pcmBytes = new Uint8Array(pcmInput.buffer, pcmInput.byteOffset, pcmInput.byteLength);
-            deepgramWs.send(pcmBytes);
-          }
+          audioDiag.packetsForwarded++;
+          openaiWs.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: base64Audio,
+          }));
         }
         return;
       }
@@ -4310,8 +3408,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
 
           // Forward directly to OpenAI - C# bridge already sends PCM16 @ 24kHz
-          // Only send audio to OpenAI if NOT using Deepgram as primary STT
-          if (!USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "input_audio_buffer.append",
               audio: data.audio,
@@ -4335,8 +3432,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
           const pcm24k = resamplePcm16To24k(pcmInput, assumedRate);
           const base64Audio = pcm16ToBase64(pcm24k);
 
-          // Only send audio to OpenAI if NOT using Deepgram as primary STT
-          if (!USE_DEEPGRAM_AS_PRIMARY && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "input_audio_buffer.append",
               audio: base64Audio,
