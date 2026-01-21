@@ -16,9 +16,13 @@ const corsHeaders = {
 
 // Environment
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
+const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY") || "";
 const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL") || "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+
+// Feature flags
+const USE_DEEPGRAM_STT = DEEPGRAM_API_KEY.length > 0; // Auto-enable if key exists
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -1749,12 +1753,17 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   
   const sessionState = createSessionState(callId, callerPhone, effectiveLanguage);
   let openaiWs: WebSocket | null = null;
+  let deepgramWs: WebSocket | null = null;  // Parallel Deepgram STT for better 8kHz telephony recognition
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
   let inboundSampleRate = 8000;
+  
+  // Deepgram transcript tracking for better address capture
+  let lastDeepgramTranscript = "";
+  let deepgramTranscriptBuffer: string[] = [];  // Rolling buffer of last few transcripts
   
   // MEMORY LEAK FIX: Track all active timers for cleanup
   const activeTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -1841,6 +1850,18 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
+    }
+    
+    // Close Deepgram connection
+    if (deepgramWs) {
+      try {
+        if (deepgramWs.readyState === WebSocket.OPEN) {
+          deepgramWs.close();
+        }
+      } catch (e) {
+        console.error(`[${callId}] Error closing Deepgram:`, e);
+      }
+      deepgramWs = null;
     }
   };
 
@@ -2137,6 +2158,106 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     socket.close();
     return;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Deepgram Streaming STT - Parallel transcription for better 8kHz telephony
+  // Uses nova-2-phonecall model optimized for telephony audio quality
+  // ═══════════════════════════════════════════════════════════════════════════
+  const connectToDeepgram = (): boolean => {
+    if (!USE_DEEPGRAM_STT || !DEEPGRAM_API_KEY) {
+      console.log(`[${callId}] 🎙️ Deepgram STT disabled (no API key)`);
+      return false;
+    }
+    
+    try {
+      // Keyword boosting for taxi booking context - helps with addresses
+      const keywords = [
+        // Confirmation phrases (high boost)
+        "cancel:2", "cancel it:2", "book it:2", "yes:1.5", "no:1.5", "yeah:1.5",
+        // UK Cities
+        "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Manchester:1.5", "London:1.5",
+        // Common streets
+        "Road:1.3", "Street:1.3", "Lane:1.3", "Avenue:1.3", "Drive:1.3", "Close:1.3",
+        // Airports
+        "airport:1.5", "Birmingham Airport:1.8", "Heathrow:1.8",
+        // Venues
+        "Sweet Spot:1.8", "Tesco:1.5", "hospital:1.5", "station:1.5"
+      ].join("&keywords=");
+      
+      // Format for streaming: mulaw for 8kHz telephony, linear16 for slin/slin16
+      const encoding = inboundAudioFormat === "ulaw" ? "mulaw" : "linear16";
+      const sampleRate = inboundSampleRate;
+      
+      const url = `wss://api.deepgram.com/v1/listen?` +
+        `model=nova-2-phonecall&language=en-GB&encoding=${encoding}&` +
+        `sample_rate=${sampleRate}&channels=1&` +
+        `punctuate=true&interim_results=true&endpointing=500&` +
+        `vad_events=true&smart_format=true&numerals=true&` +
+        `keywords=${keywords}`;
+      
+      deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+      
+      deepgramWs.onopen = () => {
+        console.log(`[${callId}] 🎙️ Deepgram STT connected (nova-2-phonecall @ ${sampleRate}Hz)`);
+      };
+      
+      deepgramWs.onmessage = (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === "Results" && data.channel?.alternatives?.[0]) {
+            const alt = data.channel.alternatives[0];
+            const transcript = alt.transcript?.trim() || "";
+            const isFinal = data.is_final === true;
+            
+            if (transcript) {
+              if (isFinal) {
+                // Final transcript - store for address extraction
+                lastDeepgramTranscript = transcript;
+                deepgramTranscriptBuffer.push(transcript);
+                if (deepgramTranscriptBuffer.length > 5) {
+                  deepgramTranscriptBuffer.shift(); // Keep last 5
+                }
+                console.log(`[${callId}] 🎙️ DG FINAL: "${transcript}"`);
+                
+                // Send to client for logging/display
+                if (socket.readyState === WebSocket.OPEN) {
+                  socket.send(JSON.stringify({
+                    type: "deepgram_transcript",
+                    transcript,
+                    is_final: true,
+                    confidence: alt.confidence || 0
+                  }));
+                }
+              } else {
+                // Interim result - log but don't store
+                console.log(`[${callId}] 🎙️ DG interim: "${transcript}"`);
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`[${callId}] Deepgram parse error:`, e);
+        }
+      };
+      
+      deepgramWs.onerror = (error) => {
+        console.error(`[${callId}] Deepgram error:`, error);
+      };
+      
+      deepgramWs.onclose = () => {
+        console.log(`[${callId}] 🎙️ Deepgram connection closed`);
+        deepgramWs = null;
+      };
+      
+      return true;
+    } catch (e) {
+      console.error(`[${callId}] Failed to connect to Deepgram:`, e);
+      return false;
+    }
+  };
+  
+  // Connect to Deepgram for parallel STT
+  connectToDeepgram();
 
   // OpenAI WebSocket handlers
   // Flag to prevent duplicate greetings
@@ -3755,6 +3876,13 @@ Do NOT skip any part. Say ALL of it warmly.]`
             type: "input_audio_buffer.append",
             audio: base64Audio,
           }));
+          
+          // PARALLEL: Send raw audio to Deepgram for telephony-optimized STT
+          // Deepgram nova-2-phonecall is better at 8kHz than Whisper
+          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            // Send original audio bytes (before resampling) to Deepgram
+            deepgramWs.send(audioBytes);
+          }
         }
         return;
       }
