@@ -3553,6 +3553,11 @@ Do NOT say 'booked' until the tool returns success.]`
           // AFTER Ada has asked "Is there anything else I can help you with?" (askedAnythingElse=true).
           // Otherwise, "no thanks" might mean rejecting a fare quote, not ending the call.
           // IMPORTANT: Enforce 3-second grace period after "anything else?" to let users actually respond
+          // 
+          // NEW: Hard goodbye (bye/goodbye) should ONLY end the call if:
+          // 1. A booking has been confirmed (bookingConfirmed=true), OR
+          // 2. Ada has asked "Is there anything else?" (askedAnythingElse=true)
+          // Otherwise, redirect user back to complete the booking.
           const isHardGoodbye = /\b(bye|goodbye|see ya|see you|cya|i'm done|im done|hang up|end call)\b/i.test(lowerUserText);
           const isSoftGoodbye = /\b(no thank you|no thanks|no that's all|no thats all|nothing else|that's it|thats it|that'll be all|thatll be all|i'm good|im good|all good|all done)\b/i.test(lowerUserText) ||
             // Special case: just "no" or "no." when asked "anything else?" - user is declining
@@ -3564,14 +3569,51 @@ Do NOT say 'booked' until the tool returns success.]`
           const enoughTimeElapsed = !sessionState.askedAnythingElseAt || 
             (Date.now() - sessionState.askedAnythingElseAt > gracePeriodMs);
           
-          // Hard goodbye always works (user explicitly wants to leave).
-          // Soft goodbye only works AFTER Ada asked "anything else?" AND 3 seconds have passed.
-          const isExplicitGoodbye = (isHardGoodbye || (isSoftGoodbye && sessionState.askedAnythingElse && enoughTimeElapsed)) &&
+          // === NEW GUARD: Prevent premature goodbye if booking incomplete ===
+          // A booking is "complete enough" to end the call if:
+          // - bookingConfirmed=true (dispatch confirmed), OR
+          // - askedAnythingElse=true (Ada already asked follow-up question)
+          const bookingCompleteEnough = sessionState.bookingFullyConfirmed || sessionState.askedAnythingElse;
+          
+          // Hard goodbye now requires bookingCompleteEnough to prevent premature termination
+          // Soft goodbye still requires askedAnythingElse (unchanged)
+          const isExplicitGoodbye = ((isHardGoodbye && bookingCompleteEnough) || (isSoftGoodbye && sessionState.askedAnythingElse && enoughTimeElapsed)) &&
             // Exclude "bye" in compound phrases like "going to the airport" (unlikely but guard against)
             !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
           
+          // === NEW: Handle premature goodbye attempt (user says bye before booking complete) ===
+          if (isHardGoodbye && !bookingCompleteEnough && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 👋 Premature goodbye detected: "${userText}" - booking not complete, redirecting user`);
+            
+            // Cancel any in-flight assistant speech
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            // Ask if they want to continue or cancel
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: `[SYSTEM: The customer said goodbye but hasn't completed their booking. Say EXACTLY: "Before you go, would you like me to complete your taxi booking? I just need a few more details."]`,
+                    },
+                  ],
+                },
+              })
+            );
+            
+            openaiWs.send(JSON.stringify({ type: "response.create" }));
+            break; // Skip normal processing
+          }
+          
           if (isExplicitGoodbye && openaiWs && openaiConnected && !sessionState.callEnded) {
-            console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" (hardGoodbye=${isHardGoodbye}, softGoodbye=${isSoftGoodbye}, gracePeriodPassed=${enoughTimeElapsed}) - ending call`);
+            console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" (hardGoodbye=${isHardGoodbye}, softGoodbye=${isSoftGoodbye}, gracePeriodPassed=${enoughTimeElapsed}, bookingConfirmed=${sessionState.bookingFullyConfirmed}) - ending call`);
             
             // ✅ CRITICAL: Mark call as ending IMMEDIATELY to block all further processing
             sessionState.callEnded = true;
@@ -3598,6 +3640,11 @@ Do NOT say 'booked' until the tool returns success.]`
               "You can always book again by simply sending us a voice note on WhatsApp."
             ];
             const randomTip = whatsappTips[Math.floor(Math.random() * whatsappTips.length)];
+            
+            // Different closing message based on whether a booking was made
+            const closingMessage = sessionState.bookingFullyConfirmed 
+              ? `You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey.`
+              : `${randomTip} Thank you for trying the Taxibot demo. Goodbye!`;
 
             openaiWs.send(
               JSON.stringify({
@@ -3609,7 +3656,7 @@ Do NOT say 'booked' until the tool returns success.]`
                     {
                       type: "input_text",
                       text: `[SYSTEM: The customer is done. Say EXACTLY this closing message, then stay silent:
-"You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey."]`,
+"${closingMessage}"]`,
                     },
                   ],
                 },
