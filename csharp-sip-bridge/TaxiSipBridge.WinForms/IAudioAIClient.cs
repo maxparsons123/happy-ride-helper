@@ -30,6 +30,9 @@ public interface IAudioAIClient : IDisposable
     /// <summary>Fired when a new AI response starts (for fade-in reset).</summary>
     event Action? OnResponseStarted;
     
+    /// <summary>Fired when the AI requests to end the call.</summary>
+    event Action? OnCallEnded;
+    
     /// <summary>Whether the client is currently connected.</summary>
     bool IsConnected { get; }
     
