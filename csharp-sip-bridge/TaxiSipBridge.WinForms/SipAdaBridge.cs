@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
@@ -283,6 +284,33 @@ public class SipAdaBridge : IDisposable
                             var text = textEl.GetString();
                             if (!string.IsNullOrEmpty(text))
                                 Log($"📝 [{callId}] {text}");
+                        }
+                        else if (typeStr == "keepalive")
+                        {
+                            long? ts = null;
+                            if (doc.RootElement.TryGetProperty("timestamp", out var tsEl) && tsEl.ValueKind == JsonValueKind.Number)
+                                ts = tsEl.GetInt64();
+
+                            string ackCallId = callId;
+                            if (doc.RootElement.TryGetProperty("call_id", out var callIdEl) && callIdEl.ValueKind == JsonValueKind.String)
+                                ackCallId = callIdEl.GetString() ?? callId;
+
+                            try
+                            {
+                                var ack = JsonSerializer.Serialize(new Dictionary<string, object?>
+                                {
+                                    ["type"] = "keepalive_ack",
+                                    ["timestamp"] = ts,
+                                    ["call_id"] = ackCallId,
+                                });
+
+                                await ws.SendAsync(
+                                    new ArraySegment<byte>(Encoding.UTF8.GetBytes(ack)),
+                                    WebSocketMessageType.Text,
+                                    true,
+                                    CancellationToken.None);
+                            }
+                            catch { }
                         }
                         else if (typeStr == "response.created" || typeStr == "response.audio.started")
                         {
