@@ -22,7 +22,10 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
 // Feature flags
-const USE_DEEPGRAM_STT = DEEPGRAM_API_KEY.length > 0; // Auto-enable if key exists
+// NOTE: Deepgram streaming STT is disabled because Deno's native WebSocket doesn't support
+// the Authorization header that Deepgram requires. The subprotocol auth method fails silently.
+// OpenAI's built-in Whisper transcription is used instead.
+const USE_DEEPGRAM_STT = false; // Disabled until we find a working auth method for Deno
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
