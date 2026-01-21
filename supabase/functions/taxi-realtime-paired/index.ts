@@ -667,6 +667,10 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
+  // No-reply reprompt tracking (3-second timeout)
+  noReplyRepromptCount: number;
+  lastUserActivityAt: number;
+  awaitingReplyAt: number;
 }
 
 // Helper to get current step name from index
@@ -681,6 +685,8 @@ const ECHO_GUARD_MS = 150; // Reduced from 250ms for faster response
 const GREETING_PROTECTION_MS = 2000; // Reduced from 12000ms - desktop is cleaner
 const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms for quicker confirmations
 const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms for snappier turns
+const NO_REPLY_TIMEOUT_MS = 3000; // 3 seconds - if user doesn't respond, re-ask
+const MAX_NO_REPLY_REPROMPTS = 2; // Max times to re-ask before asking "Are you still there?"
 
 // RMS thresholds for audio quality (aligned with desktop mode)
 const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
@@ -1481,7 +1487,11 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false
+    saidOneMoment: false,
+    // No-reply reprompt tracking
+    noReplyRepromptCount: 0,
+    lastUserActivityAt: Date.now(),
+    awaitingReplyAt: 0
   };
 }
 
@@ -2903,6 +2913,77 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             console.log(`[${callId}] 🚀 Flushing queued post-confirmation goodbye response`);
             openaiWs.send(JSON.stringify({ type: "response.create", response: queued }));
           }
+          
+          // ARM NO-REPLY TIMER: If Ada just asked a question, set a 3-second timer
+          // If user doesn't respond, re-ask the question
+          if (
+            !sessionState.bookingConfirmed &&
+            !sessionState.waitingForQuoteSilence &&
+            sessionState.lastQuestionAsked !== "none" &&
+            openaiWs &&
+            openaiWs.readyState === WebSocket.OPEN &&
+            !cleanedUp
+          ) {
+            sessionState.awaitingReplyAt = Date.now();
+            console.log(`[${callId}] ⏳ Armed no-reply timer (${NO_REPLY_TIMEOUT_MS}ms) for ${sessionState.lastQuestionAsked}`);
+            
+            trackedTimeout(() => {
+              if (cleanedUp) return;
+              // Check if user spoke since we armed the timer
+              if (sessionState.lastUserActivityAt > sessionState.awaitingReplyAt) {
+                console.log(`[${callId}] ⏳ No-reply timer: User spoke, skipping reprompt`);
+                return;
+              }
+              // Don't reprompt if Ada is speaking or we're waiting for quote
+              if (sessionState.openAiResponseActive || sessionState.waitingForQuoteSilence) {
+                console.log(`[${callId}] ⏳ No-reply timer: Ada speaking or waiting for quote, skipping`);
+                return;
+              }
+              // Don't reprompt if booking is confirmed
+              if (sessionState.bookingConfirmed) return;
+              
+              sessionState.noReplyRepromptCount++;
+              console.log(`[${callId}] 🔁 No-reply reprompt #${sessionState.noReplyRepromptCount}`);
+              
+              if (sessionState.noReplyRepromptCount > MAX_NO_REPLY_REPROMPTS) {
+                // After max reprompts, ask if they're still there
+                console.log(`[${callId}] 🔁 Max reprompts reached, asking if user is still there`);
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [{ type: "input_text", text: `[NO REPLY] Say: "Hello? Are you still there?" and wait for a response.` }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                }
+              } else {
+                // Re-ask the current question
+                const stepQuestions: Record<string, string> = {
+                  pickup: "Where would you like to be picked up?",
+                  destination: "And what is your destination?",
+                  passengers: "How many passengers will there be?",
+                  time: "What time would you like the taxi?",
+                  confirmation: "Would you like me to book this for you?"
+                };
+                const question = stepQuestions[sessionState.lastQuestionAsked] || "I didn't catch that. Could you repeat?";
+                
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system", 
+                      content: [{ type: "input_text", text: `[NO REPLY - REPEAT QUESTION] The user didn't respond. Say exactly: "${question}" and wait for their answer.` }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                }
+              }
+            }, NO_REPLY_TIMEOUT_MS);
+          }
           break;
 
         case "input_audio_buffer.speech_started":
@@ -2910,6 +2991,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // This prevents race conditions where Ada's response advances the step before transcript arrives
           sessionState.stepIndexAtSpeechStart = sessionState.currentStepIndex;
           sessionState.contextAtSpeechStart = getCurrentStepName(sessionState.currentStepIndex);
+          // Mark user activity to cancel any pending no-reply timer
+          sessionState.lastUserActivityAt = Date.now();
+          sessionState.noReplyRepromptCount = 0; // Reset reprompt count on user speech
           console.log(`[${callId}] 🎤 User started speaking (step ${sessionState.stepIndexAtSpeechStart}: ${sessionState.contextAtSpeechStart})`);
           break;
 
