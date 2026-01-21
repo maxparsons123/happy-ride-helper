@@ -602,6 +602,24 @@ const STT_CORRECTIONS: Record<string, string> = {
   "rugby": "Rugby",
   "rug bee": "Rugby",
   
+  // Dovey Road mishearings (observed in testing - STT says "Dogpool" for "Dovey")
+  "dogpool road": "Dovey Road",
+  "dog pool road": "Dovey Road",
+  "dogpole road": "Dovey Road",
+  "dog pole road": "Dovey Road",
+  "dorkey road": "Dovey Road",
+  "dork he road": "Dovey Road",
+  "doggie road": "Dovey Road",
+  "doki road": "Dovey Road",
+  "dopey road": "Dovey Road",
+  "dovy road": "Dovey Road",
+  "dovie road": "Dovey Road",
+  "duvey road": "Dovey Road",
+  "duffy road": "Dovey Road",
+  "duffey road": "Dovey Road",
+  "darvi road": "Dovey Road",
+  "darby road": "Dovey Road",
+  
   // Street name mishearings
   "david rose": "David Road",
   "davie road": "David Road",
@@ -848,6 +866,99 @@ const STT_CORRECTION_PATTERN = new RegExp(
 const STT_CORRECTIONS_LOWER = new Map(
   Object.entries(STT_CORRECTIONS).map(([k, v]) => [k.toLowerCase(), v])
 );
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADDRESS CORRECTION DETECTION (ported from paired mode)
+// Detects "No", "Actually", "It's..." patterns and maps to pickup/destination
+// ═══════════════════════════════════════════════════════════════════════════════
+interface AddressCorrection {
+  type: "pickup" | "destination" | null;
+  address: string;
+}
+
+function detectAddressCorrection(text: string, currentPickup: string | null, currentDestination: string | null): AddressCorrection {
+  const lower = text.toLowerCase();
+  
+  // Correction trigger phrases
+  const correctionPhrases = [
+    /^it'?s\s+(.+)/i,                          // "It's 52A David Road"
+    /^no[,\s]+it'?s\s+(.+)/i,                  // "No, it's..."
+    /^actually[,\s]+(.+)/i,                    // "Actually 52A David Road"
+    /^i meant\s+(.+)/i,                        // "I meant 52A..."
+    /^i said\s+(.+)/i,                         // "I said 52A..."
+    /^should be\s+(.+)/i,                      // "Should be 52A..."
+    /^it should be\s+(.+)/i,                   // "It should be..."
+    /^sorry[,\s]+(.+)/i,                       // "Sorry, 52A David Road"
+    /^correction[:\s]+(.+)/i,                  // "Correction: 52A..."
+    /^the (?:pickup|address) is\s+(.+)/i,     // "The pickup is..."
+    /^(?:no[,\s]+)?that'?s\s+(.+)/i,          // "That's 52A..." or "No, that's 52A..."
+    /^now[,\s]+(?:the\s+)?(?:pickup|address)\s+(?:is\s+)?(.+)/i, // "Now, the pickup is 43 Dovey Road"
+  ];
+  
+  let extractedAddress: string | null = null;
+  
+  for (const pattern of correctionPhrases) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      extractedAddress = match[1].trim();
+      // Remove trailing punctuation
+      extractedAddress = extractedAddress.replace(/[.,!?]+$/, '').trim();
+      break;
+    }
+  }
+  
+  if (!extractedAddress || extractedAddress.length < 3) {
+    return { type: null, address: "" };
+  }
+  
+  // Filter out confirmation phrases that are NOT addresses
+  const confirmationPhrases = ["correct", "right", "yes", "yeah", "yep", "sure", "fine", "ok", "okay", "good", "great", "perfect", "lovely", "brilliant", "that's right", "that's correct"];
+  const lowerExtracted = extractedAddress.toLowerCase();
+  
+  // Check if it's exactly a confirmation phrase OR starts with one
+  for (const phrase of confirmationPhrases) {
+    if (lowerExtracted === phrase || 
+        lowerExtracted.startsWith(phrase + ",") || 
+        lowerExtracted.startsWith(phrase + " ") ||
+        lowerExtracted.startsWith(phrase + ".") ||
+        lowerExtracted.startsWith(phrase + "!")) {
+      return { type: null, address: "" };
+    }
+  }
+  
+  // Address keywords indicate a valid address
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park"];
+  const hasAddressKeyword = addressKeywords.some(kw => lowerExtracted.includes(kw));
+  const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(extractedAddress) || /\d+[a-zA-Z]?$/.test(extractedAddress);
+  
+  // If no address keywords and no house number, likely not a real address
+  if (!hasAddressKeyword && !hasHouseNumber && extractedAddress.split(/\s+/).length <= 2) {
+    return { type: null, address: "" };
+  }
+  
+  // Determine if correcting pickup or destination
+  if (lower.includes("pickup") || lower.includes("pick up") || lower.includes("from")) {
+    return { type: "pickup", address: extractedAddress };
+  }
+  if (lower.includes("destination") || lower.includes("to") || lower.includes("going to") || lower.includes("drop")) {
+    return { type: "destination", address: extractedAddress };
+  }
+  
+  // Default: if we have a pickup but no destination, assume pickup correction
+  if (currentPickup && !currentDestination) {
+    return { type: "pickup", address: extractedAddress };
+  }
+  
+  // Default to pickup correction if uncertain
+  return { type: "pickup", address: extractedAddress };
+}
+
+// Detect simple negation during summary phase ("No", "No.", "Nope")
+function isSummaryNegation(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  // Match standalone "no", "nope", "not correct", "wrong", etc.
+  return /^(no\.?|nope\.?|not correct|wrong|incorrect|that'?s not right|that'?s wrong)$/i.test(lower);
+}
 
 function correctTranscript(text: string): string {
   if (!text || text.length === 0) return "";
@@ -3131,6 +3242,119 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             
             break; // Skip normal processing for this transcript
+          }
+
+          // === SUMMARY NEGATION DETECTION (ported from paired mode) ===
+          // When user says "No" during summary confirmation, they want to correct something
+          // Don't treat it as a goodbye - instead reset the summary and ask what's wrong
+          const isSummaryPhase = sessionState.bookingStep === "summary" || sessionState.lastQuestionType === "confirmation";
+          const isSimpleNegation = isSummaryNegation(userText);
+          
+          if (isSummaryPhase && isSimpleNegation && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] ❌ SUMMARY NEGATION: User said "${userText}" during summary - asking what needs correcting`);
+            
+            // Cancel any in-flight response
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            sessionState.discardCurrentResponseAudio = true;
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+            
+            // Inject correction prompt
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: The customer said "No" to the summary. Say ONLY: "I'm sorry about that. What would you like me to change?" Then STOP and wait for their answer. Do NOT repeat the booking details.]`,
+                }],
+              },
+            }));
+            
+            // Stay in summary phase but clear the confirmation question type to allow corrections
+            sessionState.lastQuestionType = null;
+            safeResponseCreate(sessionState, "summary-negation-correction");
+            
+            break; // Skip normal processing
+          }
+          
+          // === ADDRESS CORRECTION DETECTION (ported from paired mode) ===
+          // Detect phrases like "No, it's...", "Actually...", "The pickup is..."
+          const addressCorrection = detectAddressCorrection(userText, sessionState.booking.pickup, sessionState.booking.destination);
+          
+          if (addressCorrection.type && addressCorrection.address && openaiWs && openaiConnected && !sessionState.callEnded) {
+            console.log(`[${sessionState.callId}] 🔧 ADDRESS CORRECTION DETECTED: ${addressCorrection.type} = "${addressCorrection.address}"`);
+            
+            // Apply STT correction to the extracted address
+            const correctedAddress = correctTranscript(addressCorrection.address);
+            
+            // Update booking state
+            const oldValue = addressCorrection.type === "pickup" ? sessionState.booking.pickup : sessionState.booking.destination;
+            if (addressCorrection.type === "pickup") {
+              sessionState.booking.pickup = correctedAddress;
+            } else {
+              sessionState.booking.destination = correctedAddress;
+            }
+            
+            console.log(`[${sessionState.callId}] ✅ Updated ${addressCorrection.type}: "${oldValue}" → "${correctedAddress}"`);
+            
+            // Sync to database
+            const updatePayload: Record<string, any> = { updated_at: new Date().toISOString() };
+            if (addressCorrection.type === "pickup") {
+              updatePayload.pickup = correctedAddress;
+            } else {
+              updatePayload.destination = correctedAddress;
+            }
+            supabase.from("live_calls").update(updatePayload).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ live_calls updated with ${addressCorrection.type} correction`);
+            });
+            
+            // Cancel any in-flight response
+            if (sessionState.openAiResponseActive) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            }
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            
+            sessionState.discardCurrentResponseAudio = true;
+            sessionState.audioVerified = false;
+            sessionState.pendingAudioBuffer = [];
+            
+            // Inject acknowledgment and continue flow
+            const fieldLabel = addressCorrection.type === "pickup" ? "pickup" : "destination";
+            const nextQuestion = sessionState.booking.pickup && sessionState.booking.destination 
+              ? (sessionState.booking.passengers ? "When do you need the taxi?" : "How many people will be travelling?")
+              : (addressCorrection.type === "pickup" ? "And what is your destination?" : "Where would you like to be picked up?");
+            
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: The customer corrected the ${fieldLabel} to "${correctedAddress}". Updated ${fieldLabel} is now "${correctedAddress}". Ask ONLY: "${nextQuestion}" No filler words.]`,
+                }],
+              },
+            }));
+            
+            // Update question tracking
+            if (nextQuestion.includes("destination")) {
+              sessionState.lastQuestionType = "destination";
+            } else if (nextQuestion.includes("people") || nextQuestion.includes("passengers")) {
+              sessionState.lastQuestionType = "passengers";
+            } else if (nextQuestion.includes("when") || nextQuestion.includes("taxi")) {
+              sessionState.lastQuestionType = "time";
+            }
+            sessionState.lastQuestionAt = Date.now();
+            
+            safeResponseCreate(sessionState, "address-correction");
+            
+            break; // Skip normal processing
           }
 
           // === EXPLICIT BYE/GOODBYE DETECTION (HIGHEST PRIORITY) ===
