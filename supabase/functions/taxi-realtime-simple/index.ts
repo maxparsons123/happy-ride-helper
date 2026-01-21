@@ -473,6 +473,18 @@ If caller says their name → CALL save_customer_name
 ✅ Only ask for a house number if it's clearly a residential street address missing a number.
 ✅ If the user gives a place name or business, accept it immediately and move to the next question.
 ✅ ALWAYS check the "CURRENT BOOKING STATE" section to see what's already captured before asking questions.
+
+# NEAREST/CLOSEST PLACES
+When user says "nearest X" or "closest X" (e.g., "nearest hospital", "closest train station", "nearest tube"):
+- Accept this as a valid destination or pickup
+- Do NOT ask for a specific address - just accept "nearest hospital" as the destination
+- The dispatch system will find the actual nearest location based on their pickup
+
+# VENUE SUGGESTIONS (ANYTHING ELSE)
+When you ask "Is there anything else I can help you with?" and user asks about places (hotels, restaurants, bars, pubs, cafes):
+- Be helpful and suggest 2-3 popular options if you know them
+- Say something like: "There are some great options nearby! Would you like me to book a taxi to any of them?"
+- If they pick one, use it as the destination and start a new booking
 `;
 
 
