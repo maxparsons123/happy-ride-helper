@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using NAudio.Wave;
 
 namespace TaxiSipBridge;
@@ -296,6 +297,31 @@ public class AdaAudioClient : IDisposable
     private int _totalAudioBytes = 0;
     private DateTime _lastAudioStats = DateTime.MinValue;
 
+    private async Task SendKeepaliveAckAsync(long? timestamp, string? callId)
+    {
+        if (_disposed || _ws?.State != WebSocketState.Open) return;
+
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["type"] = "keepalive_ack",
+                ["timestamp"] = timestamp,
+                ["call_id"] = callId,
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
+        catch { }
+    }
+
     private void ProcessMessage(string json)
     {
         if (_disposed) return;
@@ -310,6 +336,20 @@ public class AdaAudioClient : IDisposable
 
             switch (type)
             {
+                case "keepalive":
+                    {
+                        long? ts = null;
+                        if (doc.RootElement.TryGetProperty("timestamp", out var tsEl) && tsEl.ValueKind == JsonValueKind.Number)
+                            ts = tsEl.GetInt64();
+
+                        string? callId = null;
+                        if (doc.RootElement.TryGetProperty("call_id", out var callIdEl) && callIdEl.ValueKind == JsonValueKind.String)
+                            callId = callIdEl.GetString();
+
+                        _ = SendKeepaliveAckAsync(ts, callId);
+                        break;
+                    }
+
                 case "response.audio.delta":
                 case "audio":  // Also handle direct "audio" type from some edge functions
                     // Try both "delta" (OpenAI format) and "audio" (direct format)
