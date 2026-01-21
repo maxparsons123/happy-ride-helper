@@ -722,8 +722,9 @@ function getNoReplyTimeoutMs(repromptCount: number): number {
 // RMS thresholds for audio quality
 // CRITICAL: Asterisk 8kHz audio comes in EXTREMELY quiet (raw RMS 1-10)
 // With AGC boost, we can detect speech at much lower thresholds
-const RMS_NOISE_FLOOR = 20;     // Below = digital silence (after boost)
-const RMS_BARGE_IN_MIN = 50;    // Minimum for barge-in (lowered significantly for telephony)
+// With DSP disabled, use raw RMS thresholds appropriate for 8kHz telephony
+const RMS_NOISE_FLOOR = 100;    // Below = digital silence (raw audio)
+const RMS_BARGE_IN_MIN = 200;   // Minimum for barge-in (raw audio levels)
 const RMS_BARGE_IN_MAX = 32000; // Above = clipping
 const RMS_ECHO_CEILING = 28000; // Hard ceiling for echo detection
 
@@ -772,13 +773,17 @@ function applyPreEmphasis(pcm: Int16Array): Int16Array {
 }
 
 // Volume boost for telephony audio (phone mics are quieter than browser)
-// CRITICAL: Asterisk 8kHz audio comes in very quiet (RMS 1-100). Need aggressive boost.
-const TELEPHONY_VOLUME_BOOST = 8.0; // Increased from 3.0 - telephony is VERY quiet
+// REDUCED: Previous 8x was too aggressive and distorting speech
+const TELEPHONY_VOLUME_BOOST = 2.0; // Gentle boost only
 
 // Automatic Gain Control (AGC) - dynamically boost quiet audio to target RMS
-const AGC_TARGET_RMS = 3000; // Target RMS level for speech
+// REDUCED: Max gain 4x prevents distortion while still helping quiet callers
+const AGC_TARGET_RMS = 2000; // Lowered target for more natural sound
 const AGC_MIN_GAIN = 1.0;
-const AGC_MAX_GAIN = 20.0;
+const AGC_MAX_GAIN = 4.0; // Reduced from 20x - was causing distortion
+
+// Feature flag to disable DSP entirely for testing
+const ENABLE_DSP_PIPELINE = false; // DISABLED - DSP was causing transcription issues
 
 function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST): Int16Array {
   if (pcm.length === 0 || gain === 1.0) return pcm;
@@ -4106,18 +4111,16 @@ Do NOT skip any part. Say ALL of it warmly.]`
           pcmInput = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
         }
 
-        // Compute RMS on raw input for debugging, but use a boosted RMS for barge-in gating.
-        // This prevents "quiet caller" scenarios where the user speaks over Ada but never trips
-        // the barge-in threshold (causing repeated questions / no-reply reprompts).
+        // Compute RMS - use raw values when DSP is disabled
         const rmsRaw = computeRms(pcmInput);
-        const rmsBoosted = computeRms(applyVolumeBoost(pcmInput));
-        const rms = rmsBoosted;
+        // When DSP is disabled, use raw RMS directly; otherwise use boosted for barge-in gating
+        const rms = ENABLE_DSP_PIPELINE ? computeRms(applyVolumeBoost(pcmInput)) : rmsRaw;
         updateRmsAverage(audioDiag, rms);
 
         // Log audio stats periodically
         if (audioDiag.packetsReceived <= 3) {
           console.log(
-            `[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS(raw)=${rmsRaw.toFixed(0)}, RMS(boosted)=${rmsBoosted.toFixed(0)}`
+            `[${callId}] 🎙️ Audio #${audioDiag.packetsReceived}: ${audioBytes.length}b, RMS=${rms.toFixed(0)} (DSP=${ENABLE_DSP_PIPELINE ? 'on' : 'off'})`
           );
         } else if (audioDiag.packetsReceived % 200 === 0) {
           console.log(`[${callId}] 📊 Audio: rx=${audioDiag.packetsReceived}, fwd=${audioDiag.packetsForwarded}, noise=${audioDiag.packetsSkippedNoise}, echo=${audioDiag.packetsSkippedEcho}, avgRMS=${audioDiag.avgRms.toFixed(0)}`);
@@ -4175,17 +4178,24 @@ Do NOT skip any part. Say ALL of it warmly.]`
             // Speech-like: build a short streak before forwarding to reduce false triggers.
             bargeInSpeechStreak++;
 
-            // Full DSP pipeline with AGC for quiet telephony:
-            // 1. Calculate dynamic gain based on current RMS
-            // 2. Apply AGC + fixed boost  
-            // 3. Low-pass filter - prevent aliasing
-            // 4. Pre-emphasis - boost consonants for STT
-            // 5. Resample to 24kHz for OpenAI
-            const agcGain = calculateAgcGain(rms);
-            let processed = applyVolumeBoost(pcmInput, agcGain);
-            processed = applyLowPassFilter(processed);
-            processed = applyPreEmphasis(processed);
-            const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
+            // DSP pipeline (can be disabled for testing)
+            let pcm24k: Int16Array;
+            if (ENABLE_DSP_PIPELINE) {
+              // Full DSP pipeline with AGC for quiet telephony:
+              // 1. Calculate dynamic gain based on current RMS
+              // 2. Apply AGC + fixed boost  
+              // 3. Low-pass filter - prevent aliasing
+              // 4. Pre-emphasis - boost consonants for STT
+              // 5. Resample to 24kHz for OpenAI
+              const agcGain = calculateAgcGain(rms);
+              let processed = applyVolumeBoost(pcmInput, agcGain);
+              processed = applyLowPassFilter(processed);
+              processed = applyPreEmphasis(processed);
+              pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
+            } else {
+              // BYPASS DSP: Just resample directly for cleaner audio
+              pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
+            }
             const base64Audio = pcm16ToBase64(pcm24k);
 
             // Backpressure guard: avoid huge buffered sends causing latency/hit-and-miss hearing.
@@ -4230,17 +4240,24 @@ Do NOT skip any part. Say ALL of it warmly.]`
           bargeInSpeechStreak = 0;
           bufferedBargeInFrame = null;
 
-          // Full DSP pipeline with AGC for quiet telephony:
-          // 1. Calculate dynamic gain based on current RMS
-          // 2. Apply AGC boost
-          // 3. Low-pass filter - prevent aliasing  
-          // 4. Pre-emphasis - boost consonants for STT
-          // 5. Resample to 24kHz for OpenAI
-          const agcGain = calculateAgcGain(rms);
-          let processed = applyVolumeBoost(pcmInput, agcGain);
-          processed = applyLowPassFilter(processed);
-          processed = applyPreEmphasis(processed);
-          const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
+          // DSP pipeline (can be disabled for testing)
+          let pcm24k: Int16Array;
+          if (ENABLE_DSP_PIPELINE) {
+            // Full DSP pipeline with AGC for quiet telephony:
+            // 1. Calculate dynamic gain based on current RMS
+            // 2. Apply AGC boost
+            // 3. Low-pass filter - prevent aliasing  
+            // 4. Pre-emphasis - boost consonants for STT
+            // 5. Resample to 24kHz for OpenAI
+            const agcGain = calculateAgcGain(rms);
+            let processed = applyVolumeBoost(pcmInput, agcGain);
+            processed = applyLowPassFilter(processed);
+            processed = applyPreEmphasis(processed);
+            pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
+          } else {
+            // BYPASS DSP: Just resample directly for cleaner audio
+            pcm24k = resamplePcm16To24k(pcmInput, inboundSampleRate);
+          }
           const base64Audio = pcm16ToBase64(pcm24k);
 
           // Backpressure guard
