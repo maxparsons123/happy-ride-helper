@@ -87,6 +87,7 @@ interface DispatchCallback {
   // For ask action
   question?: string;
   context?: string;
+  ignored?: boolean; // Flag to mark questions that don't need processing
   // For ask_confirm action - fare confirmation with callback
   callback_url?: string; // URL to POST yes/no response
   // For say action (uses message field)
@@ -127,6 +128,7 @@ serve(async (req) => {
       booking_ref,
       question,
       context,
+      ignored,
       callback_url,
       field_changed,
       old_value,
@@ -286,7 +288,7 @@ serve(async (req) => {
         });
       }
 
-      console.log(`[${call_id}] 🎤 Dispatch asking: "${question}"`);
+      console.log(`[${call_id}] 🎤 Dispatch asking: "${question}" (ignored: ${ignored || false})`);
 
       // Broadcast the question to the active WebSocket session
       await supabase.channel(`dispatch_${call_id}`).send({
@@ -297,6 +299,7 @@ serve(async (req) => {
           action: "ask",
           question,
           context: context || null,
+          ignored: ignored || false,
           timestamp: new Date().toISOString()
         }
       });
@@ -308,6 +311,7 @@ serve(async (req) => {
           clarification_attempts: { 
             pending_question: question,
             question_context: context || null,
+            ignored: ignored || false,
             asked_at: new Date().toISOString()
           },
           updated_at: new Date().toISOString()
