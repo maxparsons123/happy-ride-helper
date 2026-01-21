@@ -94,19 +94,22 @@ RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
 # Audio processing - ENABLED for quiet telephony lines
-# v7.4: AGC + volume boost to bring quiet input (RMS 5-20) up to usable levels
+# v7.5: AGGRESSIVE boost - avgRMS was still 8-89, needs to be 300+
 ENABLE_NOISE_REDUCTION = False  # Keep disabled - causes muting issues
-ENABLE_VOLUME_BOOST = True      # NEW: Apply 3x boost to quiet lines
-ENABLE_AGC = True               # NEW: Automatic gain control
+ENABLE_VOLUME_BOOST = True      # Apply fixed boost to quiet lines
+ENABLE_AGC = True               # Automatic gain control
 
-VOLUME_BOOST_FACTOR = 3.0       # Fixed multiplier for all audio (before AGC)
+VOLUME_BOOST_FACTOR = 6.0       # INCREASED from 3.0 - audio still too quiet
 NOISE_GATE_THRESHOLD = 15       # Lower threshold if enabled
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 60
-TARGET_RMS = 300                # Target RMS after AGC (was 2500, now matches backend)
-MAX_GAIN = 15.0                 # Match backend AGC (was 2.0)
-MIN_GAIN = 1.0                  # Never reduce volume (was 0.9)
-GAIN_SMOOTHING_FACTOR = 0.15    # Slightly faster adaptation
+TARGET_RMS = 500                # INCREASED from 300 - target louder output
+MAX_GAIN = 20.0                 # INCREASED from 15.0 for very quiet lines
+MIN_GAIN = 1.0                  # Never reduce volume
+GAIN_SMOOTHING_FACTOR = 0.2     # Faster adaptation
+
+# Debug logging for audio levels
+LOG_AUDIO_LEVELS = True         # Log RMS before/after processing
 
 # Asterisk message types
 MSG_HANGUP = 0x00
@@ -690,11 +693,14 @@ class TaxiBridgeV7:
                         # Convert to numpy for processing
                         pcm_array = np.frombuffer(linear, dtype=np.int16).astype(np.float32)
                         
-                        # v7.4: Apply VOLUME BOOST first (3x) to bring quiet lines up
+                        # Calculate input RMS for debugging
+                        input_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
+                        
+                        # v7.5: Apply VOLUME BOOST first (6x) to bring quiet lines up
                         if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
                             pcm_array *= VOLUME_BOOST_FACTOR
                         
-                        # v7.4: Apply AGC to normalize levels
+                        # v7.5: Apply AGC to normalize levels
                         if ENABLE_AGC and pcm_array.size > 0:
                             rms = float(np.sqrt(np.mean(pcm_array ** 2)))
                             if rms > 10:  # Only apply AGC if there's actual audio
@@ -702,8 +708,16 @@ class TaxiBridgeV7:
                                 self.state.last_gain = self.state.last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - self.state.last_gain)
                                 pcm_array *= self.state.last_gain
                         
+                        # Calculate output RMS
+                        output_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
+                        
+                        # Log audio levels periodically (every ~1 second = 50 frames @ 20ms)
+                        if LOG_AUDIO_LEVELS and self.state.binary_audio_count % 50 == 0:
+                            logger.info("[%s] 🔊 Audio: inRMS=%.0f → outRMS=%.0f (gain=%.1fx, boost=%.0fx)",
+                                       self.state.call_id, input_rms, output_rms, 
+                                       self.state.last_gain, VOLUME_BOOST_FACTOR)
+                        
                         # Apply pre-emphasis to boost consonants before STT
-                        # This helps OpenAI distinguish 'S' vs 'F' sounds (Russell vs Ruffles)
                         emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
                         cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
 
