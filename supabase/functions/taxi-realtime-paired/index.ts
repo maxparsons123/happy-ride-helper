@@ -23,9 +23,13 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // OpenAI Realtime API config
-// Using full gpt-4o-realtime model for highest voice quality and consistency
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
+// Using mini model - testing direct audio passthrough to Whisper
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
 const VOICE = "shimmer";
+
+// EXPERIMENT: Send raw audio directly to OpenAI without pre-emphasis/resampling
+// Theory: Whisper handles format conversion internally, our processing may degrade quality
+const DIRECT_AUDIO_PASSTHROUGH = true;
 
 // ---------------------------------------------------------------------------
 // Phone Number to Language Mapping (match taxi-realtime-simple)
@@ -3577,10 +3581,21 @@ Do NOT skip any part. Say ALL of it warmly.]`
             }
           }
 
-          // Apply pre-emphasis for better STT consonant clarity, then resample
-          const pcmEmph = applyPreEmphasis(pcmInput);
-          const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
-          const base64Audio = pcm16ToBase64(pcm24k);
+          // EXPERIMENT: Direct passthrough vs processed audio
+          let base64Audio: string;
+          if (DIRECT_AUDIO_PASSTHROUGH) {
+            // Send raw PCM directly - OpenAI/Whisper handles format conversion internally
+            // Note: OpenAI expects 24kHz PCM16, but testing if their internal processing is better than ours
+            base64Audio = pcm16ToBase64(pcmInput);
+            if (audioDiag.packetsForwarded === 0) {
+              console.log(`[${callId}] 🔊 DIRECT PASSTHROUGH MODE: Sending raw ${inboundSampleRate}Hz PCM to OpenAI (no pre-emphasis/resample)`);
+            }
+          } else {
+            // Original flow: pre-emphasis for better STT consonant clarity, then resample to 24kHz
+            const pcmEmph = applyPreEmphasis(pcmInput);
+            const pcm24k = resamplePcm16To24k(pcmEmph, inboundSampleRate);
+            base64Audio = pcm16ToBase64(pcm24k);
+          }
 
           audioDiag.packetsForwarded++;
           openaiWs.send(JSON.stringify({
