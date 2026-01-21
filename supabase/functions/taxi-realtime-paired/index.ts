@@ -690,8 +690,15 @@ const ECHO_GUARD_MS = 150; // Reduced from 250ms for faster response
 const GREETING_PROTECTION_MS = 2000; // Reduced from 12000ms - desktop is cleaner
 const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms for quicker confirmations
 const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms for snappier turns
-const NO_REPLY_TIMEOUT_MS = 3000; // 3 seconds - if user doesn't respond, re-ask
+// No-reply reprompt tuning
+// (3s was too aggressive and caused rapid repeated questions)
+const NO_REPLY_TIMEOUT_FIRST_MS = 8000;  // first reprompt after 8s of silence
+const NO_REPLY_TIMEOUT_REPEAT_MS = 12000; // subsequent reprompts after 12s
 const MAX_NO_REPLY_REPROMPTS = 2; // Max times to re-ask before asking "Are you still there?"
+
+function getNoReplyTimeoutMs(repromptCount: number): number {
+  return repromptCount <= 0 ? NO_REPLY_TIMEOUT_FIRST_MS : NO_REPLY_TIMEOUT_REPEAT_MS;
+}
 
 // RMS thresholds for audio quality (aligned with desktop mode)
 const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
@@ -2974,7 +2981,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             !cleanedUp
           ) {
             sessionState.awaitingReplyAt = Date.now();
-            console.log(`[${callId}] ⏳ Armed no-reply timer (${NO_REPLY_TIMEOUT_MS}ms) for ${sessionState.lastQuestionAsked}`);
+            const noReplyDelayMs = getNoReplyTimeoutMs(sessionState.noReplyRepromptCount);
+            console.log(
+              `[${callId}] ⏳ Armed no-reply timer (${noReplyDelayMs}ms) for ${sessionState.lastQuestionAsked} (repromptCount=${sessionState.noReplyRepromptCount})`
+            );
             
             trackedTimeout(() => {
               if (cleanedUp) return;
@@ -3031,7 +3041,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                   openaiWs.send(JSON.stringify({ type: "response.create" }));
                 }
               }
-            }, NO_REPLY_TIMEOUT_MS);
+            }, noReplyDelayMs);
           }
           break;
 
