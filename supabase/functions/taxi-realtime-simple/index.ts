@@ -1496,9 +1496,9 @@ serve(async (req) => {
     return new Response("Expected WebSocket", { status: 426, headers: corsHeaders });
   }
 
-  // Increase idle timeout to reduce abrupt disconnects while waiting for dispatch callbacks
-  // (Deno will manage protocol-level ping/pong internally based on this timeout.)
-  const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 120_000 });
+  // MAXIMUM idle timeout (300s = 5 minutes) to prevent disconnects during slow dispatch or long conversations
+  // Deno's max supported idle timeout - keeps connection alive through proxy timeouts
+  const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 300_000 });
   
   let openaiWs: WebSocket | null = null;
   let state: SessionState | null = null;
@@ -1514,7 +1514,7 @@ serve(async (req) => {
   const startKeepAlive = (callId: string) => {
     if (keepAliveInterval) return; // Already running
     
-    // Send ping every 15 seconds to keep connection alive
+    // Send ping every 8 seconds (more aggressive) to keep connection alive through all proxies
     keepAliveInterval = setInterval(() => {
       if (isConnectionClosed || !socket) {
         if (keepAliveInterval) {
@@ -1534,9 +1534,9 @@ serve(async (req) => {
           keepAliveInterval = null;
         }
       }
-    }, 15000) as unknown as number;
+    }, 8000) as unknown as number;
     
-    console.log(`[${callId}] 🔄 Keep-alive started (15s interval)`);
+    console.log(`[${callId}] 🔄 Keep-alive started (8s interval for max stability)`);
   };
   
   const stopKeepAlive = () => {
@@ -5051,7 +5051,7 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.quoteTripKey = currentTripKey;
 
               const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 5000);
+              const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for slow dispatch systems
 
               const postResp = await fetch(DISPATCH_WEBHOOK_URL, {
                 method: "POST",
@@ -5080,7 +5080,7 @@ Do NOT say 'booked' until the tool returns success.]`
               
               // Now poll live_calls table for dispatch response (fare, eta, or say message)
               // Dispatch will call taxi-dispatch-callback which updates live_calls
-              const pollTimeout = 25000; // 25 seconds max wait (callback can take 15-20s)
+              const pollTimeout = 45000; // 45 seconds max wait for dispatch callback
               const pollInterval = 500; // Check every 500ms
               const pollStart = Date.now();
               let dispatchResult: any = null;
