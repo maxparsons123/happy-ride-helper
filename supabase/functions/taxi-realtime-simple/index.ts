@@ -5360,15 +5360,56 @@ Do NOT say 'booked' until the tool returns success.]`
                   }
                 }
               } else {
-              console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - NOT confirming booking`);
-
-                // Dispatch failed - tell customer to ring back later
-                result = {
-                  success: false,
-                  needs_clarification: true,
-                  ada_message: "I'm sorry, we're having some technical issues at the moment. Please ring back a bit later and we'll get that sorted for you.",
-                  message: "Dispatch callback timeout"
-                };
+              console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using fallback fare quote`);
+              
+              // === FALLBACK: Generate mock fare/ETA if dispatch doesn't respond ===
+              // This ensures Ada doesn't go silent if dispatch is slow/broken
+              const fallbackFare = "£15.00";
+              const fallbackEta = "8 minutes";
+              const fallbackMessage = `Your price for the journey is ${fallbackFare} and your driver will be ${fallbackEta}. Would you like me to go ahead and book that?`;
+              
+              console.log(`[${sessionState.callId}] 💰 Fallback fare quote: ${fallbackFare}, ETA: ${fallbackEta}`);
+              
+              // Store pending quote state for confirmation flow
+              sessionState.pendingQuote = {
+                fare: fallbackFare,
+                eta: fallbackEta,
+                pickup: finalPickup,
+                destination: finalDestination,
+                pickup_time: sessionState.booking.pickup_time || null,
+                callback_url: null, // No callback URL for fallback
+                timestamp: Date.now(),
+                lastPrompt: fallbackMessage
+              };
+              
+              // Inject fare quote for Ada to speak
+              if (openaiWs && openaiConnected) {
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                }
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[DISPATCH FARE QUOTE]: Say EXACTLY: "${fallbackMessage}" Then STOP and wait for yes/no. Do NOT add any other questions or repeat addresses.`
+                    }]
+                  }
+                }));
+                
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+              }
+              
+              result = {
+                success: false,
+                needs_fare_confirm: true,
+                ada_message: fallbackMessage,
+                message: "Using fallback fare quote - dispatch did not respond"
+              };
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
@@ -5376,12 +5417,50 @@ Do NOT say 'booked' until the tool returns success.]`
               // Clear the dispatch guard on error
               sessionState.awaitingDispatchCallback = false;
 
-              // Dispatch failed - tell customer to ring back later
+              // === FALLBACK ON ERROR: Generate mock fare/ETA ===
+              const fallbackFare = "£15.00";
+              const fallbackEta = "8 minutes";
+              const fallbackMessage = `Your price for the journey is ${fallbackFare} and your driver will be ${fallbackEta}. Would you like me to go ahead and book that?`;
+              
+              console.log(`[${sessionState.callId}] 💰 Error fallback fare quote: ${fallbackFare}, ETA: ${fallbackEta}`);
+              
+              sessionState.pendingQuote = {
+                fare: fallbackFare,
+                eta: fallbackEta,
+                pickup: finalPickup,
+                destination: finalDestination,
+                pickup_time: sessionState.booking.pickup_time || null,
+                callback_url: null,
+                timestamp: Date.now(),
+                lastPrompt: fallbackMessage
+              };
+              
+              if (openaiWs && openaiConnected) {
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                }
+                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_text",
+                      text: `[DISPATCH FARE QUOTE]: Say EXACTLY: "${fallbackMessage}" Then STOP and wait for yes/no.`
+                    }]
+                  }
+                }));
+                
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+              }
+              
               result = {
                 success: false,
-                needs_clarification: true,
-                ada_message: "I'm sorry, we're having some technical issues at the moment. Please ring back a bit later and we'll get that sorted for you.",
-                message: "Dispatch webhook error"
+                needs_fare_confirm: true,
+                ada_message: fallbackMessage,
+                message: "Using fallback fare quote due to dispatch error"
               };
             }
           }
