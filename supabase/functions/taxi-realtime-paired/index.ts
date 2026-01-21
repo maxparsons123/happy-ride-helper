@@ -2190,6 +2190,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       const sampleRate = inboundSampleRate;
       
       // Deepgram accepts auth via URL (api_key param) - works in Deno
+      // NOTE: Subprotocol auth ["token", key] doesn't work reliably in Deno edge runtime
       const url = `wss://api.deepgram.com/v1/listen?` +
         `model=nova-2-phonecall&language=en-GB&encoding=${encoding}&` +
         `sample_rate=${sampleRate}&channels=1&` +
@@ -2197,9 +2198,18 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         `vad_events=true&smart_format=true&numerals=true&` +
         `keywords=${keywords}`;
       
-      // Create WebSocket with Sec-WebSocket-Protocol header for token auth
-      // This is the standard Deepgram auth method that works with native WebSocket
-      deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+      console.log(`[${callId}] 🎙️ Connecting to Deepgram...`);
+      
+      // Try fetch-based connection with Authorization header (Deno supports this for fetch)
+      // Then upgrade to WebSocket isn't possible, so we use a workaround:
+      // Deepgram also accepts the API key in the URL for some endpoints, but not streaming.
+      // The only reliable method in Deno is using the protocols array.
+      try {
+        deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+      } catch (wsError) {
+        console.error(`[${callId}] ❌ Deepgram WebSocket creation failed:`, wsError);
+        return false;
+      }
       
       deepgramWs.onopen = () => {
         console.log(`[${callId}] 🎙️ Deepgram STT connected (nova-2-phonecall @ ${sampleRate}Hz)`);
@@ -3242,9 +3252,11 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
             };
             openaiWs!.send(JSON.stringify(statePrompt));
             
-            // CRITICAL: Trigger Ada to respond after the state update
-            // Without this, Ada will stay silent after processing the transcript
-            openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            // Only send response.create if OpenAI isn't already responding
+            // (VAD may have already triggered a response from the user's speech)
+            if (!sessionState.openAiResponseActive) {
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            }
             
             await updateLiveCall(sessionState);
           }
