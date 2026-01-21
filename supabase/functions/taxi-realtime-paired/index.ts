@@ -2168,20 +2168,19 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       console.log(`[${callId}] 🎙️ Deepgram STT disabled (no API key)`);
       return false;
     }
+
+    // Safe debug: confirm key is present without logging it
+    console.log(`[${callId}] 🎙️ Deepgram key detected (len=${DEEPGRAM_API_KEY.length})`);
     
     try {
       // Keyword boosting for taxi booking context - helps with addresses
+      // NOTE: Keep keywords URL-safe (spaces encoded) to match proven working implementations
       const keywords = [
-        // Confirmation phrases (high boost)
-        "cancel:2", "cancel it:2", "book it:2", "yes:1.5", "no:1.5", "yeah:1.5",
-        // UK Cities
+        "cancel:2", "cancel%20it:2", "book%20it:2", "yes:1.5", "no:1.5", "yeah:1.5",
         "Coventry:1.5", "Birmingham:1.5", "Solihull:1.5", "Manchester:1.5", "London:1.5",
-        // Common streets
         "Road:1.3", "Street:1.3", "Lane:1.3", "Avenue:1.3", "Drive:1.3", "Close:1.3",
-        // Airports
-        "airport:1.5", "Birmingham Airport:1.8", "Heathrow:1.8",
-        // Venues
-        "Sweet Spot:1.8", "Tesco:1.5", "hospital:1.5", "station:1.5"
+        "airport:1.5", "Birmingham%20Airport:1.8", "Heathrow:1.8",
+        "Sweet%20Spot:1.8", "Tesco:1.5", "hospital:1.5", "station:1.5"
       ].join("&keywords=");
       
       // Format for streaming: mulaw for 8kHz telephony, linear16 for slin/slin16
@@ -3799,6 +3798,25 @@ Do NOT skip any part. Say ALL of it warmly.]`
         const audioBytes = event.data instanceof ArrayBuffer
           ? new Uint8Array(event.data)
           : event.data;
+
+        // FORMAT AUTODETECT (CRITICAL): The Python bridge may start by assuming ulaw,
+        // then send an update_format a moment later. If we decode the first PCM frames
+        // as ulaw, RMS becomes ~0 and OpenAI VAD won't trigger → Ada won't respond.
+        // Auto-detect by 20ms frame size:
+        // - 160 bytes: ulaw@8k
+        // - 320 bytes: slin@8k (PCM16)
+        // - 640 bytes: slin16@16k (PCM16)
+        if (inboundAudioFormat === "ulaw") {
+          if (audioBytes.length === 320) {
+            inboundAudioFormat = "slin";
+            inboundSampleRate = 8000;
+            console.log(`[${callId}] 🔎 Auto-detected inbound audio: slin @ 8000Hz (from 320b frames)`);
+          } else if (audioBytes.length === 640) {
+            inboundAudioFormat = "slin16";
+            inboundSampleRate = 16000;
+            console.log(`[${callId}] ✅ Auto-detected inbound audio: slin16 @ 16000Hz (from 640b frames)`);
+          }
+        }
 
         audioDiag.packetsReceived++;
 
