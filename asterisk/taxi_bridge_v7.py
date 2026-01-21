@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.5 - AGGRESSIVE AUDIO BOOST
+# Taxi AI Asterisk Bridge v7.4 - LOUD AND CLEAR
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -67,14 +67,6 @@ if not WS_URL:
     except (FileNotFoundError, json.JSONDecodeError):
         WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
 
-# Normalize WS routing: if an env var still uses the less reliable ".supabase.co/functions/v1" domain,
-# rewrite it to the ".functions.supabase.co/functions/v1" subdomain.
-if WS_URL and (".supabase.co/functions/v1/" in WS_URL) and (".functions.supabase.co" not in WS_URL):
-    WS_URL = WS_URL.replace(
-        ".supabase.co/functions/v1/",
-        ".functions.supabase.co/functions/v1/",
-    )
-
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
@@ -102,22 +94,19 @@ RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 
 # Audio processing - ENABLED for quiet telephony lines
-# v7.5: AGGRESSIVE boost - avgRMS was still 8-89, needs to be 300+
+# v7.4: AGC + volume boost to bring quiet input (RMS 5-20) up to usable levels
 ENABLE_NOISE_REDUCTION = False  # Keep disabled - causes muting issues
-ENABLE_VOLUME_BOOST = True      # Apply fixed boost to quiet lines
-ENABLE_AGC = True               # Automatic gain control
+ENABLE_VOLUME_BOOST = True      # NEW: Apply 3x boost to quiet lines
+ENABLE_AGC = True               # NEW: Automatic gain control
 
-VOLUME_BOOST_FACTOR = 6.0       # INCREASED from 3.0 - audio still too quiet
+VOLUME_BOOST_FACTOR = 3.0       # Fixed multiplier for all audio (before AGC)
 NOISE_GATE_THRESHOLD = 15       # Lower threshold if enabled
 NOISE_GATE_SOFT_KNEE = True
 HIGH_PASS_CUTOFF = 60
-TARGET_RMS = 500                # INCREASED from 300 - target louder output
-MAX_GAIN = 20.0                 # INCREASED from 15.0 for very quiet lines
-MIN_GAIN = 1.0                  # Never reduce volume
-GAIN_SMOOTHING_FACTOR = 0.2     # Faster adaptation
-
-# Debug logging for audio levels
-LOG_AUDIO_LEVELS = True         # Log RMS before/after processing
+TARGET_RMS = 300                # Target RMS after AGC (was 2500, now matches backend)
+MAX_GAIN = 15.0                 # Match backend AGC (was 2.0)
+MIN_GAIN = 1.0                  # Never reduce volume (was 0.9)
+GAIN_SMOOTHING_FACTOR = 0.15    # Slightly faster adaptation
 
 # Asterisk message types
 MSG_HANGUP = 0x00
@@ -442,55 +431,60 @@ class TaxiBridgeV7:
                         "type": "init",
                         **init_data,
                         "call_id": self.state.call_id,
-                        "phone": self.state.phone,
-                        "user_phone": self.state.phone,
-                        "reconnect": True,
+                        "phone": None if self.state.phone == "Unknown" else self.state.phone,
+                        "reconnect": False,
                     }
                     await self.ws.send(json.dumps(init_payload))
-                    logger.info("[%s] 📡 Sent reconnect init", self.state.call_id)
-
-                # Flush any pending audio
-                while self.pending_audio_buffer:
-                    try:
-                        await self.ws.send(self.pending_audio_buffer.popleft())
-                    except Exception:
-                        break
+                    logger.info("[%s] 🔀 Sent redirect init", self.state.call_id)
+                    self.state.init_sent = True
+                elif self.state.reconnect_attempts > 0 and self.state.init_sent:
+                    reinit_payload = {
+                        "type": "init",
+                        "call_id": self.state.call_id,
+                        "phone": None if self.state.phone == "Unknown" else self.state.phone,
+                        "reconnect": True,
+                        "inbound_format": self.state.ast_codec,
+                        "inbound_sample_rate": self.state.ast_rate,
+                    }
+                    await self.ws.send(json.dumps(reinit_payload))
+                    logger.info("[%s] 🔁 Sent reconnect init", self.state.call_id)
 
                 self.state.ws_connected = True
+                self.state.last_ws_activity = time.time()
                 self.state.reconnect_attempts = 0
-                logger.info("[%s] ✅ Connected to %s", self.state.call_id, target_url)
+
+                logger.info("[%s] ✅ WebSocket connected", self.state.call_id)
+
+                # Flush pending audio from disconnect
+                while self.pending_audio_buffer:
+                    chunk = self.pending_audio_buffer.popleft()
+                    try:
+                        await self.ws.send(chunk)
+                        self.state.binary_audio_count += 1
+                    except Exception as e:
+                        logger.warning("[%s] ⚠️ Flush failed: %s", self.state.call_id, e)
+                        self.pending_audio_buffer.clear()
+                        break
+
                 return True
 
             except asyncio.TimeoutError:
-                logger.warning("[%s] ⏱️ WS connect timeout", self.state.call_id)
+                logger.warning("[%s] ⏱️ WebSocket timeout", self.state.call_id)
+                self.state.reconnect_attempts += 1
             except Exception as e:
-                logger.warning("[%s] 🔌 WS connect failed: %s", self.state.call_id, e)
+                logger.error("[%s] ❌ WebSocket error: %s", self.state.call_id, e)
+                self.state.reconnect_attempts += 1
 
-            self.state.reconnect_attempts += 1
-
-        logger.error("[%s] ❌ Max reconnect attempts reached", self.state.call_id)
         return False
 
     async def stop_call(self, reason: str) -> None:
-        """Stop the call gracefully."""
+        """Stop the bridge cleanly."""
         if not self.running:
             return
+        logger.info("[%s] 🧹 Stopping: %s", self.state.call_id, reason)
         self.running = False
         self.state.ws_connected = False
-        logger.info("[%s] 🛑 Stopping: %s", self.state.call_id, reason)
 
-        # Send hangup to AI
-        if self.ws:
-            try:
-                await self.ws.send(json.dumps({
-                    "type": "hangup",
-                    "call_id": self.state.call_id,
-                    "reason": reason,
-                }))
-            except Exception:
-                pass
-
-        # Close connections
         try:
             if self.ws:
                 await self.ws.close(code=1000, reason=reason)
@@ -696,14 +690,11 @@ class TaxiBridgeV7:
                         # Convert to numpy for processing
                         pcm_array = np.frombuffer(linear, dtype=np.int16).astype(np.float32)
                         
-                        # Calculate input RMS for debugging
-                        input_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
-                        
-                        # v7.5: Apply VOLUME BOOST first (6x) to bring quiet lines up
+                        # v7.4: Apply VOLUME BOOST first (3x) to bring quiet lines up
                         if ENABLE_VOLUME_BOOST and pcm_array.size > 0:
                             pcm_array *= VOLUME_BOOST_FACTOR
                         
-                        # v7.5: Apply AGC to normalize levels
+                        # v7.4: Apply AGC to normalize levels
                         if ENABLE_AGC and pcm_array.size > 0:
                             rms = float(np.sqrt(np.mean(pcm_array ** 2)))
                             if rms > 10:  # Only apply AGC if there's actual audio
@@ -711,16 +702,8 @@ class TaxiBridgeV7:
                                 self.state.last_gain = self.state.last_gain + GAIN_SMOOTHING_FACTOR * (target_gain - self.state.last_gain)
                                 pcm_array *= self.state.last_gain
                         
-                        # Calculate output RMS
-                        output_rms = float(np.sqrt(np.mean(pcm_array ** 2))) if pcm_array.size > 0 else 0
-                        
-                        # Log audio levels periodically (every ~1 second = 50 frames @ 20ms)
-                        if LOG_AUDIO_LEVELS and self.state.binary_audio_count % 50 == 0:
-                            logger.info("[%s] 🔊 Audio: inRMS=%.0f → outRMS=%.0f (gain=%.1fx, boost=%.0fx)",
-                                       self.state.call_id, input_rms, output_rms, 
-                                       self.state.last_gain, VOLUME_BOOST_FACTOR)
-                        
                         # Apply pre-emphasis to boost consonants before STT
+                        # This helps OpenAI distinguish 'S' vs 'F' sounds (Russell vs Ruffles)
                         emphasized = apply_pre_emphasis(pcm_array, coeff=PRE_EMPHASIS_COEFF)
                         cleaned = np.clip(emphasized, -32768, 32767).astype(np.int16).tobytes()
 
@@ -870,60 +853,36 @@ class TaxiBridgeV7:
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Calculate expected playback position
-                elapsed = time.time() - start_time
-                expected = int(elapsed * bytes_per_sec)
+                # Pace output to real-time
+                expected_time = start_time + (bytes_played / max(bytes_per_sec, 1))
+                delay = expected_time - time.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
-                if bytes_played < expected and len(buffer) >= self.state.ast_frame_bytes:
-                    # We're behind - send frames to catch up
-                    frames_needed = (expected - bytes_played) // self.state.ast_frame_bytes
-                    frames_available = len(buffer) // self.state.ast_frame_bytes
-                    frames_to_send = min(frames_needed, frames_available, 10)
+                # 🔥 FIXED: Early exit check after sleep
+                if not self.running:
+                    break
 
-                    for _ in range(frames_to_send):
-                        if len(buffer) < self.state.ast_frame_bytes:
-                            break
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
+                # Get next frame
+                if len(buffer) >= self.state.ast_frame_bytes:
+                    chunk = bytes(buffer[:self.state.ast_frame_bytes])
+                    del buffer[:self.state.ast_frame_bytes]
+                else:
+                    chunk = self._silence()
 
-                        try:
-                            self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
-                            await self.writer.drain()
-                            bytes_played += len(chunk)
-                        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                            logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                            await self.stop_call("Asterisk disconnected")
-                            return
-                        except Exception as e:
-                            logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                            await self.stop_call("Write failed")
-                            return
-
-                # Sleep for one frame duration
-                await asyncio.sleep(0.02)
-
-                # Send silence if buffer is empty but we need to maintain timing
-                if not buffer and bytes_played < expected:
-                    # Get next frame
-                    if len(buffer) >= self.state.ast_frame_bytes:
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
-                    else:
-                        chunk = self._silence()
-
-                    # Send to Asterisk
-                    try:
-                        self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
-                        await self.writer.drain()
-                        bytes_played += len(chunk)
-                    except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                        logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
-                        await self.stop_call("Asterisk disconnected")
-                        return
-                    except Exception as e:
-                        logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
-                        await self.stop_call("Write failed")
-                        return
+                # Send to Asterisk
+                try:
+                    self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
+                    await self.writer.drain()
+                    bytes_played += len(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
+                    await self.stop_call("Asterisk disconnected")
+                    return
+                except Exception as e:
+                    logger.error("[%s] ❌ Write error: %s", self.state.call_id, e)
+                    await self.stop_call("Write failed")
+                    return
         except asyncio.CancelledError:
             # 🔥 FIXED: Handle task cancellation gracefully
             logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
@@ -946,12 +905,12 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.5 - AGGRESSIVE AUDIO BOOST (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.3 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
-        f"   Volume boost: {VOLUME_BOOST_FACTOR}x, AGC target: {TARGET_RMS} RMS",
-        f"   Preferred codec: ulaw @ 8kHz (locked)",
+        f"   Preferred codec: slin16 @ 16kHz (auto-detected from Asterisk)",
+        f"   Resampling: resample_poly (preserves high-frequency transients)",
     ]
     for line in startup_lines:
         print(line, flush=True)
