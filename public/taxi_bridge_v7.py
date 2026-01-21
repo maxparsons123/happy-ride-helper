@@ -83,10 +83,17 @@ ULAW_RATE = 8000    # µ-law telephony (8kHz)
 SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
 AI_RATE = 24000     # OpenAI TTS
 
-# LOCK TO ULAW: Disable slin16 auto-detection - it was corrupting audio
-# The format detection was switching mid-call causing garbled audio
+# Format handling
+#
+# IMPORTANT:
+# - Some setups deliver AudioSocket frames as slin (PCM16) even if the SIP leg is ulaw.
+# - If we force ulaw while Asterisk is actually sending slin (320-byte frames), the
+#   return audio will be encoded wrong and can sound "too fast"/garbled.
+#
+# Default to AUTO-detect based on frame size. You can re-lock to ulaw by setting:
+#   LOCK_FORMAT_ULAW=1
 PREFER_SLIN16 = False
-LOCK_FORMAT_ULAW = True  # NEW: Prevent any format switching
+LOCK_FORMAT_ULAW = os.environ.get("LOCK_FORMAT_ULAW", "0").lower() in ("1", "true", "yes")
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -948,7 +955,7 @@ async def main() -> None:
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
         f"   Smart boost: {VOLUME_BOOST_FACTOR}x when inRMS<{QUIET_LINE_THRESHOLD}, AGC target: {TARGET_RMS} RMS",
-        f"   Preferred codec: ulaw @ 8kHz (locked)",
+        f"   Format mode: {'ulaw-locked' if LOCK_FORMAT_ULAW else 'auto-detect (prefers ulaw, may switch to slin/slin16 based on frame size)'}",
     ]
     for line in startup_lines:
         print(line, flush=True)
