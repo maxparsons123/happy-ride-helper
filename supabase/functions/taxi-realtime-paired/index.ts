@@ -2187,6 +2187,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       const encoding = inboundAudioFormat === "ulaw" ? "mulaw" : "linear16";
       const sampleRate = inboundSampleRate;
       
+      // Deepgram accepts auth via URL (api_key param) - works in Deno
       const url = `wss://api.deepgram.com/v1/listen?` +
         `model=nova-2-phonecall&language=en-GB&encoding=${encoding}&` +
         `sample_rate=${sampleRate}&channels=1&` +
@@ -2194,12 +2195,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         `vad_events=true&smart_format=true&numerals=true&` +
         `keywords=${keywords}`;
       
-      // Use Authorization header instead of WebSocket subprotocol for Deno compatibility
-      deepgramWs = new WebSocket(url, {
-        headers: {
-          "Authorization": `Token ${DEEPGRAM_API_KEY}`
-        }
-      } as any);
+      // Create WebSocket with Sec-WebSocket-Protocol header for token auth
+      // This is the standard Deepgram auth method that works with native WebSocket
+      deepgramWs = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
       
       deepgramWs.onopen = () => {
         console.log(`[${callId}] 🎙️ Deepgram STT connected (nova-2-phonecall @ ${sampleRate}Hz)`);
@@ -2244,12 +2242,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         }
       };
       
-      deepgramWs.onerror = (error) => {
-        console.error(`[${callId}] Deepgram error:`, error);
+      deepgramWs.onerror = (error: Event) => {
+        console.error(`[${callId}] ❌ Deepgram WebSocket error:`, error);
       };
       
-      deepgramWs.onclose = () => {
-        console.log(`[${callId}] 🎙️ Deepgram connection closed`);
+      deepgramWs.onclose = (event: CloseEvent) => {
+        console.log(`[${callId}] 🎙️ Deepgram closed: code=${event.code}, reason="${event.reason || 'none'}"`);
         deepgramWs = null;
       };
       
