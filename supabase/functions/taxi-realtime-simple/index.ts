@@ -1414,6 +1414,137 @@ const Ada = {
 // END ADA MODULE
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// "TRUST ADA'S FIRST ECHO" MODE (ported from paired mode)
+// When Ada immediately acknowledges an address (e.g., "Got it, 18 Exmoor Road"),
+// extract that as the canonical value. Ada's interpretation is often more accurate
+// than raw STT transcripts because she has context and UK address knowledge.
+// ═══════════════════════════════════════════════════════════════════════════════
+interface AdaEchoExtraction {
+  type: "pickup" | "destination" | null;
+  address: string;
+}
+
+function extractAdaFirstEcho(
+  adaTranscript: string,
+  lastQuestionType: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null
+): AdaEchoExtraction {
+  const lower = adaTranscript.toLowerCase();
+  
+  // SKIP summaries - only trust immediate acknowledgments
+  const isSummaryText = lower.includes("let me confirm") ||
+                    lower.includes("to confirm") ||
+                    lower.includes("so that's") ||
+                    lower.includes("summarize") ||
+                    lower.includes("your booking") ||
+                    lower.includes("booking details") ||
+                    lower.includes("quickly summarize") ||
+                    lower.includes("picked up at") ||
+                    lower.includes("travel to");
+  
+  if (isSummaryText) {
+    return { type: null, address: "" };
+  }
+  
+  // Immediate acknowledgment patterns for PICKUP
+  const pickupPatterns = [
+    /got it[,.]?\s+(?:picking you up (?:from|at)\s+)?([^,.]+?)(?:\s+for your pickup|\s+as your pickup|\s+for pickup|[,.]|\s+and\s+)/i,
+    /(?:your )?pickup (?:is|will be|address is)\s+([^,.]+?)(?:[,.]|\s+and\s+)/i,
+    /picking you up (?:from|at)\s+([^,.]+?)(?:[,.]|\s+and\s+)/i,
+    /thank you[,.]?\s+(?:picking you up (?:from|at)\s+)?([^,.]+?)(?:\s+for your pickup|\s+as your pickup|[,.]|\s+and\s+)/i,
+    /perfect[,.]?\s+([^,.]+?)(?:\s+for your pickup|\s+as pickup|[,.]|\s+and\s+)/i,
+    /lovely[,.]?\s+([^,.]+?)(?:\s+for your pickup|\s+as pickup|[,.]|\s+and\s+)/i,
+    /great[,.]?\s+([^,.]+?)(?:\s+for your pickup|\s+as pickup|[,.]|\s+and\s+)/i,
+  ];
+  
+  // Immediate acknowledgment patterns for DESTINATION
+  const destinationPatterns = [
+    /(?:your )?destination (?:is|will be)\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /(?:going|heading|travelling?) to\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /(?:drop(?:ping)? you (?:off )?at|to)\s+([^,.]+?)(?:[,.]|\s+and\s+|\s+how many)/i,
+    /thank you[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+    /got it[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+    /perfect[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+    /lovely[,.]?\s+([^,.]+?)(?:\s+(?:is |as )?(?:your )?destination|[,.]|\s+how many)/i,
+  ];
+  
+  // Determine which field to extract based on lastQuestionType context
+  let patterns: RegExp[] = [];
+  let fieldType: "pickup" | "destination" | null = null;
+  
+  if (lastQuestionType === "pickup") {
+    patterns = pickupPatterns;
+    fieldType = "pickup";
+  } else if (lastQuestionType === "destination") {
+    patterns = destinationPatterns;
+    fieldType = "destination";
+  } else {
+    // Check both if context is unclear
+    for (const p of pickupPatterns) {
+      const match = adaTranscript.match(p);
+      if (match && match[1]) {
+        const addr = cleanAdaEchoAddress(match[1]);
+        if (isValidEchoAddress(addr)) {
+          return { type: "pickup", address: addr };
+        }
+      }
+    }
+    for (const p of destinationPatterns) {
+      const match = adaTranscript.match(p);
+      if (match && match[1]) {
+        const addr = cleanAdaEchoAddress(match[1]);
+        if (isValidEchoAddress(addr)) {
+          return { type: "destination", address: addr };
+        }
+      }
+    }
+    return { type: null, address: "" };
+  }
+  
+  // Try each pattern
+  for (const p of patterns) {
+    const match = adaTranscript.match(p);
+    if (match && match[1]) {
+      const addr = cleanAdaEchoAddress(match[1]);
+      if (isValidEchoAddress(addr)) {
+        return { type: fieldType, address: addr };
+      }
+    }
+  }
+  
+  return { type: null, address: "" };
+}
+
+function cleanAdaEchoAddress(raw: string): string {
+  return raw
+    .replace(/^\s*(?:from|at|to|is|it's|it is)\s+/i, "")
+    .replace(/\s*(?:for your|as your|for the|is your).*$/i, "")
+    .replace(/[.?!,]+$/g, "")
+    .trim();
+}
+
+function isValidEchoAddress(addr: string): boolean {
+  if (!addr || addr.length < 3) return false;
+  const lower = addr.toLowerCase();
+  
+  // Must have address keyword OR house number
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park", "green", "hill", "gardens", "grove"];
+  const hasKeyword = addressKeywords.some(kw => lower.includes(kw));
+  const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(addr) || /\s\d+[a-zA-Z]?$/.test(addr);
+  
+  // Filter out question fragments
+  if (lower.includes("what") || lower.includes("where") || lower.includes("how many")) {
+    return false;
+  }
+  
+  // Filter out common short phrases that aren't addresses
+  if (lower === "here" || lower === "there" || lower === "that" || lower === "this") {
+    return false;
+  }
+  
+  return hasKeyword || hasHouseNumber;
+}
+
 
 interface TranscriptItem {
   role: "user" | "assistant";
@@ -2915,6 +3046,58 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
           } else {
             console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
+          }
+        }
+
+        // === TRUST ADA'S FIRST ECHO ===
+        // Extract addresses from Ada's immediate acknowledgments (e.g., "Got it, 18 Exmoor Road")
+        // Ada's interpretation is often more accurate than raw STT transcripts
+        const adaEcho = extractAdaFirstEcho(lastAssistantText, sessionState.lastQuestionType);
+        if (adaEcho.type && adaEcho.address) {
+          const currentValue = adaEcho.type === "pickup" 
+            ? sessionState.booking.pickup 
+            : sessionState.booking.destination;
+          
+          // Only update if Ada's echo is different (and longer/more complete) than what we have
+          const shouldUpdate = !currentValue || 
+            adaEcho.address.length > currentValue.length ||
+            // Ada corrected the address (different content)
+            (adaEcho.address.toLowerCase() !== currentValue.toLowerCase());
+          
+          if (shouldUpdate) {
+            if (adaEcho.type === "pickup") {
+              const oldPickup = sessionState.booking.pickup;
+              sessionState.booking.pickup = adaEcho.address;
+              console.log(`[${sessionState.callId}] 🎯 TRUST ADA'S FIRST ECHO: pickup "${oldPickup}" → "${adaEcho.address}"`);
+              
+              // Update database (fire-and-forget using IIFE)
+              (async () => {
+                try {
+                  await supabase.from("live_calls").update({
+                    pickup: adaEcho.address,
+                    updated_at: new Date().toISOString()
+                  }).eq("call_id", sessionState.callId);
+                } catch (e: unknown) {
+                  console.error(`[${sessionState.callId}] ⚠️ Failed to update pickup in DB:`, e);
+                }
+              })();
+            } else {
+              const oldDestination = sessionState.booking.destination;
+              sessionState.booking.destination = adaEcho.address;
+              console.log(`[${sessionState.callId}] 🎯 TRUST ADA'S FIRST ECHO: destination "${oldDestination}" → "${adaEcho.address}"`);
+              
+              // Update database (fire-and-forget using IIFE)
+              (async () => {
+                try {
+                  await supabase.from("live_calls").update({
+                    destination: adaEcho.address,
+                    updated_at: new Date().toISOString()
+                  }).eq("call_id", sessionState.callId);
+                } catch (e: unknown) {
+                  console.error(`[${sessionState.callId}] ⚠️ Failed to update destination in DB:`, e);
+                }
+              })();
+            }
           }
         }
 
