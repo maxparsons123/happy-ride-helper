@@ -2383,7 +2383,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   };
   
   // Connect to Deepgram for parallel STT
-  connectToDeepgram();
+  console.log(`[${callId}] 🎙️ Attempting Deepgram connection (USE_DEEPGRAM_STT=${USE_DEEPGRAM_STT}, hasKey=${!!DEEPGRAM_API_KEY})`);
+  const deepgramConnected = connectToDeepgram();
+  console.log(`[${callId}] 🎙️ Deepgram connection result: ${deepgramConnected}`);
 
   // OpenAI WebSocket handlers
   // Flag to prevent duplicate greetings
