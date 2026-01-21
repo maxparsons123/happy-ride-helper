@@ -2723,7 +2723,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               
               // Send webhook in background
               (async () => {
-                const AUTO_QUOTE_TIMEOUT_MS = 30000;
+                const AUTO_QUOTE_TIMEOUT_MS = 3000; // 3 seconds - if no quote, proceed with normal flow
 
                 try {
                   const result = await sendDispatchWebhook(sessionState, "request_quote", {
@@ -2776,15 +2776,41 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                       }));
                     }
                   } else {
-                    console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback...`);
+                    console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback (max ${AUTO_QUOTE_TIMEOUT_MS}ms)...`);
 
-                    // Safety: if callback never arrives, allow a retry later.
+                    // 3-SECOND TIMEOUT: If callback never arrives, proceed with normal booking flow
                     // MEMORY LEAK FIX: Use tracked timeout
                     trackedTimeout(() => {
                       if (cleanedUp) return;
                       if (sessionState.quoteInFlight && !sessionState.awaitingConfirmation && !sessionState.pendingFare) {
-                        console.log(`[${callId}] ⏰ Auto-trigger quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - clearing quoteInFlight to allow retry`);
+                        console.log(`[${callId}] ⏰ Quote timeout (${AUTO_QUOTE_TIMEOUT_MS}ms) - proceeding with normal booking flow (no quote)`);
                         sessionState.quoteInFlight = false;
+                        sessionState.awaitingConfirmation = true;
+                        sessionState.lastQuestionAsked = "confirmation";
+                        
+                        // Tell Ada to proceed WITHOUT a specific fare - just confirm the booking
+                        if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                          
+                          sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                          
+                          const noQuoteMessage = `I wasn't able to get an exact fare quote, but shall I go ahead and book the taxi for you? The driver will confirm the fare when they arrive.`;
+                          
+                          openaiWs.send(JSON.stringify({
+                            type: "conversation.item.create",
+                            item: {
+                              type: "message",
+                              role: "user", 
+                              content: [{ type: "input_text", text: `[QUOTE UNAVAILABLE - PROCEED WITHOUT FARE]: Say to the customer: "${noQuoteMessage}". Then WAIT for their YES or NO answer. Do NOT call book_taxi until they explicitly say yes.` }]
+                            }
+                          }));
+                          
+                          openaiWs.send(JSON.stringify({
+                            type: "response.create",
+                            response: { modalities: ["audio", "text"], instructions: `Say exactly: "${noQuoteMessage}" - then STOP and WAIT for user response.` }
+                          }));
+                        }
                       }
                     }, AUTO_QUOTE_TIMEOUT_MS);
                   }
