@@ -534,6 +534,9 @@ class TaxiBridgeV7:
 
                     # Only send eager init once (first ever connection).
                     if not self.state.init_sent and self.ws:
+                        # v7.4: Tell edge we're sending PCM16 (slin) not ulaw
+                        # This is critical - otherwise edge runs ulawToPcm16 on PCM data
+                        send_format = "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec
                         eager_init = {
                             "type": "init",
                             "call_id": self.state.call_id,
@@ -541,13 +544,13 @@ class TaxiBridgeV7:
                             "user_phone": "unknown",
                             "addressTtsSplicing": True,
                             "eager_init": True,
-                            "inbound_format": self.state.ast_codec,  # ulaw, slin, or slin16
-                            "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
+                            "inbound_format": send_format,  # slin = PCM16 @ 8kHz
+                            "inbound_sample_rate": self.state.ast_rate,  # 8000
                         }
                         await self.ws.send(json.dumps(eager_init))
                         self.state.init_sent = True
                         logger.info("[%s] 🚀 Sent eager init (format=%s @ %dHz)",
-                                   self.state.call_id, self.state.ast_codec, self.state.ast_rate)
+                                   self.state.call_id, send_format, self.state.ast_rate)
 
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
                 ai_task = asyncio.create_task(self.ai_to_queue())
