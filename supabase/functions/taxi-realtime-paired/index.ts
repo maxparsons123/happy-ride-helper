@@ -700,12 +700,12 @@ function getNoReplyTimeoutMs(repromptCount: number): number {
 }
 
 // RMS thresholds for audio quality
-// CRITICAL: Telephony audio RMS is VERY low (0-200 typical for real speech)
-// We use boosted RMS for detection but thresholds must match boosted levels
-const RMS_NOISE_FLOOR = 50;    // Below = silence (after boost)
-const RMS_BARGE_IN_MIN = 100;  // Minimum for barge-in during Ada speech (lowered for telephony)
-const RMS_BARGE_IN_MAX = 30000; // Above = likely echo/clipping
-const RMS_ECHO_CEILING = 25000; // Hard ceiling for echo detection
+// CRITICAL: Asterisk 8kHz audio comes in EXTREMELY quiet (raw RMS 1-10)
+// With AGC boost, we can detect speech at much lower thresholds
+const RMS_NOISE_FLOOR = 20;     // Below = digital silence (after boost)
+const RMS_BARGE_IN_MIN = 50;    // Minimum for barge-in (lowered significantly for telephony)
+const RMS_BARGE_IN_MAX = 32000; // Above = clipping
+const RMS_ECHO_CEILING = 28000; // Hard ceiling for echo detection
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
@@ -752,8 +752,13 @@ function applyPreEmphasis(pcm: Int16Array): Int16Array {
 }
 
 // Volume boost for telephony audio (phone mics are quieter than browser)
-// INCREASED: Telephony RMS is 0-100, we need 3x+ to reach usable levels for OpenAI VAD
-const TELEPHONY_VOLUME_BOOST = 3.0;
+// CRITICAL: Asterisk 8kHz audio comes in very quiet (RMS 1-100). Need aggressive boost.
+const TELEPHONY_VOLUME_BOOST = 8.0; // Increased from 3.0 - telephony is VERY quiet
+
+// Automatic Gain Control (AGC) - dynamically boost quiet audio to target RMS
+const AGC_TARGET_RMS = 3000; // Target RMS level for speech
+const AGC_MIN_GAIN = 1.0;
+const AGC_MAX_GAIN = 20.0;
 
 function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST): Int16Array {
   if (pcm.length === 0 || gain === 1.0) return pcm;
@@ -763,6 +768,13 @@ function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST
     output[i] = Math.max(-32768, Math.min(32767, val));
   }
   return output;
+}
+
+// AGC: Calculate gain needed to reach target RMS, with limits
+function calculateAgcGain(rms: number): number {
+  if (rms < 10) return AGC_MAX_GAIN; // Very quiet - max boost
+  const idealGain = AGC_TARGET_RMS / rms;
+  return Math.max(AGC_MIN_GAIN, Math.min(AGC_MAX_GAIN, idealGain));
 }
 
 // 3-tap low-pass filter to prevent aliasing (from C# desktop bridge)
@@ -4094,12 +4106,14 @@ Do NOT skip any part. Say ALL of it warmly.]`
             // Speech-like: build a short streak before forwarding to reduce false triggers.
             bargeInSpeechStreak++;
 
-            // Full DSP pipeline (matching C# desktop bridge):
-            // 1. Volume boost (1.4x) - phone mics are quieter
-            // 2. Low-pass filter - prevent aliasing
-            // 3. Pre-emphasis - boost consonants for STT
-            // 4. Resample to 24kHz for OpenAI
-            let processed = applyVolumeBoost(pcmInput);
+            // Full DSP pipeline with AGC for quiet telephony:
+            // 1. Calculate dynamic gain based on current RMS
+            // 2. Apply AGC + fixed boost  
+            // 3. Low-pass filter - prevent aliasing
+            // 4. Pre-emphasis - boost consonants for STT
+            // 5. Resample to 24kHz for OpenAI
+            const agcGain = calculateAgcGain(rms);
+            let processed = applyVolumeBoost(pcmInput, agcGain);
             processed = applyLowPassFilter(processed);
             processed = applyPreEmphasis(processed);
             const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
@@ -4139,12 +4153,14 @@ Do NOT skip any part. Say ALL of it warmly.]`
           bargeInSpeechStreak = 0;
           bufferedBargeInFrame = null;
 
-          // Full DSP pipeline (matching C# desktop bridge):
-          // 1. Volume boost (1.4x) - phone mics are quieter
-          // 2. Low-pass filter - prevent aliasing  
-          // 3. Pre-emphasis - boost consonants for STT
-          // 4. Resample to 24kHz for OpenAI
-          let processed = applyVolumeBoost(pcmInput);
+          // Full DSP pipeline with AGC for quiet telephony:
+          // 1. Calculate dynamic gain based on current RMS
+          // 2. Apply AGC boost
+          // 3. Low-pass filter - prevent aliasing  
+          // 4. Pre-emphasis - boost consonants for STT
+          // 5. Resample to 24kHz for OpenAI
+          const agcGain = calculateAgcGain(rms);
+          let processed = applyVolumeBoost(pcmInput, agcGain);
           processed = applyLowPassFilter(processed);
           processed = applyPreEmphasis(processed);
           const pcm24k = resamplePcm16To24k(processed, inboundSampleRate);
