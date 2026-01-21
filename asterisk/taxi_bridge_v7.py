@@ -288,6 +288,10 @@ class CallState:
     call_formally_ended: bool = False
     init_sent: bool = False
     current_ws_url: str = WS_URL
+    
+    # Format detection debounce - prevents flip-flopping between formats
+    format_locked: bool = False
+    format_lock_time: float = 0.0
 
 
 # =============================================================================
@@ -317,7 +321,21 @@ class TaxiBridgeV7:
         - µ-law 8kHz: 160 bytes (1 byte/sample × 8000 × 0.02)
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02) ← OPTIMAL
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
+        
+        Once a format is locked (after first detection), ignore changes for 5 seconds
+        to prevent flip-flopping during codec negotiation.
         """
+        # DEBOUNCE: If format is locked and within lock window, just update frame bytes silently
+        FORMAT_LOCK_DURATION = 5.0  # seconds
+        if self.state.format_locked:
+            if time.time() - self.state.format_lock_time < FORMAT_LOCK_DURATION:
+                # Still within lock window - silently accept frames of different sizes
+                # but don't change the negotiated format
+                self.state.ast_frame_bytes = frame_len
+                return
+            # Lock expired - allow re-detection
+            self.state.format_locked = False
+        
         old_codec = self.state.ast_codec
         
         if frame_len == 640:
@@ -349,6 +367,10 @@ class TaxiBridgeV7:
             logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
                           self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
         
+        # LOCK FORMAT: Once detected, lock for 5 seconds to prevent flip-flopping
+        self.state.format_locked = True
+        self.state.format_lock_time = time.time()
+        
         # Notify edge function of format change
         if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
             await self.ws.send(json.dumps({
@@ -357,8 +379,8 @@ class TaxiBridgeV7:
                 "inbound_format": self.state.ast_codec,
                 "inbound_sample_rate": self.state.ast_rate,
             }))
-            logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
-                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
+            logger.info("[%s] 📡 Sent format update: %s @ %dHz (locked for %.1fs)", 
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate, FORMAT_LOCK_DURATION)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
