@@ -3255,11 +3255,10 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
             };
             openaiWs!.send(JSON.stringify(statePrompt));
             
-            // Only send response.create if OpenAI isn't already responding
-            // (VAD may have already triggered a response from the user's speech)
-            if (!sessionState.openAiResponseActive) {
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-            }
+            // NOTE: Do NOT send response.create here!
+            // OpenAI's VAD already triggered a response from the user's speech.
+            // The system message injection guides what Ada says - sending response.create
+            // here causes duplicate responses (Ada asks the same question twice).
             
             await updateLiveCall(sessionState);
           }
