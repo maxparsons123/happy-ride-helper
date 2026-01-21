@@ -5014,6 +5014,7 @@ Do NOT say 'booked' until the tool returns success.]`
               sessionState.booking.pickup_time = normalizedPickupTime;
               
               const webhookPayload = {
+                action: "request_quote",  // Explicit action for C# routing
                 job_id: jobId,
                 call_id: sessionState.callId,
                 caller_phone: formattedPhone,
