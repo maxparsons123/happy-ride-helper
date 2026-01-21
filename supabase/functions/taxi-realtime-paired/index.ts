@@ -2132,10 +2132,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
           
         case "response.created":
+          // Mark response as active immediately (before any audio)
+          sessionState.openAiResponseActive = true;
+          
           // SILENCE MODE GUARD: If we're waiting for a quote, cancel any new responses
           if (sessionState.waitingForQuoteSilence && sessionState.saidOneMoment) {
             console.log(`[${callId}] 🤫 BLOCKING new response - in silence mode waiting for fare`);
             openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.openAiResponseActive = false; // We cancelled it
             break;
           }
           console.log(`[${callId}] 🎤 Response started`);
@@ -2150,8 +2154,17 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "error":
+          // Suppress expected "response_cancel_not_active" error - this is normal when we send
+          // fire-and-forget cancels during dispatch events or silence mode transitions
+          const errorCode = data.error?.code;
+          if (errorCode === "response_cancel_not_active") {
+            // Harmless - we tried to cancel but there was no active response
+            console.log(`[${callId}] ℹ️ Cancel skipped (no active response)`);
+            break;
+          }
+          
           console.error(`[${callId}] ❌ OpenAI error:`, JSON.stringify(data));
-          // Forward error to client so bridge can handle appropriately
+          // Forward real errors to client so bridge can handle appropriately
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "error", message: data.error?.message || "Unknown OpenAI error" }));
           }
