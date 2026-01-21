@@ -2700,10 +2700,15 @@ Do NOT say 'booked' until the tool returns success.]`
         // AUTO-TRIGGER (TOOL ENFORCEMENT): If Ada says she's "checking the price" but never calls book_taxi,
         // force a silent request_quote tool call so the dispatch webhook actually fires.
         // This is mainly needed for weaker tool-calling realtime models.
+        // EXPANDED: Also catch "one moment" alone when in summary step (Ada often says just "one moment please")
         const isCheckingPrice =
           (lowerAssistantText.includes("check") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare"))) ||
           (lowerAssistantText.includes("one moment") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare"))) ||
-          (lowerAssistantText.includes("checking") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare") || lowerAssistantText.includes("trip")));
+          (lowerAssistantText.includes("checking") && (lowerAssistantText.includes("price") || lowerAssistantText.includes("fare") || lowerAssistantText.includes("trip"))) ||
+          // Catch standalone "one moment" when we're at summary step and have all fields
+          (lowerAssistantText.includes("one moment") && sessionState.bookingStep === "summary") ||
+          (lowerAssistantText.includes("moment please") && sessionState.bookingStep === "summary") ||
+          (lowerAssistantText.includes("just a moment") && sessionState.bookingStep === "summary");
 
         const hasRequiredBookingFields =
           !!sessionState.booking?.pickup &&
@@ -2715,15 +2720,28 @@ Do NOT say 'booked' until the tool returns success.]`
           !!sessionState.pendingQuote ||
           !!sessionState.awaitingDispatchCallback;
 
+        // Check if we're past the data collection phase (summary or later, OR all fields complete)
+        const isPastDataCollection = 
+          sessionState.bookingStep === "summary" || 
+          sessionState.bookingStep === "confirmed" ||
+          (hasRequiredBookingFields && sessionState.booking?.pickup_time !== undefined);
+
         if (
           isCheckingPrice &&
           hasRequiredBookingFields &&
           !quoteAlreadyInProgress &&
-          sessionState.bookingStep === "summary" &&
           openaiWs &&
           openaiConnected
         ) {
           console.log(`[${sessionState.callId}] 🔄 AUTO-TRIGGER: Ada said she's checking price but no quote requested yet → forcing book_taxi(request_quote)`);
+          console.log(`[${sessionState.callId}] 📊 Current step: ${sessionState.bookingStep}, isPastDataCollection: ${isPastDataCollection}`);
+          
+          // Auto-advance to summary step if we have all fields
+          if (sessionState.bookingStep !== "summary" && sessionState.bookingStep !== "confirmed") {
+            console.log(`[${sessionState.callId}] 📈 Auto-advancing step from ${sessionState.bookingStep} → summary (all fields present)`);
+            sessionState.bookingStep = "summary";
+            sessionState.bookingStepAdvancedAt = Date.now();
+          }
 
           const pickup = sessionState.booking.pickup;
           const destination = sessionState.booking.destination;
