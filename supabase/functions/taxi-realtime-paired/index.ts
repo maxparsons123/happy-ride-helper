@@ -3799,22 +3799,23 @@ Do NOT skip any part. Say ALL of it warmly.]`
           ? new Uint8Array(event.data)
           : event.data;
 
-        // FORMAT AUTODETECT (CRITICAL): The Python bridge may start by assuming ulaw,
-        // then send an update_format a moment later. If we decode the first PCM frames
-        // as ulaw, RMS becomes ~0 and OpenAI VAD won't trigger → Ada won't respond.
-        // Auto-detect by 20ms frame size:
-        // - 160 bytes: ulaw@8k
-        // - 320 bytes: slin@8k (PCM16)
-        // - 640 bytes: slin16@16k (PCM16)
-        if (inboundAudioFormat === "ulaw") {
-          if (audioBytes.length === 320) {
-            inboundAudioFormat = "slin";
-            inboundSampleRate = 8000;
-            console.log(`[${callId}] 🔎 Auto-detected inbound audio: slin @ 8000Hz (from 320b frames)`);
-          } else if (audioBytes.length === 640) {
-            inboundAudioFormat = "slin16";
-            inboundSampleRate = 16000;
-            console.log(`[${callId}] ✅ Auto-detected inbound audio: slin16 @ 16000Hz (from 640b frames)`);
+        // FORMAT AUTODETECT (CRITICAL FIX): Always verify format on the first 5 packets.
+        // The Python bridge might send "update_format" AFTER audio starts, or might not match
+        // what we expect. Frame sizes tell us the truth:
+        // - 160 bytes: ulaw@8k (8000 samples/sec * 1 byte/sample * 20ms = 160)
+        // - 320 bytes: slin@8k (8000 samples/sec * 2 bytes/sample * 20ms = 320) 
+        // - 640 bytes: slin16@16k (16000 samples/sec * 2 bytes/sample * 20ms = 640)
+        if (audioDiag.packetsReceived < 5) {
+          const detectedFormat = audioBytes.length === 160 ? "ulaw" 
+            : audioBytes.length === 320 ? "slin" 
+            : audioBytes.length === 640 ? "slin16" 
+            : null;
+          
+          if (detectedFormat && detectedFormat !== inboundAudioFormat) {
+            const oldFormat = inboundAudioFormat;
+            inboundAudioFormat = detectedFormat;
+            inboundSampleRate = detectedFormat === "slin16" ? 16000 : 8000;
+            console.log(`[${callId}] 🔎 FORMAT FIX: ${oldFormat} → ${detectedFormat} (detected from ${audioBytes.length}b frames)`);
           }
         }
 
