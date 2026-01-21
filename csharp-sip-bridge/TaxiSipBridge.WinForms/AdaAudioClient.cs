@@ -128,6 +128,9 @@ public class AdaAudioClient : IDisposable
         Log("🎤 Microphone capture stopped");
     }
 
+    /// <summary>
+    /// Send PCM16 audio to Ada using binary WebSocket frames (lower overhead than JSON/Base64).
+    /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
@@ -146,14 +149,12 @@ public class AdaAudioClient : IDisposable
             audioToSend = pcmData;
         }
 
-        var base64 = Convert.ToBase64String(audioToSend);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
         try
         {
+            // Send raw PCM16 bytes as binary frame - edge function handles this directly
             await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
+                new ArraySegment<byte>(audioToSend),
+                WebSocketMessageType.Binary,
                 true,
                 _cts?.Token ?? CancellationToken.None);
         }
@@ -165,8 +166,9 @@ public class AdaAudioClient : IDisposable
     private DateTime _lastSendStats = DateTime.Now;
 
     /// <summary>
-    /// Send telephony audio (µ-law 8kHz) to Ada with high-quality conversion.
-    /// Uses the same processing pipeline as the browser for consistent quality.
+    /// Send telephony audio (µ-law 8kHz) to Ada using binary WebSocket frames.
+    /// Uses the same processing pipeline as the browser for consistent quality,
+    /// but sends raw PCM16 bytes instead of Base64-encoded JSON (33% less overhead).
     /// </summary>
     public async Task SendMuLawAsync(byte[] ulawData)
     {
@@ -193,23 +195,21 @@ public class AdaAudioClient : IDisposable
         var pcm24k = AudioCodecs.Resample(pcm8kEmph, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
         try
         {
+            // Send raw PCM16 bytes as binary frame - 33% less data than Base64 JSON
             await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
+                new ArraySegment<byte>(pcmBytes),
+                WebSocketMessageType.Binary,
                 true,
                 _cts?.Token ?? CancellationToken.None);
             
             _sentToAda++;
             if (_sentToAda <= 3)
-                Log($"🎙️ Sent to Ada #{_sentToAda}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24k (HQ pipeline)");
+                Log($"🎙️ Sent to Ada #{_sentToAda}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24k (binary)");
             else if ((DateTime.Now - _lastSendStats).TotalSeconds >= 3)
             {
-                Log($"📤 Sent to Ada: {_sentToAda} packets (pre-emphasis + 1.4x boost)");
+                Log($"📤 Sent to Ada: {_sentToAda} packets (binary mode)");
                 _lastSendStats = DateTime.Now;
             }
         }
