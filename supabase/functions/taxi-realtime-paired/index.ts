@@ -700,13 +700,13 @@ function getNoReplyTimeoutMs(repromptCount: number): number {
   return repromptCount <= 0 ? NO_REPLY_TIMEOUT_FIRST_MS : NO_REPLY_TIMEOUT_REPEAT_MS;
 }
 
-// RMS thresholds for audio quality (aligned with desktop mode)
-const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
-// NOTE: Telephony RMS can be very low; lowering this improves barge-in reliability.
-// We mitigate false-positives by requiring 2 consecutive frames before forwarding.
-const RMS_BARGE_IN_MIN = 500;  // Minimum for barge-in during Ada speech
-const RMS_BARGE_IN_MAX = 25000; // Above = likely echo/clipping (increased headroom)
-const RMS_ECHO_CEILING = 20000; // Hard ceiling for echo detection
+// RMS thresholds for audio quality
+// CRITICAL: Telephony audio RMS is VERY low (0-200 typical for real speech)
+// We use boosted RMS for detection but thresholds must match boosted levels
+const RMS_NOISE_FLOOR = 50;    // Below = silence (after boost)
+const RMS_BARGE_IN_MIN = 100;  // Minimum for barge-in during Ada speech (lowered for telephony)
+const RMS_BARGE_IN_MAX = 30000; // Above = likely echo/clipping
+const RMS_ECHO_CEILING = 25000; // Hard ceiling for echo detection
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
@@ -753,8 +753,8 @@ function applyPreEmphasis(pcm: Int16Array): Int16Array {
 }
 
 // Volume boost for telephony audio (phone mics are quieter than browser)
-// Matches C# desktop bridge 1.4x gain
-const TELEPHONY_VOLUME_BOOST = 1.4;
+// INCREASED: Telephony RMS is 0-100, we need 3x+ to reach usable levels for OpenAI VAD
+const TELEPHONY_VOLUME_BOOST = 3.0;
 
 function applyVolumeBoost(pcm: Int16Array, gain: number = TELEPHONY_VOLUME_BOOST): Int16Array {
   if (pcm.length === 0 || gain === 1.0) return pcm;
