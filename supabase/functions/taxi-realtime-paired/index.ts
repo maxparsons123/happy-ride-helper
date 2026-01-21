@@ -3242,6 +3242,10 @@ CRITICAL: You CANNOT ask about a later step until the current step is complete. 
             };
             openaiWs!.send(JSON.stringify(statePrompt));
             
+            // CRITICAL: Trigger Ada to respond after the state update
+            // Without this, Ada will stay silent after processing the transcript
+            openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            
             await updateLiveCall(sessionState);
           }
           break;
