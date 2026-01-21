@@ -28,7 +28,7 @@ const USE_DEEPGRAM_STT = true; // ENABLED - use URL auth method
 
 // When true, use Deepgram as PRIMARY STT (inject transcripts into OpenAI as text)
 // When false, use OpenAI Whisper as primary and Deepgram for logging only
-const USE_DEEPGRAM_AS_PRIMARY = true; // TEST MODE - Deepgram drives the conversation
+const USE_DEEPGRAM_AS_PRIMARY = false; // RESET - OpenAI Whisper is primary STT
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
