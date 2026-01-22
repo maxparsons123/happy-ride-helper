@@ -2231,6 +2231,35 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             break;
           }
         }
+
+        // ✅ QUESTION RESPONSE COOLDOWN GUARD: After Ada asks ANY question during data collection,
+        // block VAD-triggered responses for 8 seconds to give users time to answer.
+        // This prevents background noise/VAD false-positives from causing Ada to barge ahead with follow-up questions.
+        // Skip this guard during summary/confirmed phase where quick responses are expected.
+        const QUESTION_COOLDOWN_MS = 8000;
+        const isAtDataCollectionStep = !["summary", "confirmed"].includes(sessionState.bookingStep || "");
+        if (
+          sessionState.adaAskedQuestionAt &&
+          isAtDataCollectionStep &&
+          sessionState.greetingDelivered  // Only apply after greeting has been delivered
+        ) {
+          const msSinceQuestion = Date.now() - sessionState.adaAskedQuestionAt;
+          if (msSinceQuestion < QUESTION_COOLDOWN_MS) {
+            // Check if user actually spoke (speechStartTime was set after the question)
+            const userRespondedAfterQuestion = 
+              sessionState.speechStartTime && 
+              sessionState.adaAskedQuestionAt < sessionState.speechStartTime;
+            
+            if (!userRespondedAfterQuestion) {
+              console.log(
+                `[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user answer to question (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms)`
+              );
+              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              sessionState.discardCurrentResponseAudio = true;
+              break;
+            }
+          }
+        }
         
         // Clear confirmationResponsePending after allowing one response through
         if (sessionState.confirmationResponsePending) {
