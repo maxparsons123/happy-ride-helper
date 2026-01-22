@@ -243,11 +243,37 @@ public class SipAutoAnswer : IDisposable
         mediaSession.AcceptRtpFromAny = true;
         Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
 
+        // Prefer G.722 (16kHz wideband) for better audio quality, fall back to PCMU/PCMA
+        // G.722 payload type is typically 9
+        try
+        {
+            var audioFormats = _adaAudioSource.GetAudioSourceFormats();
+            var g722 = audioFormats.FirstOrDefault(f => f.FormatName?.ToUpper() == "G722" || f.FormatID == 9);
+            if (!g722.IsEmpty())
+            {
+                Log($"🎵 [{callId}] Prioritizing G.722 (16kHz wideband) for better quality");
+                // Restrict to prefer G.722, then PCMU, then PCMA
+                _adaAudioSource.RestrictFormats(f => 
+                    f.FormatName?.ToUpper() == "G722" || f.FormatID == 9 ||
+                    f.FormatName?.ToUpper() == "PCMU" || f.FormatID == 0 ||
+                    f.FormatName?.ToUpper() == "PCMA" || f.FormatID == 8);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Could not set codec preference: {ex.Message}");
+        }
+
         mediaSession.OnAudioFormatsNegotiated += formats =>
         {
-            var fmt = formats.FirstOrDefault();
+            // Prefer G.722 if available in negotiated formats
+            var fmt = formats.FirstOrDefault(f => f.FormatName?.ToUpper() == "G722" || f.FormatID == 9);
+            if (fmt.IsEmpty())
+                fmt = formats.FirstOrDefault();
+            
             onFormatNegotiated(fmt);
-            Log($"🎵 [{callId}] Negotiated codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID})");
+            string quality = fmt.ClockRate >= 16000 ? "WIDEBAND 🎶" : "narrowband";
+            Log($"🎵 [{callId}] Negotiated codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID}) [{quality}]");
 
             // Set the format on our audio source so it knows how to encode
             _adaAudioSource?.SetAudioSourceFormat(fmt);
