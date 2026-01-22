@@ -7653,11 +7653,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
       }
 
       // PRE-CONNECT: Connect to OpenAI while phone is ringing (before answer)
-      if (message.type === "pre_connect") {
+      // Also handle "eager_init" from bridge (type: "init" with eager_init: true)
+      const isPreConnect = message.type === "pre_connect" || (message.type === "init" && message.eager_init === true);
+      
+      if (isPreConnect) {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         
-        console.log(`[${callId}] 🔔 Pre-connecting to OpenAI (phone ringing)`);
+        console.log(`[${callId}] 🔔 Pre-connecting to OpenAI (eager_init=${message.eager_init || false})`);
         
         // Detect language early
         const detectedLanguage = detectLanguageFromPhone(phone);
@@ -7776,7 +7779,17 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         };
         
         preConnected = true;
-        connectToOpenAI(state!, false); // Connect but DON'T trigger greeting yet
+        
+        // === DEMO MODE OPTIMIZATION ===
+        // In demo mode, trigger greeting IMMEDIATELY on pre-connect
+        // No need to wait for phone number since we skip caller lookup anyway
+        if (DEMO_SIMPLE_MODE) {
+          console.log(`[${callId}] ⚡ DEMO MODE: Triggering greeting on pre-connect (no caller lookup needed)`);
+          pendingGreeting = true;
+          connectToOpenAI(state!, true); // Connect AND trigger greeting immediately!
+        } else {
+          connectToOpenAI(state!, false); // Connect but DON'T trigger greeting yet (wait for init)
+        }
         
         socket.send(JSON.stringify({ 
           type: "pre_connected", 
@@ -7785,7 +7798,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         return;
       }
 
-      if (message.type === "init") {
+      // Skip regular init processing for eager_init (already handled above)
+      if (message.type === "init" && !message.eager_init) {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         const isReconnect = message.reconnect === true;
