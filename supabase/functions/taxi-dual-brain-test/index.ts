@@ -30,64 +30,45 @@ setInterval(() => {
   }
 }, 60000);
 
-// --- 2. BRAIN 1: THE INTENT EXTRACTOR (Context-Aware Routing) ---
+// --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
+// Maps raw transcript to structured BookingState
 async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
-  // Determine what field Ada was asking about
-  const lastQ = state.lastQuestion.toLowerCase();
-  let expectedField: "pickup" | "destination" | "passengers" | "confirmation" | "unknown" = "unknown";
-  
-  if (lastQ.includes("pick") && lastQ.includes("up") || lastQ.includes("from where") || lastQ.includes("where are you")) {
-    expectedField = "pickup";
-  } else if (lastQ.includes("destination") || lastQ.includes("going") || lastQ.includes("where to") || lastQ.includes("off to") || lastQ.includes("heading")) {
-    expectedField = "destination";
-  } else if (lastQ.includes("passenger") || lastQ.includes("people") || lastQ.includes("how many")) {
-    expectedField = "passengers";
-  } else if (lastQ.includes("correct") || lastQ.includes("confirm") || lastQ.includes("right")) {
-    expectedField = "confirmation";
-  }
+  console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
+  console.log(`[BRAIN1] Ada's last question: "${state.lastQuestion}"`);
 
-  console.log(`[BRAIN1] Expected field based on last question: ${expectedField}`);
-  console.log(`[BRAIN1] Last question was: "${state.lastQuestion}"`);
+  const systemPrompt = `You are a Taxi Intent Parser.
 
-  const prompt = `
-You are extracting booking data from a taxi conversation.
+CONTEXT:
+- Ada's Last Question: "${state.lastQuestion}"
+- Current Data: Pickup: ${state.pickup || 'null'}, Destination: ${state.destination || 'null'}, Passengers: ${state.passengers || 'null'}
 
-CRITICAL CONTEXT:
-- Ada just asked: "${state.lastQuestion}"
-- This means Ada was asking for: ${expectedField.toUpperCase()}
-- The user responded: "${transcript}"
+TASK:
+1. Identify if the user is answering the specific question Ada asked.
+2. Extract the response into the CORRECT field based on what Ada asked:
+   - If Ada asked about pickup/collection → put address in "pickup"
+   - If Ada asked about destination/where going → put address in "destination"  
+   - If Ada asked about passengers/how many → put number in "passengers"
+3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
+4. Detect 'is_correction' (true if user says "No", "Wait", "Change that", "Actually", "Not quite").
 
-Current booking state:
-- Pickup: ${state.pickup || 'NOT SET'}
-- Destination: ${state.destination || 'NOT SET'}
-- Passengers: ${state.passengers || 'NOT SET'}
+WORD-TO-NUMBER MAPPING:
+- "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
 
-YOUR TASK:
-Based on what Ada asked, extract the user's response into the CORRECT field.
+CRITICAL RULES:
+- Only fill the field that Ada was asking about
+- If Ada asked "Where to?" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
+- If Ada asked "How many people?" and user says "three" → passengers: 3 (NOT an address field!)
+- If user provides info out of order (e.g., destination when asked for pickup), still put it in the correct semantic field
 
-ROUTING RULES:
-1. If Ada asked about PICKUP, put any address/location in "pickup"
-2. If Ada asked about DESTINATION, put any address/location in "destination"  
-3. If Ada asked about PASSENGERS, put any number (spoken or digit) in "passengers"
-4. If Ada asked for CONFIRMATION, check if user said yes/correct/ok → set is_affirmative=true
-
-EXAMPLES:
-- Ada asked "Where to?" + User said "7 Russell Street" → destination: "7 Russell Street"
-- Ada asked "How many people?" + User said "3" → passengers: 3
-- Ada asked "Is that correct?" + User said "Yes" → is_affirmative: true
-
-Return JSON only:
+Return valid JSON only:
 {
   "pickup": null,
   "destination": null,
   "passengers": null,
-  "is_affirmative": false
-}
+  "is_affirmative": false,
+  "is_correction": false
+}`;
 
-Fill in ONLY the field that matches what Ada was asking about.`;
-
-  console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
-  
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -97,8 +78,8 @@ Fill in ONLY the field that matches what Ada was asking about.`;
     body: JSON.stringify({
       model: "google/gemini-2.5-flash",
       messages: [
-        { role: "system", content: "You are a precise data extractor. Return only valid JSON." },
-        { role: "user", content: prompt }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `User just said: "${transcript}"` }
       ],
       max_tokens: 200,
     }),
@@ -106,7 +87,7 @@ Fill in ONLY the field that matches what Ada was asking about.`;
 
   if (!res.ok) {
     console.error(`[BRAIN1] API error: ${res.status}`);
-    return { pickup: null, destination: null, passengers: null, is_affirmative: false };
+    return { pickup: null, destination: null, passengers: null, is_affirmative: false, is_correction: false };
   }
 
   const data = await res.json();
@@ -124,8 +105,8 @@ Fill in ONLY the field that matches what Ada was asking about.`;
     console.log(`[BRAIN1] Extracted:`, parsed);
     return parsed;
   } catch (e) {
-    console.error(`[BRAIN1] JSON parse error:`, e);
-    return { pickup: null, destination: null, passengers: null, is_affirmative: false };
+    console.error(`[BRAIN1] JSON parse error:`, e, content);
+    return { pickup: null, destination: null, passengers: null, is_affirmative: false, is_correction: false };
   }
 }
 
