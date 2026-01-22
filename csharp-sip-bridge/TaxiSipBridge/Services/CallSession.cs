@@ -133,13 +133,13 @@ public class CallSession : IDisposable
             var payload = rtpPacket.Payload;
             
             // Convert μ-law to PCM16
-            var pcm16 = G711Codec.UlawToPcm16(payload);
+            var pcm16 = TaxiSipBridge.Audio.G711Codec.UlawToPcm16(payload);
             
             // Apply DSP pipeline (high-pass, noise gate, AGC) - from Python bridge
             var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16);
             
             // Resample 8kHz to 24kHz
-            var resampled = AudioResampler.Resample(processed, 8000, 24000);
+            var resampled = TaxiSipBridge.Audio.AudioResampler.Resample(processed, 8000, 24000);
             
             // BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
             // This reduces CPU usage and bandwidth by ~33%
@@ -213,10 +213,10 @@ public class CallSession : IDisposable
                         var pcm24k = Convert.FromBase64String(audioData);
                         
                         // Resample 24kHz to 8kHz
-                        var pcm8k = AudioResampler.Resample(pcm24k, 24000, 8000);
+                        var pcm8k = TaxiSipBridge.Audio.AudioResampler.Resample(pcm24k, 24000, 8000);
                         
                         // Convert PCM16 to μ-law
-                        var ulaw = G711Codec.Pcm16ToUlaw(pcm8k);
+                        var ulaw = TaxiSipBridge.Audio.G711Codec.Pcm16ToUlaw(pcm8k);
                         
                         _audioQueue.Enqueue(ulaw);
                     }
