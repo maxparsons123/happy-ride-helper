@@ -4926,34 +4926,34 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             
             // POST confirmation to callback_url if provided (tells C# to dispatch the driver)
+            // ✅ CRITICAL: This is fire-and-forget to avoid blocking the post-confirmation speech
             if (pendingQuote.callback_url) {
-              try {
-                console.log(`[${sessionState.callId}] 📡 POSTing confirmation to callback_url: ${pendingQuote.callback_url}`);
               const confirmPayload = {
-                  call_id: sessionState.callId,
-                  action: "confirmed",
-                  response: "confirmed",  // C# bridge compatibility
-                  pickup: finalPickup,
-                  destination: finalDestination,
-                  fare: pendingQuote.fare,
-                  eta: pendingQuote.eta,
-                  pickup_time: pendingQuote.pickup_time || sessionState.booking.pickup_time || "ASAP", // Include normalized pickup time
-                  passengers: sessionState.booking.passengers || 1,
-                  customer_name: sessionState.customerName,
-                  caller_phone: sessionState.phone,
-                  timestamp: new Date().toISOString()
-                };
-                
-                const confirmResp = await fetch(pendingQuote.callback_url, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(confirmPayload)
-                });
-                
+                call_id: sessionState.callId,
+                action: "confirmed",
+                response: "confirmed",  // C# bridge compatibility
+                pickup: finalPickup,
+                destination: finalDestination,
+                fare: pendingQuote.fare,
+                eta: pendingQuote.eta,
+                pickup_time: pendingQuote.pickup_time || sessionState.booking.pickup_time || "ASAP",
+                passengers: sessionState.booking.passengers || 1,
+                customer_name: sessionState.customerName,
+                caller_phone: sessionState.phone,
+                timestamp: new Date().toISOString()
+              };
+              
+              // Fire-and-forget: Don't block on dispatch confirmation
+              console.log(`[${sessionState.callId}] 📡 POSTing confirmation to callback_url (fire-and-forget): ${pendingQuote.callback_url}`);
+              fetch(pendingQuote.callback_url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(confirmPayload)
+              }).then(confirmResp => {
                 console.log(`[${sessionState.callId}] 📬 Callback response: ${confirmResp.status}`);
-              } catch (callbackErr) {
+              }).catch(callbackErr => {
                 console.error(`[${sessionState.callId}] ⚠️ Callback POST failed:`, callbackErr);
-              }
+              });
             }
             
             // Mark booking as confirmed
