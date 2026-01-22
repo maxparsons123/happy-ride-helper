@@ -411,21 +411,31 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz is exactly 3:1
-        // Use high-quality NAudio resampler instead of manual FIR
-        // This avoids crackling from aggressive filtering
-        
+        // 24kHz → 8kHz using NAudio's WDL resampler
         if (pcm24.Length < 3) return new short[0];
 
-        // Use AudioCodecs.Resample for high-quality downsampling
-        // It uses NAudio's WDL resampler which has proper anti-aliasing
         var resampled = AudioCodecs.Resample(pcm24, 24000, 8000);
         
-        // Apply gentle volume boost (1.15x) without clipping
+        // Apply soft limiter instead of hard clipping
+        // This prevents harsh clipping artifacts while maintaining volume
+        const float threshold = 24000f;  // Start limiting here
+        const float ceiling = 32000f;    // Max output
+        
         for (int i = 0; i < resampled.Length; i++)
         {
-            int boosted = (int)(resampled[i] * 1.15f);
-            resampled[i] = (short)Math.Clamp(boosted, -30000, 30000); // Leave headroom
+            float sample = resampled[i];
+            float absSample = Math.Abs(sample);
+            
+            if (absSample > threshold)
+            {
+                // Soft knee compression above threshold
+                float excess = absSample - threshold;
+                float compressed = threshold + (excess * 0.3f); // 3:1 ratio
+                compressed = Math.Min(compressed, ceiling);
+                sample = sample > 0 ? compressed : -compressed;
+            }
+            
+            resampled[i] = (short)sample;
         }
 
         return resampled;
