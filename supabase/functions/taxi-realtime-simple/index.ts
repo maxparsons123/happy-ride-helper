@@ -2178,9 +2178,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // EXCEPTION: Allow final goodbye response through even if extraction is running
         if (sessionState.extractionInProgress && !sessionState.finalGoodbyePending) {
           console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - extraction in progress`);
-          if (sessionState.openAiResponseActive && !isConnectionClosed) {
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          }
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
           sessionState.discardCurrentResponseAudio = true;
           break;
         }
@@ -2196,9 +2194,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             sessionState.modificationPromptPending = false;
           } else {
             console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting modification confirmation`);
-            if (sessionState.openAiResponseActive && !isConnectionClosed) {
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            }
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
             sessionState.discardCurrentResponseAudio = true;
             break;
           }
@@ -2208,9 +2204,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // This prevents Ada from hallucinating fare amounts before dispatch responds
         if (sessionState.awaitingDispatchCallback) {
           console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting dispatch callback`);
-          if (sessionState.openAiResponseActive && !isConnectionClosed) {
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          }
+          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
           sessionState.discardCurrentResponseAudio = true;
           break;
         }
@@ -2226,9 +2220,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           // Only block during the grace period - after that, Ada can respond naturally
           if (msSinceAsked < waitPeriodMs) {
             console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user response to "anything else?" (${msSinceAsked}ms / ${waitPeriodMs}ms)`);
-            if (sessionState.openAiResponseActive && !isConnectionClosed) {
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            }
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
             sessionState.discardCurrentResponseAudio = true;
             break;
           }
@@ -2248,9 +2240,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             sessionState.finalGoodbyePending = false;
           } else {
             console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response after callEnded`);
-            if (sessionState.openAiResponseActive && !isConnectionClosed) {
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            }
+            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
           }
         }
         break;
@@ -3414,15 +3404,14 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.pendingAudioBuffer = [];
 
             // Cancel anything already in-flight and clear audio to avoid competing responses.
-            if (openaiWs && openaiConnected && !isConnectionClosed) {
-              if (sessionState.openAiResponseActive) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-              }
+            // (Even if no response is active yet, cancel is safe and keeps the flow deterministic.)
+            if (openaiWs && openaiConnected) {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             }
             
             // Inject system message to handle the mismatch gracefully
-            if (openaiWs && openaiConnected && !isConnectionClosed && !sessionState.callEnded) {
+            if (openaiWs && openaiConnected && !sessionState.callEnded) {
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -3449,7 +3438,7 @@ Do NOT say 'booked' until the tool returns success.]`
           const isSummaryPhase = sessionState.bookingStep === "summary" || sessionState.lastQuestionType === "confirmation";
           const isSimpleNegation = isSummaryNegation(userText);
           
-          if (isSummaryPhase && isSimpleNegation && openaiWs && openaiConnected && !isConnectionClosed && !sessionState.callEnded) {
+          if (isSummaryPhase && isSimpleNegation && openaiWs && openaiConnected && !sessionState.callEnded) {
             console.log(`[${sessionState.callId}] ❌ SUMMARY NEGATION: User said "${userText}" during summary - asking what needs correcting`);
             
             // Cancel any in-flight response
@@ -3486,7 +3475,7 @@ Do NOT say 'booked' until the tool returns success.]`
           // Detect phrases like "No, it's...", "Actually...", "The pickup is..."
           const addressCorrection = detectAddressCorrection(userText, sessionState.booking.pickup, sessionState.booking.destination);
           
-          if (addressCorrection.type && addressCorrection.address && openaiWs && openaiConnected && !isConnectionClosed && !sessionState.callEnded) {
+          if (addressCorrection.type && addressCorrection.address && openaiWs && openaiConnected && !sessionState.callEnded) {
             console.log(`[${sessionState.callId}] 🔧 ADDRESS CORRECTION DETECTED: ${addressCorrection.type} = "${addressCorrection.address}"`);
             
             // Apply STT correction to the extracted address
@@ -3593,7 +3582,7 @@ Do NOT say 'booked' until the tool returns success.]`
             !/going to|from|pick ?up|drop ?off/i.test(lowerUserText);
           
           // === NEW: Handle premature goodbye attempt (user says bye before booking complete) ===
-          if (isHardGoodbye && !bookingCompleteEnough && openaiWs && openaiConnected && !isConnectionClosed && !sessionState.callEnded) {
+          if (isHardGoodbye && !bookingCompleteEnough && openaiWs && openaiConnected && !sessionState.callEnded) {
             console.log(`[${sessionState.callId}] 👋 Premature goodbye detected: "${userText}" - booking not complete, redirecting user`);
             
             // Cancel any in-flight assistant speech
@@ -3623,7 +3612,7 @@ Do NOT say 'booked' until the tool returns success.]`
             break; // Skip normal processing
           }
           
-          if (isExplicitGoodbye && openaiWs && openaiConnected && !isConnectionClosed && !sessionState.callEnded) {
+          if (isExplicitGoodbye && openaiWs && openaiConnected && !sessionState.callEnded) {
             console.log(`[${sessionState.callId}] 👋 Explicit goodbye detected: "${userText}" (hardGoodbye=${isHardGoodbye}, softGoodbye=${isSoftGoodbye}, gracePeriodPassed=${enoughTimeElapsed}, bookingConfirmed=${sessionState.bookingFullyConfirmed}) - ending call`);
             
             // ✅ CRITICAL: Mark call as ending IMMEDIATELY to block all further processing
@@ -3863,12 +3852,10 @@ Do NOT say 'booked' until the tool returns success.]`
 
               // Ensure nothing else is speaking; keep the flow deterministic.
               sessionState.discardCurrentResponseAudio = true;
-              if (sessionState.openAiResponseActive && !isConnectionClosed) {
+              if (sessionState.openAiResponseActive) {
                 openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               }
-              if (!isConnectionClosed) {
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
 
               openaiWs.send(
                 JSON.stringify({
@@ -5894,12 +5881,10 @@ Do NOT say 'booked' until the tool returns success.]`
                   console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
                   
                   // Cancel any active response before injecting system message
-                  if (sessionState.openAiResponseActive && !isConnectionClosed) {
+                  if (sessionState.openAiResponseActive) {
                     openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
                   }
-                  if (!isConnectionClosed) {
-                    openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  }
+                  openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
                   
                   // Send the goodbye message to Ada to speak
                   openaiWs?.send(JSON.stringify({
@@ -5998,12 +5983,10 @@ Do NOT say 'booked' until the tool returns success.]`
                     sessionState.discardCurrentResponseAudio = true;
                     
                     // Cancel any active response before injecting system message
-                    if (sessionState.openAiResponseActive && !isConnectionClosed) {
+                    if (sessionState.openAiResponseActive) {
                       openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
                     }
-                    if (!isConnectionClosed) {
-                      openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                    }
+                    openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
                     
                     // Send system message so Ada speaks the dispatch confirmation + details + follow-up question
                     openaiWs?.send(JSON.stringify({
@@ -6043,7 +6026,7 @@ Do NOT say 'booked' until the tool returns success.]`
               };
               
               // Inject fare quote for Ada to speak
-              if (openaiWs && openaiConnected && !isConnectionClosed) {
+              if (openaiWs && openaiConnected) {
                 if (sessionState.openAiResponseActive) {
                   openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                 }
@@ -6095,7 +6078,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 lastPrompt: fallbackMessage
               };
               
-              if (openaiWs && openaiConnected && !isConnectionClosed) {
+              if (openaiWs && openaiConnected) {
                 if (sessionState.openAiResponseActive) {
                   openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                 }
@@ -6203,33 +6186,22 @@ Do NOT say 'booked' until the tool returns success.]`
           // 🔧 FAILSAFE: If dispatch_confirm broadcast doesn't arrive within 3s, trigger confirmation directly
           // This prevents Ada from going silent if the dispatch system doesn't send the broadcast
           const confirmationTimeoutMs = 3000;
-          console.log(`[${sessionState.callId}] ⏱️ Setting confirmation failsafe timer for ${confirmationTimeoutMs}ms`);
-          
           sessionState.confirmationFailsafeTimerId = setTimeout(() => {
-            console.log(`[${sessionState.callId}] ⏱️ FAILSAFE timer fired - checking: bookingFullyConfirmed=${sessionState.bookingFullyConfirmed}, confirmationSpoken=${sessionState.confirmationSpoken}, openaiWs=${!!openaiWs}, openaiConnected=${openaiConnected}, isConnectionClosed=${isConnectionClosed}`);
-            
             // Only trigger if booking was confirmed and we haven't already spoken
             if (sessionState.bookingFullyConfirmed && 
                 !sessionState.confirmationSpoken && 
-                !isConnectionClosed &&
                 openaiWs && 
                 openaiConnected) {
               console.log(`[${sessionState.callId}] ⏰ FAILSAFE: dispatch_confirm not received in ${confirmationTimeoutMs}ms - triggering confirmation directly`);
               sessionState.confirmationSpoken = true;
               
-              // ✅ CRITICAL: Set askedAnythingElse so goodbye logic works correctly
-              sessionState.askedAnythingElse = true;
-              sessionState.confirmationResponsePending = true;
-              
               const langCode = sessionState.language || "en";
               const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
               const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
               
-              // ✅ Only cancel if there's an active response (prevents response_cancel_not_active error)
-              if (sessionState.openAiResponseActive) {
-                sessionState.discardCurrentResponseAudio = true;
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-              }
+              // Cancel any stale response and clear buffers
+              sessionState.discardCurrentResponseAudio = true;
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
               
               // Inject confirmation message
@@ -6253,12 +6225,9 @@ Do NOT say 'booked' until the tool returns success.]`
                   instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say EXACTLY: "${confirmationScript}" Do not add extra details.`
                 }
               }));
-            } else {
-              console.log(`[${sessionState.callId}] ⏱️ FAILSAFE skipped - conditions not met`);
             }
           }, confirmationTimeoutMs);
           
-          break; // ✅ CRITICAL: Prevent fall-through to next case
         }
 
         case "cancel_booking": {
@@ -7786,12 +7755,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           }
           
           // Cancel any active response before injecting confirmation
-          if (state?.openAiResponseActive && !isConnectionClosed) {
+          if (state?.openAiResponseActive) {
             openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           }
-          if (!isConnectionClosed) {
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-          }
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Inject the confirmation for Ada to speak
           // Script: "That's on the way" + "Is there anything else I can help you with?"
