@@ -7809,7 +7809,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         const sessionAgeS = message.session_age_s || 0;
         const bookingStateFromBridge = message.booking_state || {};
         
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, resume=${isResume}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
+        // Debug: Log raw message to trace handoff issues
+        console.log(`[${callId}] 📨 Init message received: resume=${message.resume}, resume_call_id=${message.resume_call_id}, reconnect=${message.reconnect}`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, resume=${isResume}, resumeCallId=${resumeCallId}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
 
         // === SESSION RESUME SUPPORT ===
         // When bridge sends resume=true after session.handoff, restore state from DB
