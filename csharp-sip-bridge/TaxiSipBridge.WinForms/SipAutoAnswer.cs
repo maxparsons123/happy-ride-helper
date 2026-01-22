@@ -28,6 +28,8 @@ public class SipAutoAnswer : IDisposable
 
     // 2-way audio safety: prevent echo by muting SIP→Ada while Ada is speaking
     private volatile bool _isBotSpeaking = false;
+    private DateTime _lastBotAudioTime = DateTime.MinValue;
+    private const int BOT_SPEAKING_TIMEOUT_MS = 3000; // Auto-clear bot-speaking after 3s of no audio
     private const int RMS_NOISE_FLOOR = 650;  // Below this = background noise, skip
     private const int RMS_ECHO_CEILING = 20000; // Above this = likely echo/clipping
     private const int GREETING_PROTECTION_PACKETS = 150; // ~3 seconds @ 20ms packets
@@ -364,8 +366,9 @@ public class SipAutoAnswer : IDisposable
                 {
                     if (cts.Token.IsCancellationRequested) return;
 
-                    // Set bot-speaking flag when Ada starts sending audio
+                    // Set bot-speaking flag and timestamp when Ada sends audio
                     _isBotSpeaking = true;
+                    _lastBotAudioTime = DateTime.Now;
 
                     chunkCount++;
                     if (chunkCount <= 5)
@@ -525,10 +528,22 @@ public class SipAutoAnswer : IDisposable
             }
 
             // Bot-speaking protection: don't forward audio while Ada is speaking (prevents echo)
+            // Auto-expire after BOT_SPEAKING_TIMEOUT_MS to prevent stuck state
             if (_isBotSpeaking)
             {
-                skippedBotSpeaking++;
-                return;
+                // Check if bot-speaking has timed out
+                if ((DateTime.Now - _lastBotAudioTime).TotalMilliseconds > BOT_SPEAKING_TIMEOUT_MS)
+                {
+                    _isBotSpeaking = false;
+                    // Log once when auto-clearing
+                    if (skippedBotSpeaking > 0 && sentToAda == 0)
+                        Log($"⏱️ [{callId}] Bot-speaking auto-cleared after {BOT_SPEAKING_TIMEOUT_MS}ms timeout");
+                }
+                else
+                {
+                    skippedBotSpeaking++;
+                    return;
+                }
             }
 
             try
