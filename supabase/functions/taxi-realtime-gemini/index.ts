@@ -672,13 +672,46 @@ serve(async (req) => {
         consecutiveSpeechFrames = 0;
         socket.send(JSON.stringify({ type: "audio.done" }));
         
-        // Check if Ada said goodbye
-        const goodbyePatterns = /\b(goodbye|bye|take care|have a (great|lovely|good) (day|journey|trip))\b/i;
-        if (goodbyePatterns.test(parsed.response)) {
-          console.log(`[${callId}] 👋 Ada said goodbye, ending call...`);
+        // ════════════════════════════════════════════════════════════════════════
+        // GRACEFUL DISCONNECT: Close socket cleanly after booking or goodbye
+        // This prevents Supabase timeout issues by ending connection proactively
+        // ════════════════════════════════════════════════════════════════════════
+        const isBookingComplete = parsed.booking_complete === true || 
+          currentBooking.status === "confirmed" ||
+          (currentBooking.pickup && currentBooking.destination && currentBooking.passengers && 
+           /\b(booked|confirmed|on (its|the) way|will be there|arriving)\b/i.test(parsed.response));
+        
+        const goodbyePatterns = /\b(goodbye|bye|take care|have a (great|lovely|good) (day|journey|trip)|safe travels)\b/i;
+        const isGoodbye = goodbyePatterns.test(parsed.response);
+        
+        if (isBookingComplete || isGoodbye) {
+          const reason = isBookingComplete ? "booking_complete" : "goodbye";
+          console.log(`[${callId}] ✅ Graceful disconnect scheduled - reason: ${reason}`);
+          
+          // Wait for audio to finish playing (~2-3 seconds for typical confirmation)
           setTimeout(() => {
-            socket.send(JSON.stringify({ type: "session.end", reason: "goodbye" }));
-          }, 3000);
+            console.log(`[${callId}] 🔌 Closing WebSocket cleanly (${reason})`);
+            
+            // Notify client before closing
+            try {
+              socket.send(JSON.stringify({ 
+                type: "session.end", 
+                reason,
+                booking: currentBooking 
+              }));
+            } catch (e) {
+              // Socket may already be closing
+            }
+            
+            // Close with normal closure code (1000)
+            setTimeout(() => {
+              try {
+                socket.close(1000, reason);
+              } catch (e) {
+                console.log(`[${callId}] Socket already closed`);
+              }
+            }, 500);
+          }, 2500); // 2.5s grace period for audio playback
         }
       }
       
