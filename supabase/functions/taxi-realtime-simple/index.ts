@@ -2590,11 +2590,16 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           
           // --- DUPLICATE QUESTION DETECTION: Prevent Ada from asking the same question twice ---
           // This catches OpenAI generating back-to-back identical questions (common with passenger question)
+          // EXCEPTION: Allow re-asking after address-vs-passenger mismatch recovery
           const duplicateQuestionWindow = 10000; // 10 seconds
           const isWithinDuplicateWindow = sessionState.lastSpokenQuestionAt && 
             (Date.now() - sessionState.lastSpokenQuestionAt < duplicateQuestionWindow);
           
-          if (isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15) {
+          // Allow the re-ask if we recently had an address-vs-passenger mismatch (intentional re-prompt)
+          const isRecoveringFromMismatch = sessionState.lastPassengerMismatchAt &&
+            (Date.now() - sessionState.lastPassengerMismatchAt < 5000); // 5 second window after mismatch
+          
+          if (isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15 && !isRecoveringFromMismatch) {
             // Check if this is the same question being asked again
             const normalizeQuestion = (q: string) => q.toLowerCase()
               .replace(/[.,!?'"]/g, '')
