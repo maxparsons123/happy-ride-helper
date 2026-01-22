@@ -3671,15 +3671,40 @@ Do NOT say 'booked' until the tool returns success.]`
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
             // Close OpenAI connection after extended delay to let full goodbye audio finish,
-            // then tell the bridge to hang up.
+            // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
             setTimeout(() => {
-              console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after explicit goodbye`);
+              console.log(`[${sessionState.callId}] 🔌 Closing connections after explicit goodbye`);
+              
+              // Stop keep-alives immediately (we are ending the session)
               try {
-                socket.send(JSON.stringify({ type: "hangup", reason: "customer_goodbye" }));
+                stopKeepAlive();
               } catch {
                 // ignore
               }
-              openaiWs?.close();
+              
+              // Notify the bridge
+              try {
+                socket.send(JSON.stringify({ type: "hangup", reason: "customer_goodbye" }));
+                console.log(`[${sessionState.callId}] 📤 Sent hangup to bridge`);
+              } catch (e) {
+                console.warn(`[${sessionState.callId}] ⚠️ Failed to send hangup to bridge:`, e);
+              }
+              
+              // Close the bridge WebSocket gracefully (send close frame)
+              try {
+                isConnectionClosed = true;
+                socket.close(1000, "customer_goodbye");
+                console.log(`[${sessionState.callId}] 📴 Closed bridge WebSocket (1000 customer_goodbye)`);
+              } catch (e) {
+                console.warn(`[${sessionState.callId}] ⚠️ Failed to close bridge WebSocket:`, e);
+              }
+              
+              // Close OpenAI WS
+              try {
+                openaiWs?.close();
+              } catch {
+                // ignore
+              }
             }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
@@ -3741,15 +3766,40 @@ Do NOT say 'booked' until the tool returns success.]`
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
             // Close OpenAI connection after extended delay to let full goodbye audio finish,
-            // then tell the bridge to hang up.
+            // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
             setTimeout(() => {
-              console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after post-booking goodbye`);
+              console.log(`[${sessionState.callId}] 🔌 Closing connections after post-booking goodbye`);
+              
+              // Stop keep-alives immediately (we are ending the session)
               try {
-                socket.send(JSON.stringify({ type: "hangup", reason: "post_booking_goodbye" }));
+                stopKeepAlive();
               } catch {
                 // ignore
               }
-              openaiWs?.close();
+              
+              // Notify the bridge
+              try {
+                socket.send(JSON.stringify({ type: "hangup", reason: "post_booking_goodbye" }));
+                console.log(`[${sessionState.callId}] 📤 Sent hangup to bridge`);
+              } catch (e) {
+                console.warn(`[${sessionState.callId}] ⚠️ Failed to send hangup to bridge:`, e);
+              }
+              
+              // Close the bridge WebSocket gracefully (send close frame)
+              try {
+                isConnectionClosed = true;
+                socket.close(1000, "post_booking_goodbye");
+                console.log(`[${sessionState.callId}] 📴 Closed bridge WebSocket (1000 post_booking_goodbye)`);
+              } catch (e) {
+                console.warn(`[${sessionState.callId}] ⚠️ Failed to close bridge WebSocket:`, e);
+              }
+              
+              // Close OpenAI WS
+              try {
+                openaiWs?.close();
+              } catch {
+                // ignore
+              }
             }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
