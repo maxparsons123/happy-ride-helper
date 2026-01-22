@@ -47,22 +47,59 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// Encode PCM16 samples to µ-law (G.711).
+    /// Encode PCM16 samples to µ-law (G.711) using lookup table for consistent encoding.
     /// </summary>
     public static byte[] MuLawEncode(short[] pcm)
     {
         var ulaw = new byte[pcm.Length];
         for (int i = 0; i < pcm.Length; i++)
         {
-            int s = pcm[i];
-            int mask = 0x80, seg = 8;
-            if (s < 0) { s = -s; mask = 0x00; }
-            s += 0x84;
-            if (s > 0x7FFF) s = 0x7FFF;
-            for (int j = 0x4000; (s & j) == 0 && seg > 0; j >>= 1) seg--;
-            ulaw[i] = (byte)~(mask | (seg << 4) | ((s >> (seg + 3)) & 0x0F));
+            ulaw[i] = MuLawTable[pcm[i] + 32768];
         }
         return ulaw;
+    }
+
+    // Pre-computed µ-law lookup table for fast encoding
+    private static readonly byte[] MuLawTable = BuildMuLawTable();
+    
+    private const int MULAW_BIAS = 0x84;
+    private const int MULAW_CLIP = 32635;
+    
+    private static byte[] BuildMuLawTable()
+    {
+        var table = new byte[65536];
+        for (int i = 0; i < 65536; i++)
+        {
+            short sample = (short)(i - 32768);
+            table[i] = EncodeToMuLaw(sample);
+        }
+        return table;
+    }
+    
+    private static byte EncodeToMuLaw(short sample)
+    {
+        int sign = (sample >> 8) & 0x80;
+        if (sign != 0)
+            sample = (short)-sample;
+        
+        if (sample > MULAW_CLIP)
+            sample = MULAW_CLIP;
+        
+        sample = (short)(sample + MULAW_BIAS);
+        
+        int exponent = 7;
+        int mask = 0x4000;
+        
+        while ((sample & mask) == 0 && exponent > 0)
+        {
+            exponent--;
+            mask >>= 1;
+        }
+        
+        int mantissa = (sample >> (exponent + 3)) & 0x0F;
+        byte ulawByte = (byte)(sign | (exponent << 4) | mantissa);
+        
+        return (byte)~ulawByte;
     }
 
     /// <summary>

@@ -349,8 +349,21 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 OnDebugLog?.Invoke($"[AdaAudioSource] 📤 [{mode}] Frame {_sentFrames}: {audioFrame.Length} samples @{targetRate}Hz, codec={_audioFormatManager.SelectedFormat.FormatName}");
             }
 
-            // Encode using negotiated codec
-            byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
+            // Encode using appropriate codec
+            byte[] encoded;
+            var format = _audioFormatManager.SelectedFormat;
+            
+            // G.711 µ-law has format ID 0 (PCMU)
+            if (format.FormatName == "PCMU" || format.ID == 0)
+            {
+                // Use NAudio-based lookup table encoder for cleaner G.711 output
+                encoded = AudioCodecs.MuLawEncode(audioFrame);
+            }
+            else
+            {
+                // Use SIPSorcery encoder for Opus and other codecs
+                encoded = _audioEncoder.EncodeAudio(audioFrame, format);
+            }
 
             // Calculate RTP duration
             uint durationRtpUnits = (uint)samplesNeeded;
