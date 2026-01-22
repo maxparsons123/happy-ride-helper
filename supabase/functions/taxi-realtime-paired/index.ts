@@ -3774,6 +3774,19 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
         audioDiag.packetsReceived++;
 
+        // AUTO-DETECT slin16 from frame size (640 bytes = 20ms @ 16kHz PCM16)
+        // This handles race conditions where format update message arrives after first audio
+        if (audioBytes.length === 640 && inboundSampleRate === 8000) {
+          console.log(`[${callId}] 🔄 Auto-detected slin16 @ 16kHz from 640-byte frame size`);
+          inboundSampleRate = 16000;
+          inboundAudioFormat = "slin16";
+        } else if (audioBytes.length === 320 && inboundSampleRate !== 8000 && inboundAudioFormat !== "ulaw") {
+          // Correct back to 8kHz if we're getting 320-byte frames
+          console.log(`[${callId}] 🔄 Auto-corrected to slin @ 8kHz from 320-byte frame size`);
+          inboundSampleRate = 8000;
+          inboundAudioFormat = "slin";
+        }
+
         // Decode to PCM for RMS calculation
         let pcmInput: Int16Array;
         if (inboundAudioFormat === "ulaw") {
