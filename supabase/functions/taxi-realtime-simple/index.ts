@@ -1783,6 +1783,12 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
+  
+  // === HANDOFF RESUMPTION ===
+  // True if the fare prompt was already spoken BEFORE handoff (prevents re-asking after reconnect)
+  fareSpoken: boolean;
+  // True if this session was resumed from a handoff (prevents duplicate webhook sends)
+  isResumedSession: boolean;
 }
 
 serve(async (req) => {
@@ -2008,6 +2014,9 @@ serve(async (req) => {
     
     try {
       // Save current booking state to live_calls for resumption
+      // CRITICAL: Include fareSpoken flag so resumed session knows fare was already read
+      const fareWasSpoken = !!(state.lastQuotePromptAt && state.pendingQuote);
+      
       const handoffState = {
         pickup: state.booking.pickup,
         destination: state.booking.destination,
@@ -2019,6 +2028,7 @@ serve(async (req) => {
         greetingDelivered: state.greetingDelivered,
         transcripts: state.transcripts.slice(-20), // Last 20 transcripts for context
         pendingQuote: state.pendingQuote,
+        fareSpoken: fareWasSpoken, // TRUE if Ada already read the fare to the customer
         handoffAt: new Date().toISOString(),
       };
       
@@ -7776,6 +7786,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
+          fareSpoken: false, // True if fare was already spoken (for handoff resume)
+          isResumedSession: false, // True if this session was resumed from handoff
         };
         
         preConnected = true;
@@ -7971,6 +7983,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
+            fareSpoken: false, // True if fare was already spoken (for handoff resume)
+            isResumedSession: false, // True if this session was resumed from handoff
           };
         }
         
@@ -8043,11 +8057,25 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             state.pendingQuote = restoredState.pendingQuote;
           }
           
+          // CRITICAL: Restore fareSpoken flag if it exists in the restored state
+          // This prevents Ada from re-reading the fare after handoff
+          if ((restoredState as any).fareSpoken) {
+            state.fareSpoken = true;
+            console.log(`[${callId}] 💰 fareSpoken=true restored - will NOT re-ask fare`);
+          }
+          
+          // Mark this as a resumed session to prevent duplicate webhooks
+          state.isResumedSession = true;
+          
           // CRITICAL: Mark greeting as delivered so Ada continues conversation
           state.greetingDelivered = true;
           
           // Determine booking step based on what data we have
-          if (state.booking.pickup && state.booking.destination && state.booking.passengers !== null) {
+          // If fare was already spoken, we're waiting for confirmation
+          if (state.fareSpoken && state.pendingQuote) {
+            state.bookingStep = "summary"; // Waiting for yes/no to fare
+            console.log(`[${callId}] 📍 Step set to summary (fareSpoken=true, awaiting confirmation)`);
+          } else if (state.booking.pickup && state.booking.destination && state.booking.passengers !== null) {
             state.bookingStep = "summary";
           } else if (state.booking.pickup && state.booking.destination) {
             state.bookingStep = "passengers";
@@ -8057,7 +8085,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             state.bookingStep = "pickup";
           }
           
-          console.log(`[${callId}] 📦 DB restore complete: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, transcripts=${state.transcripts.length}`);
+          console.log(`[${callId}] 📦 DB restore complete: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, fareSpoken=${state.fareSpoken}, transcripts=${state.transcripts.length}`);
           
           // Update live_calls status back to active
           await supabase.from("live_calls").update({
@@ -8150,26 +8178,61 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           connectToOpenAI(state!);
         }
 
-        // For reconnects, skip greeting and inject a resume message instead
-        if (isReconnect && state) {
+        // For reconnects/resumes, skip greeting and inject a resume message instead
+        if ((isReconnect || isResume) && state) {
           state.greetingDelivered = true;  // Don't play greeting again
           state.greetingProtectionUntil = 0;  // No greeting protection needed
           
-          // Send a brief "I'm still here" message if we have booking context
-          const hasBookingContext = state.booking.pickup || state.booking.destination;
-          if (hasBookingContext && openaiWs && openaiConnected) {
-            const resumePrompt = `[SYSTEM: The call was briefly interrupted. You are resuming the conversation. The customer was booking a taxi. Current state: pickup="${state.booking.pickup || 'not yet'}", destination="${state.booking.destination || 'not yet'}", passengers=${state.booking.passengers || 'unknown'}. Ask a brief follow-up question like "Sorry about that, where were we?" or continue asking for the next missing field. Do NOT repeat the greeting.]`;
+          // === FARE ALREADY SPOKEN - WAIT FOR YES/NO ===
+          // If this is a resume after handoff and fare was already read, inject prompt to wait for confirmation
+          if (isResume && state.fareSpoken && state.pendingQuote && openaiWs && openaiConnected) {
+            const fare = state.pendingQuote.fare || "";
+            const eta = state.pendingQuote.eta || "";
+            const langCode = state.language || "en";
+            const langName = LANGUAGE_NAMES[langCode] || "English";
             
-            console.log(`[${callId}] 🔄 Injecting resume prompt for reconnected call`);
+            const fareResumePrompt = `[SYSTEM: Session resumed after handoff. You have ALREADY told the customer the fare (${fare}, ETA ${eta}). 
+DO NOT repeat the fare. DO NOT re-ask the price.
+The customer may have said "yes" or "no" just before the handoff.
+
+WAIT SILENTLY for their response. If they seem confused, say: "Would you like me to book that?"
+
+WHEN CUSTOMER RESPONDS:
+- If YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state.booking.pickup || ''}", destination: "${state.booking.destination || ''}"
+- If NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask: "Would you like me to book that?"
+
+IMPORTANT: Respond in ${langName.toUpperCase()}.]`;
+            
+            console.log(`[${callId}] 💰 RESUME with fareSpoken=true - injecting wait-for-confirmation prompt`);
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
                 type: "message",
                 role: "user",
-                content: [{ type: "input_text", text: resumePrompt }]
+                content: [{ type: "input_text", text: fareResumePrompt }]
               }
             }));
-            safeResponseCreate(state, "reconnect-resume");
+            // DON'T trigger response.create - wait for customer's yes/no
+            // The response will be triggered by VAD when customer speaks
+          }
+          // === REGULAR RECONNECT (no fare spoken yet) ===
+          else {
+            const hasBookingContext = state.booking.pickup || state.booking.destination;
+            if (hasBookingContext && openaiWs && openaiConnected) {
+              const resumePrompt = `[SYSTEM: The call was briefly interrupted. You are resuming the conversation. The customer was booking a taxi. Current state: pickup="${state.booking.pickup || 'not yet'}", destination="${state.booking.destination || 'not yet'}", passengers=${state.booking.passengers || 'unknown'}. Ask a brief follow-up question like "Sorry about that, where were we?" or continue asking for the next missing field. Do NOT repeat the greeting.]`;
+              
+              console.log(`[${callId}] 🔄 Injecting resume prompt for reconnected call`);
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: resumePrompt }]
+                }
+              }));
+              safeResponseCreate(state, "reconnect-resume");
+            }
           }
         }
 
@@ -8231,6 +8294,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // GUARD 0: If call is ending/ended, ignore ALL dispatch messages
           if (state?.callEnded) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - call is ended/ending`);
+            return;
+          }
+
+          // GUARD 0.1: If fare was ALREADY spoken (resumed session), ignore ask_confirm
+          // This prevents re-reading the fare after a handoff reconnection
+          if (state?.fareSpoken) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - fareSpoken=true (resumed session, awaiting yes/no)`);
             return;
           }
 
@@ -8439,6 +8509,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
             }
           }));
+          
+          // ✅ Mark fare as spoken - this is persisted in handoff state
+          // Prevents re-reading fare if session is resumed after handoff
+          if (state) {
+            state.fareSpoken = true;
+            console.log(`[${callId}] 💰 fareSpoken=true set - fare prompt injected`);
+          }
           
           // 🔄 DISPATCH-TRIGGERED HANDOFF: Now that we have fare/ETA, trigger handoff to extend session
           // This ensures the caller has time to hear the fare and respond without session timeout
