@@ -1823,10 +1823,15 @@ serve(async (req) => {
   const MAX_SESSION_DURATION_MS = 4 * 60 * 1000;
   
   // === SESSION HANDOFF CONFIGURATION ===
-  // At 75 seconds, save state to DB and signal bridge to reconnect for seamless continuation
-  const SESSION_HANDOFF_MS = 75 * 1000;
+  // Handoff is now triggered by dispatch webhook response (not a fixed timer)
+  // When we receive a fare quote from dispatch, we trigger handoff to extend session
+  // This is smarter than a fixed 75s timer because:
+  // 1. No handoff needed if call finishes quickly
+  // 2. Handoff happens exactly when we need more time (fare confirmation stage)
+  const HANDOFF_AFTER_DISPATCH_DELAY_MS = 2000; // Give 2s for fare speech to start
   let handoffTimeoutId: number | null = null;
   let handoffInProgress = false;
+  let handoffTriggeredByDispatch = false; // Track if dispatch already triggered a handoff
   
   // --- OpenAI WebSocket ping to prevent OpenAI's idle timeout ---
   // OpenAI Realtime API can drop connections after ~30s of no audio
@@ -1977,87 +1982,106 @@ serve(async (req) => {
   };
   
   // --- Session Handoff: Save state to DB and signal bridge to reconnect ---
-  const startHandoffTimer = (callId: string) => {
-    if (handoffTimeoutId) return; // Already running
+  /**
+   * Trigger session handoff - called when dispatch webhook responds with fare/ETA
+   * This extends the session by signaling the bridge to reconnect.
+   * 
+   * Unlike the old fixed 75s timer, this is smarter:
+   * - Only triggers when we actually need more time (fare confirmation stage)
+   * - No unnecessary handoffs for quick calls that finish before 75s
+   * - Ensures continuity exactly when the caller is making a booking decision
+   */
+  const triggerDispatchHandoff = async (callId: string, reason: string = "dispatch_response") => {
+    if (handoffInProgress || handoffTriggeredByDispatch) {
+      console.log(`[${callId}] ⏭️ Handoff already in progress or triggered, skipping`);
+      return;
+    }
     
-    handoffTimeoutId = setTimeout(async () => {
-      if (isConnectionClosed || handoffInProgress || !state) return;
+    if (isConnectionClosed || !state) {
+      console.log(`[${callId}] ⏭️ Connection closed or no state, skipping handoff`);
+      return;
+    }
+    
+    handoffTriggeredByDispatch = true;
+    handoffInProgress = true;
+    console.log(`[${callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Saving state for seamless reconnection (reason: ${reason})...`);
+    
+    try {
+      // Save current booking state to live_calls for resumption
+      const handoffState = {
+        pickup: state.booking.pickup,
+        destination: state.booking.destination,
+        passengers: state.booking.passengers,
+        pickup_time: state.booking.pickup_time,
+        bookingStep: state.bookingStep,
+        language: state.language,
+        customerName: state.customerName,
+        greetingDelivered: state.greetingDelivered,
+        transcripts: state.transcripts.slice(-20), // Last 20 transcripts for context
+        pendingQuote: state.pendingQuote,
+        handoffAt: new Date().toISOString(),
+      };
       
-      handoffInProgress = true;
-      console.log(`[${callId}] 🔄 SESSION HANDOFF: Saving state for seamless reconnection...`);
+      // Update live_calls with handoff status and state
+      await supabase.from("live_calls").update({
+        status: "handoff",
+        pickup: state.booking.pickup,
+        destination: state.booking.destination,
+        passengers: state.booking.passengers,
+        fare: state.pendingQuote?.fare || null,
+        eta: state.pendingQuote?.eta || null,
+        transcripts: state.transcripts,
+        updated_at: new Date().toISOString(),
+      }).eq("call_id", callId);
       
-      try {
-        // Save current booking state to live_calls for resumption
-        const handoffState = {
-          pickup: state.booking.pickup,
-          destination: state.booking.destination,
-          passengers: state.booking.passengers,
-          pickup_time: state.booking.pickup_time,
-          bookingStep: state.bookingStep,
-          language: state.language,
-          customerName: state.customerName,
-          greetingDelivered: state.greetingDelivered,
-          transcripts: state.transcripts.slice(-20), // Last 20 transcripts for context
-          pendingQuote: state.pendingQuote,
-          handoffAt: new Date().toISOString(),
-        };
-        
-        // Update live_calls with handoff status and state
-        await supabase.from("live_calls").update({
-          status: "handoff",
-          pickup: state.booking.pickup,
-          destination: state.booking.destination,
-          passengers: state.booking.passengers,
-          fare: state.pendingQuote?.fare || null,
-          eta: state.pendingQuote?.eta || null,
-          transcripts: state.transcripts,
-          updated_at: new Date().toISOString(),
-        }).eq("call_id", callId);
-        
-        console.log(`[${callId}] ✅ Handoff state saved to DB`);
-        console.log(`[${callId}] 📊 State: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}`);
-        
-        // Send handoff signal to bridge - it will reconnect with resume flag
-        socket.send(JSON.stringify({
-          type: "session.handoff",
-          call_id: callId,
-          reason: "session_timeout_approaching",
-          state: handoffState,
-        }));
-        
-        console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
-        
-        // Close OpenAI connection cleanly (bridge will re-establish on reconnect)
-        if (openaiWs && openaiConnected) {
+      console.log(`[${callId}] ✅ Handoff state saved to DB`);
+      console.log(`[${callId}] 📊 State: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, fare=${state.pendingQuote?.fare}`);
+      
+      // Send handoff signal to bridge - it will reconnect with resume flag
+      socket.send(JSON.stringify({
+        type: "session.handoff",
+        call_id: callId,
+        reason: reason,
+        state: handoffState,
+      }));
+      
+      console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
+      
+      // Close OpenAI connection cleanly (bridge will re-establish on reconnect)
+      if (openaiWs && openaiConnected) {
+        try {
+          openaiWs.close(1000, "session_handoff");
+        } catch (e) {
+          console.warn(`[${callId}] ⚠️ Error closing OpenAI on handoff:`, e);
+        }
+      }
+      
+      // Give bridge time to process handoff before closing
+      setTimeout(() => {
+        if (!isConnectionClosed) {
+          console.log(`[${callId}] 🔌 Closing WebSocket for handoff`);
+          isConnectionClosed = true;
+          stopKeepAlive();
+          stopOpenAiPing();
           try {
-            openaiWs.close(1000, "session_handoff");
+            socket.close(1000, "session_handoff");
           } catch (e) {
-            console.warn(`[${callId}] ⚠️ Error closing OpenAI on handoff:`, e);
+            console.warn(`[${callId}] ⚠️ Error closing socket on handoff:`, e);
           }
         }
-        
-        // Give bridge time to process handoff before closing
-        setTimeout(() => {
-          if (!isConnectionClosed) {
-            console.log(`[${callId}] 🔌 Closing WebSocket for handoff`);
-            isConnectionClosed = true;
-            stopKeepAlive();
-            stopOpenAiPing();
-            try {
-              socket.close(1000, "session_handoff");
-            } catch (e) {
-              console.warn(`[${callId}] ⚠️ Error closing socket on handoff:`, e);
-            }
-          }
-        }, 500);
-        
-      } catch (e) {
-        console.error(`[${callId}] ❌ Handoff failed:`, e);
-        handoffInProgress = false;
-      }
-    }, SESSION_HANDOFF_MS) as unknown as number;
-    
-    console.log(`[${callId}] 🔄 Handoff timer started (${SESSION_HANDOFF_MS / 1000}s)`);
+      }, 500);
+      
+    } catch (e) {
+      console.error(`[${callId}] ❌ Handoff failed:`, e);
+      handoffInProgress = false;
+      handoffTriggeredByDispatch = false; // Allow retry
+    }
+  };
+  
+  // Legacy function for compatibility - now does nothing (handoff is dispatch-triggered)
+  const startHandoffTimer = (_callId: string) => {
+    // No-op: Handoff is now triggered by dispatch webhook, not a fixed timer
+    // This function is kept for compatibility but does nothing
   };
   
   const stopHandoffTimer = () => {
@@ -8399,6 +8423,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
             }
           }));
+          
+          // 🔄 DISPATCH-TRIGGERED HANDOFF: Now that we have fare/ETA, trigger handoff to extend session
+          // This ensures the caller has time to hear the fare and respond without session timeout
+          // We delay slightly to let the fare speech start first
+          setTimeout(() => {
+            if (!isConnectionClosed && !handoffInProgress) {
+              console.log(`[${callId}] 🔄 Triggering dispatch-based session handoff (fare received)`);
+              triggerDispatchHandoff(callId, "dispatch_ask_confirm");
+            }
+          }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
         });
         
         dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
