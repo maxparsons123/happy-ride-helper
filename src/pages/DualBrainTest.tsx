@@ -17,12 +17,15 @@ interface Turn {
     pickup: string | null;
     destination: string | null;
     passengers: number | null;
+    pickup_time: string | null;
     is_affirmative: boolean;
+    is_correction: boolean;
   };
   state: {
     pickup: string | null;
     destination: string | null;
     passengers: number | null;
+    pickup_time: string | null;
     step: string;
   };
   processingTime: number;
@@ -240,6 +243,23 @@ export default function DualBrainTest() {
                       <>
                         <CheckCircle2 className="h-4 w-4 text-green-500" />
                         <span className="text-sm font-medium">{currentState.passengers}</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="h-4 w-4 text-muted-foreground" />
+                        <span className="text-sm text-muted-foreground">Not set</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Pickup Time</span>
+                  <div className="flex items-center gap-2">
+                    {currentState?.pickup_time ? (
+                      <>
+                        <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        <span className="text-sm font-medium">{currentState.pickup_time}</span>
                       </>
                     ) : (
                       <>

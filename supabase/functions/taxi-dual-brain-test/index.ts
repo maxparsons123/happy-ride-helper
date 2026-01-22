@@ -10,6 +10,7 @@ interface BookingState {
   pickup: string | null;
   destination: string | null;
   passengers: number | null;
+  pickup_time: string | null;
   lastQuestion: string;
   step: "collecting" | "summary" | "confirmed";
   lastActive: number;
@@ -40,7 +41,7 @@ async function extractIntent(transcript: string, state: BookingState, apiKey: st
 
 CONTEXT:
 - Ada's Last Question: "${state.lastQuestion}"
-- Current Data: Pickup: ${state.pickup || 'null'}, Destination: ${state.destination || 'null'}, Passengers: ${state.passengers || 'null'}
+- Current Data: Pickup: ${state.pickup || 'null'}, Destination: ${state.destination || 'null'}, Passengers: ${state.passengers || 'null'}, Time: ${state.pickup_time || 'null'}
 
 TASK:
 1. Identify if the user is answering the specific question Ada asked.
@@ -48,11 +49,16 @@ TASK:
    - If Ada asked about pickup/collection → put address in "pickup"
    - If Ada asked about destination/where going → put address in "destination"  
    - If Ada asked about passengers/how many → put number in "passengers"
+   - If Ada asked about time/when → put time in "pickup_time" (e.g., "now", "asap", "in 10 minutes", "3pm")
 3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
 4. Detect 'is_correction' (true if user says "No", "Wait", "Change that", "Actually", "Not quite").
 
 WORD-TO-NUMBER MAPPING:
 - "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
+
+TIME KEYWORDS:
+- "now", "asap", "as soon as possible", "straight away" → pickup_time: "now"
+- "in X minutes", "at X o'clock", "around X" → pickup_time: as spoken
 
 CRITICAL RULES:
 - Only fill the field that Ada was asking about
@@ -65,6 +71,7 @@ Return valid JSON only:
   "pickup": null,
   "destination": null,
   "passengers": null,
+  "pickup_time": null,
   "is_affirmative": false,
   "is_correction": false
 }`;
@@ -127,15 +134,17 @@ CURRENT BOOKING STATE:
 - Pickup: ${state.pickup || 'NOT SET'}
 - Destination: ${state.destination || 'NOT SET'}  
 - Passengers: ${state.passengers || 'NOT SET'}
+- Pickup Time: ${state.pickup_time || 'NOT SET'}
 - Step: ${state.step}
 
 STRICT RULES:
 1. ONLY use the data shown above. NEVER use placeholders like [number] or [address].
 2. If a field is "NOT SET", you MUST ask for it. Do not skip or assume.
 3. Ask ONE question at a time - do not bundle questions.
-4. If ALL fields are set and step is 'collecting', give a summary and ask "Is that correct?"
-5. If user confirms in 'summary' step, say the taxi is booked and will arrive shortly.
-6. Be warm and concise. No filler words like "Got it" or "Great".
+4. Collection order: pickup → destination → passengers → time
+5. If ALL fields are set and step is 'collecting', give a summary and ask "Is that correct?"
+6. If user confirms in 'summary' step, say the taxi is booked and will arrive shortly.
+7. Be warm and concise. No filler words like "Got it" or "Great".
 
 ${forceConfirm ? 'USER HAS CONFIRMED. Book the taxi now.' : ''}`;
 
@@ -143,6 +152,7 @@ ${forceConfirm ? 'USER HAS CONFIRMED. Book the taxi now.' : ''}`;
     pickup: state.pickup, 
     destination: state.destination, 
     passengers: state.passengers,
+    pickup_time: state.pickup_time,
     step: state.step,
     isAffirmative 
   });
@@ -194,6 +204,7 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
       pickup: null,
       destination: null,
       passengers: null,
+      pickup_time: null,
       lastQuestion: "Where would you like to be picked up?",
       step: "collecting",
       lastActive: Date.now(),
@@ -221,9 +232,13 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
     state.passengers = extraction.passengers;
     console.log(`[STATE] Updated passengers: ${state.passengers}`);
   }
+  if (extraction.pickup_time && extraction.pickup_time !== "null") {
+    state.pickup_time = extraction.pickup_time;
+    console.log(`[STATE] Updated pickup_time: ${state.pickup_time}`);
+  }
   
-  // Check if ready for summary
-  if (state.pickup && state.destination && state.passengers && state.step === "collecting") {
+  // Check if ready for summary (all 4 fields required)
+  if (state.pickup && state.destination && state.passengers && state.pickup_time && state.step === "collecting") {
     console.log(`[STATE] All fields collected, moving to summary`);
     state.step = "summary";
   }
