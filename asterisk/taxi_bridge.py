@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Taxi AI Asterisk Bridge v6.5 - ASTERISK KEEP-ALIVE
+"""Taxi AI Asterisk Bridge v7.0 - MID-CALL RECONNECTION
 
-Improvements in v6.5:
-1. Added Asterisk AudioSocket keep-alive tracking
-2. Reduced read timeout from 30s to 10s with graceful retry
-3. Keep-alive silence frames prevent Asterisk timeout
-4. Improved timeout handling (no immediate disconnect on quiet audio)
-5. Added keep-alive count logging
+Improvements in v7.0:
+1. Mid-call WebSocket reconnection when Supabase kills edge function (~75s limit)
+2. Seamless audio continuity - caller hears no interruption
+3. Reconnects with same call_id and session state
+4. Up to 5 reconnection attempts with exponential backoff
+5. Keep audio flowing to Asterisk during reconnect
 
 Dependencies:
     pip install websockets numpy scipy
@@ -78,9 +78,10 @@ AI_RATE = 24000   # AI TTS output rate
 # Send native 8kHz µ-law to edge function (edge function auto-decodes + resamples)
 SEND_NATIVE_ULAW = True
 
-# Reconnection settings
-MAX_RECONNECT_ATTEMPTS = 3
-RECONNECT_BASE_DELAY_S = 1.0
+# Reconnection settings - ENHANCED for mid-call reconnection
+MAX_RECONNECT_ATTEMPTS = 5        # More attempts for mid-call recovery
+RECONNECT_BASE_DELAY_S = 0.5      # Faster initial reconnect
+RECONNECT_MAX_DELAY_S = 4.0       # Cap on exponential backoff
 HEARTBEAT_INTERVAL_S = 15
 
 # Asterisk AudioSocket keep-alive (send silence frame if no audio in this interval)
@@ -133,7 +134,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-print("🚀 Starting taxi_bridge.py v6.5...", flush=True)
+print("🚀 Starting taxi_bridge.py v7.0 - MID-CALL RECONNECTION...", flush=True)
 
 # =============================================================================
 # AUDIO CODECS AND FILTERS
@@ -325,7 +326,14 @@ class RedirectException(Exception):
         super().__init__(f"Redirect to {url}")
 
 
-class TaxiBridgeV6:
+class TaxiBridgeV7:
+    """
+    v7.0: Implements mid-call WebSocket reconnection.
+    
+    When Supabase kills the edge function (~75s wall-clock limit),
+    the bridge automatically reconnects and resumes the session.
+    """
+    
     def __init__(self, reader, writer):
         self.reader = reader
         self.writer = writer
@@ -339,13 +347,19 @@ class TaxiBridgeV6:
         self.binary_audio_count = 0
         self.last_gain = 1.0
         
+        # Reconnection state
         self.reconnect_attempts = 0
+        self.total_reconnects = 0  # Track total reconnects for this call
         self.ws_connected = False
         self.last_ws_activity = time.time()
         self.call_formally_ended = False
         self.init_sent = False
         self.current_ws_url = WS_URL
-        self.pending_audio_buffer = deque(maxlen=50)
+        self.pending_audio_buffer = deque(maxlen=100)  # Buffer audio during reconnect
+        
+        # Track session state for reconnection
+        self.session_start_time = time.time()
+        self.last_booking_state = {}  # Cache booking state for reconnect
         
         # VAD state tracking with hysteresis
         self.consecutive_silence = 0
@@ -360,6 +374,10 @@ class TaxiBridgeV6:
         self.last_asterisk_send = time.time()
         self.last_asterisk_recv = time.time()
         self.keepalive_count = 0
+        
+        # Reconnection lock to prevent concurrent reconnect attempts
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnecting = False
 
     def _detect_format(self, frame_len):
         if frame_len == 160:
@@ -368,15 +386,19 @@ class TaxiBridgeV6:
             self.ast_codec, self.ast_frame_bytes = "slin16", 320
         print(f"[{self.call_id}] 🔎 Format: {self.ast_codec} ({frame_len} bytes)", flush=True)
 
-    async def connect_websocket(self, url: str = None, init_data: dict = None) -> bool:
-        """Connect to WebSocket with retry logic."""
+    async def connect_websocket(self, url: str = None, init_data: dict = None, is_reconnect: bool = False) -> bool:
+        """Connect to WebSocket with retry logic and mid-call reconnection support."""
         target_url = url or self.current_ws_url
         
         while self.reconnect_attempts < MAX_RECONNECT_ATTEMPTS and self.running:
             try:
-                delay = RECONNECT_BASE_DELAY_S * (2 ** self.reconnect_attempts) if self.reconnect_attempts > 0 else 0
+                delay = min(
+                    RECONNECT_BASE_DELAY_S * (2 ** self.reconnect_attempts),
+                    RECONNECT_MAX_DELAY_S
+                ) if self.reconnect_attempts > 0 else 0
+                
                 if delay > 0:
-                    print(f"[{self.call_id}] 🔄 Reconnecting in {delay:.1f}s", flush=True)
+                    print(f"[{self.call_id}] 🔄 Reconnecting in {delay:.1f}s (attempt {self.reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})", flush=True)
                     await asyncio.sleep(delay)
                 
                 self.ws = await asyncio.wait_for(
@@ -386,29 +408,49 @@ class TaxiBridgeV6:
                 
                 self.current_ws_url = target_url
                 
+                # Send init message
                 if init_data:
+                    # Redirect case - use provided init_data
                     redirect_msg = {
                         "type": "init",
                         **init_data,
                         "call_id": self.call_id,
                         "phone": self.phone if self.phone != "Unknown" else None,
-                        "reconnect": False,
+                        "reconnect": is_reconnect,
                     }
                     await self.ws.send(json.dumps(redirect_msg))
                     print(f"[{self.call_id}] 🔀 Sent redirect init to {target_url}", flush=True)
                     self.init_sent = True
-                elif self.reconnect_attempts > 0 and self.init_sent:
-                    init_msg = {
+                elif is_reconnect:
+                    # Mid-call reconnection - send reconnect init with state
+                    reconnect_msg = {
                         "type": "init",
                         "call_id": self.call_id,
                         "phone": self.phone if self.phone != "Unknown" else None,
-                        "reconnect": True
+                        "reconnect": True,
+                        "reconnect_attempt": self.total_reconnects,
+                        "session_age_s": int(time.time() - self.session_start_time),
+                        "booking_state": self.last_booking_state,  # Include cached state
                     }
-                    await self.ws.send(json.dumps(init_msg))
+                    await self.ws.send(json.dumps(reconnect_msg))
+                    print(f"[{self.call_id}] 🔁 Sent reconnect init (attempt {self.total_reconnects})", flush=True)
                 
                 self.ws_connected = True
                 self.last_ws_activity = time.time()
                 self.reconnect_attempts = 0
+                
+                if is_reconnect:
+                    self.total_reconnects += 1
+                    # Flush any buffered audio that accumulated during reconnect
+                    buffered_count = len(self.pending_audio_buffer)
+                    if buffered_count > 0:
+                        print(f"[{self.call_id}] 📤 Flushing {buffered_count} buffered audio frames", flush=True)
+                        while self.pending_audio_buffer and self.ws_connected:
+                            try:
+                                audio = self.pending_audio_buffer.popleft()
+                                await self.ws.send(audio)
+                            except:
+                                break
                 
                 print(f"[{self.call_id}] ✅ WebSocket connected to {target_url}", flush=True)
                 return True
@@ -421,6 +463,42 @@ class TaxiBridgeV6:
                 self.reconnect_attempts += 1
         
         return False
+
+    async def attempt_mid_call_reconnect(self) -> bool:
+        """
+        Attempt to reconnect WebSocket mid-call after unexpected disconnect.
+        Returns True if reconnection succeeded.
+        """
+        async with self._reconnect_lock:
+            if self._reconnecting:
+                return False
+            self._reconnecting = True
+        
+        try:
+            print(f"[{self.call_id}] 🔌 WebSocket died mid-call, attempting reconnection...", flush=True)
+            
+            # Close old WebSocket cleanly
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+                self.ws = None
+            
+            self.ws_connected = False
+            self.reconnect_attempts = 0  # Reset for new reconnect attempt
+            
+            # Attempt reconnection
+            success = await self.connect_websocket(is_reconnect=True)
+            
+            if success:
+                print(f"[{self.call_id}] ✅ Mid-call reconnection successful! (total reconnects: {self.total_reconnects})", flush=True)
+                return True
+            else:
+                print(f"[{self.call_id}] ❌ Mid-call reconnection failed after {MAX_RECONNECT_ATTEMPTS} attempts", flush=True)
+                return False
+        finally:
+            self._reconnecting = False
 
     async def stop_call(self, reason: str):
         """Stop the bridge cleanly."""
@@ -488,6 +566,7 @@ class TaxiBridgeV6:
             self.init_sent = True
             print(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}", flush=True)
 
+            # Main loop with reconnection support
             while self.running:
                 try:
                     await asyncio.gather(
@@ -496,6 +575,25 @@ class TaxiBridgeV6:
                         return_exceptions=False
                     )
                     break
+                except (ConnectionClosed, WebSocketException) as e:
+                    # WebSocket died - attempt mid-call reconnection
+                    if self.call_formally_ended:
+                        print(f"[{self.call_id}] 📴 Call formally ended, not reconnecting", flush=True)
+                        break
+                    
+                    if not self.running:
+                        break
+                    
+                    # Attempt reconnection
+                    if await self.attempt_mid_call_reconnect():
+                        # Reconnected successfully - continue the main loop
+                        print(f"[{self.call_id}] 🔄 Resuming audio stream after reconnect", flush=True)
+                        continue
+                    else:
+                        # Reconnection failed - end the call
+                        print(f"[{self.call_id}] ❌ Reconnection failed, ending call", flush=True)
+                        break
+                        
                 except Exception as e:
                     if not self.running:
                         break
@@ -520,6 +618,7 @@ class TaxiBridgeV6:
             skip_pct = (self.frames_skipped / total_frames * 100) if total_frames > 0 else 0
             print(f"[{self.call_id}] 📊 VAD Stats: {self.frames_sent} sent, {self.frames_skipped} skipped ({skip_pct:.1f}% filtered)", flush=True)
             print(f"[{self.call_id}] 📊 Audio frames: {self.binary_audio_count}", flush=True)
+            print(f"[{self.call_id}] 📊 Total reconnects: {self.total_reconnects}", flush=True)
             await self.cleanup()
 
     async def heartbeat_loop(self):
@@ -531,7 +630,8 @@ class TaxiBridgeV6:
                     ast_age = time.time() - self.last_asterisk_recv
                     ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
                     ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
-                    print(f"[{self.call_id}] 💓 WS{ws_status}({ws_age:.1f}s) AST{ast_status}({ast_age:.1f}s) KA:{self.keepalive_count}", flush=True)
+                    reconnect_info = f" R:{self.total_reconnects}" if self.total_reconnects > 0 else ""
+                    print(f"[{self.call_id}] 💓 WS{ws_status}({ws_age:.1f}s) AST{ast_status}({ast_age:.1f}s) KA:{self.keepalive_count}{reconnect_info}", flush=True)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -540,7 +640,12 @@ class TaxiBridgeV6:
 
     async def asterisk_to_ai(self):
         """Read audio from Asterisk, apply VAD + noise reduction, send to AI."""
-        while self.running and self.ws_connected:
+        while self.running:
+            # Wait for WebSocket to be connected (handles reconnection)
+            if not self.ws_connected or not self.ws:
+                await asyncio.sleep(0.1)
+                continue
+                
             try:
                 header = await asyncio.wait_for(self.reader.readexactly(3), timeout=ASTERISK_READ_TIMEOUT_S)
                 self.last_asterisk_recv = time.time()
@@ -609,12 +714,21 @@ class TaxiBridgeV6:
                             await self.ws.send(audio_to_send)
                             self.binary_audio_count += 1
                             self.last_ws_activity = time.time()
-                        except:
+                        except (ConnectionClosed, WebSocketException):
+                            # Buffer audio for replay after reconnect
                             self.pending_audio_buffer.append(audio_to_send)
                             raise
+                        except Exception as e:
+                            # Buffer audio for replay after reconnect
+                            self.pending_audio_buffer.append(audio_to_send)
+                            print(f"[{self.call_id}] ⚠️ Audio send failed, buffering: {e}", flush=True)
+                    else:
+                        # WebSocket not connected - buffer audio for later
+                        self.pending_audio_buffer.append(audio_to_send)
 
                 elif m_type == MSG_HANGUP:
                     print(f"[{self.call_id}] 📴 Hangup", flush=True)
+                    self.call_formally_ended = True
                     await self.stop_call("Asterisk hangup")
                     return
 
@@ -629,10 +743,11 @@ class TaxiBridgeV6:
                 continue
             except asyncio.IncompleteReadError:
                 print(f"[{self.call_id}] 📴 Closed", flush=True)
+                self.call_formally_ended = True
                 await self.stop_call("Closed")
                 return
             except (ConnectionClosed, WebSocketException):
-                raise
+                raise  # Let main loop handle reconnection
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -641,6 +756,7 @@ class TaxiBridgeV6:
                 return
 
     async def ai_to_queue(self):
+        """Receive audio/messages from AI and queue for Asterisk playback."""
         audio_count = 0
         try:
             async for message in self.ws:
@@ -669,12 +785,23 @@ class TaxiBridgeV6:
                     role = data.get('role', '?').upper()
                     text = data.get('text', '')
                     print(f"[{self.call_id}] 💬 {role}: {text}", flush=True)
+                elif msg_type == "booking_state":
+                    # Cache booking state for potential reconnection
+                    self.last_booking_state = data.get("state", {})
+                    print(f"[{self.call_id}] 📦 Cached booking state for reconnect", flush=True)
                 elif msg_type == "ai_interrupted":
                     size = len(self.audio_queue)
                     self.audio_queue.clear()
                     print(f"[{self.call_id}] 🛑 Flushed {size} chunks", flush=True)
                 elif msg_type == "redirect":
                     raise RedirectException(data.get("url"), data.get("init_data", {}))
+                elif msg_type == "hangup":
+                    # Server requested hangup
+                    reason = data.get("reason", "server_hangup")
+                    print(f"[{self.call_id}] 📴 Server hangup: {reason}", flush=True)
+                    self.call_formally_ended = True
+                    self.running = False
+                    break
                 elif msg_type == "call_ended":
                     print(f"[{self.call_id}] 📴 Ended: {data.get('reason')}", flush=True)
                     self.call_formally_ended = True
@@ -682,11 +809,14 @@ class TaxiBridgeV6:
                     break
                 elif msg_type == "error":
                     print(f"[{self.call_id}] 🧨 {data.get('error')}", flush=True)
+                elif msg_type == "keepalive":
+                    # Server keep-alive - just update activity timestamp
+                    pass
                     
         except RedirectException:
             raise
         except (ConnectionClosed, WebSocketException):
-            raise
+            raise  # Let main loop handle reconnection
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -773,14 +903,15 @@ class TaxiBridgeV6:
 
 async def main():
     server = await asyncio.start_server(
-        lambda r, w: TaxiBridgeV6(r, w).run(),
+        lambda r, w: TaxiBridgeV7(r, w).run(),
         AUDIOSOCKET_HOST, AUDIOSOCKET_PORT
     )
 
-    print(f"🚀 Taxi Bridge v6.4 - SMOOTH VAD + HYSTERESIS", flush=True)
+    print(f"🚀 Taxi Bridge v7.0 - MID-CALL RECONNECTION", flush=True)
     print(f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}", flush=True)
     print(f"   Config: {CONFIG_PATH}", flush=True)
     print(f"   WebSocket: {WS_URL}", flush=True)
+    print(f"   Reconnect: up to {MAX_RECONNECT_ATTEMPTS} attempts, {RECONNECT_BASE_DELAY_S}s base delay", flush=True)
     print(f"   VAD: RMS>{VAD_RMS_THRESHOLD}, Peaks>{VAD_PEAK_THRESHOLD}", flush=True)
     print(f"   Hysteresis: min_speech={VAD_MIN_SPEECH_FRAMES}, hangover={VAD_HANGOVER_FRAMES}, silence>{VAD_CONSECUTIVE_SILENCE}", flush=True)
     print(f"   Noise Floor: init={NOISE_FLOOR_INIT}, speech_ratio={SPEECH_NOISE_RATIO}", flush=True)
