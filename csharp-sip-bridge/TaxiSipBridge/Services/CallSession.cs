@@ -7,7 +7,6 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP;
-using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge.Services;
 
@@ -16,7 +15,7 @@ public class CallSession : IDisposable
     private readonly string _callId;
     private readonly string _callerNumber;
     private readonly string _calledNumber;
-    private readonly BridgeConfig _config;
+    private readonly string _webSocketUrl;
     private readonly SIPTransport _sipTransport;
     private readonly SIPEndPoint _localEndPoint;
     private readonly SIPEndPoint _remoteEndPoint;
@@ -27,7 +26,7 @@ public class CallSession : IDisposable
     private RTPSession? _rtpSession;
     private CancellationTokenSource? _cts;
     private readonly ConcurrentQueue<byte[]> _audioQueue = new();
-    private readonly AudioDsp _audioDsp = new(); // DSP pipeline from Python bridge
+    private readonly Audio.AudioDsp _audioDsp = new(); // DSP pipeline from Python bridge
     private bool _isDisposed;
     private DateTime _startTime;
     private int _rtpPacketsSent;
@@ -39,7 +38,7 @@ public class CallSession : IDisposable
         string callId,
         string callerNumber,
         string calledNumber,
-        BridgeConfig config,
+        string webSocketUrl,
         SIPTransport sipTransport,
         SIPEndPoint localEndPoint,
         SIPEndPoint remoteEndPoint,
@@ -49,7 +48,7 @@ public class CallSession : IDisposable
         _callId = callId;
         _callerNumber = callerNumber;
         _calledNumber = calledNumber;
-        _config = config;
+        _webSocketUrl = webSocketUrl;
         _sipTransport = sipTransport;
         _localEndPoint = localEndPoint;
         _remoteEndPoint = remoteEndPoint;
@@ -128,7 +127,7 @@ public class CallSession : IDisposable
     {
         _webSocket = new ClientWebSocket();
         
-        var wsUrl = $"{_config.WebSocketUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
+        var wsUrl = $"{_webSocketUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
         _logger.LogInformation("Connecting to WebSocket: {Url}", wsUrl);
 
         await _webSocket.ConnectAsync(new Uri(wsUrl), _cts!.Token);
@@ -156,13 +155,13 @@ public class CallSession : IDisposable
             var payload = rtpPacket.Payload;
             
             // Convert μ-law to PCM16
-            var pcm16 = G711Codec.UlawToPcm16(payload);
+            var pcm16 = Audio.G711Codec.UlawToPcm16(payload);
             
             // Apply DSP pipeline (high-pass, noise gate, AGC) - from Python bridge
             var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16);
             
             // Resample 8kHz to 24kHz
-            var resampled = AudioResampler.Resample(processed, 8000, 24000);
+            var resampled = Audio.AudioResampler.Resample(processed, 8000, 24000);
             
             // BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
             // This reduces CPU usage and bandwidth by ~33%
@@ -236,10 +235,10 @@ public class CallSession : IDisposable
                         var pcm24k = Convert.FromBase64String(audioData);
                         
                         // Resample 24kHz to 8kHz
-                        var pcm8k = AudioResampler.Resample(pcm24k, 24000, 8000);
+                        var pcm8k = Audio.AudioResampler.Resample(pcm24k, 24000, 8000);
                         
                         // Convert PCM16 to μ-law
-                        var ulaw = G711Codec.Pcm16ToUlaw(pcm8k);
+                        var ulaw = Audio.G711Codec.Pcm16ToUlaw(pcm8k);
                         
                         _audioQueue.Enqueue(ulaw);
                     }
@@ -341,9 +340,10 @@ public class CallSession : IDisposable
     {
         try
         {
-            _rtpSession?.SendAudioFrame(
-                (uint)frame.Length * 8, // Timestamp increment
-                (int)SDPWellKnownMediaFormatsEnum.PCMU,
+            // SIPSorcery uses SendMedia for RTP audio
+            _rtpSession?.SendMedia(
+                SDPMediaTypesEnum.audio,
+                (uint)(frame.Length * 8), // Timestamp increment (160 samples = 20ms)
                 frame);
             
             _rtpPacketsSent++;
