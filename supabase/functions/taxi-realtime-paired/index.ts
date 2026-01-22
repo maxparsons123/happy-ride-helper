@@ -2047,11 +2047,17 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   
   // Clear keepalive on cleanup
   const originalCleanup = cleanup;
+  // Note: stopOpenAiPing() is defined later but called via closure - this works because
+  // cleanupWithKeepalive is only called after OpenAI handlers are set up
   const cleanupWithKeepalive = async () => {
     if (keepaliveInterval) {
       clearInterval(keepaliveInterval);
       keepaliveInterval = null;
     }
+    // Stop OpenAI ping if running (function defined after OpenAI WS setup)
+    try {
+      if (typeof stopOpenAiPing === "function") stopOpenAiPing();
+    } catch { /* stopOpenAiPing may not exist yet during early cleanup */ }
     await originalCleanup();
   };
 
@@ -2373,8 +2379,53 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify(sessionConfig));
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OpenAI-side heartbeat: Send minimal silent audio every 20s to prevent 
+  // OpenAI from dropping the WebSocket during long pauses (e.g., waiting for
+  // dispatch quote or user thinking time).
+  // ═══════════════════════════════════════════════════════════════════════════
+  const OPENAI_PING_INTERVAL_MS = 20000; // 20s - well under OpenAI's ~60s idle timeout
+  let openaiPingInterval: ReturnType<typeof setInterval> | null = null;
+  
+  const startOpenAiPing = () => {
+    if (openaiPingInterval) return; // Already running
+    
+    openaiPingInterval = setInterval(() => {
+      if (cleanedUp || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+        if (openaiPingInterval) {
+          clearInterval(openaiPingInterval);
+          openaiPingInterval = null;
+        }
+        return;
+      }
+      
+      // Send a tiny silent audio frame (32 samples of silence = 64 bytes)
+      // This is enough to reset OpenAI's idle timer without affecting conversation
+      const silentPcm = new Int16Array(32); // All zeros = silence
+      const silentBase64 = pcm16ToBase64(silentPcm);
+      
+      try {
+        openaiWs.send(JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: silentBase64,
+        }));
+        console.log(`[${callId}] 💓 OpenAI ping sent (silent audio)`);
+      } catch (e) {
+        console.error(`[${callId}] ⚠️ OpenAI ping failed:`, e);
+      }
+    }, OPENAI_PING_INTERVAL_MS);
+  };
+  
+  const stopOpenAiPing = () => {
+    if (openaiPingInterval) {
+      clearInterval(openaiPingInterval);
+      openaiPingInterval = null;
+    }
+  };
+
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
+    startOpenAiPing(); // Start pinging to prevent idle timeout
   };
 
   openaiWs.onmessage = async (event) => {
@@ -3611,6 +3662,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
   };
 
   openaiWs.onclose = (ev) => {
+    // Stop the OpenAI ping immediately
+    stopOpenAiPing();
+    
     // Include close codes/reasons to debug unexpected disconnects.
     // NOTE: Deno's WS close event may not always include reason.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
