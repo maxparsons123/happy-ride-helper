@@ -266,7 +266,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
                     
-                    // Select resampling method based on target rate and audio mode
+                    // Select resampling method based on target rate
                     if (_audioMode == AudioMode.SimpleResample)
                     {
                         // Simple linear interpolation only
@@ -274,14 +274,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     }
                     else if (targetRate == 48000)
                     {
-                        // Opus @ 48kHz - use high-quality NAudio resampler (no brightness boost needed)
+                        // Opus @ 48kHz - use high-quality NAudio resampler
                         audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
                     else if (targetRate == 8000)
                     {
-                        // G.711 @ 8kHz - apply brightness boost + de-emphasis for telephony
-                        var boostedPcm = ApplyBrightnessBoost(pcm24);
-                        audioFrame = AudioCodecs.ResampleWithDeEmphasis(boostedPcm, 24000, targetRate);
+                        // G.711 @ 8kHz - use clean NAudio resample (no DSP artifacts)
+                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
                     else
                     {
