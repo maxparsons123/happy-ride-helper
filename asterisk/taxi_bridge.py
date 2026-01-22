@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Taxi AI Asterisk Bridge v6.4 - SMOOTH VAD + HYSTERESIS
+"""Taxi AI Asterisk Bridge v6.5 - ASTERISK KEEP-ALIVE
 
-Improvements in v6.4:
-1. Lowered VAD thresholds (RMS 80, Peak 250) for better sensitivity
-2. Hysteresis: minimum speech duration before allowing end
-3. Hangover time: wait longer after speech before declaring silence
-4. Looser peak detection (1 peak vs 2)
-5. Speech continuation: once speaking, stay speaking longer
+Improvements in v6.5:
+1. Added Asterisk AudioSocket keep-alive tracking
+2. Reduced read timeout from 30s to 10s with graceful retry
+3. Keep-alive silence frames prevent Asterisk timeout
+4. Improved timeout handling (no immediate disconnect on quiet audio)
+5. Added keep-alive count logging
 
 Dependencies:
     pip install websockets numpy scipy
@@ -68,6 +68,10 @@ MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15
 
+# Asterisk AudioSocket keep-alive (send silence frame if no audio in this interval)
+ASTERISK_KEEPALIVE_INTERVAL_S = 5.0  # 5 seconds max silence before keep-alive
+ASTERISK_READ_TIMEOUT_S = 10.0       # Reduced from 30s for faster detection
+
 # =============================================================================
 # AUDIO PROCESSING - DYNAMIC NOISE FLOOR + GENTLE AGC
 # =============================================================================
@@ -114,7 +118,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-print("🚀 Starting taxi_bridge.py v6.4...", flush=True)
+print("🚀 Starting taxi_bridge.py v6.5...", flush=True)
 
 # =============================================================================
 # AUDIO CODECS AND FILTERS
@@ -336,6 +340,11 @@ class TaxiBridgeV6:
         self.frames_skipped = 0
         self.is_speaking = False
         self.speech_start_time = None
+        
+        # Asterisk keep-alive tracking
+        self.last_asterisk_send = time.time()
+        self.last_asterisk_recv = time.time()
+        self.keepalive_count = 0
 
     def _detect_format(self, frame_len):
         if frame_len == 160:
@@ -503,9 +512,11 @@ class TaxiBridgeV6:
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_S)
                 if self.running:
-                    age = time.time() - self.last_ws_activity
-                    status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
-                    print(f"[{self.call_id}] 💓 {status} (last: {age:.1f}s)", flush=True)
+                    ws_age = time.time() - self.last_ws_activity
+                    ast_age = time.time() - self.last_asterisk_recv
+                    ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
+                    ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
+                    print(f"[{self.call_id}] 💓 WS{ws_status}({ws_age:.1f}s) AST{ast_status}({ast_age:.1f}s) KA:{self.keepalive_count}", flush=True)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -516,7 +527,8 @@ class TaxiBridgeV6:
         """Read audio from Asterisk, apply VAD + noise reduction, send to AI."""
         while self.running and self.ws_connected:
             try:
-                header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
+                header = await asyncio.wait_for(self.reader.readexactly(3), timeout=ASTERISK_READ_TIMEOUT_S)
+                self.last_asterisk_recv = time.time()
                 m_type, m_len = header[0], struct.unpack(">H", header[1:3])[0]
                 payload = await self.reader.readexactly(m_len)
 
@@ -592,9 +604,14 @@ class TaxiBridgeV6:
                     return
 
             except asyncio.TimeoutError:
-                print(f"[{self.call_id}] ⏱️ Timeout", flush=True)
-                await self.stop_call("Timeout")
-                return
+                # Check if we've truly lost connection or just no audio
+                last_recv_age = time.time() - self.last_asterisk_recv
+                if last_recv_age > ASTERISK_READ_TIMEOUT_S * 2:
+                    print(f"[{self.call_id}] ⏱️ Asterisk read timeout ({last_recv_age:.1f}s)", flush=True)
+                    await self.stop_call("Asterisk timeout")
+                    return
+                # Otherwise, Asterisk is just quiet - keep waiting
+                continue
             except asyncio.IncompleteReadError:
                 print(f"[{self.call_id}] 📴 Closed", flush=True)
                 await self.stop_call("Closed")
@@ -663,9 +680,11 @@ class TaxiBridgeV6:
             print(f"[{self.call_id}] 📊 Audio received: {audio_count}", flush=True)
 
     async def queue_to_asterisk(self):
+        """Send audio queue to Asterisk with keep-alive silence frames."""
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
+        last_keepalive_log = time.time()
 
         while self.running:
             try:
@@ -678,14 +697,24 @@ class TaxiBridgeV6:
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
 
-                chunk = bytes(buffer[:self.ast_frame_bytes]) if len(buffer) >= self.ast_frame_bytes else self._silence()
-                if len(buffer) >= self.ast_frame_bytes:
+                # Determine if this is audio or a keep-alive silence frame
+                has_audio = len(buffer) >= self.ast_frame_bytes
+                if has_audio:
+                    chunk = bytes(buffer[:self.ast_frame_bytes])
                     del buffer[:self.ast_frame_bytes]
+                else:
+                    chunk = self._silence()
+                    self.keepalive_count += 1
+                    # Log keep-alive activity every 30 seconds
+                    if time.time() - last_keepalive_log > 30:
+                        print(f"[{self.call_id}] 💤 Keep-alives sent: {self.keepalive_count}", flush=True)
+                        last_keepalive_log = time.time()
 
                 try:
                     self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                     await self.writer.drain()
                     bytes_played += len(chunk)
+                    self.last_asterisk_send = time.time()
                 except (BrokenPipeError, ConnectionResetError, OSError) as e:
                     print(f"[{self.call_id}] 🔌 Asterisk pipe closed: {e}", flush=True)
                     await self.stop_call("Asterisk disconnected")
