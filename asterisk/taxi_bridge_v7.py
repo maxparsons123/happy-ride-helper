@@ -302,6 +302,12 @@ class CallState:
     # Format detection debounce - prevents flip-flopping between formats
     format_locked: bool = False
     format_lock_time: float = 0.0
+    
+    # Asterisk keep-alive tracking (from v6)
+    last_asterisk_send: float = field(default_factory=time.time)
+    last_asterisk_recv: float = field(default_factory=time.time)
+    keepalive_count: int = 0
+    handoff_count: int = 0
 
 
 # =============================================================================
@@ -502,15 +508,19 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     async def heartbeat_loop(self) -> None:
-        """Periodic heartbeat logging."""
+        """Periodic heartbeat logging (v6 style with WS + AST status)."""
         try:
             while self.running:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-                if not self.running:  # 🔥 FIXED: Early exit check after sleep
+                if not self.running:
                     break
-                age = time.time() - self.state.last_ws_activity
-                status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
-                logger.info("[%s] 💓 %s (%.1fs)", self.state.call_id, status, age)
+                ws_age = time.time() - self.state.last_ws_activity
+                ast_age = time.time() - self.state.last_asterisk_recv
+                ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
+                ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
+                logger.info("[%s] 💓 WS%s AST%s KA:%d HO:%d", 
+                           self.state.call_id, ws_status, ast_status, 
+                           self.state.keepalive_count, self.state.handoff_count)
         except asyncio.CancelledError:
             logger.debug("[%s] Heartbeat task cancelled", self.state.call_id)
 
@@ -660,6 +670,7 @@ class TaxiBridgeV7:
 
                 try:
                     header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
+                    self.state.last_asterisk_recv = time.time()  # Track for heartbeat
                     m_type = header[0]
                     m_len = struct.unpack(">H", header[1:3])[0]
                     payload = await self.reader.readexactly(m_len)
@@ -805,8 +816,9 @@ class TaxiBridgeV7:
                 elif msg_type == "session.handoff":
                     # Edge function is about to hit 90s limit - reconnect with resume flag
                     resume_call_id = data.get("call_id", self.state.call_id)
-                    logger.info("[%s] 🔄 Session handoff received, will reconnect with resume",
-                               self.state.call_id)
+                    self.state.handoff_count += 1
+                    logger.info("[%s] 🔄 Session handoff #%d received, reconnecting with resume",
+                               self.state.call_id, self.state.handoff_count)
                     raise RedirectException(
                         url=self.state.current_ws_url,
                         init_data={
@@ -855,42 +867,51 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     async def queue_to_asterisk(self) -> None:
-        """Stream audio from queue to Asterisk at correct pacing."""
+        """Stream audio from queue to Asterisk at correct pacing (v6 style)."""
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
+        last_keepalive_log = time.time()
 
         try:
             while self.running:
-                # Calculate bytes_per_sec dynamically (format can change mid-call)
-                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
-                
-                # Drain queue to buffer
+                # Drain queue to buffer FIRST (v6 order)
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Pace output to real-time
-                expected_time = start_time + (bytes_played / max(bytes_per_sec, 1))
-                delay = expected_time - time.time()
-                if delay > 0:
-                    await asyncio.sleep(delay)
+                # Calculate bytes_per_sec (v6 uses constant AST_RATE = 8000)
+                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                
+                # Pace output to real-time (v6 style)
+                expected_time = start_time + (bytes_played / bytes_per_sec)
+                sleep_time = max(0, expected_time - time.time())
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
 
-                # 🔥 FIXED: Early exit check after sleep
+                # Early exit check after sleep
                 if not self.running:
                     break
 
-                # Get next frame
-                if len(buffer) >= self.state.ast_frame_bytes:
+                # Determine if this is audio or a keep-alive silence frame (v6 style)
+                has_audio = len(buffer) >= self.state.ast_frame_bytes
+                if has_audio:
                     chunk = bytes(buffer[:self.state.ast_frame_bytes])
                     del buffer[:self.state.ast_frame_bytes]
                 else:
                     chunk = self._silence()
+                    self.state.keepalive_count += 1
+                    # Log keep-alive activity every 30 seconds (v6 style)
+                    if time.time() - last_keepalive_log > 30:
+                        logger.info("[%s] 💤 Keep-alives sent: %d", 
+                                   self.state.call_id, self.state.keepalive_count)
+                        last_keepalive_log = time.time()
 
                 # Send to Asterisk
                 try:
                     self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                     await self.writer.drain()
                     bytes_played += len(chunk)
+                    self.state.last_asterisk_send = time.time()
                 except (BrokenPipeError, ConnectionResetError, OSError) as e:
                     logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
                     await self.stop_call("Asterisk disconnected")
@@ -900,13 +921,11 @@ class TaxiBridgeV7:
                     await self.stop_call("Write failed")
                     return
         except asyncio.CancelledError:
-            # 🔥 FIXED: Handle task cancellation gracefully
             logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
 
     def _silence(self) -> bytes:
         """Generate one frame of silence."""
-        b = 0xFF if self.state.ast_codec == "ulaw" else 0x00
-        return bytes([b]) * self.state.ast_frame_bytes
+        return (b"\xFF" if self.state.ast_codec == "ulaw" else b"\x00") * self.state.ast_frame_bytes
 
 
 # =============================================================================
