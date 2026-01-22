@@ -11,7 +11,7 @@ namespace TaxiSipBridge
     {
         private const int OPUS_SAMPLE_RATE = 48000;
         private const int OPUS_CHANNELS = 1;
-        private const int OPUS_BITRATE = 24000;
+        private const int OPUS_BITRATE = 32000;  // Increased from 24kbps for better voice quality
         private const int OPUS_FRAME_SIZE_MS = 20;
         private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
 

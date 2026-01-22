@@ -67,9 +67,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event Action? OnQueueEmpty;
     private bool _wasQueueEmpty = true; // Track state to fire only on transition
 
-    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60)
+    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60, bool preferOpus = true)
     {
-        _audioEncoder = new AudioEncoder();
+        // Use OpusAudioEncoder for high-quality Opus support (48kHz), falls back to G.711
+        _audioEncoder = preferOpus ? new OpusAudioEncoder() : new AudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = jitterBufferMs;
@@ -268,20 +269,25 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     // Apply brightness boost before resampling (counteract telephony muffling)
                     var boostedPcm = ApplyBrightnessBoost(pcm24);
                     
-                    // Select resampling method based on audio mode
+                    // Select resampling method based on target rate and audio mode
                     if (_audioMode == AudioMode.SimpleResample)
                     {
                         // Simple linear interpolation only
                         audioFrame = SimpleResample(boostedPcm, 24000, targetRate);
                     }
+                    else if (targetRate == 48000)
+                    {
+                        // Opus @ 48kHz - upsample 24kHz → 48kHz (2:1, high quality)
+                        audioFrame = Upsample24kTo48k(boostedPcm);
+                    }
                     else if (targetRate == 8000)
                     {
-                        // High-quality resample with de-emphasis for natural telephony sound
+                        // G.711 @ 8kHz - downsample with de-emphasis for natural telephony sound
                         audioFrame = AudioCodecs.ResampleWithDeEmphasis(boostedPcm, 24000, targetRate);
                     }
                     else
                     {
-                        // Use AudioCodecs high-quality resampler
+                        // Use AudioCodecs high-quality resampler for other rates
                         audioFrame = AudioCodecs.Resample(boostedPcm, 24000, targetRate);
                     }
 
@@ -399,6 +405,36 @@ public class AdaAudioSource : IAudioSource, IDisposable
             output[i] = (short)Math.Clamp(boosted, -32000, 32000);
         }
         output[0] = input[0];
+        
+        return output;
+    }
+
+    /// <summary>
+    /// High-quality upsample 24kHz → 48kHz for Opus codec.
+    /// Uses linear interpolation (2:1 ratio is exact, no aliasing concerns for upsampling).
+    /// </summary>
+    private static short[] Upsample24kTo48k(short[] pcm24)
+    {
+        if (pcm24.Length == 0) return Array.Empty<short>();
+        
+        // 24kHz → 48kHz is exactly 2:1 - insert interpolated sample between each pair
+        var output = new short[pcm24.Length * 2];
+        
+        for (int i = 0; i < pcm24.Length; i++)
+        {
+            int outIdx = i * 2;
+            output[outIdx] = pcm24[i];
+            
+            // Interpolate next sample (average with next input, or repeat last)
+            if (i < pcm24.Length - 1)
+            {
+                output[outIdx + 1] = (short)((pcm24[i] + pcm24[i + 1]) / 2);
+            }
+            else
+            {
+                output[outIdx + 1] = pcm24[i]; // Last sample - just repeat
+            }
+        }
         
         return output;
     }
