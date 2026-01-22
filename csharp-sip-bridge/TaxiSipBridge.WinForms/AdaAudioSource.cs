@@ -265,21 +265,24 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
                     
+                    // Apply brightness boost before resampling (counteract telephony muffling)
+                    var boostedPcm = ApplyBrightnessBoost(pcm24);
+                    
                     // Select resampling method based on audio mode
                     if (_audioMode == AudioMode.SimpleResample)
                     {
                         // Simple linear interpolation only
-                        audioFrame = SimpleResample(pcm24, 24000, targetRate);
+                        audioFrame = SimpleResample(boostedPcm, 24000, targetRate);
                     }
                     else if (targetRate == 8000)
                     {
-                        // Use optimized 3:1 decimator for 8kHz
-                        audioFrame = Downsample24kTo8k(pcm24);
+                        // High-quality resample with de-emphasis for natural telephony sound
+                        audioFrame = AudioCodecs.ResampleWithDeEmphasis(boostedPcm, 24000, targetRate);
                     }
                     else
                     {
                         // Use AudioCodecs high-quality resampler
-                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                        audioFrame = AudioCodecs.Resample(boostedPcm, 24000, targetRate);
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP
@@ -377,10 +380,33 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return samples;
     }
 
+    /// <summary>
+    /// Apply brightness boost to counteract telephony muffling.
+    /// Uses a subtle high-shelf boost for clearer consonants.
+    /// </summary>
+    private static short[] ApplyBrightnessBoost(short[] input)
+    {
+        if (input.Length < 2) return input;
+        
+        var output = new short[input.Length];
+        const float boostFactor = 0.15f; // Subtle boost
+        
+        for (int i = 1; i < input.Length; i++)
+        {
+            // High-frequency emphasis: add difference between adjacent samples
+            float diff = input[i] - input[i - 1];
+            float boosted = input[i] + diff * boostFactor;
+            output[i] = (short)Math.Clamp(boosted, -32000, 32000);
+        }
+        output[0] = input[0];
+        
+        return output;
+    }
+
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz is exactly 3:1. Using a small FIR per group avoids boundary artifacts.
-        if (pcm24.Length < 3) return new short[0];
+        // 24kHz → 8kHz is exactly 3:1. Using improved 5-tap FIR for better quality.
+        if (pcm24.Length < 5) return new short[0];
 
         int outLen = pcm24.Length / 3;
         var output = new short[outLen];
@@ -388,12 +414,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
         for (int i = 0; i < outLen; i++)
         {
             int idx = i * 3;
-            int s0 = pcm24[idx];
-            int s1 = pcm24[idx + 1];
-            int s2 = pcm24[idx + 2];
+            
+            // 5-tap low-pass with Hann-windowed sinc: (1, 2, 3, 2, 1) / 9
+            int s0 = idx > 0 ? pcm24[idx - 1] : pcm24[idx];
+            int s1 = pcm24[idx];
+            int s2 = pcm24[idx + 1];
+            int s3 = idx + 2 < pcm24.Length ? pcm24[idx + 2] : pcm24[idx + 1];
+            int s4 = idx + 3 < pcm24.Length ? pcm24[idx + 3] : s3;
 
-            // 3-tap low-pass-ish: (1,2,1)/4
-            output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
+            output[i] = (short)((s0 + 2 * s1 + 3 * s2 + 2 * s3 + s4) / 9);
         }
 
         return output;
