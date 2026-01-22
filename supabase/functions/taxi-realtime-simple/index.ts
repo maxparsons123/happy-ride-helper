@@ -7456,14 +7456,29 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         const isReconnect = message.reconnect === true;
+        const reconnectAttempt = message.reconnect_attempt || 0;
+        const sessionAgeS = message.session_age_s || 0;
+        const bookingStateFromBridge = message.booking_state || {};
         
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, preConnected=${preConnected})`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
 
-        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
+        // === MID-CALL RECONNECTION SUPPORT ===
+        // When Supabase kills edge function (~75s), bridge reconnects with reconnect=true
+        // We restore session state and continue the conversation seamlessly
         if (isReconnect) {
-          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
-          socket.close(1000, "Session expired");
-          return;
+          console.log(`[${callId}] 🔁 Mid-call reconnection attempt ${reconnectAttempt}, session age ${sessionAgeS}s`);
+          
+          // Check if session is too old to be resumed (5 minutes max)
+          if (sessionAgeS > 300) {
+            console.log(`[${callId}] ❌ Session too old (${sessionAgeS}s > 300s), rejecting reconnect`);
+            socket.close(1000, "Session expired");
+            return;
+          }
+          
+          // Log booking state received from bridge
+          if (Object.keys(bookingStateFromBridge).length > 0) {
+            console.log(`[${callId}] 📦 Received booking state from bridge:`, JSON.stringify(bookingStateFromBridge));
+          }
         }
 
         // Detect language from phone number FIRST (fast, no DB)
@@ -7601,6 +7616,36 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
         }
         
+        // === APPLY BOOKING STATE FROM RECONNECTING BRIDGE ===
+        // If bridge reconnected with cached booking state, restore it
+        if (isReconnect && state && Object.keys(bookingStateFromBridge).length > 0) {
+          console.log(`[${callId}] 🔄 Restoring booking state from bridge reconnect`);
+          
+          if (bookingStateFromBridge.pickup) {
+            state.booking.pickup = bookingStateFromBridge.pickup;
+          }
+          if (bookingStateFromBridge.destination) {
+            state.booking.destination = bookingStateFromBridge.destination;
+          }
+          if (bookingStateFromBridge.passengers) {
+            state.booking.passengers = bookingStateFromBridge.passengers;
+          }
+          if (bookingStateFromBridge.pickup_time) {
+            state.booking.pickup_time = bookingStateFromBridge.pickup_time;
+          }
+          if (bookingStateFromBridge.step) {
+            state.bookingStep = bookingStateFromBridge.step;
+          }
+          if (bookingStateFromBridge.greetingDelivered) {
+            state.greetingDelivered = true;
+          }
+          if (bookingStateFromBridge.bookingFullyConfirmed) {
+            state.bookingFullyConfirmed = true;
+          }
+          
+          console.log(`[${callId}] 📦 Restored state: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}`);
+        }
+        
         console.log(`[${callId}] 🔊 Inbound audio: ${state!.inboundAudioFormat} @ ${state!.inboundSampleRate}Hz`);
         console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
         
@@ -7684,10 +7729,34 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           connectToOpenAI(state!);
         }
 
+        // For reconnects, skip greeting and inject a resume message instead
+        if (isReconnect && state) {
+          state.greetingDelivered = true;  // Don't play greeting again
+          state.greetingProtectionUntil = 0;  // No greeting protection needed
+          
+          // Send a brief "I'm still here" message if we have booking context
+          const hasBookingContext = state.booking.pickup || state.booking.destination;
+          if (hasBookingContext && openaiWs && openaiConnected) {
+            const resumePrompt = `[SYSTEM: The call was briefly interrupted. You are resuming the conversation. The customer was booking a taxi. Current state: pickup="${state.booking.pickup || 'not yet'}", destination="${state.booking.destination || 'not yet'}", passengers=${state.booking.passengers || 'unknown'}. Ask a brief follow-up question like "Sorry about that, where were we?" or continue asking for the next missing field. Do NOT repeat the greeting.]`;
+            
+            console.log(`[${callId}] 🔄 Injecting resume prompt for reconnected call`);
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: resumePrompt }]
+              }
+            }));
+            safeResponseCreate(state, "reconnect-resume");
+          }
+        }
+
         socket.send(JSON.stringify({ 
           type: "ready", 
           call_id: callId,
-          mode: "simple"
+          mode: "simple",
+          reconnect: isReconnect,
         }));
         
         // Start keep-alive pings to prevent WebSocket timeout during dispatch callback wait
