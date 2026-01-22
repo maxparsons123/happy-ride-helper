@@ -2352,6 +2352,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // Monitoring: throttle DB inserts for audio playback in the LiveCalls panel
   let monitorAiChunkCount = 0;
   
+  // === SESSION RESUME STATE ===
+  // Set when bridge reconnects mid-call - we skip greeting and inject continuation
+  let isResumedSession = false;
+  // deno-lint-ignore no-explicit-any
+  let resumedStateData: any = null;  // Will hold restored session state for resumed calls
+  
   const sendGreeting = () => {
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
       console.log(`[${callId}] ⚠️ sendGreeting skipped: sent=${greetingSent}, wsOpen=${openaiWs?.readyState === WebSocket.OPEN}`);
@@ -2360,6 +2366,45 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     greetingSent = true;
     
+    // === RESUMED SESSION: Send continuation prompt instead of greeting ===
+    if (isResumedSession && resumedStateData) {
+      console.log(`[${callId}] 🔄 RESUMED SESSION - sending continuation prompt instead of greeting`);
+      
+      let continuationInstruction: string;
+      const rsd = resumedStateData;
+      
+      if (rsd.awaitingConfirmation && rsd.pendingFare) {
+        // We were waiting for user to confirm the fare quote
+        continuationInstruction = `Sorry, I didn't catch that. Your fare is ${rsd.pendingFare} and driver will arrive in ${rsd.pendingEta || "a few minutes"}. Would you like me to book that for you?`;
+      } else if (rsd.bookingConfirmed) {
+        // Booking was already confirmed, deliver closing
+        continuationInstruction = `Your taxi is on the way. Thank you for booking with us! Have a great journey!`;
+      } else {
+        // Mid-booking, determine next question
+        const bk = rsd.booking || {};
+        const nextQ = !bk.pickup ? "pickup" :
+                      !bk.destination ? "destination" :
+                      !bk.passengers ? "passengers" : "time";
+        const questionText = nextQ === "pickup" ? "Where would you like to be picked up?" 
+                           : nextQ === "destination" ? "And where are you heading to?" 
+                           : nextQ === "passengers" ? "How many passengers?" 
+                           : "What time would you like the taxi?";
+        continuationInstruction = `Sorry about that brief interruption. Let me continue. ${questionText}`;
+      }
+      
+      openaiWs!.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: `Say EXACTLY this: "${continuationInstruction}". Then WAIT for the caller's response.`
+        }
+      }));
+      
+      console.log(`[${callId}] ✅ Continuation prompt sent`);
+      return;
+    }
+    
+    // === NORMAL GREETING (not resumed) ===
     console.log(`[${callId}] 🎙️ Sending initial greeting (language: ${sessionState.language})...`);
     
     // Get language-specific greeting or fall back to English for auto-detect
@@ -4060,59 +4105,30 @@ Do NOT skip any part. Say ALL of it warmly.]`
               sessionState.pendingFare = restoredState.pendingFare;
               sessionState.pendingEta = restoredState.pendingEta;
               
-              // Mark greeting as sent so we don't replay it
-              greetingSent = true;
-              greetingAudioReceived = true;
+              // === KEY FIX: Set resume flags so sendGreeting() sends continuation instead ===
+              // Don't mark greetingSent=true here - we want sendGreeting() to fire after session.updated
+              // but with the continuation prompt instead of the regular greeting
+              isResumedSession = true;
+              resumedStateData = {
+                booking: restoredState.booking,
+                awaitingConfirmation: restoredState.awaitingConfirmation,
+                pendingFare: restoredState.pendingFare,
+                pendingEta: restoredState.pendingEta,
+                bookingConfirmed: restoredState.bookingConfirmed
+              };
+              
+              // Clear the fallback timer so we wait for proper session.updated
               if (greetingFallbackTimer) {
                 clearTrackedTimeout(greetingFallbackTimer);
                 greetingFallbackTimer = null;
               }
               
-              console.log(`[${callId}] ✅ Session restored - skipping greeting, injecting continuation prompt`);
+              console.log(`[${callId}] ✅ Session restored - will send continuation prompt after session.updated`);
+              console.log(`[${callId}]   pickup: ${restoredState.booking.pickup}, dest: ${restoredState.booking.destination}, pax: ${restoredState.booking.passengers}`);
+              console.log(`[${callId}]   awaitingConfirmation: ${restoredState.awaitingConfirmation}, fare: ${restoredState.pendingFare}`);
               
-              // Inject continuation prompt based on where we left off
-              if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                let continuationPrompt: string;
-                
-                if (restoredState.awaitingConfirmation && restoredState.pendingFare) {
-                  // We were waiting for user to confirm the fare quote
-                  continuationPrompt = `[SESSION RESUMED - AWAITING FARE CONFIRMATION]
-The caller was asked to confirm a taxi booking. The fare is ${restoredState.pendingFare} with ETA ${restoredState.pendingEta || "a few minutes"}.
-Journey: ${restoredState.booking.pickup} → ${restoredState.booking.destination}, ${restoredState.booking.passengers} passengers.
-
-The caller may have already said "yes" but it wasn't heard. Say something brief like "Sorry, I didn't catch that. Would you like me to book that taxi for you?" and WAIT for their response.
-Do NOT repeat the full summary or fare. Just ask for confirmation.`;
-                } else if (restoredState.bookingConfirmed) {
-                  // Booking was already confirmed, deliver closing
-                  continuationPrompt = `[SESSION RESUMED - BOOKING ALREADY CONFIRMED]
-The booking is already confirmed. Say a brief closing like "Your taxi is on the way. Thank you for booking with us!" and call end_call().`;
-                } else {
-                  // Mid-booking, determine next question
-                  const nextQ = !restoredState.booking.pickup ? "pickup" :
-                                !restoredState.booking.destination ? "destination" :
-                                !restoredState.booking.passengers ? "passengers" : "time";
-                  continuationPrompt = `[SESSION RESUMED - CONTINUE BOOKING]
-Current state: pickup=${restoredState.booking.pickup || "missing"}, destination=${restoredState.booking.destination || "missing"}, passengers=${restoredState.booking.passengers || "missing"}.
-Next question: ${nextQ}.
-Say something brief like "Sorry about that, let me continue. ${nextQ === "pickup" ? "Where would you like to be picked up?" : nextQ === "destination" ? "And where are you heading to?" : nextQ === "passengers" ? "How many passengers?" : "What time would you like the taxi?"}"`;
-                }
-                
-                // Inject the continuation as a system message
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{ type: "input_text", text: continuationPrompt }]
-                  }
-                }));
-                
-                // Trigger a response
-                openaiWs.send(JSON.stringify({ type: "response.create" }));
-                
-                // Notify client we're ready
-                sendSessionReady();
-              }
+              // Notify client we're ready
+              sendSessionReady();
             } else {
               console.log(`[${callId}] ⚠️ No state found in DB for resume, will send fresh greeting`);
             }
