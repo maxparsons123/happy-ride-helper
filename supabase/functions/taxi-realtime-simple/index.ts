@@ -1822,6 +1822,12 @@ serve(async (req) => {
   // Maximum session duration (4 minutes) - end gracefully before Supabase's ~5 minute limit
   const MAX_SESSION_DURATION_MS = 4 * 60 * 1000;
   
+  // === SESSION HANDOFF CONFIGURATION ===
+  // At 75 seconds, save state to DB and signal bridge to reconnect for seamless continuation
+  const SESSION_HANDOFF_MS = 75 * 1000;
+  let handoffTimeoutId: number | null = null;
+  let handoffInProgress = false;
+  
   // --- OpenAI WebSocket ping to prevent OpenAI's idle timeout ---
   // OpenAI Realtime API can drop connections after ~30s of no audio
   const startOpenAiPing = (callId: string) => {
@@ -1967,6 +1973,152 @@ serve(async (req) => {
     if (sessionTimeoutId) {
       clearTimeout(sessionTimeoutId);
       sessionTimeoutId = null;
+    }
+  };
+  
+  // --- Session Handoff: Save state to DB and signal bridge to reconnect ---
+  const startHandoffTimer = (callId: string) => {
+    if (handoffTimeoutId) return; // Already running
+    
+    handoffTimeoutId = setTimeout(async () => {
+      if (isConnectionClosed || handoffInProgress || !state) return;
+      
+      handoffInProgress = true;
+      console.log(`[${callId}] 🔄 SESSION HANDOFF: Saving state for seamless reconnection...`);
+      
+      try {
+        // Save current booking state to live_calls for resumption
+        const handoffState = {
+          pickup: state.booking.pickup,
+          destination: state.booking.destination,
+          passengers: state.booking.passengers,
+          pickup_time: state.booking.pickup_time,
+          bookingStep: state.bookingStep,
+          language: state.language,
+          customerName: state.customerName,
+          greetingDelivered: state.greetingDelivered,
+          transcripts: state.transcripts.slice(-20), // Last 20 transcripts for context
+          pendingQuote: state.pendingQuote,
+          handoffAt: new Date().toISOString(),
+        };
+        
+        // Update live_calls with handoff status and state
+        await supabase.from("live_calls").update({
+          status: "handoff",
+          pickup: state.booking.pickup,
+          destination: state.booking.destination,
+          passengers: state.booking.passengers,
+          fare: state.pendingQuote?.fare || null,
+          eta: state.pendingQuote?.eta || null,
+          transcripts: state.transcripts,
+          updated_at: new Date().toISOString(),
+        }).eq("call_id", callId);
+        
+        console.log(`[${callId}] ✅ Handoff state saved to DB`);
+        console.log(`[${callId}] 📊 State: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}`);
+        
+        // Send handoff signal to bridge - it will reconnect with resume flag
+        socket.send(JSON.stringify({
+          type: "session.handoff",
+          call_id: callId,
+          reason: "session_timeout_approaching",
+          state: handoffState,
+        }));
+        
+        console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
+        
+        // Close OpenAI connection cleanly (bridge will re-establish on reconnect)
+        if (openaiWs && openaiConnected) {
+          try {
+            openaiWs.close(1000, "session_handoff");
+          } catch (e) {
+            console.warn(`[${callId}] ⚠️ Error closing OpenAI on handoff:`, e);
+          }
+        }
+        
+        // Give bridge time to process handoff before closing
+        setTimeout(() => {
+          if (!isConnectionClosed) {
+            console.log(`[${callId}] 🔌 Closing WebSocket for handoff`);
+            isConnectionClosed = true;
+            stopKeepAlive();
+            stopOpenAiPing();
+            try {
+              socket.close(1000, "session_handoff");
+            } catch (e) {
+              console.warn(`[${callId}] ⚠️ Error closing socket on handoff:`, e);
+            }
+          }
+        }, 500);
+        
+      } catch (e) {
+        console.error(`[${callId}] ❌ Handoff failed:`, e);
+        handoffInProgress = false;
+      }
+    }, SESSION_HANDOFF_MS) as unknown as number;
+    
+    console.log(`[${callId}] 🔄 Handoff timer started (${SESSION_HANDOFF_MS / 1000}s)`);
+  };
+  
+  const stopHandoffTimer = () => {
+    if (handoffTimeoutId) {
+      clearTimeout(handoffTimeoutId);
+      handoffTimeoutId = null;
+    }
+  };
+  
+  // --- Restore session state from DB (for resumed sessions) ---
+  const restoreSessionFromDb = async (callId: string, resumeCallId: string): Promise<Partial<SessionState> | null> => {
+    try {
+      const { data: liveCall } = await supabase
+        .from("live_calls")
+        .select("*")
+        .eq("call_id", resumeCallId)
+        .maybeSingle();
+      
+      if (!liveCall) {
+        console.log(`[${callId}] ⚠️ No live_call found for resume_call_id: ${resumeCallId}`);
+        return null;
+      }
+      
+      console.log(`[${callId}] ✅ Restored session from DB:`);
+      console.log(`[${callId}]   pickup: ${liveCall.pickup}`);
+      console.log(`[${callId}]   destination: ${liveCall.destination}`);
+      console.log(`[${callId}]   passengers: ${liveCall.passengers}`);
+      console.log(`[${callId}]   status: ${liveCall.status}`);
+      
+      // Parse transcripts if stored as JSON
+      const transcripts = Array.isArray(liveCall.transcripts) ? liveCall.transcripts : [];
+      
+      return {
+        booking: {
+          pickup: liveCall.pickup || null,
+          destination: liveCall.destination || null,
+          passengers: liveCall.passengers || null,
+          bags: null,
+          vehicle_type: null,
+          pickup_time: null,
+          version: 1,
+        },
+        transcripts: transcripts as TranscriptItem[],
+        callerLastPickup: liveCall.caller_last_pickup || null,
+        callerLastDestination: liveCall.caller_last_destination || null,
+        callerTotalBookings: liveCall.caller_total_bookings || 0,
+        customerName: liveCall.caller_name || null,
+        pendingQuote: liveCall.fare ? {
+          fare: liveCall.fare,
+          eta: liveCall.eta,
+          pickup: liveCall.pickup,
+          destination: liveCall.destination,
+          pickup_time: null,
+          callback_url: null,
+          timestamp: Date.now(),
+          lastPrompt: null,
+        } : null,
+      };
+    } catch (e) {
+      console.error(`[${callId}] ❌ Failed to restore session:`, e);
+      return null;
     }
   };
 
@@ -2228,6 +2380,52 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     };
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
+
+    // === RESUME SESSION: Skip greeting if already delivered ===
+    // When resuming after handoff, inject continuation context instead of greeting
+    if (sessionState.greetingDelivered) {
+      console.log(`[${sessionState.callId}] 🔄 RESUME: Greeting already delivered, injecting continuation context`);
+      
+      // Build continuation context based on current booking step
+      let continuationPrompt = "";
+      const step = sessionState.bookingStep;
+      const booking = sessionState.booking;
+      
+      if (step === "summary" || (booking.pickup && booking.destination && booking.passengers !== null)) {
+        // All fields captured - ask for confirmation
+        continuationPrompt = `[SYSTEM: Session resumed. The booking details are: Pickup: "${booking.pickup}", Destination: "${booking.destination}", Passengers: ${booking.passengers}, Time: ${booking.pickup_time || "now"}. Confirm these details with the customer and ask if they're ready to proceed.]`;
+      } else if (step === "passengers" || (booking.pickup && booking.destination && booking.passengers === null)) {
+        continuationPrompt = `[SYSTEM: Session resumed. Pickup: "${booking.pickup}", Destination: "${booking.destination}". Now ask: "How many people will be travelling?"]`;
+      } else if (step === "destination" || (booking.pickup && !booking.destination)) {
+        continuationPrompt = `[SYSTEM: Session resumed. Pickup captured: "${booking.pickup}". Now ask: "And what is your destination?"]`;
+      } else if (step === "time") {
+        continuationPrompt = `[SYSTEM: Session resumed. Pickup: "${booking.pickup}", Destination: "${booking.destination}", Passengers: ${booking.passengers}. Now ask: "When do you need the taxi?"]`;
+      } else {
+        // Default: continue the conversation naturally
+        continuationPrompt = `[SYSTEM: Session resumed. Continue the taxi booking conversation naturally. Ask for any missing information.]`;
+      }
+      
+      openaiWs?.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: continuationPrompt }]
+        }
+      }));
+      
+      // Trigger response with continuation instructions
+      openaiWs?.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["text", "audio"],
+          instructions: `Continue the conversation naturally. DO NOT repeat the greeting. Ask only the next required question based on the system context.`
+        }
+      }));
+      
+      console.log(`[${sessionState.callId}] 📝 Session resumed at step: ${step}`);
+      return;
+    }
 
     // Inject the exact welcome greeting as a conversation item to force OpenAI to speak it
     // This prevents OpenAI from skipping or paraphrasing the greeting
@@ -7567,16 +7765,34 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         const isReconnect = message.reconnect === true;
+        const isResume = message.resume === true; // NEW: Bridge reconnecting after handoff
+        const resumeCallId = message.resume_call_id || null; // Original call_id to restore from
         const reconnectAttempt = message.reconnect_attempt || 0;
         const sessionAgeS = message.session_age_s || 0;
         const bookingStateFromBridge = message.booking_state || {};
         
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, resume=${isResume}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
+
+        // === SESSION RESUME SUPPORT ===
+        // When bridge sends resume=true after session.handoff, restore state from DB
+        let restoredState: Partial<SessionState> | null = null;
+        if (isResume && resumeCallId) {
+          console.log(`[${callId}] 🔄 RESUME: Attempting to restore from call_id: ${resumeCallId}`);
+          restoredState = await restoreSessionFromDb(callId, resumeCallId);
+          
+          if (restoredState) {
+            console.log(`[${callId}] ✅ RESUME: State restored successfully`);
+            // Mark greeting as already delivered so Ada continues the conversation
+            restoredState.greetingDelivered = true;
+          } else {
+            console.log(`[${callId}] ⚠️ RESUME: No state found in DB, starting fresh`);
+          }
+        }
 
         // === MID-CALL RECONNECTION SUPPORT ===
         // When Supabase kills edge function (~75s), bridge reconnects with reconnect=true
         // We restore session state and continue the conversation seamlessly
-        if (isReconnect) {
+        if (isReconnect && !isResume) {
           console.log(`[${callId}] 🔁 Mid-call reconnection attempt ${reconnectAttempt}, session age ${sessionAgeS}s`);
           
           // Check if session is too old to be resumed (5 minutes max)
@@ -7757,6 +7973,60 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           console.log(`[${callId}] 📦 Restored state: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}`);
         }
         
+        // === APPLY RESTORED STATE FROM DB (for resume after handoff) ===
+        if (isResume && restoredState && state) {
+          console.log(`[${callId}] 🔄 Applying restored state from DB handoff`);
+          
+          // Apply booking state
+          if (restoredState.booking) {
+            state.booking.pickup = restoredState.booking.pickup || state.booking.pickup;
+            state.booking.destination = restoredState.booking.destination || state.booking.destination;
+            state.booking.passengers = restoredState.booking.passengers ?? state.booking.passengers;
+            state.booking.pickup_time = restoredState.booking.pickup_time || state.booking.pickup_time;
+            state.booking.version = Math.max(restoredState.booking.version || 0, state.booking.version);
+          }
+          
+          // Apply other state
+          if (restoredState.transcripts && restoredState.transcripts.length > 0) {
+            state.transcripts = restoredState.transcripts;
+          }
+          if (restoredState.customerName) {
+            state.customerName = restoredState.customerName;
+          }
+          if (restoredState.callerLastPickup) {
+            state.callerLastPickup = restoredState.callerLastPickup;
+          }
+          if (restoredState.callerLastDestination) {
+            state.callerLastDestination = restoredState.callerLastDestination;
+          }
+          if (restoredState.pendingQuote) {
+            state.pendingQuote = restoredState.pendingQuote;
+          }
+          
+          // CRITICAL: Mark greeting as delivered so Ada continues conversation
+          state.greetingDelivered = true;
+          
+          // Determine booking step based on what data we have
+          if (state.booking.pickup && state.booking.destination && state.booking.passengers !== null) {
+            state.bookingStep = "summary";
+          } else if (state.booking.pickup && state.booking.destination) {
+            state.bookingStep = "passengers";
+          } else if (state.booking.pickup) {
+            state.bookingStep = "destination";
+          } else {
+            state.bookingStep = "pickup";
+          }
+          
+          console.log(`[${callId}] 📦 DB restore complete: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, transcripts=${state.transcripts.length}`);
+          
+          // Update live_calls status back to active
+          await supabase.from("live_calls").update({
+            call_id: callId, // Update to new call_id
+            status: "active",
+            updated_at: new Date().toISOString(),
+          }).eq("call_id", resumeCallId);
+        }
+        
         console.log(`[${callId}] 🔊 Inbound audio: ${state!.inboundAudioFormat} @ ${state!.inboundSampleRate}Hz`);
         console.log(`[${callId}] 🎧 Audio processing: ${state!.useRasaAudioProcessing ? 'Rasa-style (8→16kHz)' : 'Standard (8→24kHz)'}`);
         
@@ -7875,6 +8145,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         // Start session timeout to end call gracefully before Supabase kills the function
         startSessionTimeout(callId);
+        
+        // Start handoff timer - at 75s, save state and signal bridge to reconnect
+        // This allows seamless continuation beyond the Supabase edge function limit
+        startHandoffTimer(callId);
 
         // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
         dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -8948,6 +9222,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     
     // Stop session timeout
     stopSessionTimeout();
+    
+    // Stop handoff timer
+    stopHandoffTimer();
     
     // Clear any pending flush timers to prevent memory leaks
     if (state?.transcriptFlushTimer) {
