@@ -22,21 +22,38 @@ class Program
                 });
         });
 
-        var config = new BridgeConfig
+        var config = new SipAdaBridgeConfig
         {
+            SipServer = GetEnvString("SIP_SERVER", "206.189.123.28"),
             SipPort = GetEnvInt("SIP_PORT", 5060),
-            SipUsername = GetEnvString("SIP_USERNAME", "taxi-bridge"),
-            SipPassword = GetEnvString("SIP_PASSWORD", ""),
-            WebSocketUrl = GetEnvString("WS_URL", "wss://isnqnuveumxiughjuccs.supabase.co/functions/v1/taxi-realtime"),
+            SipUser = GetEnvString("SIP_USER", "max201"),
+            SipPassword = GetEnvString("SIP_PASSWORD", "qwe70954504118"),
+            Transport = GetEnvString("SIP_TRANSPORT", "UDP").ToUpper() == "TCP" 
+                ? SipTransportType.TCP 
+                : SipTransportType.UDP,
+            AudioMode = Enum.TryParse<AudioMode>(GetEnvString("AUDIO_MODE", "Standard"), out var mode) 
+                ? mode 
+                : AudioMode.Standard,
+            JitterBufferMs = GetEnvInt("JITTER_BUFFER_MS", 60),
             MaxConcurrentCalls = GetEnvInt("MAX_CALLS", 50),
-            EnableTls = GetEnvBool("ENABLE_TLS", false)
+            // IMPORTANT: Use .functions.supabase.co subdomain for reliability
+            AdaWsUrl = GetEnvString("ADA_WS_URL", "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired")
         };
 
+        // Validate configuration
+        if (!config.IsValid(out var error))
+        {
+            Console.WriteLine($"❌ Configuration error: {error}");
+            return;
+        }
+
         Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  SIP Port: {config.SipPort}");
-        Console.WriteLine($"  SIP Username: {config.SipUsername}");
-        Console.WriteLine($"  WebSocket URL: {config.WebSocketUrl}");
+        Console.WriteLine($"  SIP Server: {config.SipServer}:{config.SipPort} ({config.Transport})");
+        Console.WriteLine($"  SIP User: {config.SipUser}");
+        Console.WriteLine($"  Audio Mode: {config.AudioMode}");
+        Console.WriteLine($"  Jitter Buffer: {config.JitterBufferMs}ms");
         Console.WriteLine($"  Max Concurrent Calls: {config.MaxConcurrentCalls}");
+        Console.WriteLine($"  Ada WS URL: {config.AdaWsUrl}");
         Console.WriteLine();
 
         var bridge = new SipBridgeService(config, loggerFactory);
