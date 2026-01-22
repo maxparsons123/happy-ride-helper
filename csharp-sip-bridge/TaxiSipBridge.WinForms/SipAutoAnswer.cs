@@ -264,6 +264,21 @@ public class SipAutoAnswer : IDisposable
             Log($"⏰ [{callId}] Media timeout: {mt}");
         };
 
+        // Track outbound RTP packets to verify they're being sent
+        int outboundRtpCount = 0;
+        DateTime lastOutboundLog = DateTime.Now;
+        mediaSession.OnRtpPacketSend += (ep, mt, rtp) =>
+        {
+            outboundRtpCount++;
+            if (outboundRtpCount <= 5)
+                Log($"📤 [{callId}] RTP OUT #{outboundRtpCount}: {rtp.Payload?.Length ?? 0}b → {ep}");
+            else if ((DateTime.Now - lastOutboundLog).TotalSeconds >= 5)
+            {
+                Log($"📤 [{callId}] RTP OUT total: {outboundRtpCount} packets");
+                lastOutboundLog = DateTime.Now;
+            }
+        };
+
         _currentMediaSession = mediaSession;
 
         Log($"🔧 [{callId}] Accepting call...");
