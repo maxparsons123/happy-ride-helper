@@ -3239,8 +3239,12 @@ Do NOT say 'booked' until the tool returns success.]`
         const hasActiveBookingContext = sessionState.hasActiveBooking || 
           (sessionState.booking.pickup && sessionState.booking.destination);
         const isSubstantialSpeech = speechDuration > 1000; // >1 second suggests address/modification
+        // After a booking is confirmed and Ada asks "anything else", allow free-form chat.
+        // The modification extraction guard is too aggressive here and can stall the call.
+        const inAnythingElseChatMode = !!sessionState.askedAnythingElse && !!sessionState.bookingFullyConfirmed;
         
         if (hasActiveBookingContext && isSubstantialSpeech && 
+            !inAnythingElseChatMode &&
             !sessionState.extractionInProgress && 
             !sessionState.pendingQuote &&
             !sessionState.modificationPromptPending) {
@@ -4183,8 +4187,11 @@ Do NOT say 'booked' until the tool returns success.]`
           // use AI to extract and compare - no more relying on fragile regex patterns
           // NOTE: We now allow extraction even with pendingQuote, as user might be changing their trip
           // after being asked "keep, change, or cancel?"
+          // Don't run booking modification extraction during "anything else" chat.
+          // It causes unnecessary blocking for general questions (e.g. "what events are on?").
           const shouldUseAiExtraction = hasExistingBookingContext && 
             isSubstantialInput &&
+            !sessionState.askedAnythingElse &&
             !sessionState.pendingModification &&
             !sessionState.extractionInProgress &&
             !sessionState.callEnded;
