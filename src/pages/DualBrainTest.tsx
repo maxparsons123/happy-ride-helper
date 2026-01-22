@@ -82,8 +82,10 @@ export default function DualBrainTest() {
 
       setTurns((prev) => [...prev, turn]);
       setCurrentState(data.state);
-      // Store updated state for next request
+      // Store FULL updated state for next request (including conversationHistory)
+      // The edge function returns the complete state with all preserved fields
       setServerState(data.state);
+      console.log("[DualBrain] State updated:", data.state);
 
       if (data.end) {
         toast.success("Booking confirmed!");
