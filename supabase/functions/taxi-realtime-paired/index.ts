@@ -531,6 +531,12 @@ Follow this order exactly. Only move to the next if you have the current answer:
 🚨 ACKNOWLEDGE PASSENGER COUNT: After user says a number, briefly confirm the count.
 Then ask about the time.
 
+🔊 PASSENGER COUNT STT CORRECTION:
+- If the previous address contained "7" (e.g., "7 Russell Street") and user says passengers:
+- "Seven" right after a "7 [street]" address is likely the user saying "Three" (phonetic confusion)
+- Common mishearings: "Boston Juice" = three, "Ozempic Juice" = three
+- When uncertain, ask: "Was that three passengers?" to clarify
+
 🚨 CRITICAL: NEVER ASK USER TO CONFIRM/REPEAT AN ADDRESS 🚨
 🚫 DO NOT ask "Could you please confirm the pickup address?"
 🚫 DO NOT ask "Could you confirm the destination?"
@@ -2743,8 +2749,42 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                     six: 6, seven: 7, eight: 8, nine: 9, ten: 10
                   };
                   
-                  const lowerV = v.toLowerCase().trim();
+                  let lowerV = v.toLowerCase().trim();
                   let parsedCount: number | null = null;
+                  
+                  // ═══════════════════════════════════════════════════════════════════
+                  // CONTEXT-AWARE STT CORRECTION: "Seven" vs "Three" confusion
+                  // When the previous answer was "7 Russell Street", the audio context
+                  // can cause Whisper to mishear "Three" as "Seven" for passengers.
+                  // ═══════════════════════════════════════════════════════════════════
+                  const prevDestination = sessionState.booking.destination?.toLowerCase() || "";
+                  const prevPickup = sessionState.booking.pickup?.toLowerCase() || "";
+                  const lastAddressHad7 = /\b7\b/.test(prevDestination) || /\b7\b/.test(prevPickup);
+                  
+                  // If user says "seven" or "7" right after a "7 [street]" address, 
+                  // check if they might have meant "three" (common phonetic confusion)
+                  if (lastAddressHad7 && (lowerV === "seven" || lowerV === "7" || lowerV === "seven passengers" || lowerV === "7 passengers")) {
+                    // Look at the raw transcript for phonetic hints
+                    // "Three" and "Seven" sound similar - "th" vs "s" prefix
+                    // If we just asked for passengers after a "7 X Street" address, 
+                    // this is likely a context bleed from the STT
+                    console.log(`[${callId}] 🔄 CONTEXT STT CHECK: User said "${v}" after "7 [street]" address - possible "Three"→"Seven" confusion`);
+                    
+                    // Check conversation history for phonetic hints
+                    const recentUserInputs = sessionState.conversationHistory
+                      .filter(h => h.role === "user")
+                      .slice(-3)
+                      .map(h => h.content.toLowerCase());
+                    
+                    // If they previously used "three" or we detect phonetic similarity patterns
+                    const hasThreeContext = recentUserInputs.some(t => /\bthree\b|\b3\b/.test(t) && !/street|road/i.test(t));
+                    
+                    // For now, log the potential confusion but don't auto-correct
+                    // The AI extraction will also catch this with better context
+                    if (!hasThreeContext) {
+                      console.log(`[${callId}] ⚠️ Potential STT confusion: "seven" after "7 street" - may have meant "three"`);
+                    }
+                  }
                   
                   // IMPORTANT: Only accept passenger counts that LOOK like just a number.
                   // Reject if transcript looks like an address (contains street/road keywords or is too long).
