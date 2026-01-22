@@ -8,8 +8,8 @@ using Concentus.Structs;
 namespace TaxiSipBridge
 {
     /// <summary>
-    /// Opus audio encoder supporting both 48kHz and 16kHz modes.
-    /// Prioritizes Opus for high-quality wideband audio over G.711.
+    /// Opus audio encoder supporting full range of sample rates: 8k, 12k, 16k, 24k, 48kHz.
+    /// Opus internally always works at 48kHz but can encode/decode at any supported rate.
     /// </summary>
     public class OpusAudioEncoder : IAudioEncoder
     {
@@ -17,16 +17,15 @@ namespace TaxiSipBridge
         private const int OPUS_BITRATE = 32000;  // 32kbps for clear voice quality
 
         private readonly SIPSorcery.Media.AudioEncoder _baseEncoder;
-        private OpusEncoder? _opusEncoder48k;
-        private OpusEncoder? _opusEncoder16k;
-        private OpusDecoder? _opusDecoder48k;
-        private OpusDecoder? _opusDecoder16k;
+        
+        // Opus encoders/decoders for each sample rate
+        private readonly Dictionary<int, OpusEncoder> _encoders = new();
+        private readonly Dictionary<int, OpusDecoder> _decoders = new();
         private readonly object _encoderLock = new();
         private readonly object _decoderLock = new();
 
-        // Opus formats - 16kHz first (matches user's SIP client), then 48kHz
-        private static readonly AudioFormat OpusFormat16k = new(AudioCodecsEnum.OPUS, 111, 16000, OPUS_CHANNELS, "opus");
-        private static readonly AudioFormat OpusFormat48k = new(AudioCodecsEnum.OPUS, 111, 48000, OPUS_CHANNELS, "opus");
+        // Supported Opus sample rates (Opus spec: 8000, 12000, 16000, 24000, 48000)
+        private static readonly int[] OpusSampleRates = { 8000, 12000, 16000, 24000, 48000 };
 
         public OpusAudioEncoder() => _baseEncoder = new SIPSorcery.Media.AudioEncoder();
 
@@ -34,12 +33,18 @@ namespace TaxiSipBridge
         {
             get
             {
-                var formats = new List<AudioFormat>
-                {
-                    OpusFormat16k,  // Prefer 16kHz Opus (wideband, efficient)
-                    OpusFormat48k   // Also offer 48kHz Opus (fullband)
-                };
-                formats.AddRange(_baseEncoder.SupportedFormats); // Add PCMU, PCMA, etc.
+                var formats = new List<AudioFormat>();
+                
+                // Add Opus formats in priority order (16k first for wideband SIP, then others)
+                formats.Add(new AudioFormat(AudioCodecsEnum.OPUS, 111, 16000, OPUS_CHANNELS, "opus"));
+                formats.Add(new AudioFormat(AudioCodecsEnum.OPUS, 111, 24000, OPUS_CHANNELS, "opus"));
+                formats.Add(new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, OPUS_CHANNELS, "opus"));
+                formats.Add(new AudioFormat(AudioCodecsEnum.OPUS, 111, 12000, OPUS_CHANNELS, "opus"));
+                formats.Add(new AudioFormat(AudioCodecsEnum.OPUS, 111, 8000, OPUS_CHANNELS, "opus"));
+                
+                // Add base encoder formats (PCMU, PCMA, etc.) as fallback
+                formats.AddRange(_baseEncoder.SupportedFormats);
+                
                 return formats;
             }
         }
@@ -48,9 +53,7 @@ namespace TaxiSipBridge
         {
             if (format.Codec == AudioCodecsEnum.OPUS)
             {
-                return format.ClockRate == 16000 
-                    ? EncodeOpus16k(pcm) 
-                    : EncodeOpus48k(pcm);
+                return EncodeOpus(pcm, format.ClockRate);
             }
             return _baseEncoder.EncodeAudio(pcm, format);
         }
@@ -59,81 +62,52 @@ namespace TaxiSipBridge
         {
             if (format.Codec == AudioCodecsEnum.OPUS)
             {
-                return format.ClockRate == 16000 
-                    ? DecodeOpus16k(encodedSample) 
-                    : DecodeOpus48k(encodedSample);
+                return DecodeOpus(encodedSample, format.ClockRate);
             }
             return _baseEncoder.DecodeAudio(encodedSample, format);
         }
 
-        private byte[] EncodeOpus16k(short[] pcm)
+        private byte[] EncodeOpus(short[] pcm, int sampleRate)
         {
             lock (_encoderLock)
             {
-                if (_opusEncoder16k == null)
+                // Get or create encoder for this sample rate
+                if (!_encoders.TryGetValue(sampleRate, out var encoder))
                 {
-                    _opusEncoder16k = new OpusEncoder(16000, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
-                    _opusEncoder16k.Bitrate = OPUS_BITRATE;
-                    _opusEncoder16k.Complexity = 5;
-                    _opusEncoder16k.UseVBR = true;
+                    encoder = new OpusEncoder(sampleRate, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+                    encoder.Bitrate = OPUS_BITRATE;
+                    encoder.Complexity = 5;
+                    encoder.UseVBR = true;
+                    _encoders[sampleRate] = encoder;
                 }
 
-                // 20ms frame at 16kHz = 320 samples
-                int frameSize = 320;
+                // Frame size for 20ms at this sample rate
+                int frameSize = sampleRate / 1000 * 20;
                 short[] frame = EnsureFrameSize(pcm, frameSize);
 
                 byte[] outBuf = new byte[1275];
-                int len = _opusEncoder16k.Encode(frame, 0, frameSize, outBuf, 0, outBuf.Length);
+                int len = encoder.Encode(frame, 0, frameSize, outBuf, 0, outBuf.Length);
                 byte[] res = new byte[len];
                 Array.Copy(outBuf, res, len);
                 return res;
             }
         }
 
-        private byte[] EncodeOpus48k(short[] pcm)
+        private short[] DecodeOpus(byte[] encoded, int sampleRate)
         {
-            lock (_encoderLock)
+            lock (_decoderLock)
             {
-                if (_opusEncoder48k == null)
+                // Get or create decoder for this sample rate
+                if (!_decoders.TryGetValue(sampleRate, out var decoder))
                 {
-                    _opusEncoder48k = new OpusEncoder(48000, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
-                    _opusEncoder48k.Bitrate = OPUS_BITRATE;
-                    _opusEncoder48k.Complexity = 5;
-                    _opusEncoder48k.UseVBR = true;
+                    decoder = new OpusDecoder(sampleRate, OPUS_CHANNELS);
+                    _decoders[sampleRate] = decoder;
                 }
 
-                // 20ms frame at 48kHz = 960 samples
-                int frameSize = 960;
-                short[] frame = EnsureFrameSize(pcm, frameSize);
-
-                byte[] outBuf = new byte[1275];
-                int len = _opusEncoder48k.Encode(frame, 0, frameSize, outBuf, 0, outBuf.Length);
-                byte[] res = new byte[len];
-                Array.Copy(outBuf, res, len);
-                return res;
-            }
-        }
-
-        private short[] DecodeOpus16k(byte[] encoded)
-        {
-            lock (_decoderLock)
-            {
-                _opusDecoder16k ??= new OpusDecoder(16000, OPUS_CHANNELS);
-                int frameSize = 320; // 20ms at 16kHz
+                // Frame size for 20ms at this sample rate
+                int frameSize = sampleRate / 1000 * 20;
                 short[] outBuf = new short[frameSize];
-                int len = _opusDecoder16k.Decode(encoded, 0, encoded.Length, outBuf, 0, frameSize, false);
-                return len < frameSize ? outBuf.Take(len).ToArray() : outBuf;
-            }
-        }
-
-        private short[] DecodeOpus48k(byte[] encoded)
-        {
-            lock (_decoderLock)
-            {
-                _opusDecoder48k ??= new OpusDecoder(48000, OPUS_CHANNELS);
-                int frameSize = 960; // 20ms at 48kHz
-                short[] outBuf = new short[frameSize];
-                int len = _opusDecoder48k.Decode(encoded, 0, encoded.Length, outBuf, 0, frameSize, false);
+                int len = decoder.Decode(encoded, 0, encoded.Length, outBuf, 0, frameSize, false);
                 return len < frameSize ? outBuf.Take(len).ToArray() : outBuf;
             }
         }
