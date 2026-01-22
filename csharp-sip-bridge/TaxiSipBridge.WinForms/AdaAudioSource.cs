@@ -411,21 +411,56 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz is exactly 3:1. Using a small FIR per group avoids boundary artifacts.
-        if (pcm24.Length < 3) return new short[0];
+        // 24kHz → 8kHz is exactly 3:1
+        // Enhanced pipeline for clarity:
+        // 1. Apply pre-emphasis to boost high frequencies (counteracts telephony muffle)
+        // 2. Apply 5-tap low-pass FIR for proper anti-aliasing
+        // 3. Decimate by 3
+        // 4. Apply volume boost for G.711 headroom
+        
+        if (pcm24.Length < 5) return new short[0];
 
-        int outLen = pcm24.Length / 3;
+        // Step 1: Pre-emphasis filter (boost highs) - coefficient 0.95
+        // This makes speech clearer over telephone lines
+        var emphasized = new short[pcm24.Length];
+        emphasized[0] = pcm24[0];
+        for (int i = 1; i < pcm24.Length; i++)
+        {
+            int sample = pcm24[i] - (int)(pcm24[i - 1] * 0.95f);
+            emphasized[i] = (short)Math.Clamp(sample, -32768, 32767);
+        }
+
+        // Step 2: 5-tap low-pass FIR filter for anti-aliasing before decimation
+        // Coefficients: [1, 2, 3, 2, 1] / 9 (symmetric, smooth rolloff)
+        var filtered = new short[pcm24.Length];
+        for (int i = 2; i < pcm24.Length - 2; i++)
+        {
+            int sum = emphasized[i - 2] + 
+                      emphasized[i - 1] * 2 + 
+                      emphasized[i] * 3 + 
+                      emphasized[i + 1] * 2 + 
+                      emphasized[i + 2];
+            filtered[i] = (short)(sum / 9);
+        }
+        // Handle edges
+        filtered[0] = emphasized[0];
+        filtered[1] = (short)((emphasized[0] + emphasized[1] * 2 + emphasized[2]) / 4);
+        filtered[pcm24.Length - 2] = (short)((emphasized[^3] + emphasized[^2] * 2 + emphasized[^1]) / 4);
+        filtered[pcm24.Length - 1] = emphasized[^1];
+
+        // Step 3: Decimate by 3 (pick every 3rd sample from filtered signal)
+        int outLen = filtered.Length / 3;
         var output = new short[outLen];
-
+        
         for (int i = 0; i < outLen; i++)
         {
-            int idx = i * 3;
-            int s0 = pcm24[idx];
-            int s1 = pcm24[idx + 1];
-            int s2 = pcm24[idx + 2];
-
-            // 3-tap low-pass-ish: (1,2,1)/4
-            output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
+            int idx = i * 3 + 1; // Pick center sample of each group
+            if (idx < filtered.Length)
+            {
+                // Step 4: Apply 1.3x volume boost for G.711 headroom
+                int boosted = (int)(filtered[idx] * 1.3f);
+                output[i] = (short)Math.Clamp(boosted, -32768, 32767);
+            }
         }
 
         return output;
