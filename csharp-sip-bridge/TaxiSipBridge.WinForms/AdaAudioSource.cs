@@ -403,18 +403,38 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
         // 24kHz → 8kHz is exactly 3:1
-        // Use simple averaging decimation - clean and artifact-free
-        if (pcm24.Length < 3) return new short[0];
+        // Apply low-pass anti-aliasing filter BEFORE decimation for smooth, natural sound
+        if (pcm24.Length < 6) return new short[0];
 
+        // Step 1: Apply 5-tap low-pass FIR filter for anti-aliasing
+        // Coefficients designed for 4kHz cutoff at 24kHz (Nyquist/3)
+        // [0.1, 0.2, 0.4, 0.2, 0.1] - smooth Gaussian-like response
+        var filtered = new float[pcm24.Length];
+        for (int i = 2; i < pcm24.Length - 2; i++)
+        {
+            filtered[i] = pcm24[i - 2] * 0.1f +
+                          pcm24[i - 1] * 0.2f +
+                          pcm24[i] * 0.4f +
+                          pcm24[i + 1] * 0.2f +
+                          pcm24[i + 2] * 0.1f;
+        }
+        // Handle edges with reduced filter
+        filtered[0] = pcm24[0] * 0.5f + pcm24[1] * 0.3f + pcm24[2] * 0.2f;
+        filtered[1] = pcm24[0] * 0.2f + pcm24[1] * 0.4f + pcm24[2] * 0.3f + pcm24[3] * 0.1f;
+        filtered[pcm24.Length - 2] = pcm24[^4] * 0.1f + pcm24[^3] * 0.3f + pcm24[^2] * 0.4f + pcm24[^1] * 0.2f;
+        filtered[pcm24.Length - 1] = pcm24[^3] * 0.2f + pcm24[^2] * 0.3f + pcm24[^1] * 0.5f;
+
+        // Step 2: Decimate by 3 using the filtered samples
         int outLen = pcm24.Length / 3;
         var output = new short[outLen];
 
         for (int i = 0; i < outLen; i++)
         {
             int idx = i * 3;
-            // Simple average of 3 samples - clean, no artifacts
-            int avg = (pcm24[idx] + pcm24[idx + 1] + pcm24[idx + 2]) / 3;
-            output[i] = (short)avg;
+            // Pick center sample from each group of 3 (already filtered)
+            float sample = filtered[idx + 1];
+            // Clamp to short range
+            output[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
         }
 
         return output;
