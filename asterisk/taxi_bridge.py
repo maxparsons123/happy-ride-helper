@@ -411,16 +411,19 @@ class TaxiBridgeV7:
                 
                 # Send init message
                 if init_data:
-                    # Redirect case - use provided init_data
+                    # Redirect/handoff case - use provided init_data (includes resume flag if handoff)
+                    is_handoff_resume = init_data.get("resume", False)
                     redirect_msg = {
                         "type": "init",
                         **init_data,
                         "call_id": self.call_id,
                         "phone": self.phone if self.phone != "Unknown" else None,
-                        "reconnect": is_reconnect,
+                        # Keep reconnect=True for handoff reconnects to trigger proper handling
+                        "reconnect": is_reconnect or is_handoff_resume,
                     }
                     await self.ws.send(json.dumps(redirect_msg))
-                    print(f"[{self.call_id}] 🔀 Sent redirect init to {target_url}", flush=True)
+                    mode = "handoff resume" if is_handoff_resume else "redirect"
+                    print(f"[{self.call_id}] 🔀 Sent {mode} init: resume={is_handoff_resume}, resume_call_id={init_data.get('resume_call_id')}", flush=True)
                     self.init_sent = True
                 elif is_reconnect:
                     # Mid-call reconnection - send reconnect init with state
