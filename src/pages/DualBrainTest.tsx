@@ -151,37 +151,46 @@ export default function DualBrainTest() {
             </CardHeader>
             <CardContent>
               <ScrollArea className="h-[500px] pr-4">
-                {turns.length === 0 ? (
-                  <div className="text-center text-muted-foreground py-12">
-                    <p>Start a conversation to test the dual-brain flow</p>
-                    <p className="text-sm mt-2">Try: "I need a taxi from 52A David Road"</p>
+                {/* Ada's intro message - always shown */}
+                <div className="space-y-4">
+                  <div className="flex justify-start">
+                    <div className="bg-muted rounded-lg px-4 py-2 max-w-[80%]">
+                      <p>Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. Where would you like to be picked up?</p>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+                        <Badge variant="secondary">Collecting</Badge>
+                      </div>
+                    </div>
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    {turns.map((turn) => (
-                      <div key={turn.id} className="space-y-2">
-                        {/* User message */}
-                        <div className="flex justify-end">
-                          <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[80%]">
-                            {turn.userInput}
-                          </div>
+                  
+                  {turns.length === 0 && (
+                    <div className="text-center text-muted-foreground py-8">
+                      <p className="text-sm">Type your pickup address to continue...</p>
+                    </div>
+                  )}
+                  
+                  {turns.map((turn) => (
+                    <div key={turn.id} className="space-y-2">
+                      {/* User message */}
+                      <div className="flex justify-end">
+                        <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[80%]">
+                          {turn.userInput}
                         </div>
-                        
-                        {/* Ada response */}
-                        <div className="flex justify-start">
-                          <div className="bg-muted rounded-lg px-4 py-2 max-w-[80%]">
-                            <p>{turn.adaResponse}</p>
-                            <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-                              <Clock className="h-3 w-3" />
-                              {turn.processingTime}ms
-                              {getStepBadge(turn.state.step)}
-                            </div>
+                      </div>
+                      
+                      {/* Ada response */}
+                      <div className="flex justify-start">
+                        <div className="bg-muted rounded-lg px-4 py-2 max-w-[80%]">
+                          <p>{turn.adaResponse}</p>
+                          <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+                            <Clock className="h-3 w-3" />
+                            {turn.processingTime}ms
+                            {getStepBadge(turn.state.step)}
                           </div>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    </div>
+                  ))}
+                </div>
               </ScrollArea>
 
               {/* Input */}
