@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.4 - LOUD AND CLEAR
+# Taxi AI Asterisk Bridge v7.5 - LOUD AND CLEAR
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -803,6 +803,13 @@ class TaxiBridgeV7:
                     role = data.get("role", "?").upper()
                     text = data.get("text", "")
                     logger.info("[%s] 💬 %s: %s", self.state.call_id, role, text)
+
+                elif msg_type == "speech_started":
+                    logger.info("[%s] 🎤 Speech started", self.state.call_id)
+
+                elif msg_type == "speech_stopped":
+                    duration = data.get("duration", "?")
+                    logger.info("[%s] 🔇 Speech ended (%ss)", self.state.call_id, duration)
 
                 elif msg_type == "ai_interrupted":
                     flushed = len(self.audio_queue)
