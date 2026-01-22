@@ -1802,7 +1802,12 @@ serve(async (req) => {
   let keepAliveInterval: number | null = null; // Keep-alive ping interval to prevent timeout
   let closingGracePeriodActive = false; // Prevent socket.onclose from interrupting goodbye speech
   let closingGraceTimeoutId: number | null = null; // Track the closing grace timeout for cleanup
+  let sessionTimeoutId: number | null = null; // Session timeout timer to prevent Supabase timeout
+  const sessionStartTime = Date.now(); // Track when the session started
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  
+  // Maximum session duration (4 minutes) - end gracefully before Supabase's ~5 minute limit
+  const MAX_SESSION_DURATION_MS = 4 * 60 * 1000;
   
   // --- Keep-alive ping to prevent WebSocket timeout during dispatch callback wait ---
   const startKeepAlive = (callId: string) => {
@@ -1838,6 +1843,65 @@ serve(async (req) => {
       clearInterval(keepAliveInterval);
       keepAliveInterval = null;
       console.log(`[${state?.callId || "unknown"}] 🛑 Keep-alive stopped`);
+    }
+  };
+  
+  // --- Session timeout to gracefully end call before Supabase kills function ---
+  const startSessionTimeout = (callId: string) => {
+    if (sessionTimeoutId) return; // Already running
+    
+    sessionTimeoutId = setTimeout(() => {
+      if (isConnectionClosed) return;
+      
+      console.log(`[${callId}] ⏰ Session timeout reached (${MAX_SESSION_DURATION_MS / 1000}s) - ending gracefully`);
+      
+      // If state exists and OpenAI is connected, send a goodbye message
+      if (state && openaiWs && openaiConnected && !state.callEnded) {
+        state.callEnded = true;
+        closingGracePeriodActive = true;
+        
+        // Inject a polite session timeout message
+        openaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "[SYSTEM: Maximum call duration reached. End the call politely now.]" }]
+          }
+        }));
+        
+        openaiWs.send(JSON.stringify({ type: "response.create" }));
+        
+        // Give Ada 6 seconds to say goodbye, then close
+        closingGraceTimeoutId = setTimeout(() => {
+          console.log(`[${callId}] 📴 Session timeout grace period expired - closing`);
+          isConnectionClosed = true;
+          stopKeepAlive();
+          try {
+            socket.close(1000, "session_timeout");
+          } catch (e) {
+            console.warn(`[${callId}] ⚠️ Error closing socket on timeout:`, e);
+          }
+        }, 6000) as unknown as number;
+      } else {
+        // No state or not connected - just close
+        isConnectionClosed = true;
+        stopKeepAlive();
+        try {
+          socket.close(1000, "session_timeout");
+        } catch (e) {
+          console.warn(`[${callId}] ⚠️ Error closing socket on timeout:`, e);
+        }
+      }
+    }, MAX_SESSION_DURATION_MS) as unknown as number;
+    
+    console.log(`[${callId}] ⏱️ Session timeout started (${MAX_SESSION_DURATION_MS / 1000}s)`);
+  };
+  
+  const stopSessionTimeout = () => {
+    if (sessionTimeoutId) {
+      clearTimeout(sessionTimeoutId);
+      sessionTimeoutId = null;
     }
   };
 
@@ -7530,6 +7594,9 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         // Start keep-alive pings to prevent WebSocket timeout during dispatch callback wait
         startKeepAlive(callId);
+        
+        // Start session timeout to end call gracefully before Supabase kills the function
+        startSessionTimeout(callId);
 
         // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
         dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -8576,6 +8643,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     
     // Stop keep-alive pings
     stopKeepAlive();
+    
+    // Stop session timeout
+    stopSessionTimeout();
     
     // Clear any pending flush timers to prevent memory leaks
     if (state?.transcriptFlushTimer) {

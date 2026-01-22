@@ -9,5 +9,14 @@ verify_jwt = false
 [functions.taxi-realtime-stateful]
 verify_jwt = false
 
+[functions.taxi-realtime-simple]
+verify_jwt = false
+
+[functions.taxi-realtime-paired]
+verify_jwt = false
+
+[functions.taxi-realtime-bridge]
+verify_jwt = false
+
 [functions.livekit-token]
 verify_jwt = false
