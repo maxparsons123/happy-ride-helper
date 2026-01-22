@@ -361,23 +361,28 @@ class TaxiBridgeV7:
             self.state.format_locked = False
         
         old_codec = self.state.ast_codec
+        old_rate = self.state.ast_rate
         
         if frame_len == 640:
+            # slin16: 16kHz × 2 bytes × 20ms = 640 bytes
             self.state.ast_codec = "slin16"
             self.state.ast_rate = SLIN16_RATE
             self.state.ast_frame_bytes = 640
-            logger.info("[%s] ✅ Detected: slin16 @ 16kHz", self.state.call_id)
+            logger.info("[%s] ✅ Detected: slin16 @ 16kHz (640-byte frames)", self.state.call_id)
         elif frame_len == 320:
+            # slin: 8kHz × 2 bytes × 20ms = 320 bytes
             self.state.ast_codec = "slin"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 320
-            logger.info("[%s] 🔎 Detected: slin @ 8kHz", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: slin @ 8kHz (320-byte frames)", self.state.call_id)
         elif frame_len == 160:
+            # ulaw: 8kHz × 1 byte × 20ms = 160 bytes
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 160
-            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz (160-byte frames)", self.state.call_id)
         else:
+            # Unusual frame size - use heuristic
             if frame_len > 400:
                 self.state.ast_codec = "slin16"
                 self.state.ast_rate = SLIN16_RATE
@@ -385,21 +390,25 @@ class TaxiBridgeV7:
                 self.state.ast_codec = "slin"
                 self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = frame_len
-            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
+            logger.warning("[%s] ⚠️ Unusual frame size %d bytes, assuming %s @ %dHz", 
                           self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
         
         self.state.format_locked = True
         self.state.format_lock_time = time.time()
         
-        if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
+        # Notify edge function of format change (rate may change 8kHz ↔ 16kHz)
+        format_changed = (old_codec != self.state.ast_codec or old_rate != self.state.ast_rate)
+        if format_changed and self.ws and self.state.ws_connected:
+            # When sending processed audio, always report as slin (PCM16) but with correct rate
+            send_format = "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec
             await self.ws.send(json.dumps({
                 "type": "update_format",
                 "call_id": self.state.call_id,
-                "inbound_format": self.state.ast_codec,
-                "inbound_sample_rate": self.state.ast_rate,
+                "inbound_format": send_format,
+                "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
             }))
             logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
-                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
+                       self.state.call_id, send_format, self.state.ast_rate)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION

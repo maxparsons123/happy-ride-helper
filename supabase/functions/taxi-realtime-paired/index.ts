@@ -3913,9 +3913,17 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
 
           if (data.inbound_format && (data.inbound_format === "ulaw" || data.inbound_format === "slin" || data.inbound_format === "slin16")) {
+            const oldFormat = inboundAudioFormat;
+            const oldRate = inboundSampleRate;
             inboundAudioFormat = data.inbound_format;
-          }
-          if (typeof data.inbound_sample_rate === "number") {
+            if (typeof data.inbound_sample_rate === "number") {
+              inboundSampleRate = data.inbound_sample_rate;
+            }
+            // Log format changes for debugging
+            if (oldFormat !== inboundAudioFormat || oldRate !== inboundSampleRate) {
+              console.log(`[${callId}] 🎛️ Audio format updated: ${oldFormat}@${oldRate}Hz → ${inboundAudioFormat}@${inboundSampleRate}Hz`);
+            }
+          } else if (typeof data.inbound_sample_rate === "number") {
             inboundSampleRate = data.inbound_sample_rate;
           }
         } else if (data.type === "keepalive_ack") {
