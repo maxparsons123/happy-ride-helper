@@ -75,10 +75,10 @@ ULAW_RATE = 8000    # µ-law telephony (8kHz)
 SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
 AI_RATE = 24000     # OpenAI TTS
 
-# LOCK TO ULAW: Disable slin16 auto-detection - it was corrupting audio
-# The format detection was switching mid-call causing garbled audio
-PREFER_SLIN16 = False
-LOCK_FORMAT_ULAW = True  # NEW: Prevent any format switching
+# FORMAT DETECTION: Allow dynamic detection from Asterisk frame size
+# v7.5: Re-enabled slin16 detection - ulaw lock was causing 2x playback when Asterisk sends slin16
+PREFER_SLIN16 = True   # Prefer higher quality when detected
+LOCK_FORMAT_ULAW = False  # Allow format switching based on actual frame size
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
