@@ -2544,14 +2544,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             sessionState.openAiResponseActive = true;
             
-            // Forward transcript to bridge for logging (like simple mode)
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({
-                type: "transcript",
-                text: data.delta,
-                role: "assistant"
-              }));
-            }
+            // NOTE: We now buffer transcripts and send the complete sentence in response.audio_transcript.done
+            // This reduces log noise from word-by-word logging
             
             // PRICE/ETA HALLUCINATION GUARD: If Ada mentions a price/ETA but we haven't received one from dispatch, cancel!
             if (isPriceOrEtaHallucination(data.delta, !!sessionState.pendingFare)) {
@@ -2592,8 +2586,17 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               timestamp: Date.now()
             });
             
-            console.log(`[${callId}] 🤖 Ada: "${data.transcript.substring(0, 80)}..."`);
+            console.log(`[${callId}] 🤖 Ada: "${data.transcript.substring(0, 100)}${data.transcript.length > 100 ? '...' : ''}"`);
             
+            // Forward complete transcript to bridge for logging (cleaner than word-by-word)
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({
+                type: "transcript",
+                text: data.transcript,
+                role: "assistant"
+              }));
+            }
+
             // SILENCE MODE CHECK: If Ada just said "one moment", block any further responses
             const transcriptLower = data.transcript.toLowerCase();
             if (sessionState.waitingForQuoteSilence && 
