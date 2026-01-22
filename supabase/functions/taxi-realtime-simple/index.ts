@@ -2420,6 +2420,42 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     if (sessionState.greetingDelivered) {
       console.log(`[${sessionState.callId}] 🔄 RESUME: Greeting already delivered, injecting continuation context`);
       
+      // === FARE ALREADY SPOKEN - WAIT SILENTLY FOR YES/NO ===
+      // If the fare was already read before the handoff, do NOT re-ask anything
+      // Just wait silently for the customer's yes/no response
+      if (sessionState.fareSpoken && sessionState.pendingQuote) {
+        const fare = sessionState.pendingQuote.fare || "";
+        const eta = sessionState.pendingQuote.eta || "";
+        const langCode = sessionState.language || "en";
+        const langName = LANGUAGE_NAMES[langCode] || "English";
+        
+        const fareResumePrompt = `[SYSTEM: Session resumed after handoff. You have ALREADY told the customer the fare (${fare}, ETA ${eta}). 
+DO NOT repeat the fare. DO NOT re-ask the price. DO NOT summarize the booking again.
+The customer may have said "yes" or "no" just before the handoff.
+
+WAIT SILENTLY for their response. If they seem confused after a few seconds, say only: "Would you like me to book that?"
+
+WHEN CUSTOMER RESPONDS:
+- If YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${sessionState.booking.pickup || ''}", destination: "${sessionState.booking.destination || ''}"
+- If NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask only: "Would you like me to book that?"
+
+IMPORTANT: Respond in ${langName.toUpperCase()}. DO NOT SPEAK unless the customer speaks first or 5 seconds pass.]`;
+        
+        console.log(`[${sessionState.callId}] 💰 FARE SPOKEN RESUME: Waiting silently for yes/no (no response.create)`);
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: fareResumePrompt }]
+          }
+        }));
+        // DO NOT trigger response.create - wait for customer's yes/no via VAD
+        console.log(`[${sessionState.callId}] 📝 Session resumed at step: summary (fareSpoken=true, awaiting confirmation)`);
+        return;
+      }
+      
       // Build continuation context based on current booking step
       let continuationPrompt = "";
       const step = sessionState.bookingStep;
@@ -8178,62 +8214,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           connectToOpenAI(state!);
         }
 
-        // For reconnects/resumes, skip greeting and inject a resume message instead
+        // For reconnects/resumes, skip greeting - let sendSessionUpdate handle continuation
+        // The fareSpoken check and proper continuation prompt are now in sendSessionUpdate
         if ((isReconnect || isResume) && state) {
           state.greetingDelivered = true;  // Don't play greeting again
           state.greetingProtectionUntil = 0;  // No greeting protection needed
-          
-          // === FARE ALREADY SPOKEN - WAIT FOR YES/NO ===
-          // If this is a resume after handoff and fare was already read, inject prompt to wait for confirmation
-          if (isResume && state.fareSpoken && state.pendingQuote && openaiWs && openaiConnected) {
-            const fare = state.pendingQuote.fare || "";
-            const eta = state.pendingQuote.eta || "";
-            const langCode = state.language || "en";
-            const langName = LANGUAGE_NAMES[langCode] || "English";
-            
-            const fareResumePrompt = `[SYSTEM: Session resumed after handoff. You have ALREADY told the customer the fare (${fare}, ETA ${eta}). 
-DO NOT repeat the fare. DO NOT re-ask the price.
-The customer may have said "yes" or "no" just before the handoff.
-
-WAIT SILENTLY for their response. If they seem confused, say: "Would you like me to book that?"
-
-WHEN CUSTOMER RESPONDS:
-- If YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state.booking.pickup || ''}", destination: "${state.booking.destination || ''}"
-- If NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
-- If unclear, ask: "Would you like me to book that?"
-
-IMPORTANT: Respond in ${langName.toUpperCase()}.]`;
-            
-            console.log(`[${callId}] 💰 RESUME with fareSpoken=true - injecting wait-for-confirmation prompt`);
-            openaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: fareResumePrompt }]
-              }
-            }));
-            // DON'T trigger response.create - wait for customer's yes/no
-            // The response will be triggered by VAD when customer speaks
-          }
-          // === REGULAR RECONNECT (no fare spoken yet) ===
-          else {
-            const hasBookingContext = state.booking.pickup || state.booking.destination;
-            if (hasBookingContext && openaiWs && openaiConnected) {
-              const resumePrompt = `[SYSTEM: The call was briefly interrupted. You are resuming the conversation. The customer was booking a taxi. Current state: pickup="${state.booking.pickup || 'not yet'}", destination="${state.booking.destination || 'not yet'}", passengers=${state.booking.passengers || 'unknown'}. Ask a brief follow-up question like "Sorry about that, where were we?" or continue asking for the next missing field. Do NOT repeat the greeting.]`;
-              
-              console.log(`[${callId}] 🔄 Injecting resume prompt for reconnected call`);
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: resumePrompt }]
-                }
-              }));
-              safeResponseCreate(state, "reconnect-resume");
-            }
-          }
+          console.log(`[${callId}] 🔄 Session resume/reconnect flagged - sendSessionUpdate will handle continuation (fareSpoken=${state.fareSpoken})`);
         }
 
         socket.send(JSON.stringify({ 
