@@ -1,0 +1,443 @@
+using System.Collections.Concurrent;
+using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge;
+using Timer = System.Threading.Timer;
+
+namespace TaxiSipBridge.Audio;
+
+/// <summary>
+/// Custom audio source that receives PCM audio from Ada (WebSocket) and provides
+/// encoded samples to SIPSorcery's RTP transport. Based on AudioExtrasSource pattern.
+/// </summary>
+public class AdaAudioSource : IAudioSource, IDisposable
+{
+    private const int AUDIO_SAMPLE_PERIOD_MS = 20;
+    private const int MAX_QUEUED_FRAMES = 500;
+    private const int FADE_IN_SAMPLES = 80;
+    private const int CROSSFADE_SAMPLES = 40;
+
+    private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
+    private readonly IAudioEncoder _audioEncoder;
+    private readonly ConcurrentQueue<short[]> _pcmQueue = new();
+
+    private Timer? _sendTimer;
+    private bool _isStarted;
+    private bool _isPaused;
+    private bool _isClosed;
+    private bool _needsFadeIn = true;
+    private volatile bool _disposed;
+
+    // Debug counters
+    private int _enqueuedFrames;
+    private int _sentFrames;
+    private int _silenceFrames;
+    private int _interpolatedFrames;
+    private DateTime _lastStatsLog = DateTime.MinValue;
+
+    // Boundary smoothing
+    private short _lastOutputSample;
+    private bool _lastFrameWasSilence = true;
+    private short[]? _lastAudioFrame;
+
+    // Audio mode configuration
+    private readonly AudioMode _audioMode;
+    private readonly int _jitterBufferMs;
+    private bool _jitterBufferFilled;
+    private int _consecutiveUnderruns;
+
+    // Test tone mode
+    private bool _testToneMode;
+    private int _testToneSampleIndex;
+    private const double TEST_TONE_FREQ = 440.0;
+
+    public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
+    public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
+    public event SourceErrorDelegate? OnAudioSourceError;
+
+    event Action<EncodedAudioFrame>? IAudioSource.OnAudioSourceEncodedFrameReady
+    {
+        add { }
+        remove { }
+    }
+
+    public event Action<string>? OnDebugLog;
+
+    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60)
+    {
+        _audioEncoder = new AudioEncoder();
+        _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
+        _audioMode = audioMode;
+        _jitterBufferMs = jitterBufferMs;
+
+        if (_audioMode == AudioMode.TestTone)
+        {
+            _testToneMode = true;
+        }
+    }
+
+    public List<AudioFormat> GetAudioSourceFormats() => _audioFormatManager.GetSourceFormats();
+
+    public void SetAudioSourceFormat(AudioFormat audioFormat)
+    {
+        _audioFormatManager.SetSelectedFormat(audioFormat);
+        OnDebugLog?.Invoke($"[AdaAudioSource] Format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz");
+    }
+
+    public void RestrictFormats(Func<AudioFormat, bool> filter)
+    {
+        _audioFormatManager.RestrictFormats(filter);
+    }
+
+    public bool HasEncodedAudioSubscribers() => OnAudioSourceEncodedSample != null;
+
+    public bool IsAudioSourcePaused() => _isPaused;
+
+    public void EnableTestTone(bool enable = true)
+    {
+        _testToneMode = enable;
+        _testToneSampleIndex = 0;
+        OnDebugLog?.Invoke($"[AdaAudioSource] Test tone: {(enable ? "ON" : "OFF")}");
+    }
+
+    public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample)
+    {
+        // Not used - we receive audio via EnqueuePcm24
+    }
+
+    /// <summary>
+    /// Queue PCM audio from Ada (24kHz, 16-bit signed, little-endian).
+    /// </summary>
+    public void EnqueuePcm24(byte[] pcmBytes)
+    {
+        if (_disposed || _isClosed || pcmBytes.Length == 0) return;
+        if (_testToneMode) return;
+
+        // Convert bytes to shorts (24kHz, 16-bit mono)
+        var pcm24All = new short[pcmBytes.Length / 2];
+        Buffer.BlockCopy(pcmBytes, 0, pcm24All, 0, pcmBytes.Length);
+
+        // Packetize into 20ms frames
+        const int PCM24_FRAME_SAMPLES = 24000 / 1000 * AUDIO_SAMPLE_PERIOD_MS; // 480
+
+        int frameCount = 0;
+        for (int offset = 0; offset < pcm24All.Length; offset += PCM24_FRAME_SAMPLES)
+        {
+            int len = Math.Min(PCM24_FRAME_SAMPLES, pcm24All.Length - offset);
+
+            var frame = new short[PCM24_FRAME_SAMPLES];
+            Array.Copy(pcm24All, offset, frame, 0, len);
+
+            // Apply fade-in on first frame after reset
+            if (_needsFadeIn && frame.Length > 0)
+            {
+                int fadeLen = Math.Min(FADE_IN_SAMPLES, frame.Length);
+                for (int i = 0; i < fadeLen; i++)
+                {
+                    float gain = (float)i / fadeLen;
+                    frame[i] = (short)(frame[i] * gain);
+                }
+                _needsFadeIn = false;
+            }
+
+            // Bound the queue
+            while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
+                _pcmQueue.TryDequeue(out _);
+
+            _pcmQueue.Enqueue(frame);
+            _enqueuedFrames++;
+            frameCount++;
+        }
+
+        // Log first enqueue
+        if (_enqueuedFrames > 0 && _enqueuedFrames == frameCount)
+            OnDebugLog?.Invoke($"[AdaAudioSource] First audio: {pcm24All.Length} samples -> {frameCount} frames");
+
+        // Log stats every 3 seconds
+        if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 3)
+        {
+            OnDebugLog?.Invoke($"[AdaAudioSource] enq={_enqueuedFrames}, sent={_sentFrames}, sil={_silenceFrames}, q={_pcmQueue.Count}");
+            _lastStatsLog = DateTime.Now;
+        }
+    }
+
+    public void ResetFadeIn()
+    {
+        _needsFadeIn = true;
+    }
+
+    public void ClearQueue()
+    {
+        while (_pcmQueue.TryDequeue(out _)) { }
+        _needsFadeIn = true;
+    }
+
+    public Task StartAudio()
+    {
+        if (_audioFormatManager.SelectedFormat.IsEmpty())
+            throw new ApplicationException("Audio format not set. Cannot start AdaAudioSource.");
+
+        if (!_isStarted)
+        {
+            _isStarted = true;
+            _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
+            OnDebugLog?.Invoke($"[AdaAudioSource] Started ({AUDIO_SAMPLE_PERIOD_MS}ms), format={_audioFormatManager.SelectedFormat.FormatName}");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task PauseAudio()
+    {
+        _isPaused = true;
+        return Task.CompletedTask;
+    }
+
+    public Task ResumeAudio()
+    {
+        _isPaused = false;
+        return Task.CompletedTask;
+    }
+
+    public Task CloseAudio()
+    {
+        if (!_isClosed)
+        {
+            _isClosed = true;
+            _sendTimer?.Dispose();
+            _sendTimer = null;
+            ClearQueue();
+            OnDebugLog?.Invoke($"[AdaAudioSource] Closed (enq={_enqueuedFrames}, sent={_sentFrames}, sil={_silenceFrames})");
+        }
+        return Task.CompletedTask;
+    }
+
+    private void SendSample(object? state)
+    {
+        if (_isClosed || _isPaused || _disposed) return;
+
+        try
+        {
+            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
+            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            short[] audioFrame;
+
+            if (_testToneMode)
+            {
+                audioFrame = GenerateTestTone(samplesNeeded, targetRate);
+            }
+            else
+            {
+                // Jitter buffer mode
+                if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
+                {
+                    int framesNeeded = _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS;
+                    if (_pcmQueue.Count < framesNeeded)
+                    {
+                        SendSilence();
+                        return;
+                    }
+                    _jitterBufferFilled = true;
+                    OnDebugLog?.Invoke($"[AdaAudioSource] Jitter buffer filled ({_pcmQueue.Count} frames)");
+                }
+
+                if (_pcmQueue.TryDequeue(out var pcm24))
+                {
+                    _consecutiveUnderruns = 0;
+
+                    // Resample 24kHz to target rate (usually 8kHz for PCMU)
+                    if (targetRate == 8000)
+                    {
+                        audioFrame = Downsample24kTo8k(pcm24);
+                    }
+                    else
+                    {
+                        audioFrame = ResampleSamples(pcm24, 24000, targetRate);
+                    }
+
+                    // Ensure exact 20ms frame size
+                    if (audioFrame.Length != samplesNeeded)
+                    {
+                        var fixedFrame = new short[samplesNeeded];
+                        Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
+                        audioFrame = fixedFrame;
+                    }
+
+                    // Crossfade from silence to audio
+                    if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
+                    {
+                        int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
+                        for (int i = 0; i < fadeLen; i++)
+                        {
+                            float t = (float)i / fadeLen;
+                            audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
+                        }
+                    }
+
+                    _lastAudioFrame = audioFrame;
+                }
+                else
+                {
+                    _consecutiveUnderruns++;
+
+                    if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled)
+                    {
+                        _jitterBufferFilled = false;
+                    }
+
+                    // Interpolate from last frame on brief gaps
+                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
+                    {
+                        audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
+                        _interpolatedFrames++;
+                    }
+                    else
+                    {
+                        SendSilence();
+                        return;
+                    }
+                }
+            }
+
+            if (audioFrame.Length > 0)
+            {
+                _lastOutputSample = audioFrame[^1];
+                _lastFrameWasSilence = false;
+            }
+
+            // Encode using negotiated codec
+            byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
+            uint durationRtpUnits = (uint)samplesNeeded;
+
+            _sentFrames++;
+            OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
+        }
+        catch (Exception ex)
+        {
+            OnDebugLog?.Invoke($"[AdaAudioSource] Error: {ex.Message}");
+            OnAudioSourceError?.Invoke($"AdaAudioSource error: {ex.Message}");
+        }
+    }
+
+    private short[] GenerateTestTone(int sampleCount, int sampleRate)
+    {
+        var samples = new short[sampleCount];
+        double angularFreq = 2.0 * Math.PI * TEST_TONE_FREQ / sampleRate;
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double sample = Math.Sin(angularFreq * _testToneSampleIndex);
+            samples[i] = (short)(sample * 16000);
+            _testToneSampleIndex++;
+        }
+
+        return samples;
+    }
+
+    private static short[] Downsample24kTo8k(short[] pcm24)
+    {
+        if (pcm24.Length < 3) return Array.Empty<short>();
+
+        int outLen = pcm24.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int idx = i * 3;
+            int s0 = pcm24[idx];
+            int s1 = pcm24[idx + 1];
+            int s2 = pcm24[idx + 2];
+
+            // 3-tap low-pass: (1,2,1)/4
+            output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
+        }
+
+        return output;
+    }
+
+    private static short[] ResampleSamples(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
+
+        double ratio = (double)fromRate / toRate;
+        int outputLength = (int)(input.Length / ratio);
+        var output = new short[outputLength];
+
+        for (int i = 0; i < output.Length; i++)
+        {
+            double srcPos = i * ratio;
+            int srcIndex = (int)srcPos;
+            double frac = srcPos - srcIndex;
+
+            if (srcIndex + 1 < input.Length)
+                output[i] = (short)(input[srcIndex] * (1 - frac) + input[srcIndex + 1] * frac);
+            else if (srcIndex < input.Length)
+                output[i] = input[srcIndex];
+        }
+
+        return output;
+    }
+
+    private static short[] GenerateInterpolatedFrame(short[] lastFrame, int samplesNeeded, int underrunCount)
+    {
+        var output = new short[samplesNeeded];
+
+        float fadeBase = 1.0f - (underrunCount * 0.3f);
+        if (fadeBase < 0) fadeBase = 0;
+
+        int copyLen = Math.Min(lastFrame.Length, samplesNeeded);
+        int startIdx = Math.Max(0, lastFrame.Length - copyLen);
+
+        for (int i = 0; i < copyLen; i++)
+        {
+            float frameFade = fadeBase * (1.0f - (float)i / copyLen * 0.5f);
+            output[i] = (short)(lastFrame[startIdx + i] * frameFade);
+        }
+
+        return output;
+    }
+
+    private void SendSilence()
+    {
+        try
+        {
+            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
+            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            var silence = new short[samplesNeeded];
+
+            // Ramp to zero to avoid click
+            if (!_lastFrameWasSilence && _lastOutputSample != 0 && samplesNeeded > 0)
+            {
+                int rampLen = Math.Min(samplesNeeded, Math.Max(1, targetRate / 200));
+                for (int i = 0; i < rampLen; i++)
+                {
+                    float g = 1f - ((float)i / rampLen);
+                    silence[i] = (short)(_lastOutputSample * g);
+                }
+                _needsFadeIn = true;
+            }
+
+            byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
+            uint durationRtpUnits = (uint)samplesNeeded;
+
+            _silenceFrames++;
+            _lastFrameWasSilence = true;
+            _lastOutputSample = 0;
+
+            OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
+        }
+        catch { }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        _sendTimer?.Dispose();
+        ClearQueue();
+
+        GC.SuppressFinalize(this);
+    }
+}
