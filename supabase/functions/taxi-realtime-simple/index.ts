@@ -1800,6 +1800,8 @@ serve(async (req) => {
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null; // Track for cleanup
   let isConnectionClosed = false; // Prevent operations after cleanup
   let keepAliveInterval: number | null = null; // Keep-alive ping interval to prevent timeout
+  let closingGracePeriodActive = false; // Prevent socket.onclose from interrupting goodbye speech
+  let closingGraceTimeoutId: number | null = null; // Track the closing grace timeout for cleanup
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   
   // --- Keep-alive ping to prevent WebSocket timeout during dispatch callback wait ---
@@ -3685,10 +3687,15 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
+            // === GRACEFUL CLOSURE: Set flag to prevent socket.onclose from interrupting ===
+            closingGracePeriodActive = true;
+            console.log(`[${sessionState.callId}] 🛡️ Closing grace period ACTIVE - socket.onclose will wait`);
+            
             // Close OpenAI connection after extended delay to let full goodbye audio finish,
             // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
-            setTimeout(() => {
+            closingGraceTimeoutId = setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing connections after explicit goodbye`);
+              closingGracePeriodActive = false;
               
               // Stop keep-alives immediately (we are ending the session)
               try {
@@ -3720,7 +3727,7 @@ Do NOT say 'booked' until the tool returns success.]`
               } catch {
                 // ignore
               }
-            }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
+            }, 10000) as unknown as number; // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
           }
@@ -3788,10 +3795,15 @@ Do NOT say 'booked' until the tool returns success.]`
 
             openaiWs.send(JSON.stringify({ type: "response.create" }));
             
+            // === GRACEFUL CLOSURE: Set flag to prevent socket.onclose from interrupting ===
+            closingGracePeriodActive = true;
+            console.log(`[${sessionState.callId}] 🛡️ Closing grace period ACTIVE - socket.onclose will wait`);
+            
             // Close OpenAI connection after extended delay to let full goodbye audio finish,
             // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
-            setTimeout(() => {
+            closingGraceTimeoutId = setTimeout(() => {
               console.log(`[${sessionState.callId}] 🔌 Closing connections after post-booking goodbye`);
+              closingGracePeriodActive = false;
               
               // Stop keep-alives immediately (we are ending the session)
               try {
@@ -3823,7 +3835,7 @@ Do NOT say 'booked' until the tool returns success.]`
               } catch {
                 // ignore
               }
-            }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
+            }, 10000) as unknown as number; // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
           }
@@ -6708,12 +6720,17 @@ Do NOT say 'booked' until the tool returns success.]`
           // Trigger Ada to speak the goodbye
           safeResponseCreate(sessionState, "end_call_goodbye");
           
+          // === GRACEFUL CLOSURE: Set flag to prevent socket.onclose from interrupting ===
+          closingGracePeriodActive = true;
+          console.log(`[${sessionState.callId}] 🛡️ Closing grace period ACTIVE - socket.onclose will wait`);
+          
           // Close OpenAI connection after extended delay to let full goodbye audio finish,
           // then tell the bridge to hang up AND close the bridge WebSocket with a proper close frame.
           // (If we only send a hangup message but leave the WS open, the function may be killed by
           // runtime limits and the bridge reports: "no close frame received or sent".)
-          setTimeout(() => {
+          closingGraceTimeoutId = setTimeout(() => {
             console.log(`[${sessionState.callId}] 🔌 Closing OpenAI WebSocket after end_call`);
+            closingGracePeriodActive = false;
 
             // Stop keep-alives immediately (we are ending the session)
             try {
@@ -6745,7 +6762,7 @@ Do NOT say 'booked' until the tool returns success.]`
             } catch {
               // ignore
             }
-          }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
+          }, 10000) as unknown as number; // 10 second delay for full goodbye audio with WhatsApp tip
           
           // Return early - don't trigger another response.create at the end
           return;
@@ -8443,8 +8460,24 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
   socket.onclose = async () => {
     console.log(`[${state?.callId || "unknown"}] Client disconnected`);
     
+    // === GRACEFUL CLOSURE GUARD ===
+    // If we're in a closing grace period (Ada speaking goodbye), do NOT cleanup yet.
+    // The graceful timeout will handle cleanup after the goodbye audio finishes.
+    if (closingGracePeriodActive) {
+      console.log(`[${state?.callId || "unknown"}] 🛡️ Closing grace period active - deferring cleanup to graceful timeout`);
+      // Keep the OpenAI connection alive so Ada can finish speaking
+      // The closingGraceTimeoutId will handle the full cleanup
+      return;
+    }
+    
     // Mark connection as closed to prevent further operations
     isConnectionClosed = true;
+    
+    // Clear any pending closing grace timeout
+    if (closingGraceTimeoutId) {
+      clearTimeout(closingGraceTimeoutId);
+      closingGraceTimeoutId = null;
+    }
     
     // Stop keep-alive pings
     stopKeepAlive();

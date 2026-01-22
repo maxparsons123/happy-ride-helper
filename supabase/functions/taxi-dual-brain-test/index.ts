@@ -280,7 +280,23 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
   if (adaResponse.shouldConfirm) {
     state.step = "confirmed";
     console.log(`[MAIN] Booking confirmed for ${callId}`);
+    
+    // Add a graceful closing message to Ada's response
+    const closingTips = [
+      "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+      "Next time, feel free to book your taxi using a WhatsApp voice message.",
+      "You can always book again by simply sending us a voice note on WhatsApp."
+    ];
+    const randomTip = closingTips[Math.floor(Math.random() * closingTips.length)];
+    const closingMessage = ` You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey.`;
+    
+    // Append closing to Ada's speech if not already there
+    if (!adaResponse.content.includes("safe journey")) {
+      adaResponse.content += closingMessage;
+    }
+    
     shouldEnd = true;
+    console.log(`[MAIN] 🛡️ Graceful close: end=true with full goodbye message`);
   }
 
   // Save question for next turn context
