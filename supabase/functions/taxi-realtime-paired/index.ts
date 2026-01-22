@@ -721,6 +721,8 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
+  // Track when user started speaking (for duration logging)
+  speechStartedAt: number;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -1641,7 +1643,8 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false
+    saidOneMoment: false,
+    speechStartedAt: 0
   };
 }
 
@@ -2541,6 +2544,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             sessionState.openAiResponseActive = true;
             
+            // Forward transcript to bridge for logging (like simple mode)
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({
+                type: "transcript",
+                text: data.delta,
+                role: "assistant"
+              }));
+            }
+            
             // PRICE/ETA HALLUCINATION GUARD: If Ada mentions a price/ETA but we haven't received one from dispatch, cancel!
             if (isPriceOrEtaHallucination(data.delta, !!sessionState.pendingFare)) {
               console.log(`[${callId}] 🚫 PRICE/ETA HALLUCINATION DETECTED: "${data.delta}" - cancelling response`);
@@ -2962,7 +2974,24 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
 
         case "input_audio_buffer.speech_started":
           console.log(`[${callId}] 🎤 User started speaking`);
+          sessionState.speechStartedAt = Date.now();
+          // Notify bridge of speech activity for logging
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "speech_started" }));
+          }
           break;
+          
+        case "input_audio_buffer.speech_stopped": {
+          const speechDuration = sessionState.speechStartedAt 
+            ? ((Date.now() - sessionState.speechStartedAt) / 1000).toFixed(1)
+            : "?";
+          console.log(`[${callId}] 🔇 User stopped speaking (${speechDuration}s)`);
+          // Notify bridge of speech end for logging
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "speech_stopped", duration: speechDuration }));
+          }
+          break;
+        }
 
         case "conversation.item.input_audio_transcription.completed":
           // User finished speaking - this is the KEY context pairing moment
@@ -2978,6 +3007,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (isPhantomHallucination(userText)) {
               console.log(`[${callId}] 👻 Filtered phantom hallucination: "${userText}"`);
               break;
+            }
+            
+            // Forward user transcript to bridge for logging (like simple mode)
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({
+                type: "transcript",
+                text: userText,
+                role: "user"
+              }));
             }
             
             // POST-CONFIRMATION GUARD: After booking is confirmed, enter open conversation mode
