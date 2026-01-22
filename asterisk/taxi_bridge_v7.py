@@ -940,11 +940,12 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.3 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.5 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
-        f"   Preferred codec: slin16 @ 16kHz (auto-detected from Asterisk)",
+        f"   Format lock (ulaw): {LOCK_FORMAT_ULAW} (False = auto-detect slin/slin16)",
+        f"   Prefer slin16: {PREFER_SLIN16}",
         f"   Resampling: resample_poly (preserves high-frequency transients)",
     ]
     for line in startup_lines:
