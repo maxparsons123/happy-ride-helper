@@ -13,6 +13,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 500;
+    // If the AI audio arrives faster than real-time (can happen with some backends),
+    // cap latency by dropping older frames once we exceed this soft limit.
+    private const int SOFT_MAX_QUEUED_FRAMES = 200;
     private const int FADE_IN_SAMPLES = 80;  // Increased for smoother fade
     private const int CROSSFADE_SAMPLES = 40; // For silence-to-audio transitions
 
@@ -175,6 +178,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
 
             // Bound the queue
+            // Soft cap: keep latency reasonable by dropping old audio if we're falling behind.
+            while (_pcmQueue.Count > SOFT_MAX_QUEUED_FRAMES)
+                _pcmQueue.TryDequeue(out _);
+
             while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
                 _pcmQueue.TryDequeue(out _);
 
