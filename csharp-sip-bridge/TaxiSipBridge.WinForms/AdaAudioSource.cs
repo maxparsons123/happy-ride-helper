@@ -412,58 +412,23 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
         // 24kHz → 8kHz is exactly 3:1
-        // Enhanced pipeline for clarity:
-        // 1. Apply pre-emphasis to boost high frequencies (counteracts telephony muffle)
-        // 2. Apply 5-tap low-pass FIR for proper anti-aliasing
-        // 3. Decimate by 3
-        // 4. Apply volume boost for G.711 headroom
+        // Use high-quality NAudio resampler instead of manual FIR
+        // This avoids crackling from aggressive filtering
         
-        if (pcm24.Length < 5) return new short[0];
+        if (pcm24.Length < 3) return new short[0];
 
-        // Step 1: Pre-emphasis filter (boost highs) - coefficient 0.95
-        // This makes speech clearer over telephone lines
-        var emphasized = new short[pcm24.Length];
-        emphasized[0] = pcm24[0];
-        for (int i = 1; i < pcm24.Length; i++)
-        {
-            int sample = pcm24[i] - (int)(pcm24[i - 1] * 0.95f);
-            emphasized[i] = (short)Math.Clamp(sample, -32768, 32767);
-        }
-
-        // Step 2: 5-tap low-pass FIR filter for anti-aliasing before decimation
-        // Coefficients: [1, 2, 3, 2, 1] / 9 (symmetric, smooth rolloff)
-        var filtered = new short[pcm24.Length];
-        for (int i = 2; i < pcm24.Length - 2; i++)
-        {
-            int sum = emphasized[i - 2] + 
-                      emphasized[i - 1] * 2 + 
-                      emphasized[i] * 3 + 
-                      emphasized[i + 1] * 2 + 
-                      emphasized[i + 2];
-            filtered[i] = (short)(sum / 9);
-        }
-        // Handle edges
-        filtered[0] = emphasized[0];
-        filtered[1] = (short)((emphasized[0] + emphasized[1] * 2 + emphasized[2]) / 4);
-        filtered[pcm24.Length - 2] = (short)((emphasized[^3] + emphasized[^2] * 2 + emphasized[^1]) / 4);
-        filtered[pcm24.Length - 1] = emphasized[^1];
-
-        // Step 3: Decimate by 3 (pick every 3rd sample from filtered signal)
-        int outLen = filtered.Length / 3;
-        var output = new short[outLen];
+        // Use AudioCodecs.Resample for high-quality downsampling
+        // It uses NAudio's WDL resampler which has proper anti-aliasing
+        var resampled = AudioCodecs.Resample(pcm24, 24000, 8000);
         
-        for (int i = 0; i < outLen; i++)
+        // Apply gentle volume boost (1.15x) without clipping
+        for (int i = 0; i < resampled.Length; i++)
         {
-            int idx = i * 3 + 1; // Pick center sample of each group
-            if (idx < filtered.Length)
-            {
-                // Step 4: Apply 1.3x volume boost for G.711 headroom
-                int boosted = (int)(filtered[idx] * 1.3f);
-                output[i] = (short)Math.Clamp(boosted, -32768, 32767);
-            }
+            int boosted = (int)(resampled[i] * 1.15f);
+            resampled[i] = (short)Math.Clamp(boosted, -30000, 30000); // Leave headroom
         }
 
-        return output;
+        return resampled;
     }
 
     /// <summary>
