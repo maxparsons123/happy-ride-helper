@@ -350,6 +350,7 @@ class TaxiBridgeV7:
         # Reconnection state
         self.reconnect_attempts = 0
         self.total_reconnects = 0  # Track total reconnects for this call
+        self.handoff_count = 0  # Track session handoffs for 90s limit bypass
         self.ws_connected = False
         self.last_ws_activity = time.time()
         self.call_formally_ended = False
@@ -575,6 +576,30 @@ class TaxiBridgeV7:
                         return_exceptions=False
                     )
                     break
+                except RedirectException as e:
+                    # Session handoff or redirect - reconnect with resume flag
+                    is_handoff = e.init_data.get("resume", False)
+                    if is_handoff:
+                        print(f"[{self.call_id}] 🔄 Session handoff, reconnecting...", flush=True)
+                    else:
+                        print(f"[{self.call_id}] 🔀 Redirect to {e.url}", flush=True)
+                    
+                    self.ws_connected = False
+                    try:
+                        if self.ws:
+                            await self.ws.close(code=1000, reason="Handoff" if is_handoff else "Redirect")
+                    except:
+                        pass
+                    
+                    self.reconnect_attempts = 0
+                    if not await self.connect_websocket(url=e.url, init_data=e.init_data, is_reconnect=True):
+                        print(f"[{self.call_id}] ❌ Handoff reconnect failed", flush=True)
+                        await self.stop_call("Handoff failed")
+                        break
+                    # Continue loop with new WS
+                    print(f"[{self.call_id}] ✅ Handoff reconnect succeeded, continuing", flush=True)
+                    continue
+                    
                 except (ConnectionClosed, WebSocketException) as e:
                     # WebSocket died - attempt mid-call reconnection
                     if self.call_formally_ended:
@@ -617,7 +642,7 @@ class TaxiBridgeV7:
             total_frames = self.frames_sent + self.frames_skipped
             skip_pct = (self.frames_skipped / total_frames * 100) if total_frames > 0 else 0
             print(f"[{self.call_id}] 📊 VAD Stats: {self.frames_sent} sent, {self.frames_skipped} skipped ({skip_pct:.1f}% filtered)", flush=True)
-            print(f"[{self.call_id}] 📊 Audio frames: {self.binary_audio_count}", flush=True)
+            print(f"[{self.call_id}] 📊 Audio frames: {self.binary_audio_count}, Handoffs: {self.handoff_count}", flush=True)
             print(f"[{self.call_id}] 📊 Total reconnects: {self.total_reconnects}", flush=True)
             await self.cleanup()
 
@@ -630,8 +655,9 @@ class TaxiBridgeV7:
                     ast_age = time.time() - self.last_asterisk_recv
                     ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
                     ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
+                    handoff_info = f" HO:{self.handoff_count}" if self.handoff_count > 0 else ""
                     reconnect_info = f" R:{self.total_reconnects}" if self.total_reconnects > 0 else ""
-                    print(f"[{self.call_id}] 💓 WS{ws_status}({ws_age:.1f}s) AST{ast_status}({ast_age:.1f}s) KA:{self.keepalive_count}{reconnect_info}", flush=True)
+                    print(f"[{self.call_id}] 💓 WS{ws_status}({ws_age:.1f}s) AST{ast_status}({ast_age:.1f}s) KA:{self.keepalive_count}{handoff_info}{reconnect_info}", flush=True)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -795,6 +821,21 @@ class TaxiBridgeV7:
                     print(f"[{self.call_id}] 🛑 Flushed {size} chunks", flush=True)
                 elif msg_type == "redirect":
                     raise RedirectException(data.get("url"), data.get("init_data", {}))
+                elif msg_type == "session.handoff":
+                    # Edge function hitting 90s limit - reconnect with resume flag
+                    resume_call_id = data.get("call_id", self.call_id)
+                    self.handoff_count += 1
+                    print(f"[{self.call_id}] 🔄 Session handoff #{self.handoff_count} received, reconnecting with resume", flush=True)
+                    raise RedirectException(
+                        url=self.current_ws_url,
+                        init_data={
+                            "resume": True,
+                            "resume_call_id": resume_call_id,
+                            "phone": self.phone,
+                            "inbound_format": self.ast_codec,
+                            "inbound_sample_rate": AST_RATE,
+                        }
+                    )
                 elif msg_type == "hangup":
                     # Server requested hangup
                     reason = data.get("reason", "server_hangup")
