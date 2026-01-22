@@ -9,6 +9,17 @@ import { Brain, MessageSquare, Send, RotateCcw, Zap, Clock, CheckCircle2, XCircl
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+// Server state interface (must match edge function)
+interface ServerState {
+  pickup: string | null;
+  destination: string | null;
+  passengers: number | null;
+  pickup_time: string | null;
+  lastQuestion: string;
+  step: "collecting" | "summary" | "confirmed";
+  conversationHistory: Array<{ role: string; content: string }>;
+}
+
 interface Turn {
   id: number;
   userInput: string;
@@ -33,11 +44,12 @@ interface Turn {
 }
 
 export default function DualBrainTest() {
-  const [callId] = useState(() => `test-${Date.now()}`);
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [currentState, setCurrentState] = useState<Turn["state"] | null>(null);
+  // Server state for stateless edge function (passed with each request)
+  const [serverState, setServerState] = useState<ServerState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const sendMessage = async () => {
@@ -50,7 +62,10 @@ export default function DualBrainTest() {
     try {
       const startTime = Date.now();
       const { data, error } = await supabase.functions.invoke("taxi-dual-brain-test", {
-        body: { callId, transcript: userInput },
+        body: { 
+          transcript: userInput,
+          state: serverState // Pass current state to edge function
+        },
       });
 
       if (error) throw error;
@@ -67,6 +82,8 @@ export default function DualBrainTest() {
 
       setTurns((prev) => [...prev, turn]);
       setCurrentState(data.state);
+      // Store updated state for next request
+      setServerState(data.state);
 
       if (data.end) {
         toast.success("Booking confirmed!");
@@ -80,18 +97,11 @@ export default function DualBrainTest() {
     }
   };
 
-  const resetSession = async () => {
-    try {
-      await supabase.functions.invoke("taxi-dual-brain-test", {
-        body: { callId },
-        method: "DELETE",
-      });
-      setTurns([]);
-      setCurrentState(null);
-      toast.success("Session reset");
-    } catch (err) {
-      console.error("Reset error:", err);
-    }
+  const resetSession = () => {
+    setTurns([]);
+    setCurrentState(null);
+    setServerState(null);
+    toast.success("Session reset");
   };
 
   const getStepBadge = (step: string) => {
@@ -136,7 +146,7 @@ export default function DualBrainTest() {
                 Conversation
               </CardTitle>
               <CardDescription>
-                Session: <code className="text-xs">{callId}</code>
+                Stateless dual-brain architecture test
               </CardDescription>
             </CardHeader>
             <CardContent>
