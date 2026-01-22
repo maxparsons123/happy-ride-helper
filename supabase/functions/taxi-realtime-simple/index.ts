@@ -4117,8 +4117,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // call taxi-extract-unified to properly decode what they want
           
           // Detect if this is a simple confirmation/rejection that should NOT trigger extraction
-          // Also includes time-related affirmatives like "straight away" when used as confirmation
-          const isSimpleResponse = /^(yes|no|yeah|yep|nope|nah|okay|ok|sure|correct|right|that's right|that's correct|fine|good|perfect|great|lovely|cheers|thanks|thank you|bye|goodbye|ta|straight ?away|right away|now|asap|immediately)\.?$/i.test(lowerUserText.trim());
+          // NOTE: Time phrases like "straight away" are NOT included here - they're valid time answers
+          const isSimpleResponse = /^(yes|no|yeah|yep|nope|nah|okay|ok|sure|correct|right|that's right|that's correct|fine|good|perfect|great|lovely|cheers|thanks|thank you|bye|goodbye|ta)\.?$/i.test(lowerUserText.trim());
           
           // Detect if user is providing address-like content (anything substantial, not just small talk)
           // Minimum 8 chars to filter out "hi", "hello", "yes", etc.
