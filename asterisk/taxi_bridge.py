@@ -571,14 +571,45 @@ class TaxiBridgeV7:
             print(f"[{self.call_id}] 🚀 Sent init with phone: {self.phone}", flush=True)
 
             # Main loop with reconnection support
+            # Track streaming tasks so we can cancel them on reconnection
+            ast_to_ai_task = None
+            ai_to_queue_task = None
+            
             while self.running:
                 try:
-                    await asyncio.gather(
-                        self.asterisk_to_ai(),
-                        self.ai_to_queue(),
-                        return_exceptions=False
+                    # Create fresh streaming tasks for each connection
+                    ast_to_ai_task = asyncio.create_task(self.asterisk_to_ai())
+                    ai_to_queue_task = asyncio.create_task(self.ai_to_queue())
+                    
+                    # Wait for either task to complete (or raise exception)
+                    done, pending = await asyncio.wait(
+                        [ast_to_ai_task, ai_to_queue_task],
+                        return_when=asyncio.FIRST_EXCEPTION
                     )
+                    
+                    # Check if any task raised an exception
+                    exception_raised = None
+                    for task in done:
+                        try:
+                            task.result()  # Will raise if task had exception
+                        except Exception as e:
+                            exception_raised = e
+                            break
+                    
+                    # Cancel remaining tasks
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    
+                    if exception_raised:
+                        raise exception_raised
+                    
+                    # Normal completion
                     break
+                    
                 except RedirectException as e:
                     # Session handoff or redirect - reconnect with resume flag
                     is_handoff = e.init_data.get("resume", False)
@@ -586,6 +617,15 @@ class TaxiBridgeV7:
                         print(f"[{self.call_id}] 🔄 Session handoff, reconnecting...", flush=True)
                     else:
                         print(f"[{self.call_id}] 🔀 Redirect to {e.url}", flush=True)
+                    
+                    # Cancel streaming tasks before reconnecting
+                    for task in [ast_to_ai_task, ai_to_queue_task]:
+                        if task and not task.done():
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
                     
                     self.ws_connected = False
                     try:
@@ -604,7 +644,15 @@ class TaxiBridgeV7:
                     continue
                     
                 except (ConnectionClosed, WebSocketException) as e:
-                    # WebSocket died - attempt mid-call reconnection
+                    # WebSocket died - cancel tasks and attempt mid-call reconnection
+                    for task in [ast_to_ai_task, ai_to_queue_task]:
+                        if task and not task.done():
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                    
                     if self.call_formally_ended:
                         print(f"[{self.call_id}] 📴 Call formally ended, not reconnecting", flush=True)
                         break
@@ -614,7 +662,7 @@ class TaxiBridgeV7:
                     
                     # Attempt reconnection
                     if await self.attempt_mid_call_reconnect():
-                        # Reconnected successfully - continue the main loop
+                        # Reconnected successfully - continue the main loop with fresh tasks
                         print(f"[{self.call_id}] 🔄 Resuming audio stream after reconnect", flush=True)
                         continue
                     else:
@@ -623,6 +671,15 @@ class TaxiBridgeV7:
                         break
                         
                 except Exception as e:
+                    # Cancel tasks on any error
+                    for task in [ast_to_ai_task, ai_to_queue_task]:
+                        if task and not task.done():
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                    
                     if not self.running:
                         break
                     print(f"[{self.call_id}] ❌ Main loop error: {e}", flush=True)
