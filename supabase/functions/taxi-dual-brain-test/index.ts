@@ -30,26 +30,61 @@ setInterval(() => {
   }
 }, 60000);
 
-// --- 2. BRAIN 1: THE INTENT EXTRACTOR (Fast Logic) ---
+// --- 2. BRAIN 1: THE INTENT EXTRACTOR (Context-Aware Routing) ---
 async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
-  const prompt = `
-Context: Ada asked "${state.lastQuestion}"
-User said: "${transcript}"
-Current Data: Pickup=${state.pickup || 'null'}, Destination=${state.destination || 'null'}, Passengers=${state.passengers || 'null'}
+  // Determine what field Ada was asking about
+  const lastQ = state.lastQuestion.toLowerCase();
+  let expectedField: "pickup" | "destination" | "passengers" | "confirmation" | "unknown" = "unknown";
+  
+  if (lastQ.includes("pick") && lastQ.includes("up") || lastQ.includes("from where") || lastQ.includes("where are you")) {
+    expectedField = "pickup";
+  } else if (lastQ.includes("destination") || lastQ.includes("going") || lastQ.includes("where to") || lastQ.includes("off to") || lastQ.includes("heading")) {
+    expectedField = "destination";
+  } else if (lastQ.includes("passenger") || lastQ.includes("people") || lastQ.includes("how many")) {
+    expectedField = "passengers";
+  } else if (lastQ.includes("correct") || lastQ.includes("confirm") || lastQ.includes("right")) {
+    expectedField = "confirmation";
+  }
 
-Task: Extract booking data from user speech. Return JSON only.
+  console.log(`[BRAIN1] Expected field based on last question: ${expectedField}`);
+  console.log(`[BRAIN1] Last question was: "${state.lastQuestion}"`);
+
+  const prompt = `
+You are extracting booking data from a taxi conversation.
+
+CRITICAL CONTEXT:
+- Ada just asked: "${state.lastQuestion}"
+- This means Ada was asking for: ${expectedField.toUpperCase()}
+- The user responded: "${transcript}"
+
+Current booking state:
+- Pickup: ${state.pickup || 'NOT SET'}
+- Destination: ${state.destination || 'NOT SET'}
+- Passengers: ${state.passengers || 'NOT SET'}
+
+YOUR TASK:
+Based on what Ada asked, extract the user's response into the CORRECT field.
+
+ROUTING RULES:
+1. If Ada asked about PICKUP, put any address/location in "pickup"
+2. If Ada asked about DESTINATION, put any address/location in "destination"  
+3. If Ada asked about PASSENGERS, put any number (spoken or digit) in "passengers"
+4. If Ada asked for CONFIRMATION, check if user said yes/correct/ok → set is_affirmative=true
+
+EXAMPLES:
+- Ada asked "Where to?" + User said "7 Russell Street" → destination: "7 Russell Street"
+- Ada asked "How many people?" + User said "3" → passengers: 3
+- Ada asked "Is that correct?" + User said "Yes" → is_affirmative: true
+
+Return JSON only:
 {
-  "pickup": "street address or null if not mentioned",
-  "destination": "street address or null if not mentioned", 
-  "passengers": number or null if not mentioned,
-  "is_affirmative": true if user says yes/correct/ok/that's right/yeah
+  "pickup": null,
+  "destination": null,
+  "passengers": null,
+  "is_affirmative": false
 }
 
-RULES:
-- Only extract what the user ACTUALLY said
-- If user provides a number when asked about passengers, that's the passenger count
-- If user provides an address when asked about destination, that's the destination
-- Do NOT hallucinate or guess values`;
+Fill in ONLY the field that matches what Ada was asking about.`;
 
   console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
   
