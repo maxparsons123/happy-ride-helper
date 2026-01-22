@@ -243,30 +243,30 @@ public class SipAutoAnswer : IDisposable
         mediaSession.AcceptRtpFromAny = true;
         Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
 
-        // Log available codecs and prefer G.722 (16kHz wideband) for better audio quality
+        // Log available codecs and prefer Opus 16kHz > G.722 > PCMU for best quality
         try
         {
             var audioFormats = _adaAudioSource.GetAudioSourceFormats();
             var formatNames = string.Join(", ", audioFormats.Select(f => $"{f.FormatName}@{f.ClockRate}"));
             Log($"🎵 [{callId}] Available codecs: {formatNames}");
             
+            // Check for wideband codecs in priority order
+            var opus16k = audioFormats.FirstOrDefault(f => f.Codec == AudioCodecsEnum.OPUS && f.ClockRate == 16000);
+            var opus48k = audioFormats.FirstOrDefault(f => f.Codec == AudioCodecsEnum.OPUS && f.ClockRate == 48000);
             var g722 = audioFormats.FirstOrDefault(f => f.FormatName?.ToUpper() == "G722" || f.FormatID == 9);
-            if (!g722.IsEmpty())
-            {
-                Log($"🎵 [{callId}] G.722 available - prioritizing 16kHz wideband");
-                _adaAudioSource.RestrictFormats(f => 
-                    f.FormatName?.ToUpper() == "G722" || f.FormatID == 9 ||
-                    f.FormatName?.ToUpper() == "PCMU" || f.FormatID == 0 ||
-                    f.FormatName?.ToUpper() == "PCMA" || f.FormatID == 8);
-            }
+            
+            if (!opus16k.IsEmpty())
+                Log($"🎵 [{callId}] Opus 16kHz available - prioritizing wideband");
+            else if (!opus48k.IsEmpty())
+                Log($"🎵 [{callId}] Opus 48kHz available - prioritizing fullband");
+            else if (!g722.IsEmpty())
+                Log($"🎵 [{callId}] G.722 available - prioritizing wideband");
             else
-            {
-                Log($"⚠️ [{callId}] G.722 not available in encoder - using narrowband codecs");
-            }
+                Log($"⚠️ [{callId}] No wideband codecs - will use narrowband PCMU/PCMA");
         }
         catch (Exception ex)
         {
-            Log($"⚠️ [{callId}] Could not set codec preference: {ex.Message}");
+            Log($"⚠️ [{callId}] Could not check codec availability: {ex.Message}");
         }
 
         mediaSession.OnAudioFormatsNegotiated += formats =>
@@ -274,13 +274,19 @@ public class SipAutoAnswer : IDisposable
             var formatList = string.Join(", ", formats.Select(f => $"{f.FormatName}@{f.ClockRate}"));
             Log($"🎵 [{callId}] Remote offered: {formatList}");
             
-            // Prefer G.722 if available in negotiated formats
-            var fmt = formats.FirstOrDefault(f => f.FormatName?.ToUpper() == "G722" || f.FormatID == 9);
+            // Prefer wideband codecs: Opus 16kHz > Opus 48kHz > G.722 > PCMU
+            var fmt = formats.FirstOrDefault(f => f.Codec == AudioCodecsEnum.OPUS && f.ClockRate == 16000);
+            if (fmt.IsEmpty())
+                fmt = formats.FirstOrDefault(f => f.Codec == AudioCodecsEnum.OPUS);
+            if (fmt.IsEmpty())
+                fmt = formats.FirstOrDefault(f => f.FormatName?.ToUpper() == "G722" || f.FormatID == 9);
             if (fmt.IsEmpty())
                 fmt = formats.FirstOrDefault();
             
             onFormatNegotiated(fmt);
-            string quality = fmt.ClockRate >= 16000 ? "WIDEBAND 🎶" : "narrowband";
+            string quality = fmt.Codec == AudioCodecsEnum.OPUS ? "OPUS 🎶" 
+                           : fmt.ClockRate >= 16000 ? "WIDEBAND 🎶" 
+                           : "narrowband";
             Log($"🎵 [{callId}] Selected codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID}) [{quality}]");
 
             // Set the format on our audio source so it knows how to encode
