@@ -286,10 +286,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Simple, clean resampling path - no extra processing
+                    // Clean resampling paths based on target rate
                     if (targetRate == 8000)
                     {
                         audioFrame = Downsample24kTo8k(pcm24);
+                    }
+                    else if (targetRate == 16000)
+                    {
+                        // G.722 or other 16kHz codec - much better quality!
+                        audioFrame = Downsample24kTo16k(pcm24);
                     }
                     else
                     {
@@ -441,6 +446,48 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
+    /// Downsample 24kHz to 16kHz (3:2 ratio) with anti-aliasing for G.722/wideband.
+    /// Much better quality than 8kHz!
+    /// </summary>
+    private static short[] Downsample24kTo16k(short[] pcm24)
+    {
+        // 24kHz → 16kHz is 3:2 ratio
+        if (pcm24.Length < 4) return new short[0];
+
+        // Apply 3-tap low-pass for anti-aliasing (cutoff ~8kHz at 24kHz)
+        var filtered = new float[pcm24.Length];
+        for (int i = 1; i < pcm24.Length - 1; i++)
+        {
+            filtered[i] = pcm24[i - 1] * 0.25f + pcm24[i] * 0.5f + pcm24[i + 1] * 0.25f;
+        }
+        filtered[0] = pcm24[0] * 0.6f + pcm24[1] * 0.4f;
+        filtered[pcm24.Length - 1] = pcm24[^2] * 0.4f + pcm24[^1] * 0.6f;
+
+        // Linear interpolation for 3:2 resampling
+        int outLen = (pcm24.Length * 2) / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            float srcPos = i * 1.5f; // 3:2 ratio
+            int srcIdx = (int)srcPos;
+            float frac = srcPos - srcIdx;
+
+            if (srcIdx + 1 < pcm24.Length)
+            {
+                float sample = filtered[srcIdx] * (1 - frac) + filtered[srcIdx + 1] * frac;
+                output[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+            }
+            else if (srcIdx < pcm24.Length)
+            {
+                output[i] = (short)Math.Clamp(filtered[srcIdx], short.MinValue, short.MaxValue);
+            }
+        }
+
+        return output;
+    }
+
+
     /// Generate an interpolated frame during underrun to prevent stuttering.
     /// Fades out the last frame's characteristics over consecutive underruns.
     /// </summary>
