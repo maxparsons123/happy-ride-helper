@@ -66,6 +66,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event Action? OnQueueEmpty;
     private bool _wasQueueEmpty = true;
 
+    /// <summary>
+    /// Exposes the encoder for use by SipToAdaDecoder (decode path).
+    /// </summary>
+    public IAudioEncoder Encoder => _audioEncoder;
+    
+    /// <summary>
+    /// Exposes the negotiated format for use by SipToAdaDecoder.
+    /// </summary>
+    public AudioFormat SelectedFormat => _audioFormatManager.SelectedFormat;
+
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60, bool preferOpus = true)
     {
         // Use OpusAudioEncoder for high-quality Opus support (48kHz), falls back to G.711

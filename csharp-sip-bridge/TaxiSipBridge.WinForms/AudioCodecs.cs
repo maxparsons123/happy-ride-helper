@@ -47,6 +47,33 @@ public static class AudioCodecs
     }
 
     /// <summary>
+    /// Decode A-law (G.711) to PCM16 samples.
+    /// </summary>
+    public static short[] ALawDecode(byte[] data)
+    {
+        var pcm = new short[data.Length];
+        for (int i = 0; i < data.Length; i++)
+        {
+            byte alaw = (byte)(data[i] ^ 0x55);
+            int sign = (alaw & 0x80) != 0 ? -1 : 1;
+            int exponent = (alaw >> 4) & 0x07;
+            int mantissa = alaw & 0x0F;
+            
+            int sample;
+            if (exponent == 0)
+            {
+                sample = (mantissa << 4) + 8;
+            }
+            else
+            {
+                sample = ((mantissa << 4) + 0x108) << (exponent - 1);
+            }
+            
+            pcm[i] = (short)(sign * sample);
+        }
+        return pcm;
+
+    /// <summary>
     /// Encode PCM16 samples to µ-law (G.711) using lookup table for consistent encoding.
     /// </summary>
     public static byte[] MuLawEncode(short[] pcm)

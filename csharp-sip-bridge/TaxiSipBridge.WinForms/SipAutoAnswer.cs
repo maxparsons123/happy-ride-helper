@@ -450,12 +450,26 @@ public class SipAutoAnswer : IDisposable
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
     {
-        Log($"🔧 [{callId}] Wiring RTP input handler with RMS gating...");
+        if (_adaClient == null)
+        {
+            Log($"⚠️ [{callId}] Cannot wire RTP input; Ada client is null.");
+            return;
+        }
+
+        if (_adaAudioSource == null)
+        {
+            Log($"⚠️ [{callId}] Cannot wire RTP input; AdaAudioSource is null.");
+            return;
+        }
+
+        // Create the unified decoder using the same encoder + format as AdaAudioSource
+        var decoder = new SipToAdaDecoder(_adaClient, _adaAudioSource.Encoder, _adaAudioSource.SelectedFormat);
+        decoder.OnDebugLog += msg => Log(msg);
+
+        Log($"🔧 [{callId}] Wiring RTP input via SipToAdaDecoder (codec={_adaAudioSource.SelectedFormat.FormatName})...");
 
         int rtpPackets = 0;
         int sentToAda = 0;
-        int skippedNoClient = 0;
-        int skippedNotConnected = 0;
         int skippedBotSpeaking = 0;
         int skippedLowRms = 0;
         int skippedHighRms = 0;
@@ -469,7 +483,7 @@ public class SipAutoAnswer : IDisposable
             rtpPackets++;
 
             if (rtpPackets <= 3)
-                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b");
+                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b (PT={rtp.Header.PayloadType})");
 
             if (rtpPackets % 100 == 0)
                 Log($"📥 [{callId}] RTP total: {rtpPackets}");
@@ -489,63 +503,45 @@ public class SipAutoAnswer : IDisposable
 
             try
             {
-                var client = _adaClient;
-                if (client == null)
+                // For G.711 codecs, apply RMS gating (Opus payloads are encoded, can't easily calculate RMS)
+                if (_adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMU ||
+                    _adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMA)
                 {
-                    skippedNoClient++;
-                    if (skippedNoClient <= 3)
-                        Log($"⚠️ [{callId}] RTP→Ada skip: _adaClient is null");
-                    return;
-                }
-
-                if (!client.IsConnected)
-                {
-                    skippedNotConnected++;
-                    if (skippedNotConnected <= 3)
-                        Log($"⚠️ [{callId}] RTP→Ada skip: WS not connected yet");
-                    return;
-                }
-
-                // RMS-based noise gate: only forward if audio is meaningful speech
-                // Decode mu-law/A-law and calculate RMS
-                bool isMuLaw = rtp.Header.PayloadType == 0;
-                long sumOfSquares = 0;
-                
-                for (int i = 0; i < payload.Length; i++)
-                {
-                    short sample = isMuLaw
-                        ? MuLawDecode(payload[i])
-                        : ALawDecode(payload[i]);
-                    sumOfSquares += (long)sample * sample;
-                }
-                
-                double rms = Math.Sqrt(sumOfSquares / (double)payload.Length);
-
-                // Filter: too quiet = noise, too loud = echo/clipping
-                if (rms < RMS_NOISE_FLOOR)
-                {
-                    skippedLowRms++;
-                    return;
-                }
-                
-                if (rms > RMS_ECHO_CEILING)
-                {
-                    skippedHighRms++;
-                    return;
-                }
-
-                if (!cts.Token.IsCancellationRequested)
-                {
-                    await client.SendMuLawAsync(payload);
-                    sentToAda++;
+                    bool isMuLaw = rtp.Header.PayloadType == 0;
+                    long sumOfSquares = 0;
                     
-                    if (sentToAda <= 5)
-                        Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b, RMS={rms:F0}");
-                    else if ((DateTime.Now - lastStats).TotalSeconds >= 5)
+                    for (int i = 0; i < payload.Length; i++)
                     {
-                        Log($"📤 [{callId}] RTP→Ada: sent={sentToAda}, botSpeak={skippedBotSpeaking}, lowRms={skippedLowRms}, highRms={skippedHighRms}");
-                        lastStats = DateTime.Now;
+                        short sample = isMuLaw ? MuLawDecode(payload[i]) : ALawDecode(payload[i]);
+                        sumOfSquares += (long)sample * sample;
                     }
+                    
+                    double rms = Math.Sqrt(sumOfSquares / (double)payload.Length);
+
+                    // Filter: too quiet = noise, too loud = echo/clipping
+                    if (rms < RMS_NOISE_FLOOR)
+                    {
+                        skippedLowRms++;
+                        return;
+                    }
+                    
+                    if (rms > RMS_ECHO_CEILING)
+                    {
+                        skippedHighRms++;
+                        return;
+                    }
+                }
+
+                // Use the unified decoder (handles Opus, PCMU, PCMA → 24kHz PCM → Ada)
+                await decoder.HandleRtpPayloadAsync(payload, cts.Token);
+                sentToAda++;
+                
+                if (sentToAda <= 5)
+                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b via decoder");
+                else if ((DateTime.Now - lastStats).TotalSeconds >= 5)
+                {
+                    Log($"📤 [{callId}] RTP→Ada: sent={sentToAda}, botSpeak={skippedBotSpeaking}, lowRms={skippedLowRms}, highRms={skippedHighRms}");
+                    lastStats = DateTime.Now;
                 }
             }
             catch (OperationCanceledException) { }
