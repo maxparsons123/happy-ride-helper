@@ -26,14 +26,6 @@ public class SipAutoAnswer : IDisposable
     private volatile bool _disposed;
     private IPAddress? _localIp;
 
-    // 2-way audio safety: prevent echo by muting SIP→Ada while Ada is speaking
-    private volatile bool _isBotSpeaking = false;
-    private DateTime _lastBotAudioTime = DateTime.MinValue;
-    private const int BOT_SPEAKING_TIMEOUT_MS = 1500; // Auto-clear bot-speaking after 1.5s of no audio
-    private const int RMS_NOISE_FLOOR = 650;  // Below this = background noise, skip
-    private const int RMS_ECHO_CEILING = 20000; // Above this = likely echo/clipping
-    private const int GREETING_PROTECTION_PACKETS = 150; // ~3 seconds @ 20ms packets
-
     public event Action? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
     public event Action<string, string>? OnCallStarted;
@@ -217,7 +209,6 @@ public class SipAutoAnswer : IDisposable
             await SetupAdaConnection(callId, caller, mediaSession, negotiatedFormat, cts);
 
             Log($"✅ [{callId}] Call fully established");
-
             await WaitForCallEnd(cts.Token);
         }
         catch (OperationCanceledException) { }
@@ -236,11 +227,10 @@ public class SipAutoAnswer : IDisposable
         Action<AudioFormat> onFormatNegotiated)
     {
         Log($"🔧 [{callId}] Creating AdaAudioSource + VoIPMediaSession...");
-        Log($"🔧 [{callId}] Audio mode: {_config.AudioMode}");
 
         // Create AdaAudioSource - this implements IAudioSource and will handle
         // encoding + RTP pacing via its internal timer
-        _adaAudioSource = new AdaAudioSource(_config.AudioMode, _config.JitterBufferMs);
+        _adaAudioSource = new AdaAudioSource();
         _adaAudioSource.OnDebugLog += msg => Log(msg);
 
         // Create media endpoints with our custom audio source
@@ -251,34 +241,14 @@ public class SipAutoAnswer : IDisposable
 
         var mediaSession = new VoIPMediaSession(mediaEndPoints);
         mediaSession.AcceptRtpFromAny = true;
-
         Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
 
         mediaSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
             onFormatNegotiated(fmt);
-            
-            // Detailed codec info
-            var codecName = fmt.Codec.ToString();
-            var codecType = fmt.Codec switch
-            {
-                AudioCodecsEnum.PCMU => "G.711 μ-law (PCMU)",
-                AudioCodecsEnum.PCMA => "G.711 A-law (PCMA)",
-                AudioCodecsEnum.OPUS => "Opus",
-                AudioCodecsEnum.G722 => "G.722",
-                AudioCodecsEnum.G729 => "G.729",
-                _ => codecName
-            };
-            
-            Log($"═══════════════════════════════════════════════════════");
-            Log($"🎵 [{callId}] NEGOTIATED CODEC: {codecType}");
-            Log($"   ├─ Format Name: {codecName}");
-            Log($"   ├─ Clock Rate: {fmt.ClockRate}Hz");
-            Log($"   ├─ Payload Type: {fmt.FormatID}");
-            Log($"   └─ Channels: {fmt.ChannelCount}");
-            Log($"═══════════════════════════════════════════════════════");
-            
+            Log($"🎵 [{callId}] Negotiated codec: {fmt.FormatName} @ {fmt.ClockRate}Hz (PT={fmt.FormatID})");
+
             // Set the format on our audio source so it knows how to encode
             _adaAudioSource?.SetAudioSourceFormat(fmt);
         };
@@ -298,8 +268,8 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Accepting call...");
         var uas = ua.AcceptCall(req);
-
         await SendRingingResponse(callId, req);
+
         await Task.Delay(300, ct);
 
         Log($"🔧 [{callId}] Answering call...");
@@ -335,7 +305,6 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Connecting to Ada...");
         await _adaClient.ConnectAsync(caller, cts.Token);
-
         Log($"✅ [{callId}] Ada audio wired");
     }
 
@@ -349,57 +318,36 @@ public class SipAutoAnswer : IDisposable
 
         Log($"🔧 [{callId}] Wiring Ada audio → AdaAudioSource.EnqueuePcm24");
 
-        // Debug: log what type we have and what events are available
-        var clientType = _adaClient.GetType();
-        Log($"🔍 [{callId}] AdaAudioClient type: {clientType.FullName}");
-        var allEvents = clientType.GetEvents();
-        Log($"🔍 [{callId}] Available events: {string.Join(", ", allEvents.Select(e => e.Name))}");
-
         // IMPORTANT: to stay compatible with older AdaAudioClient builds (where these events may not exist),
         // we wire via reflection and fall back to mu-law polling.
         try
         {
-            var pcmEvt = clientType.GetEvent("OnPcm24Audio");
+            var pcmEvt = _adaClient.GetType().GetEvent("OnPcm24Audio");
             if (pcmEvt != null)
             {
                 Action<byte[]> pcmHandler = (pcmBytes) =>
                 {
                     if (cts.Token.IsCancellationRequested) return;
-
-                    // Set bot-speaking flag and timestamp when Ada sends audio
-                    _isBotSpeaking = true;
-                    _lastBotAudioTime = DateTime.Now;
-
                     chunkCount++;
                     if (chunkCount <= 5)
                         Log($"🔊 [{callId}] Ada audio #{chunkCount}: {pcmBytes.Length}b → AdaAudioSource");
 
                     _adaAudioSource?.EnqueuePcm24(pcmBytes);
                 };
-
                 pcmEvt.AddEventHandler(_adaClient, pcmHandler);
 
-                var responseEvt = clientType.GetEvent("OnResponseStarted");
+                var responseEvt = _adaClient.GetType().GetEvent("OnResponseStarted");
                 if (responseEvt != null)
                 {
                     Action responseHandler = () => _adaAudioSource?.ResetFadeIn();
                     responseEvt.AddEventHandler(_adaClient, responseHandler);
                 }
 
-                // Wire up queue empty detection to clear bot-speaking flag
-                if (_adaAudioSource != null)
-                {
-                    _adaAudioSource.OnQueueEmpty += () =>
-                    {
-                        _isBotSpeaking = false;
-                    };
-                }
-
-                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio (reflection) + bot-speaking protection");
+                Log($"✅ [{callId}] Ada audio wired via OnPcm24Audio (reflection)");
                 return;
             }
 
-            Log($"⚠️ [{callId}] OnPcm24Audio not found in {allEvents.Length} events; using mu-law polling fallback");
+            Log($"⚠️ [{callId}] OnPcm24Audio not available; using mu-law polling fallback → SendAudio");
         }
         catch (Exception ex)
         {
@@ -453,20 +401,10 @@ public class SipAutoAnswer : IDisposable
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
     {
-        Log($"🔧 [{callId}] Wiring RTP input via SipToAdaDecoder...");
+        Log($"🔧 [{callId}] Wiring RTP input handler...");
 
         int rtpPackets = 0;
-        int sentToAda = 0;
-        int skippedNoClient = 0;
-        int skippedBotSpeaking = 0;
-        int skippedLowRms = 0;
-        int skippedHighRms = 0;
-        int skippedNotConnected = 0;
-        int skippedNoDecoder = 0;
-        DateTime lastStats = DateTime.Now;
-        
-        // Decoder will be created lazily once format is negotiated
-        SipToAdaDecoder? decoder = null;
+        const int FLUSH_PACKETS = 25;
 
         mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
         {
@@ -474,161 +412,26 @@ public class SipAutoAnswer : IDisposable
             if (cts.Token.IsCancellationRequested) return;
 
             rtpPackets++;
-
             if (rtpPackets <= 3)
-                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b (PT={rtp.Header.PayloadType})");
-
+                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b");
             if (rtpPackets % 100 == 0)
                 Log($"📥 [{callId}] RTP total: {rtpPackets}");
 
-            // Greeting protection: skip first ~3 seconds to let Ada's greeting play
-            if (rtpPackets <= GREETING_PROTECTION_PACKETS) return;
+            // Give the UAS a moment to settle before forwarding to Ada.
+            if (rtpPackets <= FLUSH_PACKETS) return;
 
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
 
-            // Check Ada client is available and connected
-            if (_adaClient == null)
-            {
-                skippedNoClient++;
-                return;
-            }
-            
-            if (!_adaClient.IsConnected)
-            {
-                skippedNotConnected++;
-                if (skippedNotConnected <= 5)
-                    Log($"⚠️ [{callId}] RTP→Ada skip: WS not connected yet");
-                return;
-            }
-            
-            // Lazy-create decoder once format is negotiated and Ada is connected
-            if (decoder == null)
-            {
-                if (_adaAudioSource == null)
-                {
-                    skippedNoDecoder++;
-                    if (skippedNoDecoder <= 3)
-                        Log($"⚠️ [{callId}] RTP→Ada skip: AdaAudioSource is null");
-                    return;
-                }
-                
-                var fmt = _adaAudioSource.SelectedFormat;
-                if (fmt.IsEmpty())
-                {
-                    skippedNoDecoder++;
-                    if (skippedNoDecoder <= 3)
-                        Log($"⚠️ [{callId}] RTP→Ada skip: Format not yet negotiated");
-                    return;
-                }
-                
-                decoder = new SipToAdaDecoder(_adaClient, _adaAudioSource.Encoder, fmt);
-                decoder.OnDebugLog += msg => Log(msg);
-                Log($"✅ [{callId}] Created SipToAdaDecoder (codec={fmt.FormatName}, rate={fmt.ClockRate}Hz)");
-            }
-
             try
             {
-                // For G.711 codecs, apply RMS gating to filter noise/echo
-                double rms = 0;
-                bool isG711 = _adaAudioSource != null &&
-                              (_adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMU ||
-                               _adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMA);
-
-                if (isG711)
-                {
-                    bool isMuLaw = rtp.Header.PayloadType == 0;
-                    long sumOfSquares = 0;
-                    
-                    for (int i = 0; i < payload.Length; i++)
-                    {
-                        short sample = isMuLaw ? MuLawDecode(payload[i]) : ALawDecode(payload[i]);
-                        sumOfSquares += (long)sample * sample;
-                    }
-                    
-                    rms = Math.Sqrt(sumOfSquares / (double)payload.Length);
-
-                    // Relaxed thresholds: 300 floor (very quiet), 25000 ceiling (loud but not clipped)
-                    if (rms < 300)
-                    {
-                        skippedLowRms++;
-                        return;
-                    }
-                    
-                    if (rms > 25000)
-                    {
-                        skippedHighRms++;
-                        return;
-                    }
-                }
-
-                // Bot-speaking protection w/ barge-in:
-                // - If Ada is speaking, ONLY forward if we detect real barge-in speech
-                //   (RMS within [RMS_NOISE_FLOOR, RMS_ECHO_CEILING]).
-                // - Also auto-expire stuck bot-speaking state after BOT_SPEAKING_TIMEOUT_MS.
-                if (_isBotSpeaking)
-                {
-                    // Auto-clear if Ada audio has stopped and we didn't get a queue-empty signal.
-                    if ((DateTime.Now - _lastBotAudioTime).TotalMilliseconds > BOT_SPEAKING_TIMEOUT_MS)
-                    {
-                        _isBotSpeaking = false;
-                        Log($"⏱️ [{callId}] Bot-speaking auto-cleared after {BOT_SPEAKING_TIMEOUT_MS}ms timeout");
-                    }
-                    else
-                    {
-                        // While bot is speaking: require barge-in detection.
-                        // For Opus we don't have a cheap RMS here, so we keep blocking.
-                        if (!isG711 || rms < RMS_NOISE_FLOOR || rms > RMS_ECHO_CEILING)
-                        {
-                            skippedBotSpeaking++;
-                            return;
-                        }
-                    }
-                }
-
-                // Use the unified decoder (handles Opus, PCMU, PCMA → 24kHz PCM → Ada)
-                await decoder.HandleRtpPayloadAsync(payload, cts.Token);
-                sentToAda++;
-                
-                if (sentToAda <= 5)
-                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b, RMS={(int)rms}");
-                
-                // Stats every 3 seconds
-                if ((DateTime.Now - lastStats).TotalSeconds >= 3)
-                {
-                    Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, botSpeak={skippedBotSpeaking}, lowRms={skippedLowRms}, highRms={skippedHighRms}");
-                    lastStats = DateTime.Now;
-                }
+                var client = _adaClient;
+                if (client != null && !cts.Token.IsCancellationRequested)
+                    await client.SendMuLawAsync(payload);
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) 
-            { 
-                Log($"⚠️ [{callId}] RTP→Ada error: {ex.Message}");
-            }
+            catch { }
         };
-    }
-
-    // Simple mu-law decode (inline for performance)
-    private static short MuLawDecode(byte mulaw)
-    {
-        mulaw = (byte)~mulaw;
-        int sign = (mulaw & 0x80) != 0 ? -1 : 1;
-        int exponent = (mulaw >> 4) & 0x07;
-        int mantissa = mulaw & 0x0F;
-        return (short)(sign * (((mantissa << 3) + 0x84) << exponent) - 0x84);
-    }
-
-    // Simple A-law decode (inline for performance)
-    private static short ALawDecode(byte alaw)
-    {
-        alaw ^= 0x55;
-        int sign = (alaw & 0x80) != 0 ? -1 : 1;
-        int exponent = (alaw >> 4) & 0x07;
-        int mantissa = alaw & 0x0F;
-        int magnitude = exponent == 0
-            ? (mantissa << 4) + 8
-            : ((mantissa << 4) + 0x108) << (exponent - 1);
-        return (short)(sign * magnitude);
     }
 
     private async Task WaitForCallEnd(CancellationToken ct)
@@ -732,30 +535,15 @@ public class SipAutoAnswer : IDisposable
     {
         try
         {
-            // Log local (what we send) and remote (what we receive) formats
-            var localFormat = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
-            var remoteFormat = mediaSession.AudioRemoteTrack?.Capabilities?.FirstOrDefault();
-            
-            Log($"🔊 [{callId}] Audio Track Summary:");
-            
-            if (localFormat.HasValue && !localFormat.Value.IsEmpty())
+            var format = mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+            if (format.HasValue && !format.Value.IsEmpty())
             {
-                var f = localFormat.Value;
-                Log($"   ├─ TX (to SIP): {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
+                var f = format.Value;
+                Log($"🎵 [{callId}] Codec: {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
             }
             else
             {
-                Log($"   ├─ TX: Not negotiated");
-            }
-            
-            if (remoteFormat.HasValue && !remoteFormat.Value.IsEmpty())
-            {
-                var f = remoteFormat.Value;
-                Log($"   └─ RX (from SIP): {f.Name()} @ {f.ClockRate()}Hz (PT={f.ID})");
-            }
-            else
-            {
-                Log($"   └─ RX: Not negotiated");
+                Log($"⚠️ [{callId}] No codec negotiated!");
             }
         }
         catch (Exception ex)
