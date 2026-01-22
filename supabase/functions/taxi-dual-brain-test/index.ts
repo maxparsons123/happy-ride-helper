@@ -5,7 +5,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// --- 1. STATE & MEMORY SETUP ---
+// --- 1. STATE INTERFACE (stateless - state passed from client) ---
 interface BookingState {
   pickup: string | null;
   destination: string | null;
@@ -13,23 +13,20 @@ interface BookingState {
   pickup_time: string | null;
   lastQuestion: string;
   step: "collecting" | "summary" | "confirmed";
-  lastActive: number;
   conversationHistory: Array<{ role: string; content: string }>;
 }
 
-const callMemory = new Map<string, BookingState>();
-const CALL_TIMEOUT_MS = 10 * 60 * 1000; // 10 mins
-
-// Cleanup reaper
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, s] of callMemory.entries()) {
-    if (now - s.lastActive > CALL_TIMEOUT_MS) {
-      console.log(`[CLEANUP] Removing stale session: ${id}`);
-      callMemory.delete(id);
-    }
-  }
-}, 60000);
+function createInitialState(): BookingState {
+  return {
+    pickup: null,
+    destination: null,
+    passengers: null,
+    pickup_time: null,
+    lastQuestion: "Where would you like to be picked up?",
+    step: "collecting",
+    conversationHistory: [],
+  };
+}
 
 // --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
 // Maps raw transcript to structured BookingState with correction detection
@@ -47,9 +44,9 @@ CONTEXT:
 TASK:
 1. Identify if the user is answering the specific question Ada asked.
 2. Extract the response into the CORRECT field based on what Ada asked:
-   - If Ada asked about pickup/collection → put address in "pickup"
-   - If Ada asked about destination/where going → put address in "destination"  
-   - If Ada asked about passengers/how many → put number in "passengers"
+   - If Ada asked about pickup/collection/picked up → put address in "pickup"
+   - If Ada asked about destination/where going/where to → put address in "destination"  
+   - If Ada asked about passengers/how many/people → put number in "passengers"
    - If Ada asked about time/when → put time in "pickup_time" (e.g., "now", "asap", "in 10 minutes", "3pm")
 3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
 4. **CORRECTION DETECTION**: Set 'is_correction: true' if:
@@ -74,7 +71,8 @@ CORRECTION EXAMPLES:
 CRITICAL RULES:
 - For NEW data (field is null), fill normally with is_correction: false
 - For UPDATES (field already has value), fill new value with is_correction: true
-- If Ada asked "Where to?" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
+- If Ada asked "Where to?" or "destination" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
+- If Ada asked "How many passengers?" and user says "two" → passengers: 2 (NOT an address!)
 
 Return valid JSON only:
 {
@@ -105,7 +103,7 @@ Return valid JSON only:
 
   if (!res.ok) {
     console.error(`[BRAIN1] API error: ${res.status}`);
-    return { pickup: null, destination: null, passengers: null, is_affirmative: false, is_correction: false };
+    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
   }
 
   const data = await res.json();
@@ -124,7 +122,7 @@ Return valid JSON only:
     return parsed;
   } catch (e) {
     console.error(`[BRAIN1] JSON parse error:`, e, content);
-    return { pickup: null, destination: null, passengers: null, is_affirmative: false, is_correction: false };
+    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
   }
 }
 
@@ -201,30 +199,14 @@ ${forceConfirm ? 'USER HAS CONFIRMED. Book the taxi now.' : ''}`;
   };
 }
 
-// --- 4. THE MAIN PROCESSOR ---
-async function processTurn(callId: string, transcript: string, apiKey: string): Promise<{
+// --- 4. THE MAIN PROCESSOR (Stateless - state passed in/out) ---
+async function processTurn(state: BookingState, transcript: string, apiKey: string): Promise<{
   speech: string;
   state: BookingState;
   extraction: any;
   end: boolean;
 }> {
-  // Get or Init State
-  if (!callMemory.has(callId)) {
-    console.log(`[MAIN] New session: ${callId}`);
-    callMemory.set(callId, {
-      pickup: null,
-      destination: null,
-      passengers: null,
-      pickup_time: null,
-      lastQuestion: "Where would you like to be picked up?",
-      step: "collecting",
-      lastActive: Date.now(),
-      conversationHistory: [],
-    });
-  }
-  
-  const state = callMemory.get(callId)!;
-  state.lastActive = Date.now();
+  // Add user message to conversation history
   state.conversationHistory.push({ role: "user", content: transcript });
 
   // Step A: Extract Data (Brain 1)
@@ -238,7 +220,7 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
     }
   }
   
-  // Update RAM State - corrections override existing values
+  // Update State - corrections override existing values
   if (extraction.pickup && extraction.pickup !== "null") {
     const wasUpdate = state.pickup !== null;
     state.pickup = extraction.pickup;
@@ -279,7 +261,7 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
   let shouldEnd = false;
   if (adaResponse.shouldConfirm) {
     state.step = "confirmed";
-    console.log(`[MAIN] Booking confirmed for ${callId}`);
+    console.log(`[MAIN] Booking confirmed`);
     
     // Add a graceful closing message to Ada's response
     const closingTips = [
@@ -302,11 +284,10 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
   // Save question for next turn context
   state.lastQuestion = adaResponse.content;
   state.conversationHistory.push({ role: "assistant", content: adaResponse.content });
-  callMemory.set(callId, state);
 
   return { 
     speech: adaResponse.content, 
-    state: { ...state }, // Clone to avoid mutation
+    state: { ...state }, // Clone to return
     extraction,
     end: shouldEnd 
   };
@@ -323,23 +304,9 @@ serve(async (req) => {
   // Health check
   if (url.pathname.endsWith("/health")) {
     return new Response(JSON.stringify({ 
-      status: "ok", 
-      activeSessions: callMemory.size 
+      status: "ok",
+      mode: "stateless" 
     }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-
-  // Reset session endpoint
-  if (req.method === "DELETE") {
-    const { callId } = await req.json();
-    if (callId && callMemory.has(callId)) {
-      callMemory.delete(callId);
-      return new Response(JSON.stringify({ success: true, message: "Session cleared" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-    return new Response(JSON.stringify({ success: false, message: "Session not found" }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
@@ -347,14 +314,27 @@ serve(async (req) => {
   // Main process endpoint
   if (req.method === "POST") {
     try {
-      const { callId, transcript } = await req.json();
+      const body = await req.json();
+      const { transcript, state: clientState } = body;
       
-      if (!callId || !transcript) {
-        return new Response(JSON.stringify({ error: "Missing callId or transcript" }), {
+      if (!transcript) {
+        return new Response(JSON.stringify({ error: "Missing transcript" }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+
+      // Use client state if provided, otherwise create fresh state
+      const state: BookingState = clientState || createInitialState();
+      
+      console.log(`[MAIN] Processing turn. Current state:`, {
+        pickup: state.pickup,
+        destination: state.destination,
+        passengers: state.passengers,
+        pickup_time: state.pickup_time,
+        step: state.step,
+        lastQuestion: state.lastQuestion
+      });
 
       const apiKey = Deno.env.get("LOVABLE_API_KEY");
       if (!apiKey) {
@@ -365,7 +345,7 @@ serve(async (req) => {
       }
 
       const startTime = Date.now();
-      const result = await processTurn(callId, transcript, apiKey);
+      const result = await processTurn(state, transcript, apiKey);
       const processingTime = Date.now() - startTime;
 
       return new Response(JSON.stringify({
@@ -378,6 +358,7 @@ serve(async (req) => {
             pickup: !!result.state.pickup,
             destination: !!result.state.destination,
             passengers: !!result.state.passengers,
+            pickup_time: !!result.state.pickup_time,
           }
         }
       }), {
