@@ -1625,6 +1625,15 @@ interface SessionState {
     lastRmsValues: number[];
     avgRms: number;
   };
+  
+  // === TTS (OUTBOUND) AUDIO DIAGNOSTICS ===
+  ttsDiagnostics: {
+    chunksSent: number;
+    chunksDiscarded: number;
+    lastRmsValues: number[];
+    avgRms: number;
+    peakRms: number;
+  };
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
@@ -2226,6 +2235,19 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     openaiWs.send(JSON.stringify({ type: "response.create" }));
   };
 
+  // Helper: safely cancel response only if one is active (prevents response_cancel_not_active errors)
+  const safeCancel = (sessionState: SessionState, reason?: string) => {
+    if (!openaiWs || !openaiConnected) return;
+    if (!sessionState.openAiResponseActive) {
+      console.log(`[${sessionState.callId}] ⏭️ Skipping cancel - no active response` + (reason ? ` (${reason})` : ""));
+      return;
+    }
+    console.log(`[${sessionState.callId}] 🛑 Cancelling response` + (reason ? ` (${reason})` : ""));
+    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+    sessionState.openAiResponseActive = false;
+    sessionState.discardCurrentResponseAudio = true;
+  };
+
   // --- Handle OpenAI Messages ---
   const handleOpenAIMessage = (message: any, sessionState: SessionState) => {
     // Log all message types for debugging
@@ -2247,9 +2269,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // We'll trigger the correct response once extraction completes
         // EXCEPTION: Allow final goodbye response through even if extraction is running
         if (sessionState.extractionInProgress && !sessionState.finalGoodbyePending) {
-          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - extraction in progress`);
-          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          sessionState.discardCurrentResponseAudio = true;
+          safeCancel(sessionState, "extraction in progress");
           break;
         }
 
@@ -2263,9 +2283,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           if (sessionState.modificationPromptPending) {
             sessionState.modificationPromptPending = false;
           } else {
-            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting modification confirmation`);
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            sessionState.discardCurrentResponseAudio = true;
+            safeCancel(sessionState, "awaiting modification confirmation");
             break;
           }
         }
@@ -2273,9 +2291,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // ✅ AWAITING DISPATCH GUARD: Block VAD responses while waiting for dispatch fare callback
         // This prevents Ada from hallucinating fare amounts before dispatch responds
         if (sessionState.awaitingDispatchCallback) {
-          console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - awaiting dispatch callback`);
-          openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          sessionState.discardCurrentResponseAudio = true;
+          safeCancel(sessionState, "awaiting dispatch callback");
           break;
         }
 
@@ -2289,9 +2305,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           
           // Only block during the grace period - after that, Ada can respond naturally
           if (msSinceAsked < waitPeriodMs) {
-            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user response to "anything else?" (${msSinceAsked}ms / ${waitPeriodMs}ms)`);
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-            sessionState.discardCurrentResponseAudio = true;
+            safeCancel(sessionState, `waiting for user response to "anything else?" (${msSinceAsked}ms / ${waitPeriodMs}ms)`);
             break;
           }
         }
@@ -2323,14 +2337,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
               speechAfterGreetingProtection;
             
             if (!userRespondedAfterQuestion) {
-              console.log(
-                `[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user answer (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms, greetProt=${isStillInGreetingProtection})`
-              );
-              // Only send cancel if response is active to avoid "cancel_not_active" errors
-              if (sessionState.openAiResponseActive) {
-                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-              }
-              sessionState.discardCurrentResponseAudio = true;
+              safeCancel(sessionState, `waiting for user answer (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms, greetProt=${isStillInGreetingProtection})`);
               break;
             }
           }
@@ -2349,8 +2356,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             // This is the goodbye we just initiated; allow it to play.
             sessionState.finalGoodbyePending = false;
           } else {
-            console.log(`[${sessionState.callId}] 🛑 Cancelling VAD-triggered response after callEnded`);
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+            safeCancel(sessionState, "callEnded - post-goodbye guard");
           }
         }
         break;
@@ -2383,7 +2389,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
          }
          break;
 
-      case "response.audio.delta":
+      case "response.audio.delta": {
         // Mark Ada as speaking (echo guard)
         if (!sessionState.isAdaSpeaking) {
           // First audio delta of this response
@@ -2398,7 +2404,46 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         
         // If we cancelled a response, drop any late audio deltas to avoid leaking partial phrases.
         if (sessionState.discardCurrentResponseAudio) {
+          sessionState.ttsDiagnostics.chunksDiscarded++;
           break;
+        }
+
+        // === TTS DIAGNOSTICS: Compute RMS for outbound audio ===
+        // Decode base64 to PCM16 for level measurement
+        try {
+          const binaryStr = atob(message.delta);
+          const audioBytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            audioBytes[i] = binaryStr.charCodeAt(i);
+          }
+          // PCM16 little-endian
+          const pcm16 = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, audioBytes.byteLength / 2);
+          
+          let sumSq = 0;
+          for (let i = 0; i < pcm16.length; i++) {
+            const s = pcm16[i];
+            sumSq += s * s;
+          }
+          const ttsRms = Math.sqrt(sumSq / Math.max(1, pcm16.length));
+          
+          // Track TTS RMS (rolling average of last 50 chunks)
+          sessionState.ttsDiagnostics.lastRmsValues.push(ttsRms);
+          if (sessionState.ttsDiagnostics.lastRmsValues.length > 50) {
+            sessionState.ttsDiagnostics.lastRmsValues.shift();
+          }
+          sessionState.ttsDiagnostics.avgRms = sessionState.ttsDiagnostics.lastRmsValues.reduce((a, b) => a + b, 0) / sessionState.ttsDiagnostics.lastRmsValues.length;
+          if (ttsRms > sessionState.ttsDiagnostics.peakRms) {
+            sessionState.ttsDiagnostics.peakRms = ttsRms;
+          }
+          sessionState.ttsDiagnostics.chunksSent++;
+          
+          // Log TTS diagnostics every 100 chunks
+          if (sessionState.ttsDiagnostics.chunksSent % 100 === 0) {
+            console.log(`[${sessionState.callId}] 🔊 TTS: chunks=${sessionState.ttsDiagnostics.chunksSent}, avgRMS=${sessionState.ttsDiagnostics.avgRms.toFixed(0)}, peakRMS=${sessionState.ttsDiagnostics.peakRms.toFixed(0)}`);
+          }
+        } catch (e) {
+          // Silently ignore decode errors - just track as sent
+          sessionState.ttsDiagnostics.chunksSent++;
         }
 
         // === BOOKING CONFIRMATION GUARD ===
@@ -2429,6 +2474,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           }));
         }
         break;
+      }
 
       case "response.audio.done": {
         // Ada finished speaking - set echo guard window
@@ -6796,7 +6842,7 @@ Do NOT say 'booked' until the tool returns success.]`
           
           // === AUDIO DIAGNOSTICS SUMMARY ===
           const ad = sessionState.audioDiagnostics;
-          console.log(`[${sessionState.callId}] 📊 AUDIO DIAGNOSTICS SUMMARY`);
+          console.log(`[${sessionState.callId}] 📊 AUDIO DIAGNOSTICS SUMMARY (INBOUND)`);
           console.log(`[${sessionState.callId}] ───────────────────────────────────────────────────────────`);
           console.log(`[${sessionState.callId}]   Packets received:       ${ad.packetsReceived}`);
           console.log(`[${sessionState.callId}]   Packets forwarded:      ${ad.packetsForwarded}`);
@@ -6806,6 +6852,16 @@ Do NOT say 'booked' until the tool returns success.]`
           console.log(`[${sessionState.callId}]   Skipped (greeting):     ${ad.packetsSkippedGreeting}`);
           console.log(`[${sessionState.callId}]   Skipped (summary):      ${ad.packetsSkippedSummary}`);
           console.log(`[${sessionState.callId}]   Avg RMS:                ${ad.avgRms.toFixed(0)}`);
+          console.log(`[${sessionState.callId}] ───────────────────────────────────────────────────────────`);
+          
+          // === TTS (OUTBOUND) DIAGNOSTICS SUMMARY ===
+          const td = sessionState.ttsDiagnostics;
+          console.log(`[${sessionState.callId}] 🔊 TTS DIAGNOSTICS SUMMARY (OUTBOUND)`);
+          console.log(`[${sessionState.callId}] ───────────────────────────────────────────────────────────`);
+          console.log(`[${sessionState.callId}]   Chunks sent:            ${td.chunksSent}`);
+          console.log(`[${sessionState.callId}]   Chunks discarded:       ${td.chunksDiscarded}`);
+          console.log(`[${sessionState.callId}]   Avg RMS:                ${td.avgRms.toFixed(0)}`);
+          console.log(`[${sessionState.callId}]   Peak RMS:               ${td.peakRms.toFixed(0)}`);
           console.log(`[${sessionState.callId}] ═══════════════════════════════════════════════════════════`);
           
           
@@ -6835,10 +6891,8 @@ Do NOT say 'booked' until the tool returns success.]`
           // Mark call as ending (but not ended yet - let goodbye play)
           sessionState.callEnded = true;
           
-          // Cancel any active response before injecting goodbye
-          if (sessionState.openAiResponseActive) {
-            openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-          }
+          // Cancel any active response before injecting goodbye using safeCancel
+          safeCancel(sessionState, "end_call - preparing goodbye");
           openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Allow final goodbye to play even though callEnded=true
@@ -7140,7 +7194,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
                 console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
                 try {
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                  // Use safeCancel to avoid response_cancel_not_active errors
+                  if (state.openAiResponseActive) {
+                    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                    state.openAiResponseActive = false;
+                    state.discardCurrentResponseAudio = true;
+                  }
                 } catch (e) {
                   console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
                 }
@@ -7288,6 +7347,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastRmsValues: [],
             avgRms: 0,
           },
+          ttsDiagnostics: {
+            chunksSent: 0,
+            chunksDiscarded: 0,
+            lastRmsValues: [],
+            avgRms: 0,
+            peakRms: 0,
+          },
           callEnded: false,
           callStartedAt: Date.now(),
           finalGoodbyePending: false,
@@ -7429,6 +7495,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
                packetsSkippedSummary: 0,
                lastRmsValues: [],
                avgRms: 0,
+             },
+             ttsDiagnostics: {
+               chunksSent: 0,
+               chunksDiscarded: 0,
+               lastRmsValues: [],
+               avgRms: 0,
+               peakRms: 0,
              },
              callEnded: false,
              callStartedAt: Date.now(),
@@ -8571,7 +8644,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
               try {
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                // Use safeCancel logic to avoid response_cancel_not_active errors
+                if (state.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                  state.openAiResponseActive = false;
+                  state.discardCurrentResponseAudio = true;
+                }
               } catch (e) {
                 console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
               }
