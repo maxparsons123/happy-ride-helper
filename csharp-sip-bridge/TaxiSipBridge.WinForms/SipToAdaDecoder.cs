@@ -4,9 +4,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Decodes RTP audio from SIP (Opus or G.711) and forwards it to Ada as 24kHz PCM16.
-/// Matches AdaAudioSource's encoder side:
-///   - Opus: 48kHz, ~40ms frames (~1920 samples)
-///   - G.711: 8kHz, 20ms frames (160 samples)
+/// Uses simple linear interpolation for upsampling to avoid NAudio overhead per-frame.
 /// </summary>
 public class SipToAdaDecoder
 {
@@ -53,18 +51,25 @@ public class SipToAdaDecoder
                     // Decode Opus → PCM at negotiated clock rate (typically 48000)
                     pcm = _audioEncoder.DecodeAudio(payload, _negotiatedFormat);
                     if (pcm.Length == 0) return;
+                    // Opus 48k → 24k: simple 2:1 decimation
+                    if (sourceRate == 48000)
+                    {
+                        pcm = Downsample48kTo24k(pcm);
+                    }
                     break;
 
                 case AudioCodecsEnum.PCMU:
                     // PCMU (G.711 µ-law) → PCM 8kHz
                     pcm = AudioCodecs.MuLawDecode(payload);
-                    sourceRate = 8000;  // G.711 is always 8kHz
+                    // 8kHz → 24kHz: 1:3 upsampling with linear interpolation
+                    pcm = Upsample8kTo24k(pcm);
                     break;
 
                 case AudioCodecsEnum.PCMA:
                     // A-law → PCM 8kHz
                     pcm = AudioCodecs.ALawDecode(payload);
-                    sourceRate = 8000;
+                    // 8kHz → 24kHz: 1:3 upsampling with linear interpolation
+                    pcm = Upsample8kTo24k(pcm);
                     break;
 
                 default:
@@ -72,12 +77,6 @@ public class SipToAdaDecoder
                     if (_framesDecoded == 0)
                         OnDebugLog?.Invoke($"[SipToAdaDecoder] ⚠️ Unsupported codec: {_negotiatedFormat.Codec}");
                     return;
-            }
-
-            // Resample to 24kHz for Ada
-            if (sourceRate != 24000)
-            {
-                pcm = AudioCodecs.Resample(pcm, sourceRate, 24000);
             }
 
             // Convert shorts → bytes and send to Ada as 24kHz PCM16
@@ -98,7 +97,7 @@ public class SipToAdaDecoder
                 _lastLog = DateTime.Now;
             }
 
-            // Send to Ada (already 24kHz, so pass 24000 as sample rate)
+            // Send to Ada
             if (_adaClient.IsConnected && !ct.IsCancellationRequested)
             {
                 await _adaClient.SendAudioAsync(pcmBytes, 24000);
@@ -112,5 +111,53 @@ public class SipToAdaDecoder
         {
             OnDebugLog?.Invoke($"[SipToAdaDecoder] ❌ Decode error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Upsample 8kHz to 24kHz (1:3 ratio) with linear interpolation.
+    /// 160 samples @ 8kHz → 480 samples @ 24kHz
+    /// </summary>
+    private static short[] Upsample8kTo24k(short[] pcm8k)
+    {
+        if (pcm8k.Length == 0) return pcm8k;
+        
+        int outLen = pcm8k.Length * 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            int outIdx = i * 3;
+            short current = pcm8k[i];
+            short next = (i < pcm8k.Length - 1) ? pcm8k[i + 1] : current;
+
+            // First sample is original
+            output[outIdx] = current;
+            
+            // Interpolate 2 samples between current and next
+            output[outIdx + 1] = (short)((current * 2 + next) / 3);
+            output[outIdx + 2] = (short)((current + next * 2) / 3);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Downsample 48kHz to 24kHz (2:1 ratio) with simple averaging.
+    /// </summary>
+    private static short[] Downsample48kTo24k(short[] pcm48k)
+    {
+        if (pcm48k.Length < 2) return pcm48k;
+        
+        int outLen = pcm48k.Length / 2;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int idx = i * 2;
+            // Average of two samples
+            output[i] = (short)((pcm48k[idx] + pcm48k[idx + 1]) / 2);
+        }
+
+        return output;
     }
 }
