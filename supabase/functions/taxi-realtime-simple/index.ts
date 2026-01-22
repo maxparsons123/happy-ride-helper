@@ -4030,9 +4030,33 @@ Do NOT say 'booked' until the tool returns success.]`
                 console.log(`[${sessionState.callId}] 🔧 Corrected extraction: pickup="${rawPickup}"→"${extractedPickup}", dest="${rawDestination}"→"${extractedDestination}"`);
               }
               
-              // Only proceed if we have BOTH pickup AND destination
-              if (!extractedPickup || !extractedDestination) {
-                console.log(`[${sessionState.callId}] AI extraction incomplete - pickup="${extractedPickup}", dest="${extractedDestination}". Letting Ada ask for missing info.`);
+              // Helper to detect placeholder values that should NOT be accepted
+              const isPlaceholderAddress = (addr: string | null | undefined): boolean => {
+                if (!addr) return true;
+                const lower = addr.toLowerCase().trim();
+                // Reject known placeholders
+                if (!lower || 
+                    lower === "as directed" ||
+                    lower === "not set" || 
+                    lower === "not specified" || 
+                    lower === "unknown" || 
+                    lower === "none" || 
+                    lower === "n/a" ||
+                    lower === "to be confirmed" ||
+                    lower === "tbc" ||
+                    lower === "your location" || 
+                    lower === "your destination") {
+                  return true;
+                }
+                return false;
+              };
+              
+              // Only proceed if we have BOTH pickup AND destination (real addresses, not placeholders)
+              const pickupIsPlaceholder = isPlaceholderAddress(extractedPickup);
+              const destIsPlaceholder = isPlaceholderAddress(extractedDestination);
+              
+              if (!extractedPickup || !extractedDestination || pickupIsPlaceholder || destIsPlaceholder) {
+                console.log(`[${sessionState.callId}] AI extraction incomplete - pickup="${extractedPickup}" (placeholder=${pickupIsPlaceholder}), dest="${extractedDestination}" (placeholder=${destIsPlaceholder}). Letting Ada ask for missing info.`);
                 sessionState.extractionInProgress = false;
                 openaiWs?.send(JSON.stringify({ type: "response.create" }));
                 return;
