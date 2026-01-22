@@ -802,6 +802,22 @@ class TaxiBridgeV7:
                 elif msg_type == "redirect":
                     raise RedirectException(data.get("url", WS_URL), data.get("init_data", {}))
 
+                elif msg_type == "session.handoff":
+                    # Edge function is about to hit 90s limit - reconnect with resume flag
+                    resume_call_id = data.get("call_id", self.state.call_id)
+                    logger.info("[%s] 🔄 Session handoff received, will reconnect with resume",
+                               self.state.call_id)
+                    raise RedirectException(
+                        url=self.state.current_ws_url,
+                        init_data={
+                            "resume": True,
+                            "resume_call_id": resume_call_id,
+                            "phone": self.state.phone,
+                            "inbound_format": "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec,
+                            "inbound_sample_rate": self.state.ast_rate,
+                        }
+                    )
+
                 elif msg_type == "call_ended":
                     logger.info("[%s] 📴 AI ended: %s", 
                                self.state.call_id, data.get("reason"))
