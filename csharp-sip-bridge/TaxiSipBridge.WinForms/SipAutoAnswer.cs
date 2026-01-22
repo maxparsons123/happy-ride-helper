@@ -258,7 +258,7 @@ public class SipAutoAnswer : IDisposable
             onFormatNegotiated(fmt);
             
             // Detailed codec info
-            var codecName = fmt.FormatName ?? "UNKNOWN";
+            var codecName = fmt.Codec.ToString();
             var codecType = fmt.Codec switch
             {
                 AudioCodecsEnum.PCMU => "G.711 μ-law (PCMU)",
