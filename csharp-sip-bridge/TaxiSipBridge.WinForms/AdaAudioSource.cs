@@ -20,6 +20,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int G711_FRAME_MS = 20;   // 160 samples @ 8kHz
     private const int OPUS_FRAME_MS = 40;   // 1920 samples @ 48kHz
     
+    // Jitter buffer settings
+    private const int JITTER_BUFFER_MS = 80;  // Pre-fill before starting playback
+    private const int MAX_CONSECUTIVE_SILENCE = 5;  // Max silence frames before interpolating
+    
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
     
@@ -36,12 +40,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _isPaused;
     private bool _isClosed;
     private volatile bool _disposed;
+    private bool _jitterBufferFilled;
+    private int _consecutiveSilence;
+    private short[]? _lastAudioFrame;
 
     // Debug counters
     private int _enqueuedBytes;
     private int _sentFrames;
     private int _silenceFrames;
     private int _underruns;
+    private int _interpolatedFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
     // Test tone mode
@@ -63,7 +71,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event Action? OnQueueEmpty;
     private bool _wasQueueEmpty = true;
 
-    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60, bool preferOpus = true)
+    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 80, bool preferOpus = true)
     {
         // Use OpusAudioEncoder for high-quality Opus support (48kHz), falls back to G.711
         _audioEncoder = preferOpus ? new OpusAudioEncoder() : new AudioEncoder();
@@ -131,7 +139,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // Log stats every 3 seconds
         if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 3)
         {
-            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enq={_enqueuedBytes / 1000}KB, sent={_sentFrames}, sil={_silenceFrames}, buf={_buffer.BufferedBytes}b");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enq={_enqueuedBytes / 1000}KB, sent={_sentFrames}, sil={_silenceFrames}, interp={_interpolatedFrames}, buf={_buffer.BufferedBytes}b");
             _lastStatsLog = DateTime.Now;
         }
     }
@@ -203,7 +211,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     /// <summary>
     /// Pull loop - reads from resampler when data is available.
-    /// Clock follows audio data, not a fixed timer.
+    /// Uses jitter buffer pre-fill and frame interpolation to prevent stuttering.
     /// </summary>
     private async Task PullLoopAsync(CancellationToken ct)
     {
@@ -215,10 +223,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
             int frameMs = isOpus ? OPUS_FRAME_MS : G711_FRAME_MS;
             int frameSamples = targetRate * frameMs / 1000;
             
+            // Calculate jitter buffer threshold in bytes (24kHz input)
+            int jitterBufferBytes = 24000 * 2 * JITTER_BUFFER_MS / 1000;  // 24kHz * 2 bytes * ms
+            
             var floatBuffer = new float[frameSamples];
             var frameStartTime = DateTime.UtcNow;
             
-            OnDebugLog?.Invoke($"[AdaAudioSource] 🔄 Pull loop: {frameSamples} samples ({frameMs}ms) @ {targetRate}Hz");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔄 Pull loop: {frameSamples} samples ({frameMs}ms) @ {targetRate}Hz, jitter={JITTER_BUFFER_MS}ms");
 
             while (!ct.IsCancellationRequested && !_isClosed)
             {
@@ -228,11 +239,25 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     continue;
                 }
 
+                // Jitter buffer pre-fill: wait until we have enough data before starting
+                if (!_jitterBufferFilled)
+                {
+                    if (_buffer.BufferedBytes < jitterBufferBytes)
+                    {
+                        // Not enough data yet - wait without sending anything
+                        await Task.Delay(5, ct);
+                        continue;
+                    }
+                    _jitterBufferFilled = true;
+                    OnDebugLog?.Invoke($"[AdaAudioSource] ✅ Jitter buffer filled: {_buffer.BufferedBytes}b >= {jitterBufferBytes}b");
+                }
+
                 short[] audioFrame;
 
                 if (_testToneMode)
                 {
                     audioFrame = GenerateTestTone(frameSamples, targetRate);
+                    _consecutiveSilence = 0;
                 }
                 else if (_resampler != null)
                 {
@@ -242,21 +267,49 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     {
                         // Full frame available - convert to shorts
                         audioFrame = FloatToShort(floatBuffer);
+                        _lastAudioFrame = audioFrame;
+                        _consecutiveSilence = 0;
                     }
                     else if (samplesRead > 0)
                     {
-                        // Partial frame - pad with silence
+                        // Partial frame - pad with zeros
                         audioFrame = new short[frameSamples];
                         var partial = FloatToShort(floatBuffer, samplesRead);
                         Array.Copy(partial, audioFrame, samplesRead);
+                        _lastAudioFrame = audioFrame;
                         _underruns++;
+                        _consecutiveSilence = 0;
                     }
                     else
                     {
-                        // No data - send silence and wait
-                        SendSilence(frameSamples, format);
-                        await Task.Delay(2, ct);
-                        continue;
+                        // No data available
+                        _consecutiveSilence++;
+                        
+                        if (_consecutiveSilence <= MAX_CONSECUTIVE_SILENCE && _lastAudioFrame != null)
+                        {
+                            // Interpolate: fade out last frame to prevent abrupt silence
+                            audioFrame = InterpolateFrame(_lastAudioFrame, frameSamples, _consecutiveSilence);
+                            _interpolatedFrames++;
+                        }
+                        else
+                        {
+                            // Too many underruns - reset jitter buffer and send silence
+                            if (_jitterBufferFilled && _consecutiveSilence > MAX_CONSECUTIVE_SILENCE)
+                            {
+                                _jitterBufferFilled = false;
+                                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Buffer underrun, refilling jitter buffer...");
+                            }
+                            
+                            // Send silence but maintain frame timing
+                            audioFrame = new short[frameSamples];
+                            _silenceFrames++;
+                            
+                            if (!_wasQueueEmpty)
+                            {
+                                _wasQueueEmpty = true;
+                                OnQueueEmpty?.Invoke();
+                            }
+                        }
                     }
                 }
                 else
@@ -286,9 +339,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
                 uint durationRtpUnits = (uint)frameSamples;
                 _sentFrames++;
+                _wasQueueEmpty = false;
                 OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
 
-                // Pace the loop - wait until next frame time
+                // Pace the loop - ALWAYS wait the full frame duration for consistent timing
                 var elapsed = DateTime.UtcNow - frameStartTime;
                 var targetDuration = TimeSpan.FromMilliseconds(frameMs);
                 if (elapsed < targetDuration)
@@ -307,6 +361,28 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] ❌ Pull loop error: {ex.Message}");
             OnAudioSourceError?.Invoke($"AdaAudioSource error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Generate interpolated frame by fading out the last audio frame.
+    /// Prevents abrupt silence during brief underruns.
+    /// </summary>
+    private static short[] InterpolateFrame(short[] lastFrame, int targetSamples, int underrunCount)
+    {
+        var output = new short[targetSamples];
+        
+        // Fade factor: 0.7 → 0.5 → 0.3 → 0.1 → 0
+        float fadeFactor = Math.Max(0, 1.0f - (underrunCount * 0.25f));
+        
+        int copyLen = Math.Min(lastFrame.Length, targetSamples);
+        for (int i = 0; i < copyLen; i++)
+        {
+            // Additional fade across the frame
+            float frameFade = 1.0f - ((float)i / copyLen * 0.3f);
+            output[i] = (short)(lastFrame[i] * fadeFactor * frameFade);
+        }
+        
+        return output;
     }
 
     private static short[] FloatToShort(float[] floats, int? count = null)
