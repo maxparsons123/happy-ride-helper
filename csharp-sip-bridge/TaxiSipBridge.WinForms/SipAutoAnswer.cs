@@ -450,30 +450,19 @@ public class SipAutoAnswer : IDisposable
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)
     {
-        if (_adaClient == null)
-        {
-            Log($"⚠️ [{callId}] Cannot wire RTP input; Ada client is null.");
-            return;
-        }
-
-        if (_adaAudioSource == null)
-        {
-            Log($"⚠️ [{callId}] Cannot wire RTP input; AdaAudioSource is null.");
-            return;
-        }
-
-        // Create the unified decoder using the same encoder + format as AdaAudioSource
-        var decoder = new SipToAdaDecoder(_adaClient, _adaAudioSource.Encoder, _adaAudioSource.SelectedFormat);
-        decoder.OnDebugLog += msg => Log(msg);
-
-        Log($"🔧 [{callId}] Wiring RTP input via SipToAdaDecoder (codec={_adaAudioSource.SelectedFormat.FormatName})...");
+        Log($"🔧 [{callId}] Wiring RTP input handler...");
 
         int rtpPackets = 0;
         int sentToAda = 0;
+        int skippedNoClient = 0;
         int skippedBotSpeaking = 0;
         int skippedLowRms = 0;
         int skippedHighRms = 0;
+        int skippedNotConnected = 0;
         DateTime lastStats = DateTime.Now;
+        
+        // Decoder will be created lazily once format is negotiated
+        SipToAdaDecoder? decoder = null;
 
         mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
         {
@@ -494,6 +483,31 @@ public class SipAutoAnswer : IDisposable
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
 
+            // Check Ada client is available and connected
+            if (_adaClient == null)
+            {
+                skippedNoClient++;
+                return;
+            }
+            
+            if (!_adaClient.IsConnected)
+            {
+                skippedNotConnected++;
+                if (skippedNotConnected <= 5)
+                    Log($"⚠️ [{callId}] RTP→Ada skip: WS not connected yet");
+                return;
+            }
+            
+            // Lazy-create decoder once format is negotiated and Ada is connected
+            if (decoder == null && _adaAudioSource != null && !_adaAudioSource.SelectedFormat.IsEmpty())
+            {
+                decoder = new SipToAdaDecoder(_adaClient, _adaAudioSource.Encoder, _adaAudioSource.SelectedFormat);
+                decoder.OnDebugLog += msg => Log(msg);
+                Log($"🔧 [{callId}] Created SipToAdaDecoder (codec={_adaAudioSource.SelectedFormat.FormatName})");
+            }
+            
+            if (decoder == null) return;
+
             // Bot-speaking protection: don't forward audio while Ada is speaking (prevents echo)
             if (_isBotSpeaking)
             {
@@ -504,8 +518,10 @@ public class SipAutoAnswer : IDisposable
             try
             {
                 // For G.711 codecs, apply RMS gating (Opus payloads are encoded, can't easily calculate RMS)
-                if (_adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMU ||
-                    _adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMA)
+                // Use lower thresholds to avoid filtering real speech
+                if (_adaAudioSource != null && 
+                    (_adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMU ||
+                     _adaAudioSource.SelectedFormat.Codec == AudioCodecsEnum.PCMA))
                 {
                     bool isMuLaw = rtp.Header.PayloadType == 0;
                     long sumOfSquares = 0;
@@ -518,14 +534,14 @@ public class SipAutoAnswer : IDisposable
                     
                     double rms = Math.Sqrt(sumOfSquares / (double)payload.Length);
 
-                    // Filter: too quiet = noise, too loud = echo/clipping
-                    if (rms < RMS_NOISE_FLOOR)
+                    // Relaxed thresholds: 300 floor (very quiet), 25000 ceiling (loud but not clipped)
+                    if (rms < 300)
                     {
                         skippedLowRms++;
                         return;
                     }
                     
-                    if (rms > RMS_ECHO_CEILING)
+                    if (rms > 25000)
                     {
                         skippedHighRms++;
                         return;
@@ -536,11 +552,13 @@ public class SipAutoAnswer : IDisposable
                 await decoder.HandleRtpPayloadAsync(payload, cts.Token);
                 sentToAda++;
                 
-                if (sentToAda <= 5)
-                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b via decoder");
-                else if ((DateTime.Now - lastStats).TotalSeconds >= 5)
+                if (sentToAda <= 3)
+                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b");
+                
+                // Stats every 3 seconds
+                if ((DateTime.Now - lastStats).TotalSeconds >= 3)
                 {
-                    Log($"📤 [{callId}] RTP→Ada: sent={sentToAda}, botSpeak={skippedBotSpeaking}, lowRms={skippedLowRms}, highRms={skippedHighRms}");
+                    Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, noClient={skippedNoClient}, notConn={skippedNotConnected}");
                     lastStats = DateTime.Now;
                 }
             }
