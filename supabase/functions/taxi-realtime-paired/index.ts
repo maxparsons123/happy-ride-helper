@@ -1715,7 +1715,9 @@ async function updateLiveCall(sessionState: SessionState) {
 }
 
 // Restore session state from DB (for resumed sessions after handoff/reconnect)
-async function restoreSessionFromDb(callId: string, resumeCallId: string): Promise<{
+// NOTE: resumeCallId may not match if the edge function generated a new timestamp-based callId
+// Fallback: find most recent in-flight session for the same caller phone
+async function restoreSessionFromDb(callId: string, resumeCallId: string, callerPhone: string | null): Promise<{
   booking: SessionState["booking"];
   conversationHistory: SessionState["conversationHistory"];
   bookingConfirmed: boolean;
@@ -1725,7 +1727,8 @@ async function restoreSessionFromDb(callId: string, resumeCallId: string): Promi
   pendingEta: string | null;
 } | null> {
   try {
-    const { data: liveCall } = await supabase
+    // First try exact call_id match
+    let { data: liveCall } = await supabase
       .from("live_calls")
       .select("*")
       .eq("call_id", resumeCallId)
@@ -1733,7 +1736,34 @@ async function restoreSessionFromDb(callId: string, resumeCallId: string): Promi
     
     if (!liveCall) {
       console.log(`[${callId}] ⚠️ No live_call found for resume_call_id: ${resumeCallId}`);
-      return null;
+      
+      // Fallback: find the most recent in-flight call for this caller (within last 10 min)
+      if (callerPhone && callerPhone !== "unknown") {
+        const phoneKey = normalizePhone(callerPhone);
+        const cutoffIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        
+        console.log(`[${callId}] 🔍 Fallback: searching for recent call by phone=${phoneKey}, since=${cutoffIso}`);
+        
+        const { data: fallbackLiveCall } = await supabase
+          .from("live_calls")
+          .select("*")
+          .eq("caller_phone", phoneKey)
+          .gte("started_at", cutoffIso)
+          .in("status", ["active", "awaiting_confirmation", "confirmed"])
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (fallbackLiveCall) {
+          liveCall = fallbackLiveCall;
+          console.log(`[${callId}] ✅ Resume fallback matched: requested=${resumeCallId}, matched=${fallbackLiveCall.call_id}`);
+        }
+      }
+      
+      if (!liveCall) {
+        console.log(`[${callId}] ⚠️ No fallback session found either`);
+        return null;
+      }
     }
     
     console.log(`[${callId}] ✅ Restored session from DB:`);
@@ -4093,7 +4123,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
           if ((isReconnect || isResume) && resumeCallId && !greetingSent) {
             console.log(`[${callId}] 🔄 RESUME/RECONNECT detected: reconnect=${isReconnect}, resume=${isResume}, resumeCallId=${resumeCallId}`);
             
-            const restoredState = await restoreSessionFromDb(callId, resumeCallId);
+            const restoredState = await restoreSessionFromDb(callId, resumeCallId, callerPhone);
             
             if (restoredState) {
               // Restore booking state
