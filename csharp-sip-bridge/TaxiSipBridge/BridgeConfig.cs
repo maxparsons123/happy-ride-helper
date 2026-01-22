@@ -1,5 +1,8 @@
 namespace TaxiSipBridge;
 
+/// <summary>
+/// Configuration for the SIP-to-AI bridge
+/// </summary>
 public class BridgeConfig
 {
     public int SipPort { get; set; } = 5060;
