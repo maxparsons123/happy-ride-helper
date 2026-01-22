@@ -85,6 +85,15 @@ serve(async (req) => {
   let aiStoppedAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let consecutiveSpeechFrames = 0; // Count frames above threshold for robust barge-in
   
+  // ════════════════════════════════════════════════════════════════════════════
+  // SESSION TIMEOUT HANDLING - Supabase closes WebSocket at 90s
+  // We save state at 75s and trigger client reconnection before platform kills us
+  // ════════════════════════════════════════════════════════════════════════════
+  const SESSION_TIMEOUT_MS = 75000; // 75s - give 15s buffer before 90s kill
+  const sessionStartTime = Date.now();
+  let sessionTimeoutTimer: number | null = null;
+  let isHandingOff = false;
+  
   // Barge-in configuration
   const BARGE_IN_ECHO_GUARD_MS = 400; // Ignore speech for 400ms after AI stops (prevents echo cutoff)
   const BARGE_IN_ENERGY_THRESHOLD = 0.15; // Higher threshold for barge-in (not just noise)
@@ -148,6 +157,127 @@ serve(async (req) => {
       }
     } catch (e) {
       console.error(`[${callId}] Caller lookup error:`, e);
+    }
+  };
+  
+  // ════════════════════════════════════════════════════════════════════════════
+  // SESSION HANDOFF: Save state to DB before timeout, client reconnects fresh
+  // ════════════════════════════════════════════════════════════════════════════
+  const saveSessionState = async () => {
+    try {
+      const sessionState = {
+        call_id: callId,
+        caller_phone: userPhone,
+        caller_name: callerName,
+        booking: currentBooking,
+        conversation_history: conversationHistory.slice(-10), // Last 10 turns
+        last_assistant_response: lastAssistantResponse,
+        vad_config: vadConfig,
+        stt_provider: sttProvider,
+        tts_provider: ttsProvider,
+        handoff_at: new Date().toISOString()
+      };
+      
+      // Update live_calls with session state for resumption
+      const { error } = await supabase
+        .from("live_calls")
+        .upsert({
+          call_id: callId,
+          caller_phone: userPhone,
+          caller_name: callerName,
+          pickup: currentBooking.pickup,
+          destination: currentBooking.destination,
+          passengers: currentBooking.passengers,
+          status: "handoff",
+          source: callSource,
+          transcripts: conversationHistory,
+          updated_at: new Date().toISOString()
+        }, { onConflict: "call_id" });
+      
+      if (error) {
+        console.error(`[${callId}] Failed to save session state:`, error);
+      } else {
+        console.log(`[${callId}] 💾 Session state saved for handoff`);
+      }
+      
+      return sessionState;
+    } catch (e) {
+      console.error(`[${callId}] Session save error:`, e);
+      return null;
+    }
+  };
+  
+  const triggerSessionHandoff = async () => {
+    if (isHandingOff) return;
+    isHandingOff = true;
+    
+    console.log(`[${callId}] ⏰ Session timeout approaching, initiating handoff...`);
+    
+    // Save state to DB
+    const sessionState = await saveSessionState();
+    
+    // Notify client to reconnect
+    try {
+      socket.send(JSON.stringify({
+        type: "session.handoff",
+        reason: "timeout",
+        call_id: callId,
+        reconnect_delay_ms: 500,
+        session_state: sessionState
+      }));
+    } catch (e) {
+      console.error(`[${callId}] Failed to send handoff message:`, e);
+    }
+    
+    // Close cleanly after brief delay
+    setTimeout(() => {
+      try {
+        socket.close(1000, "session_handoff");
+      } catch (e) {
+        // Already closed
+      }
+    }, 1000);
+  };
+  
+  // Restore session from previous handoff
+  const restoreSession = async (resumeCallId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from("live_calls")
+        .select("*")
+        .eq("call_id", resumeCallId)
+        .eq("status", "handoff")
+        .maybeSingle();
+      
+      if (error || !data) {
+        console.log(`[${callId}] No session to restore for ${resumeCallId}`);
+        return false;
+      }
+      
+      // Restore state
+      callId = resumeCallId;
+      userPhone = data.caller_phone || "";
+      callerName = data.caller_name || "";
+      currentBooking.pickup = data.pickup;
+      currentBooking.destination = data.destination;
+      currentBooking.passengers = data.passengers;
+      
+      if (Array.isArray(data.transcripts)) {
+        conversationHistory = data.transcripts as { role: string; content: string }[];
+        lastAssistantResponse = conversationHistory.filter(t => t.role === "assistant").pop()?.content || "";
+      }
+      
+      // Update status to active
+      await supabase
+        .from("live_calls")
+        .update({ status: "active", updated_at: new Date().toISOString() })
+        .eq("call_id", resumeCallId);
+      
+      console.log(`[${callId}] ♻️ Session restored - pickup: ${currentBooking.pickup}, dest: ${currentBooking.destination}`);
+      return true;
+    } catch (e) {
+      console.error(`[${callId}] Session restore error:`, e);
+      return false;
     }
   };
 
@@ -871,15 +1001,53 @@ serve(async (req) => {
           userPhone = msg.phone || "";
           sttProvider = msg.stt_provider || "groq"; // "groq" or "deepgram"
           ttsProvider = msg.tts_provider || "elevenlabs"; // "elevenlabs" or "deepgram"
-          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}, TTS: ${ttsProvider}`);
           
-          // Lookup caller
+          const isResume = msg.resume === true && msg.resume_call_id;
+          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}, TTS: ${ttsProvider}${isResume ? ', RESUMING' : ''}`);
+          
+          // Check for session resumption
+          if (isResume) {
+            const restored = await restoreSession(msg.resume_call_id);
+            if (restored) {
+              sessionReady = true;
+              socket.send(JSON.stringify({ 
+                type: "session_ready", 
+                pipeline: "gemini", 
+                resumed: true,
+                booking: currentBooking
+              }));
+              
+              // Send brief "I'm back" message instead of full greeting
+              const resumeText = "Sorry about that brief pause. Where were we?";
+              conversationHistory.push({ role: "assistant", content: resumeText });
+              socket.send(JSON.stringify({ type: "transcript.assistant", text: resumeText }));
+              const audioData = await synthesizeSpeech(resumeText);
+              if (audioData) {
+                const chunkSize = 4800;
+                for (let i = 0; i < audioData.length; i += chunkSize) {
+                  const chunk = audioData.slice(i, Math.min(i + chunkSize, audioData.length));
+                  const base64 = btoa(String.fromCharCode(...chunk));
+                  socket.send(JSON.stringify({ type: "audio.delta", delta: base64 }));
+                }
+                socket.send(JSON.stringify({ type: "audio.done" }));
+              }
+              
+              // Start timeout timer for this new session
+              sessionTimeoutTimer = setTimeout(triggerSessionHandoff, SESSION_TIMEOUT_MS);
+              break;
+            }
+          }
+          
+          // Normal flow - lookup caller
           if (userPhone) {
             await lookupCaller(userPhone);
           }
           
           sessionReady = true;
           socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini", stt_provider: sttProvider, tts_provider: ttsProvider }));
+          
+          // Start session timeout timer
+          sessionTimeoutTimer = setTimeout(triggerSessionHandoff, SESSION_TIMEOUT_MS);
           
           // Send initial greeting
           await sendGreeting();
@@ -967,6 +1135,7 @@ serve(async (req) => {
   socket.onclose = () => {
     console.log(`[${callId}] 🔌 WebSocket closed`);
     if (silenceTimer) clearTimeout(silenceTimer);
+    if (sessionTimeoutTimer) clearTimeout(sessionTimeoutTimer);
   };
 
   socket.onerror = (e) => {
