@@ -13,6 +13,7 @@ import WebhookTest from "./pages/WebhookTest";
 import Billing from "./pages/Billing";
 import LiveKitTest from "./pages/LiveKitTest";
 import TtsTest from "./pages/TtsTest";
+import DualBrainTest from "./pages/DualBrainTest";
 
 const queryClient = new QueryClient();
 
@@ -32,6 +33,7 @@ const App = () => (
           <Route path="/billing" element={<Billing />} />
           <Route path="/livekit" element={<LiveKitTest />} />
           <Route path="/tts-test" element={<TtsTest />} />
+          <Route path="/dual-brain" element={<DualBrainTest />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
