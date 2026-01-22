@@ -76,9 +76,19 @@ SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
 AI_RATE = 24000     # OpenAI TTS
 
 # FORMAT DETECTION: Allow dynamic detection from Asterisk frame size
-# v7.5: Re-enabled slin16 detection - ulaw lock was causing 2x playback when Asterisk sends slin16
+# v7.5: Re-enabled slin16 detection - ulaw lock was causing 2x playback when Asterisk sends slin/slin16.
+# IMPORTANT: If the bridge keeps encoding AI audio as ulaw while Asterisk expects slin, playback can sound
+# "robotic" and effectively speed up (sample-width mismatch). So the default is UNLOCKED.
 PREFER_SLIN16 = True   # Prefer higher quality when detected
-LOCK_FORMAT_ULAW = False  # Allow format switching based on actual frame size
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+# Allow overriding at runtime, but default to False (auto-detect).
+LOCK_FORMAT_ULAW = _env_flag("LOCK_FORMAT_ULAW", False)
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -341,21 +351,28 @@ class TaxiBridgeV7:
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
-        # v7.4: LOCK TO ULAW - ignore format changes entirely
+        # Optional ulaw lock (mostly for legacy/diagnostics).
+        # NOTE: If Asterisk is actually sending PCM (320/640-byte frames), staying locked to ulaw will
+        # cause us to encode AI audio as ulaw while Asterisk expects slin/slin16, leading to distorted/
+        # "too fast" playback. So if we detect PCM-sized frames we fall back to auto-detect.
         if LOCK_FORMAT_ULAW:
-            if frame_len != self.state.ast_frame_bytes:
-                logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (locked to ulaw)",
-                              self.state.call_id, self.state.ast_frame_bytes, frame_len)
-            # Always treat as ulaw regardless of frame size
-            self.state.ast_codec = "ulaw"
-            self.state.ast_rate = ULAW_RATE
-            self.state.ast_frame_bytes = frame_len
-            return
+            if frame_len == 160:
+                self.state.ast_codec = "ulaw"
+                self.state.ast_rate = ULAW_RATE
+                self.state.ast_frame_bytes = 160
+                return
+            logger.warning(
+                "[%s] ⚠️ ULAW lock enabled but received %d-byte frames; switching to auto-detect",
+                self.state.call_id,
+                frame_len,
+            )
         
-        # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
-        FORMAT_LOCK_DURATION = 5.0
+        # Debounce format switching (prevents flip-flopping), but NEVER ignore strong signals.
+        # Strong signals are the canonical 20ms sizes for ulaw/slin/slin16.
+        STRONG_FRAME_SIZES = {160, 320, 640}
+        FORMAT_LOCK_DURATION = 0.75
         if self.state.format_locked:
-            if time.time() - self.state.format_lock_time < FORMAT_LOCK_DURATION:
+            if (time.time() - self.state.format_lock_time) < FORMAT_LOCK_DURATION and frame_len not in STRONG_FRAME_SIZES:
                 self.state.ast_frame_bytes = frame_len
                 return
             self.state.format_locked = False
@@ -895,8 +912,9 @@ class TaxiBridgeV7:
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Calculate bytes_per_sec (v6 uses constant AST_RATE = 8000)
-                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                # Pace using observed frame size (20ms per frame) to avoid speed bugs from codec/sample-width mismatches.
+                # 20ms => 50 frames/sec.
+                bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
                 
                 # Pace output to real-time (v6 style)
                 expected_time = start_time + (bytes_played / bytes_per_sec)
