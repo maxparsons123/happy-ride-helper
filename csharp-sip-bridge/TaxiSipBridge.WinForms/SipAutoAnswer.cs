@@ -404,7 +404,10 @@ public class SipAutoAnswer : IDisposable
         Log($"🔧 [{callId}] Wiring RTP input handler...");
 
         int rtpPackets = 0;
+        int sentToAda = 0;
+        int skippedNotConnected = 0;
         const int FLUSH_PACKETS = 25;
+        DateTime lastStats = DateTime.Now;
 
         mediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
         {
@@ -413,7 +416,7 @@ public class SipAutoAnswer : IDisposable
 
             rtpPackets++;
             if (rtpPackets <= 3)
-                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b");
+                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b (PT={rtp.Header.PayloadType})");
             if (rtpPackets % 100 == 0)
                 Log($"📥 [{callId}] RTP total: {rtpPackets}");
 
@@ -426,11 +429,30 @@ public class SipAutoAnswer : IDisposable
             try
             {
                 var client = _adaClient;
-                if (client != null && !cts.Token.IsCancellationRequested)
-                    await client.SendMuLawAsync(payload);
+                if (client == null || !client.IsConnected)
+                {
+                    skippedNotConnected++;
+                    return;
+                }
+
+                await client.SendMuLawAsync(payload);
+                sentToAda++;
+
+                if (sentToAda <= 5)
+                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b");
+
+                // Log stats every 5 seconds
+                if ((DateTime.Now - lastStats).TotalSeconds >= 5)
+                {
+                    Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, skipped={skippedNotConnected}");
+                    lastStats = DateTime.Now;
+                }
             }
             catch (OperationCanceledException) { }
-            catch { }
+            catch (Exception ex) 
+            { 
+                Log($"⚠️ [{callId}] SendMuLaw error: {ex.Message}");
+            }
         };
     }
 
