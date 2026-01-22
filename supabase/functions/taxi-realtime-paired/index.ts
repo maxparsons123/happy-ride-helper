@@ -1697,7 +1697,9 @@ async function updateLiveCall(sessionState: SessionState) {
         pickup: sessionState.booking.pickup,
         destination: sessionState.booking.destination,
         passengers: sessionState.booking.passengers,
-        status: sessionState.bookingConfirmed ? "confirmed" : "active",
+        fare: sessionState.pendingFare || null,
+        eta: sessionState.pendingEta || null,
+        status: sessionState.bookingConfirmed ? "confirmed" : (sessionState.awaitingConfirmation ? "awaiting_confirmation" : "active"),
         booking_confirmed: sessionState.bookingConfirmed,
         transcripts: sessionState.conversationHistory,
         source: "paired",
@@ -1709,6 +1711,75 @@ async function updateLiveCall(sessionState: SessionState) {
     }
   } catch (e) {
     console.error(`[${sessionState.callId}] Error updating live_calls:`, e);
+  }
+}
+
+// Restore session state from DB (for resumed sessions after handoff/reconnect)
+async function restoreSessionFromDb(callId: string, resumeCallId: string): Promise<{
+  booking: SessionState["booking"];
+  conversationHistory: SessionState["conversationHistory"];
+  bookingConfirmed: boolean;
+  awaitingConfirmation: boolean;
+  lastQuestionAsked: SessionState["lastQuestionAsked"];
+  pendingFare: string | null;
+  pendingEta: string | null;
+} | null> {
+  try {
+    const { data: liveCall } = await supabase
+      .from("live_calls")
+      .select("*")
+      .eq("call_id", resumeCallId)
+      .maybeSingle();
+    
+    if (!liveCall) {
+      console.log(`[${callId}] ⚠️ No live_call found for resume_call_id: ${resumeCallId}`);
+      return null;
+    }
+    
+    console.log(`[${callId}] ✅ Restored session from DB:`);
+    console.log(`[${callId}]   pickup: ${liveCall.pickup}`);
+    console.log(`[${callId}]   destination: ${liveCall.destination}`);
+    console.log(`[${callId}]   passengers: ${liveCall.passengers}`);
+    console.log(`[${callId}]   fare: ${liveCall.fare}`);
+    console.log(`[${callId}]   status: ${liveCall.status}`);
+    console.log(`[${callId}]   booking_confirmed: ${liveCall.booking_confirmed}`);
+    
+    // Parse transcripts if stored as JSON
+    const transcripts = Array.isArray(liveCall.transcripts) ? liveCall.transcripts : [];
+    
+    // Determine lastQuestionAsked from state
+    let lastQ: SessionState["lastQuestionAsked"] = "none";
+    if (liveCall.booking_confirmed) {
+      lastQ = "confirmation";
+    } else if (liveCall.fare) {
+      lastQ = "confirmation"; // We have fare, waiting for final yes/no
+    } else if (!liveCall.pickup) {
+      lastQ = "pickup";
+    } else if (!liveCall.destination) {
+      lastQ = "destination";
+    } else if (!liveCall.passengers) {
+      lastQ = "passengers";
+    } else {
+      lastQ = "time";
+    }
+    
+    return {
+      booking: {
+        pickup: liveCall.pickup || null,
+        destination: liveCall.destination || null,
+        passengers: liveCall.passengers || null,
+        pickupTime: null,
+      },
+      conversationHistory: transcripts as SessionState["conversationHistory"],
+      bookingConfirmed: liveCall.booking_confirmed || false,
+      awaitingConfirmation: !!liveCall.fare && !liveCall.booking_confirmed,
+      lastQuestionAsked: lastQ,
+      pendingFare: liveCall.fare || null,
+      pendingEta: liveCall.eta || null,
+    };
+  } catch (e) {
+    console.error(`[${callId}] ❌ Failed to restore session:`, e);
+    return null;
   }
 }
 
@@ -3966,6 +4037,85 @@ Do NOT skip any part. Say ALL of it warmly.]`
             callerPhone = data.phone;
             sessionState.callerPhone = data.phone; // Update session state too!
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
+          }
+
+          // === SESSION RESUME SUPPORT ===
+          // When bridge sends reconnect=true after WebSocket drop, restore state from DB
+          const isReconnect = data.reconnect === true;
+          const isResume = data.resume === true;
+          const resumeCallId = data.resume_call_id || data.call_id || null;
+          
+          if ((isReconnect || isResume) && resumeCallId && !greetingSent) {
+            console.log(`[${callId}] 🔄 RESUME/RECONNECT detected: reconnect=${isReconnect}, resume=${isResume}, resumeCallId=${resumeCallId}`);
+            
+            const restoredState = await restoreSessionFromDb(callId, resumeCallId);
+            
+            if (restoredState) {
+              // Restore booking state
+              sessionState.booking = restoredState.booking;
+              sessionState.conversationHistory = restoredState.conversationHistory;
+              sessionState.bookingConfirmed = restoredState.bookingConfirmed;
+              sessionState.awaitingConfirmation = restoredState.awaitingConfirmation;
+              sessionState.lastQuestionAsked = restoredState.lastQuestionAsked;
+              sessionState.pendingFare = restoredState.pendingFare;
+              sessionState.pendingEta = restoredState.pendingEta;
+              
+              // Mark greeting as sent so we don't replay it
+              greetingSent = true;
+              greetingAudioReceived = true;
+              if (greetingFallbackTimer) {
+                clearTrackedTimeout(greetingFallbackTimer);
+                greetingFallbackTimer = null;
+              }
+              
+              console.log(`[${callId}] ✅ Session restored - skipping greeting, injecting continuation prompt`);
+              
+              // Inject continuation prompt based on where we left off
+              if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                let continuationPrompt: string;
+                
+                if (restoredState.awaitingConfirmation && restoredState.pendingFare) {
+                  // We were waiting for user to confirm the fare quote
+                  continuationPrompt = `[SESSION RESUMED - AWAITING FARE CONFIRMATION]
+The caller was asked to confirm a taxi booking. The fare is ${restoredState.pendingFare} with ETA ${restoredState.pendingEta || "a few minutes"}.
+Journey: ${restoredState.booking.pickup} → ${restoredState.booking.destination}, ${restoredState.booking.passengers} passengers.
+
+The caller may have already said "yes" but it wasn't heard. Say something brief like "Sorry, I didn't catch that. Would you like me to book that taxi for you?" and WAIT for their response.
+Do NOT repeat the full summary or fare. Just ask for confirmation.`;
+                } else if (restoredState.bookingConfirmed) {
+                  // Booking was already confirmed, deliver closing
+                  continuationPrompt = `[SESSION RESUMED - BOOKING ALREADY CONFIRMED]
+The booking is already confirmed. Say a brief closing like "Your taxi is on the way. Thank you for booking with us!" and call end_call().`;
+                } else {
+                  // Mid-booking, determine next question
+                  const nextQ = !restoredState.booking.pickup ? "pickup" :
+                                !restoredState.booking.destination ? "destination" :
+                                !restoredState.booking.passengers ? "passengers" : "time";
+                  continuationPrompt = `[SESSION RESUMED - CONTINUE BOOKING]
+Current state: pickup=${restoredState.booking.pickup || "missing"}, destination=${restoredState.booking.destination || "missing"}, passengers=${restoredState.booking.passengers || "missing"}.
+Next question: ${nextQ}.
+Say something brief like "Sorry about that, let me continue. ${nextQ === "pickup" ? "Where would you like to be picked up?" : nextQ === "destination" ? "And where are you heading to?" : nextQ === "passengers" ? "How many passengers?" : "What time would you like the taxi?"}"`;
+                }
+                
+                // Inject the continuation as a system message
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{ type: "input_text", text: continuationPrompt }]
+                  }
+                }));
+                
+                // Trigger a response
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+                
+                // Notify client we're ready
+                sendSessionReady();
+              }
+            } else {
+              console.log(`[${callId}] ⚠️ No state found in DB for resume, will send fresh greeting`);
+            }
           }
 
           if (data.inbound_format && (data.inbound_format === "ulaw" || data.inbound_format === "slin" || data.inbound_format === "slin16")) {
