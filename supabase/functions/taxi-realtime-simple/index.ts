@@ -1701,6 +1701,10 @@ interface SessionState {
   lastSpokenConfirmation: string | null;
   lastSpokenConfirmationAt: number | null;
 
+  // Track when Ada last asked ANY question (for post-booking response wait)
+  // If Ada asks "Would you like to book a taxi to one of these events?" we must wait for response
+  adaAskedQuestionAt: number | null;
+
   // Pending NEW booking awaiting user confirmation before fare quote is requested
   pendingNewBooking: {
     pickup: string;
@@ -3059,6 +3063,13 @@ Do NOT say 'booked' until the tool returns success.]`
           }
         }
 
+        // === TRACK ANY QUESTION (for post-booking response wait) ===
+        // If Ada ends with a question mark, we MUST wait for user response before triggering goodbye
+        if (/\?\s*$/.test(lastAssistantText)) {
+          sessionState.adaAskedQuestionAt = Date.now();
+          console.log(`[${sessionState.callId}] ❓ Ada asked a question - waiting for user response before goodbye`);
+        }
+
         // === TRUST ADA'S FIRST ECHO ===
         // Extract addresses from Ada's immediate acknowledgments (e.g., "Got it, 18 Exmoor Road")
         // Ada's interpretation is often more accurate than raw STT transcripts
@@ -3717,10 +3728,18 @@ Do NOT say 'booked' until the tool returns success.]`
           // === POST-BOOKING GOODBYE SHORTCUT (SECONDARY) ===
           // If a booking was just confirmed and the caller says thanks/that's all, end cleanly.
           // This prevents Ada from accidentally starting a new quote from stale booking context.
+          // 
+          // IMPORTANT: If Ada just asked a question (ends with ?), we must wait for the user's
+          // actual response before triggering goodbye. "No" might be the answer to Ada's question
+          // (e.g., "Would you like to book a taxi to one of these events?")
+          const adaRecentlyAskedQuestion = sessionState.adaAskedQuestionAt && 
+            (Date.now() - sessionState.adaAskedQuestionAt < 30000); // 30 second window
+          
           if (
             sessionState.lastBookTaxiSuccessAt &&
             Date.now() - sessionState.lastBookTaxiSuccessAt < 2 * 60 * 1000 &&
             !sessionState.pendingQuote &&
+            !adaRecentlyAskedQuestion && // Don't shortcut if Ada just asked a question!
             /\b(thanks|thank you|thx|cheers|that's fine|thats fine|that's all|thats all|no thanks|no thank you|no|nope|nothing|nothing else|no i'm good|no im good|i'm good|im good|all good|that's it|thats it)\b/i.test(lowerUserText) &&
             openaiWs &&
             openaiConnected
@@ -3807,6 +3826,15 @@ Do NOT say 'booked' until the tool returns success.]`
             }, 10000); // 10 second delay for full goodbye audio with WhatsApp tip
             
             break;
+          }
+          
+          // Log when we skip goodbye shortcut because Ada asked a question
+          if (adaRecentlyAskedQuestion && 
+              sessionState.lastBookTaxiSuccessAt &&
+              /\b(no|nope|nothing|no thanks)\b/i.test(lowerUserText)) {
+            console.log(`[${sessionState.callId}] ⏳ Ada asked a question recently - forwarding user response to AI instead of triggering goodbye`);
+            // Clear the question tracker so subsequent "no" can trigger goodbye
+            sessionState.adaAskedQuestionAt = null;
           }
 
           // === FARE YES/NO HANDOFF (CRITICAL) ===
@@ -7154,6 +7182,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           bookingStepAdvancedAt: null,
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
+          adaAskedQuestionAt: null, // Track when Ada last asked any question
         };
         
         preConnected = true;
@@ -7295,6 +7324,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             bookingStepAdvancedAt: null,
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
+            adaAskedQuestionAt: null, // Track when Ada last asked any question
           };
         }
         
