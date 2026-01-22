@@ -360,7 +360,29 @@ public class AdaAudioSource : IAudioSource, IDisposable
             uint durationRtpUnits = (uint)samplesNeeded;
 
             _sentFrames++;
-            OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
+            
+            // Check if we have RTP subscribers
+            bool hasSubscribers = OnAudioSourceEncodedSample != null;
+            if (_sentFrames <= 5)
+            {
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 RTP out #{_sentFrames}: {encoded.Length}b, hasSubscribers={hasSubscribers}");
+            }
+            
+            if (hasSubscribers)
+            {
+                OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
+            }
+            else if (_sentFrames == 1)
+            {
+                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ NO RTP SUBSCRIBERS! Audio won't reach SIP!");
+            }
+            
+            // Log RTP stats every 5 seconds
+            if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 5)
+            {
+                OnDebugLog?.Invoke($"[AdaAudioSource] 📊 RTP stats: sent={_sentFrames}, encoded={encoded.Length}b, subscribers={hasSubscribers}");
+                _lastStatsLog = DateTime.Now;
+            }
         }
         catch (Exception ex)
         {
