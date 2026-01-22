@@ -8,14 +8,14 @@ namespace TaxiSipBridge.Services;
 
 public class SipBridgeService
 {
-    private readonly BridgeConfig _config;
+    private readonly SipAdaBridgeConfig _config;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SipBridgeService> _logger;
     private readonly ConcurrentDictionary<string, CallSession> _activeCalls = new();
     private SIPTransport? _sipTransport;
     private SIPUserAgent? _userAgent;
 
-    public SipBridgeService(BridgeConfig config, ILoggerFactory loggerFactory)
+    public SipBridgeService(SipAdaBridgeConfig config, ILoggerFactory loggerFactory)
     {
         _config = config;
         _loggerFactory = loggerFactory;
@@ -26,14 +26,20 @@ public class SipBridgeService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Starting SIP Bridge on port {Port}", _config.SipPort);
+        _logger.LogInformation("Starting SIP Bridge on {Server}:{Port}", _config.SipServer, _config.SipPort);
 
         _sipTransport = new SIPTransport();
-        _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, _config.SipPort)));
-
-        if (_config.EnableTls)
+        
+        // Use configured transport type
+        if (_config.Transport == SipTransportType.TCP)
         {
-            _logger.LogInformation("TLS enabled for SIP transport");
+            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, _config.SipPort)));
+            _logger.LogInformation("Using TCP transport");
+        }
+        else
+        {
+            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, _config.SipPort)));
+            _logger.LogInformation("Using UDP transport");
         }
 
         _sipTransport.SIPTransportRequestReceived += OnSIPRequestReceived;

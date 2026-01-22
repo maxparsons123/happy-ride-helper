@@ -19,7 +19,7 @@ public class CallSession : IDisposable
     private readonly string _callId;
     private readonly string _callerNumber;
     private readonly string _calledNumber;
-    private readonly BridgeConfig _config;
+    private readonly SipAdaBridgeConfig _config;
     private readonly SIPTransport _sipTransport;
     private readonly SIPEndPoint _localEndPoint;
     private readonly SIPEndPoint _remoteEndPoint;
@@ -43,7 +43,7 @@ public class CallSession : IDisposable
         string callId,
         string callerNumber,
         string calledNumber,
-        BridgeConfig config,
+        SipAdaBridgeConfig config,
         SIPTransport sipTransport,
         SIPEndPoint localEndPoint,
         SIPEndPoint remoteEndPoint,
@@ -105,7 +105,7 @@ public class CallSession : IDisposable
     {
         _webSocket = new ClientWebSocket();
         
-        var wsUrl = $"{_config.WebSocketUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
+        var wsUrl = $"{_config.AdaWsUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
         _logger.LogInformation("Connecting to WebSocket: {Url}", wsUrl);
 
         await _webSocket.ConnectAsync(new Uri(wsUrl), _cts!.Token);
