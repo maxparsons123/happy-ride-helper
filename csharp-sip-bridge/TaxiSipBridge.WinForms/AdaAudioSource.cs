@@ -275,20 +275,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Select resampling method based on audio mode
-                    if (_audioMode == AudioMode.SimpleResample)
+                    // Simple, clean resampling path - no extra processing
+                    if (targetRate == 8000)
                     {
-                        // Simple linear interpolation only
-                        audioFrame = SimpleResample(pcm24, 24000, targetRate);
-                    }
-                    else if (targetRate == 8000)
-                    {
-                        // Use optimized 3:1 decimator for 8kHz
                         audioFrame = Downsample24kTo8k(pcm24);
                     }
                     else
                     {
-                        // Use AudioCodecs high-quality resampler
                         audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
 
@@ -300,42 +293,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = fixedFrame;
                     }
 
-                    // If we were in silence, crossfade from last sample to new audio
-                    if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
-                    {
-                        int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
-                        for (int i = 0; i < fadeLen; i++)
-                        {
-                            float t = (float)i / fadeLen;
-                            audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
-                        }
-                    }
-
-                    // Store for interpolation on underrun
-                    _lastAudioFrame = audioFrame;
+                    // Store last sample for smooth silence transitions
+                    if (audioFrame.Length > 0)
+                        _lastOutputSample = audioFrame[^1];
                 }
                 else
                 {
                     _consecutiveUnderruns++;
 
-                    // Reset jitter buffer state
-                    if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled)
-                    {
-                        _jitterBufferFilled = false;
-                    }
-
-                    // On first few underruns, try to interpolate from last frame
-                    // This prevents stuttering on brief gaps
-                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
-                    {
-                        audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
-                        _interpolatedFrames++;
-                    }
-                    else
-                    {
-                        SendSilence();
-                        return;
-                    }
+                    // On underrun, send silence (fade out from last sample)
+                    SendSilence();
+                    return;
                 }
             }
 
@@ -411,34 +379,22 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz using NAudio's WDL resampler
+        // 24kHz → 8kHz is exactly 3:1
+        // Use simple averaging decimation - clean and artifact-free
         if (pcm24.Length < 3) return new short[0];
 
-        var resampled = AudioCodecs.Resample(pcm24, 24000, 8000);
-        
-        // Apply soft limiter instead of hard clipping
-        // This prevents harsh clipping artifacts while maintaining volume
-        const float threshold = 24000f;  // Start limiting here
-        const float ceiling = 32000f;    // Max output
-        
-        for (int i = 0; i < resampled.Length; i++)
+        int outLen = pcm24.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
         {
-            float sample = resampled[i];
-            float absSample = Math.Abs(sample);
-            
-            if (absSample > threshold)
-            {
-                // Soft knee compression above threshold
-                float excess = absSample - threshold;
-                float compressed = threshold + (excess * 0.3f); // 3:1 ratio
-                compressed = Math.Min(compressed, ceiling);
-                sample = sample > 0 ? compressed : -compressed;
-            }
-            
-            resampled[i] = (short)sample;
+            int idx = i * 3;
+            // Simple average of 3 samples - clean, no artifacts
+            int avg = (pcm24[idx] + pcm24[idx + 1] + pcm24[idx + 2]) / 3;
+            output[i] = (short)avg;
         }
 
-        return resampled;
+        return output;
     }
 
     /// <summary>
