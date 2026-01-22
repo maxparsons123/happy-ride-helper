@@ -44,17 +44,32 @@ AUDIOSOCKET_PORT = 9092
 # Load WS_URL from bridge-config.json (same directory as script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "bridge-config.json")
-DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-realtime-simple"
 
-try:
-    with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
-        WS_URL = config.get("edge_functions", {}).get("taxi_realtime_simple_ws", DEFAULT_WS_URL)
-        print(f"✅ Loaded config from {CONFIG_PATH}", flush=True)
-        print(f"   WebSocket URL: {WS_URL}", flush=True)
-except (FileNotFoundError, json.JSONDecodeError) as e:
-    WS_URL = os.environ.get("WS_URL", DEFAULT_WS_URL)
-    print(f"⚠️ Config not found ({CONFIG_PATH}), using default: {WS_URL}", flush=True)
+# CRITICAL: Use .functions.supabase.co subdomain for reliable WebSocket routing
+# Standard .supabase.co domain causes disconnects and audio issues
+DEFAULT_WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-simple"
+
+# Check environment variable first (highest priority)
+WS_URL = os.environ.get("WS_URL")
+
+if not WS_URL:
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            config = json.load(f)
+            # Priority: simple > paired > default (simple has 4-min graceful timeout)
+            edge = config.get("edge_functions", {})
+            WS_URL = (
+                edge.get("taxi_realtime_simple_ws")
+                or edge.get("taxi_realtime_paired_ws")
+                or edge.get("taxi_realtime_ws")
+                or DEFAULT_WS_URL
+            )
+            print(f"✅ Loaded config from {CONFIG_PATH}", flush=True)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        WS_URL = DEFAULT_WS_URL
+        print(f"⚠️ Config not found ({CONFIG_PATH}), using default", flush=True)
+
+print(f"   WebSocket URL: {WS_URL}", flush=True)
 
 # Audio rates
 AST_RATE = 8000   # Asterisk telephony rate (native µ-law)
