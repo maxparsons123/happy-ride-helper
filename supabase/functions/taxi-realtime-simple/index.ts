@@ -1809,14 +1809,70 @@ serve(async (req) => {
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null; // Track for cleanup
   let isConnectionClosed = false; // Prevent operations after cleanup
   let keepAliveInterval: number | null = null; // Keep-alive ping interval to prevent timeout
+  let openaiPingInterval: number | null = null; // OpenAI WebSocket ping to prevent its idle timeout
   let closingGracePeriodActive = false; // Prevent socket.onclose from interrupting goodbye speech
   let closingGraceTimeoutId: number | null = null; // Track the closing grace timeout for cleanup
   let sessionTimeoutId: number | null = null; // Session timeout timer to prevent Supabase timeout
+  let openaiReconnectAttempts = 0; // Track OpenAI reconnection attempts
+  const MAX_OPENAI_RECONNECT_ATTEMPTS = 3; // Don't reconnect indefinitely
+  let lastOpenAiConnectedAt: number | null = null; // Track when OpenAI was last connected
   const sessionStartTime = Date.now(); // Track when the session started
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   
   // Maximum session duration (4 minutes) - end gracefully before Supabase's ~5 minute limit
   const MAX_SESSION_DURATION_MS = 4 * 60 * 1000;
+  
+  // --- OpenAI WebSocket ping to prevent OpenAI's idle timeout ---
+  // OpenAI Realtime API can drop connections after ~30s of no audio
+  const startOpenAiPing = (callId: string) => {
+    if (openaiPingInterval) return; // Already running
+    
+    // Send empty audio buffer every 20 seconds to keep OpenAI connection alive
+    // This is more reliable than relying on user audio alone
+    openaiPingInterval = setInterval(() => {
+      if (isConnectionClosed || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+        if (openaiPingInterval) {
+          clearInterval(openaiPingInterval);
+          openaiPingInterval = null;
+        }
+        return;
+      }
+      
+      try {
+        // Send a minimal silent audio frame (64 bytes of silence = ~1.3ms at 24kHz)
+        // This prevents OpenAI from timing out while waiting for user speech
+        const silentFrame = new Int16Array(32); // 32 samples of silence
+        const bytes = new Uint8Array(silentFrame.buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const base64Silence = btoa(binary);
+        
+        openaiWs.send(JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: base64Silence
+        }));
+        console.log(`[${callId}] 💚 OpenAI ping sent (silent frame)`);
+      } catch (e) {
+        console.error(`[${callId}] ❌ OpenAI ping failed:`, e);
+        if (openaiPingInterval) {
+          clearInterval(openaiPingInterval);
+          openaiPingInterval = null;
+        }
+      }
+    }, 20000) as unknown as number; // Every 20 seconds
+    
+    console.log(`[${callId}] 🔄 OpenAI ping started (20s interval)`);
+  };
+  
+  const stopOpenAiPing = () => {
+    if (openaiPingInterval) {
+      clearInterval(openaiPingInterval);
+      openaiPingInterval = null;
+      console.log(`[${state?.callId || "unknown"}] 🛑 OpenAI ping stopped`);
+    }
+  };
   
   // --- Keep-alive ping to prevent WebSocket timeout during dispatch callback wait ---
   const startKeepAlive = (callId: string) => {
@@ -1936,6 +1992,11 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
       openaiConnected = true;
+      openaiReconnectAttempts = 0; // Reset on successful connection
+      lastOpenAiConnectedAt = Date.now();
+      
+      // Start OpenAI ping to prevent its idle timeout
+      startOpenAiPing(sessionState.callId);
       
       // If this was a pre-connect, don't send greeting yet - wait for init
       if (preConnected && !pendingGreeting) {
@@ -1955,9 +2016,59 @@ serve(async (req) => {
       }
     };
 
-    openaiWs.onclose = () => {
-      console.log(`[${sessionState.callId}] 🔌 OpenAI WebSocket closed`);
+    openaiWs.onclose = (event) => {
+      console.log(`[${sessionState.callId}] 🔌 OpenAI WebSocket closed (code=${event.code}, reason=${event.reason || "none"})`);
       openaiConnected = false;
+      stopOpenAiPing(); // Stop pinging closed connection
+      
+      // === OPENAI RECONNECTION LOGIC ===
+      // If the call is still active and we haven't exceeded retry limit, attempt reconnection
+      if (!isConnectionClosed && !closingGracePeriodActive && openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS) {
+        const timeSinceConnect = lastOpenAiConnectedAt ? Date.now() - lastOpenAiConnectedAt : 0;
+        
+        // Only reconnect if we were connected for a reasonable time (not immediate failures)
+        if (timeSinceConnect > 5000) {
+          openaiReconnectAttempts++;
+          const backoffMs = Math.min(1000 * openaiReconnectAttempts, 3000); // 1s, 2s, 3s backoff
+          
+          console.log(`[${sessionState.callId}] 🔄 OpenAI disconnected mid-call, attempting reconnect (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS}) in ${backoffMs}ms`);
+          
+          // Notify bridge that we're reconnecting
+          try {
+            socket.send(JSON.stringify({
+              type: "openai_reconnecting",
+              attempt: openaiReconnectAttempts,
+              maxAttempts: MAX_OPENAI_RECONNECT_ATTEMPTS
+            }));
+          } catch (e) {
+            // Bridge socket may be closed
+          }
+          
+          setTimeout(() => {
+            if (!isConnectionClosed && !closingGracePeriodActive) {
+              console.log(`[${sessionState.callId}] 🔌 Attempting OpenAI reconnect...`);
+              openaiWs = null; // Clear old reference
+              connectToOpenAI(sessionState, false); // Don't replay greeting
+              
+              // After reconnect, send a session update to restore context
+              // The greeting has already been delivered, so just restore state
+              if (openaiWs) {
+                sessionState.greetingDelivered = true; // Ensure greeting doesn't replay
+              }
+            }
+          }, backoffMs);
+        } else {
+          console.log(`[${sessionState.callId}] ⚠️ OpenAI disconnected too quickly (${timeSinceConnect}ms) - not reconnecting`);
+        }
+      } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
+        console.error(`[${sessionState.callId}] ❌ OpenAI reconnection failed after ${MAX_OPENAI_RECONNECT_ATTEMPTS} attempts - ending call`);
+        // Optionally send hangup to bridge
+        try {
+          socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
+        } catch (e) {
+          // Ignore
+        }
+      }
     };
 
     openaiWs.onerror = (err) => {
@@ -8831,6 +8942,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     
     // Stop keep-alive pings
     stopKeepAlive();
+    
+    // Stop OpenAI pings
+    stopOpenAiPing();
     
     // Stop session timeout
     stopSessionTimeout();
