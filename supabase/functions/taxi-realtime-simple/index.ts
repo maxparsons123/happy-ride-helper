@@ -4505,7 +4505,8 @@ Do NOT say 'booked' until the tool returns success.]`
               console.error(`[${sessionState.callId}] ❌ AI extraction error:`, extractError);
               // Clear extraction flag on error so Ada can respond
               sessionState.extractionInProgress = false;
-              openaiWs?.send(JSON.stringify({ type: "response.create" }));
+              // Use safe wrapper to prevent "already has active response" errors
+              safeResponseCreate(sessionState, "extraction-error-fallback");
             });
             
             // Don't break here - let normal processing continue while AI extraction runs in background
@@ -4557,6 +4558,12 @@ Do NOT say 'booked' until the tool returns success.]`
                     },
                   }));
 
+                  // Cancel any active response before creating new one (race condition fix)
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                    sessionState.openAiResponseActive = false;
+                  }
+
                   openaiWs?.send(JSON.stringify({
                     type: "response.create",
                     response: {
@@ -4589,6 +4596,11 @@ Do NOT say 'booked' until the tool returns success.]`
                     },
                   }));
 
+                  // Cancel any active response before creating new one (race condition fix)
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                    sessionState.openAiResponseActive = false;
+                  }
                   openaiWs?.send(JSON.stringify({ type: "response.create" }));
                 }, 300);
 
@@ -4710,6 +4722,11 @@ Do NOT say 'booked' until the tool returns success.]`
             // CRITICAL: The VAD response was cancelled, so we must manually trigger a response
             // Otherwise Ada stays silent after user spoke
             if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              // Cancel any active response before creating new one (race condition fix)
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             }
           }
@@ -6046,6 +6063,11 @@ Do NOT say 'booked' until the tool returns success.]`
                     openaiWs?.close();
                   }, 5000);
                   
+                  // Cancel any active response before creating new one (race condition fix)
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                    sessionState.openAiResponseActive = false;
+                  }
                   // Trigger response so Ada speaks the goodbye
                   openaiWs?.send(JSON.stringify({ type: "response.create" }));
                   return; // Exit early - don't continue with booking
@@ -6126,6 +6148,11 @@ Do NOT say 'booked' until the tool returns success.]`
                       }
                     }));
                     
+                    // Cancel any active response before creating new one (race condition fix)
+                    if (sessionState.openAiResponseActive) {
+                      openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+                      sessionState.openAiResponseActive = false;
+                    }
                     // Trigger Ada to respond with the message
                     openaiWs?.send(JSON.stringify({ type: "response.create" }));
                   }
@@ -6172,6 +6199,11 @@ Do NOT say 'booked' until the tool returns success.]`
                   }
                 }));
                 
+                // Cancel any active response before creating new one (race condition fix)
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                  sessionState.openAiResponseActive = false;
+                }
                 openaiWs.send(JSON.stringify({ type: "response.create" }));
               }
               
@@ -6229,6 +6261,11 @@ Do NOT say 'booked' until the tool returns success.]`
                   }
                 }));
                 
+                // Cancel any active response before creating new one (race condition fix)
+                if (sessionState.openAiResponseActive) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                  sessionState.openAiResponseActive = false;
+                }
                 openaiWs.send(JSON.stringify({ type: "response.create" }));
               }
               
@@ -6345,6 +6382,11 @@ Do NOT say 'booked' until the tool returns success.]`
               // Reset discard flag before response
               sessionState.discardCurrentResponseAudio = false;
               
+              // Cancel any active response before creating new one (race condition fix)
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
               // Trigger Ada to speak
               openaiWs.send(JSON.stringify({
                 type: "response.create",
@@ -7682,6 +7724,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             }
           }));
 
+          // Cancel any active response before creating new one (race condition fix)
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            if (state) state.openAiResponseActive = false;
+          }
           // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
@@ -7908,6 +7955,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             }
           }));
           
+          // Cancel any active response before creating new one (race condition fix)
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            if (state) state.openAiResponseActive = false;
+          }
           // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
