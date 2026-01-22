@@ -406,6 +406,7 @@ public class SipAutoAnswer : IDisposable
         int rtpPackets = 0;
         int sentToAda = 0;
         int skippedNotConnected = 0;
+        int skippedWrongCodec = 0;
         const int FLUSH_PACKETS = 25;
         DateTime lastStats = DateTime.Now;
 
@@ -415,10 +416,12 @@ public class SipAutoAnswer : IDisposable
             if (cts.Token.IsCancellationRequested) return;
 
             rtpPackets++;
-            if (rtpPackets <= 3)
-                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b (PT={rtp.Header.PayloadType})");
+            var pt = rtp.Header.PayloadType;
+            
+            if (rtpPackets <= 5)
+                Log($"📥 [{callId}] RTP #{rtpPackets}: {rtp.Payload?.Length ?? 0}b PT={pt} (0=PCMU, 8=PCMA)");
             if (rtpPackets % 100 == 0)
-                Log($"📥 [{callId}] RTP total: {rtpPackets}");
+                Log($"📥 [{callId}] RTP total: {rtpPackets}, sent={sentToAda}, skipConn={skippedNotConnected}, skipCodec={skippedWrongCodec}");
 
             // Give the UAS a moment to settle before forwarding to Ada.
             if (rtpPackets <= FLUSH_PACKETS) return;
@@ -426,32 +429,62 @@ public class SipAutoAnswer : IDisposable
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
 
+            // Only process PCMU (PT=0) or PCMA (PT=8) - skip Opus/other codecs for now
+            if (pt != 0 && pt != 8)
+            {
+                skippedWrongCodec++;
+                if (skippedWrongCodec <= 3)
+                    Log($"⚠️ [{callId}] Skipping non-G.711 codec PT={pt}");
+                return;
+            }
+
             try
             {
                 var client = _adaClient;
                 if (client == null || !client.IsConnected)
                 {
                     skippedNotConnected++;
+                    if (skippedNotConnected <= 3)
+                        Log($"⏳ [{callId}] Ada not connected yet, skipping RTP");
                     return;
                 }
 
-                await client.SendMuLawAsync(payload);
+                // PCMU (PT=0) uses SendMuLawAsync, PCMA (PT=8) needs A-law decode
+                if (pt == 0)
+                {
+                    await client.SendMuLawAsync(payload);
+                }
+                else // pt == 8 (A-law)
+                {
+                    // Decode A-law → PCM16, resample, send
+                    var pcm8k = AudioCodecs.ALawDecode(payload);
+                    var pcm8kEmph = AudioCodecs.ApplyPreEmphasis(pcm8k);
+                    for (int i = 0; i < pcm8kEmph.Length; i++)
+                    {
+                        int sample = (int)(pcm8kEmph[i] * 1.4f);
+                        pcm8kEmph[i] = (short)Math.Clamp(sample, -32768, 32767);
+                    }
+                    var pcm24k = AudioCodecs.Resample(pcm8kEmph, 8000, 24000);
+                    var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+                    await client.SendAudioAsync(pcmBytes, 24000);
+                }
+                
                 sentToAda++;
 
                 if (sentToAda <= 5)
-                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b");
+                    Log($"🎙️ [{callId}] RTP→Ada #{sentToAda}: {payload.Length}b PT={pt}");
 
                 // Log stats every 5 seconds
                 if ((DateTime.Now - lastStats).TotalSeconds >= 5)
                 {
-                    Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, skipped={skippedNotConnected}");
+                    Log($"📤 [{callId}] RTP→Ada stats: sent={sentToAda}, skipConn={skippedNotConnected}, skipCodec={skippedWrongCodec}");
                     lastStats = DateTime.Now;
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) 
             { 
-                Log($"⚠️ [{callId}] SendMuLaw error: {ex.Message}");
+                Log($"⚠️ [{callId}] SendAudio error: {ex.Message}");
             }
         };
     }
