@@ -2246,15 +2246,26 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           const msSinceQuestion = Date.now() - sessionState.adaAskedQuestionAt;
           if (msSinceQuestion < QUESTION_COOLDOWN_MS) {
             // Check if user actually spoke (speechStartTime was set after the question)
+            // ALSO: Ignore speech that happened during greeting protection window (likely noise)
+            const now = Date.now();
+            const isStillInGreetingProtection = now < sessionState.greetingProtectionUntil;
+            const speechAfterGreetingProtection = 
+              sessionState.speechStartTime && 
+              sessionState.speechStartTime > (sessionState.greetingProtectionUntil - GREETING_PROTECTION_MS);
             const userRespondedAfterQuestion = 
               sessionState.speechStartTime && 
-              sessionState.adaAskedQuestionAt < sessionState.speechStartTime;
+              sessionState.adaAskedQuestionAt < sessionState.speechStartTime &&
+              !isStillInGreetingProtection && // Don't count speech during greeting protection
+              speechAfterGreetingProtection;
             
             if (!userRespondedAfterQuestion) {
               console.log(
-                `[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user answer to question (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms)`
+                `[${sessionState.callId}] 🛑 Cancelling VAD-triggered response - waiting for user answer (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms, greetProt=${isStillInGreetingProtection})`
               );
-              openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              // Only send cancel if response is active to avoid "cancel_not_active" errors
+              if (sessionState.openAiResponseActive) {
+                openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
+              }
               sessionState.discardCurrentResponseAudio = true;
               break;
             }
@@ -2286,9 +2297,12 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
 
          // ✅ GREETING COMPLETION: Mark greeting as delivered on first response.done
          // This unlocks follow-up responses and prevents the model from firing all questions at once
+         // CRITICAL: Reset greetingProtectionUntil to start from NOW (when greeting actually ends)
+         // This ensures the 12s protection window covers AFTER the greeting, not from connection time
          if (!sessionState.greetingDelivered) {
            sessionState.greetingDelivered = true;
-           console.log(`[${sessionState.callId}] 🎉 Greeting delivered - follow-up responses now allowed`);
+           sessionState.greetingProtectionUntil = Date.now() + GREETING_PROTECTION_MS;
+           console.log(`[${sessionState.callId}] 🎉 Greeting delivered - protection window reset for ${GREETING_PROTECTION_MS}ms`);
          }
 
          // ✅ If we just finished speaking the confirmation message, NOW set the askedAnythingElseAt timestamp
