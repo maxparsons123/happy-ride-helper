@@ -27,6 +27,7 @@ public class CallSession : IDisposable
     private RTPSession? _rtpSession;
     private CancellationTokenSource? _cts;
     private readonly ConcurrentQueue<byte[]> _audioQueue = new();
+    private readonly AudioDsp _audioDsp = new(); // DSP pipeline from Python bridge
     private bool _isDisposed;
     private DateTime _startTime;
     private int _rtpPacketsSent;
@@ -157,8 +158,11 @@ public class CallSession : IDisposable
             // Convert μ-law to PCM16
             var pcm16 = G711Codec.UlawToPcm16(payload);
             
+            // Apply DSP pipeline (high-pass, noise gate, AGC) - from Python bridge
+            var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16);
+            
             // Resample 8kHz to 24kHz
-            var resampled = AudioResampler.Resample(pcm16, 8000, 24000);
+            var resampled = AudioResampler.Resample(processed, 8000, 24000);
             
             // BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
             // This reduces CPU usage and bandwidth by ~33%
