@@ -50,7 +50,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 # Load from bridge-config.json if available, otherwise use defaults
 import os
 
-# Prefer explicit WS_URL env var, then bridge-config.json, with paired as default.
+# Prefer explicit WS_URL env var, then bridge-config.json, with simple as default.
 WS_URL = os.environ.get("WS_URL")
 if not WS_URL:
     try:
@@ -58,14 +58,14 @@ if not WS_URL:
             _config = json.load(f)
             edge = _config.get("edge_functions", {})
             WS_URL = (
-                edge.get("taxi_realtime_paired_ws")
+                edge.get("taxi_realtime_simple_ws")  # PRIORITY: simple has 4-min graceful timeout
                 or edge.get("taxi_realtime_ws")
-                or edge.get("taxi_realtime_simple_ws")
+                or edge.get("taxi_realtime_paired_ws")
                 # IMPORTANT: WebSocket routing is more reliable via the .functions subdomain.
-                or "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+                or "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-simple"
             )
     except (FileNotFoundError, json.JSONDecodeError):
-        WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
+        WS_URL = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-simple"
 
 AUDIOSOCKET_HOST = "0.0.0.0"
 AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
