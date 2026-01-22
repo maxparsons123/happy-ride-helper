@@ -32,10 +32,11 @@ setInterval(() => {
 }, 60000);
 
 // --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
-// Maps raw transcript to structured BookingState
+// Maps raw transcript to structured BookingState with correction detection
 async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
   console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
   console.log(`[BRAIN1] Ada's last question: "${state.lastQuestion}"`);
+  console.log(`[BRAIN1] Current state: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.pickup_time}`);
 
   const systemPrompt = `You are a Taxi Intent Parser.
 
@@ -51,7 +52,12 @@ TASK:
    - If Ada asked about passengers/how many → put number in "passengers"
    - If Ada asked about time/when → put time in "pickup_time" (e.g., "now", "asap", "in 10 minutes", "3pm")
 3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
-4. Detect 'is_correction' (true if user says "No", "Wait", "Change that", "Actually", "Not quite").
+4. **CORRECTION DETECTION**: Set 'is_correction: true' if:
+   - User says "Actually...", "No, change...", "Wait, not that...", "I meant...", "Not quite"
+   - User says "Actually change the pickup to [address]" → set pickup AND is_correction: true
+   - User says "No, I want to go to [address]" → set destination AND is_correction: true
+   - User provides new info that CONFLICTS with Current Data above → is_correction: true
+   - User explicitly says to change/update a field
 
 WORD-TO-NUMBER MAPPING:
 - "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
@@ -60,11 +66,15 @@ TIME KEYWORDS:
 - "now", "asap", "as soon as possible", "straight away" → pickup_time: "now"
 - "in X minutes", "at X o'clock", "around X" → pickup_time: as spoken
 
+CORRECTION EXAMPLES:
+- Current pickup is "52A David Road", user says "Actually, 52B David Road" → pickup: "52B David Road", is_correction: true
+- Current destination is null, user says "No wait, take me to the airport instead" → destination: "the airport", is_correction: true
+- User says "Change passengers to 4" → passengers: 4, is_correction: true
+
 CRITICAL RULES:
-- Only fill the field that Ada was asking about
+- For NEW data (field is null), fill normally with is_correction: false
+- For UPDATES (field already has value), fill new value with is_correction: true
 - If Ada asked "Where to?" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
-- If Ada asked "How many people?" and user says "three" → passengers: 3 (NOT an address field!)
-- If user provides info out of order (e.g., destination when asked for pickup), still put it in the correct semantic field
 
 Return valid JSON only:
 {
@@ -73,7 +83,8 @@ Return valid JSON only:
   "passengers": null,
   "pickup_time": null,
   "is_affirmative": false,
-  "is_correction": false
+  "is_correction": false,
+  "corrected_field": null
 }`;
 
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -219,22 +230,40 @@ async function processTurn(callId: string, transcript: string, apiKey: string): 
   // Step A: Extract Data (Brain 1)
   const extraction = await extractIntent(transcript, state, apiKey);
   
-  // Update RAM State - only if values are truthy
+  // Log correction detection
+  if (extraction.is_correction) {
+    console.log(`[STATE] ⚠️ CORRECTION DETECTED - updating field(s)`);
+    if (extraction.corrected_field) {
+      console.log(`[STATE] Corrected field: ${extraction.corrected_field}`);
+    }
+  }
+  
+  // Update RAM State - corrections override existing values
   if (extraction.pickup && extraction.pickup !== "null") {
+    const wasUpdate = state.pickup !== null;
     state.pickup = extraction.pickup;
-    console.log(`[STATE] Updated pickup: ${state.pickup}`);
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup: ${state.pickup}`);
   }
   if (extraction.destination && extraction.destination !== "null") {
+    const wasUpdate = state.destination !== null;
     state.destination = extraction.destination;
-    console.log(`[STATE] Updated destination: ${state.destination}`);
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} destination: ${state.destination}`);
   }
   if (extraction.passengers && typeof extraction.passengers === 'number') {
+    const wasUpdate = state.passengers !== null;
     state.passengers = extraction.passengers;
-    console.log(`[STATE] Updated passengers: ${state.passengers}`);
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} passengers: ${state.passengers}`);
   }
   if (extraction.pickup_time && extraction.pickup_time !== "null") {
+    const wasUpdate = state.pickup_time !== null;
     state.pickup_time = extraction.pickup_time;
-    console.log(`[STATE] Updated pickup_time: ${state.pickup_time}`);
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup_time: ${state.pickup_time}`);
+  }
+  
+  // If correction detected during summary, go back to collecting to re-confirm
+  if (extraction.is_correction && state.step === "summary") {
+    console.log(`[STATE] Correction during summary - resetting to collecting for re-confirmation`);
+    state.step = "collecting";
   }
   
   // Check if ready for summary (all 4 fields required)
