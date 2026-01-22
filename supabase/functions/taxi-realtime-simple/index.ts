@@ -7283,16 +7283,41 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           }
           const base64Audio = btoa(binary);
 
-          openaiWs.send(JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: base64Audio
-          }));
+          // OpenAI can briefly be disconnected/reconnecting; never throw from the audio hot-path.
+          if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+            return;
+          }
+
+          try {
+            openaiWs.send(
+              JSON.stringify({
+                type: "input_audio_buffer.append",
+                audio: base64Audio,
+              })
+            );
+          } catch (e) {
+            console.error(`[${state.callId}] ❌ Failed to forward audio to OpenAI:`, e);
+            return;
+          }
         }
         return;
       }
 
       // Handle JSON messages
-      const message = JSON.parse(event.data);
+      if (typeof event.data !== "string") {
+        console.warn(`[${state?.callId || "unknown"}] ⚠️ Ignoring non-string WS message`);
+        return;
+      }
+
+      let message: any;
+      try {
+        message = JSON.parse(event.data);
+      } catch (e) {
+        console.warn(
+          `[${state?.callId || "unknown"}] ⚠️ Ignoring non-JSON WS message (${String(e)})`
+        );
+        return;
+      }
 
       // PRE-CONNECT: Connect to OpenAI while phone is ringing (before answer)
       if (message.type === "pre_connect") {
@@ -8120,29 +8145,45 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           }
           
           // Cancel any active response before injecting confirmation
-          if (state?.openAiResponseActive) {
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+            console.warn(`[${callId}] ⚠️ OpenAI WS not open during dispatch_confirm - cannot inject confirmation`);
+            return;
           }
-          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+
+          safeCancel(state as SessionState, "dispatch_confirm - preparing confirmation");
+          try {
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          } catch (e) {
+            console.error(`[${callId}] ❌ Failed to clear OpenAI audio buffer:`, e);
+          }
           
           // Inject the confirmation for Ada to speak
           // Script: "That's on the way" + "Is there anything else I can help you with?"
           const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
           
-          openaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.` }]
-            }
-          }));
-          
-          // Cancel any active response before creating new one (race condition fix)
-          if (state?.openAiResponseActive) {
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            if (state) state.openAiResponseActive = false;
+          try {
+            openaiWs.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.`,
+                    },
+                  ],
+                },
+              })
+            );
+          } catch (e) {
+            console.error(`[${callId}] ❌ Failed to inject dispatch confirmation message:`, e);
+            return;
           }
+
+          // Ensure we don't race-cancel a non-existent response
+          if (state) state.openAiResponseActive = false;
           // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
