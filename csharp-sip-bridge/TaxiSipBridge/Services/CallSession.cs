@@ -4,9 +4,13 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP;
+
+using SIPSorcery.SIP.App;
+using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge.Services;
 
@@ -15,7 +19,7 @@ public class CallSession : IDisposable
     private readonly string _callId;
     private readonly string _callerNumber;
     private readonly string _calledNumber;
-    private readonly string _webSocketUrl;
+    private readonly BridgeConfig _config;
     private readonly SIPTransport _sipTransport;
     private readonly SIPEndPoint _localEndPoint;
     private readonly SIPEndPoint _remoteEndPoint;
@@ -23,10 +27,11 @@ public class CallSession : IDisposable
     private readonly ILogger<CallSession> _logger;
 
     private ClientWebSocket? _webSocket;
-    private RTPSession? _rtpSession;
+    private SIPUserAgent? _sipUserAgent;
+    private VoIPMediaSession? _mediaSession;
     private CancellationTokenSource? _cts;
     private readonly ConcurrentQueue<byte[]> _audioQueue = new();
-    private readonly Audio.AudioDsp _audioDsp = new(); // DSP pipeline from Python bridge
+    private readonly AudioDsp _audioDsp = new(); // DSP pipeline from Python bridge
     private bool _isDisposed;
     private DateTime _startTime;
     private int _rtpPacketsSent;
@@ -38,7 +43,7 @@ public class CallSession : IDisposable
         string callId,
         string callerNumber,
         string calledNumber,
-        string webSocketUrl,
+        BridgeConfig config,
         SIPTransport sipTransport,
         SIPEndPoint localEndPoint,
         SIPEndPoint remoteEndPoint,
@@ -48,7 +53,7 @@ public class CallSession : IDisposable
         _callId = callId;
         _callerNumber = callerNumber;
         _calledNumber = calledNumber;
-        _webSocketUrl = webSocketUrl;
+        _config = config;
         _sipTransport = sipTransport;
         _localEndPoint = localEndPoint;
         _remoteEndPoint = remoteEndPoint;
@@ -63,50 +68,23 @@ public class CallSession : IDisposable
 
         try
         {
-            // Set up RTP session
-            _rtpSession = new RTPSession(false, false, false);
-            
-            var audioFormat = new SDPAudioVideoMediaFormat(
-                SDPWellKnownMediaFormatsEnum.PCMU); // G.711 μ-law
-            
-            _rtpSession.AcceptRtpFromAny = true;
-            
-            var track = new MediaStreamTrack(audioFormat);
-            _rtpSession.addTrack(track);
+            // Use VoIPMediaSession (matches Minimal/WinForms projects and SIPSorcery 6.x API surface)
+            _mediaSession = new VoIPMediaSession(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+            _mediaSession.AcceptRtpFromAny = true;
+            _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
-            _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
-            _rtpSession.OnTimeout += (mt) =>
-            {
-                _logger.LogWarning("RTP timeout on {MediaType}", mt);
-            };
+            _sipUserAgent = new SIPUserAgent(_sipTransport, null);
+            var uas = _sipUserAgent.AcceptCall(_inviteRequest);
+            bool answered = await _sipUserAgent.Answer(uas, _mediaSession);
 
-            // Parse SDP from INVITE
-            var sdpOffer = SDP.ParseSDPDescription(_inviteRequest.Body);
-            var setRemoteResult = _rtpSession.SetRemoteDescription(SdpType.offer, sdpOffer);
-            
-            if (setRemoteResult != SetDescriptionResultEnum.OK)
+            if (!answered)
             {
-                _logger.LogError("Failed to set remote SDP: {Result}", setRemoteResult);
-                await SendResponse(SIPResponseStatusCodesEnum.NotAcceptableHere);
+                _logger.LogError("Failed to answer call {CallId}", _callId);
+                await EndAsync();
                 return;
             }
 
-            // Create SDP answer
-            var sdpAnswer = _rtpSession.CreateAnswer(null);
-
-            // Send 200 OK with SDP
-            var okResponse = SIPResponse.GetResponse(
-                _inviteRequest,
-                SIPResponseStatusCodesEnum.Ok,
-                null);
-            okResponse.Header.ContentType = "application/sdp";
-            okResponse.Body = sdpAnswer.ToString();
-
-            await _sipTransport.SendResponseAsync(okResponse);
-            _logger.LogInformation("Sent 200 OK for call {CallId}", _callId);
-
-            // Start RTP
-            await _rtpSession.Start();
+            _logger.LogInformation("Call answered {CallId}", _callId);
 
             // Connect to AI WebSocket
             await ConnectWebSocketAsync();
@@ -127,7 +105,7 @@ public class CallSession : IDisposable
     {
         _webSocket = new ClientWebSocket();
         
-        var wsUrl = $"{_webSocketUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
+        var wsUrl = $"{_config.WebSocketUrl}?call_id={_callId}&source=sip&caller={_callerNumber}";
         _logger.LogInformation("Connecting to WebSocket: {Url}", wsUrl);
 
         await _webSocket.ConnectAsync(new Uri(wsUrl), _cts!.Token);
@@ -155,13 +133,13 @@ public class CallSession : IDisposable
             var payload = rtpPacket.Payload;
             
             // Convert μ-law to PCM16
-            var pcm16 = Audio.G711Codec.UlawToPcm16(payload);
+            var pcm16 = G711Codec.UlawToPcm16(payload);
             
             // Apply DSP pipeline (high-pass, noise gate, AGC) - from Python bridge
             var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16);
             
             // Resample 8kHz to 24kHz
-            var resampled = Audio.AudioResampler.Resample(processed, 8000, 24000);
+            var resampled = AudioResampler.Resample(processed, 8000, 24000);
             
             // BINARY PATH: Send raw PCM bytes directly (no base64 overhead)
             // This reduces CPU usage and bandwidth by ~33%
@@ -235,10 +213,10 @@ public class CallSession : IDisposable
                         var pcm24k = Convert.FromBase64String(audioData);
                         
                         // Resample 24kHz to 8kHz
-                        var pcm8k = Audio.AudioResampler.Resample(pcm24k, 24000, 8000);
+                        var pcm8k = AudioResampler.Resample(pcm24k, 24000, 8000);
                         
                         // Convert PCM16 to μ-law
-                        var ulaw = Audio.G711Codec.Pcm16ToUlaw(pcm8k);
+                        var ulaw = G711Codec.Pcm16ToUlaw(pcm8k);
                         
                         _audioQueue.Enqueue(ulaw);
                     }
@@ -340,11 +318,8 @@ public class CallSession : IDisposable
     {
         try
         {
-            // SIPSorcery uses SendMedia for RTP audio
-            _rtpSession?.SendMedia(
-                SDPMediaTypesEnum.audio,
-                (uint)(frame.Length * 8), // Timestamp increment (160 samples = 20ms)
-                frame);
+            // VoIPMediaSession handles RTP timing/packetization internally.
+            _mediaSession?.SendAudio((uint)frame.Length, frame);
             
             _rtpPacketsSent++;
         }
@@ -415,6 +390,9 @@ public class CallSession : IDisposable
 
         _cts?.Cancel();
 
+        // Hang up SIP dialog if still active.
+        try { _sipUserAgent?.Hangup(); } catch { }
+
         // Close WebSocket
         if (_webSocket?.State == WebSocketState.Open)
         {
@@ -428,8 +406,8 @@ public class CallSession : IDisposable
             catch { }
         }
 
-        // Close RTP session
-        _rtpSession?.Close("Call ended");
+        // Stop media session
+        try { _mediaSession?.Close("Call ended"); } catch { }
 
         OnCallEnded?.Invoke(this, EventArgs.Empty);
         Dispose();
@@ -442,6 +420,7 @@ public class CallSession : IDisposable
 
         _cts?.Dispose();
         _webSocket?.Dispose();
-        _rtpSession?.Dispose();
+        _mediaSession?.Dispose();
+        _sipUserAgent?.Hangup();
     }
 }
