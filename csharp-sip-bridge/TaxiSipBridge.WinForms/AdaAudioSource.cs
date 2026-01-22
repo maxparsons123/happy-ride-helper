@@ -79,7 +79,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 60)
     {
-        _audioEncoder = new AudioEncoder();
+        // Use OpusAudioEncoder which supports Opus 16kHz/48kHz + PCMU/PCMA fallback
+        _audioEncoder = new OpusAudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = jitterBufferMs;
