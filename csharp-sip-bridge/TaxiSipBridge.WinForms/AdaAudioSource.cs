@@ -150,6 +150,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
             var frame = new short[PCM24_FRAME_SAMPLES];
             Array.Copy(pcm24All, offset, frame, 0, len);
 
+            // IMPORTANT: avoid zero-padding discontinuities (click/crackle).
+            // If Ada chunk ends mid-frame, extend the last real sample.
+            if (len > 0 && len < PCM24_FRAME_SAMPLES)
+            {
+                short last = frame[len - 1];
+                for (int i = len; i < PCM24_FRAME_SAMPLES; i++)
+                {
+                    frame[i] = last;
+                }
+            }
+
             // Apply fade-in only on the first frame after a reset.
             if (_needsFadeIn && frame.Length > 0)
             {
@@ -296,14 +307,26 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     // Store last sample for smooth silence transitions
                     if (audioFrame.Length > 0)
                         _lastOutputSample = audioFrame[^1];
+
+                    // Keep last frame to smoothly bridge brief queue gaps.
+                    _lastAudioFrame = audioFrame;
                 }
                 else
                 {
                     _consecutiveUnderruns++;
 
-                    // On underrun, send silence (fade out from last sample)
-                    SendSilence();
-                    return;
+                    // For brief underruns, fade the last frame instead of dropping to silence.
+                    // This avoids discontinuities that present as crackling.
+                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
+                    {
+                        audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
+                        _interpolatedFrames++;
+                    }
+                    else
+                    {
+                        SendSilence();
+                        return;
+                    }
                 }
             }
 
