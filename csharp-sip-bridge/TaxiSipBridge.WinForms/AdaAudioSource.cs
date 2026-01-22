@@ -266,29 +266,27 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
                     
-                    // Apply brightness boost before resampling (counteract telephony muffling)
-                    var boostedPcm = ApplyBrightnessBoost(pcm24);
-                    
                     // Select resampling method based on target rate and audio mode
                     if (_audioMode == AudioMode.SimpleResample)
                     {
                         // Simple linear interpolation only
-                        audioFrame = SimpleResample(boostedPcm, 24000, targetRate);
+                        audioFrame = SimpleResample(pcm24, 24000, targetRate);
                     }
                     else if (targetRate == 48000)
                     {
-                        // Opus @ 48kHz - upsample 24kHz → 48kHz (2:1, high quality)
-                        audioFrame = Upsample24kTo48k(boostedPcm);
+                        // Opus @ 48kHz - use high-quality NAudio resampler (no brightness boost needed)
+                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
                     else if (targetRate == 8000)
                     {
-                        // G.711 @ 8kHz - downsample with de-emphasis for natural telephony sound
+                        // G.711 @ 8kHz - apply brightness boost + de-emphasis for telephony
+                        var boostedPcm = ApplyBrightnessBoost(pcm24);
                         audioFrame = AudioCodecs.ResampleWithDeEmphasis(boostedPcm, 24000, targetRate);
                     }
                     else
                     {
                         // Use AudioCodecs high-quality resampler for other rates
-                        audioFrame = AudioCodecs.Resample(boostedPcm, 24000, targetRate);
+                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP

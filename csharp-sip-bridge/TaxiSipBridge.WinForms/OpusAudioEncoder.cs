@@ -46,11 +46,31 @@ namespace TaxiSipBridge
             lock (_encoderLock)
             {
                 // Use constructor instead of .Create() to avoid FileSystemAclExtensions conflict
-                _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
-                _opusEncoder.Bitrate = OPUS_BITRATE;
+                if (_opusEncoder == null)
+                {
+                    _opusEncoder = new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+                    _opusEncoder.Bitrate = OPUS_BITRATE;
+                    _opusEncoder.Complexity = 5; // Balance between quality and CPU (0-10)
+                    _opusEncoder.UseVBR = true;  // Variable bitrate for better quality
+                }
 
-                short[] frame = pcm.Length == OPUS_FRAME_SIZE ? pcm : new short[OPUS_FRAME_SIZE];
-                if (pcm.Length != OPUS_FRAME_SIZE) Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
+                // Ensure we have exactly 960 samples for 20ms frame
+                short[] frame;
+                if (pcm.Length == OPUS_FRAME_SIZE)
+                {
+                    frame = pcm;
+                }
+                else if (pcm.Length > OPUS_FRAME_SIZE)
+                {
+                    frame = new short[OPUS_FRAME_SIZE];
+                    Array.Copy(pcm, frame, OPUS_FRAME_SIZE);
+                }
+                else
+                {
+                    // Pad with zeros if too short
+                    frame = new short[OPUS_FRAME_SIZE];
+                    Array.Copy(pcm, frame, pcm.Length);
+                }
 
                 byte[] outBuf = new byte[1275];
                 int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
