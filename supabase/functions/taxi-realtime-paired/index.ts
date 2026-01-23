@@ -1490,6 +1490,24 @@ interface AddressCorrection {
 function detectAddressCorrection(text: string, currentPickup: string | null, currentDestination: string | null): AddressCorrection {
   const lower = text.toLowerCase();
   
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EARLY EXIT: Reject time-related phrases that are NOT address corrections
+  // "Pick up timings now", "pickup time now", "now please", etc.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const timeRelatedPatterns = [
+    /\b(?:pick[- ]?up|pickup)\s+(?:time|timings?)\b/i,  // "pickup time", "pick up timings"
+    /^(?:now|asap|immediately|right now|straight away)\s*(?:please)?$/i,  // Just "now", "asap"
+    /\b(?:time|timing|when|at|for)\s+(?:is\s+)?(?:now|asap|immediately)\b/i,  // "time is now"
+    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:now|asap|immediately)/i,  // "pickup is now", "pick up now" 
+    /\bnow\s*(?:please|thanks?)?\s*[.!]?$/i,  // Ends with "now" 
+  ];
+  
+  for (const pattern of timeRelatedPatterns) {
+    if (pattern.test(lower)) {
+      return { type: null, address: "" };
+    }
+  }
+  
   // Correction trigger phrases - comprehensive patterns for address changes
   const correctionPhrases = [
     /^it'?s\s+(.+)/i,                                   // "It's 52A David Road"
@@ -1512,25 +1530,28 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
     /^change\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\s+(.+)/i,  // "Change the pickup to..."
     /^change\s+(?:the\s+)?(?:destination|dropoff)\s+to\s+(.+)/i, // "Change destination to..."
     /^not\s+(.+)[,\s]+(?:it'?s|but)\s+(.+)/i,          // "Not 52A, it's 52B"
-    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(.+)/i,  // "Pickup is at Sweet Spot" (without "no")
+    // REMOVED: Overly aggressive "pick up X" patterns that catch time phrases
+    // Only match "pickup at [location]" or "pickup from [location]" with explicit location words
+    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?at\s+(.+)/i,  // "Pickup is at Sweet Spot" (requires "at")
     /^from\s+(.+)/i,                                    // "From Sweet Spot" (if context suggests correction)
-    // === NEW PATTERNS: Mid-sentence "pick up [at/the] X" ===
-    /(?:but\s+)?(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,  // "but pick up the Sweet Spot please"
-    /(?:but\s+)?(?:pick[- ]?up|pickup)\s+from\s+(?:the\s+)?(.+?)(?:\s+please)?$/i,     // "but pick up from Sweet Spot"
-    /(?:can\s+(?:you|i)\s+)?(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,  // "can you pick up the Sweet Spot"
+    // === Mid-sentence corrections with explicit "change" or "but" ===
+    /(?:but\s+)?change\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\s+(.+?)(?:\s+please)?$/i,  // "but change pickup to Sweet Spot"
     /(?:change|make)\s+(?:it\s+)?(?:to\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,          // "make it the Sweet Spot please"
-    // === NEW PATTERNS: "no [something], but [actual change]" ===
+    // === "no [something], but [actual change]" ===
     /^no\s+[\w\s]+[,\s]+but\s+(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i, // "No key change, but pick up the Sweet Spot please"
-    /^no\s+[\w\s]+[,\s]+(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i, // "No key change, pickup is the Sweet Spot"
   ];
   
   let extractedAddress: string | null = null;
   let explicitFieldType: "pickup" | "destination" | null = null;
   
   // Check for explicit field mentions in the correction phrase BEFORE extracting
-  if (/\b(?:pick[- ]?up|pickup|from)\b/i.test(lower)) {
+  // BUT exclude time-related contexts like "pickup time"
+  if (/\b(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at|from)\b/i.test(lower)) {
+    // Only set pickup if there's a location indicator (at/from)
     explicitFieldType = "pickup";
-  } else if (/\b(?:destination|dropoff|drop off|to|going to)\b/i.test(lower)) {
+  } else if (/\bchange\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\b/i.test(lower)) {
+    explicitFieldType = "pickup";
+  } else if (/\b(?:destination|dropoff|drop off|going to)\b/i.test(lower)) {
     explicitFieldType = "destination";
   }
   
