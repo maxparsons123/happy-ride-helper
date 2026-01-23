@@ -649,12 +649,25 @@ serve(async (req) => {
   };
 
   // Handle incoming audio data with VAD
+  let audioFrameCount = 0;
+  let lastAudioLog = 0;
+  
   const handleAudioData = (base64Audio: string) => {
     try {
       const binaryString = atob(base64Audio);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      audioFrameCount++;
+      
+      // Log audio reception periodically (every 50 frames = ~1s at 20ms/frame)
+      const now = Date.now();
+      if (now - lastAudioLog > 2000) {
+        const energy = calculateEnergy(bytes);
+        console.log(`[${callId}] 🎤 Audio frames: ${audioFrameCount}, buffer: ${audioBuffer.length} chunks, energy: ${energy.toFixed(4)}`);
+        lastAudioLog = now;
       }
       
       // Calculate energy for VAD
@@ -696,6 +709,7 @@ serve(async (req) => {
       
       // Start silence timer - process after configured silence duration
       silenceTimer = setTimeout(() => {
+        console.log(`[${callId}] 🔇 Silence detected, buffer has ${audioBuffer.length} chunks`);
         processAudioPipeline();
       }, vadConfig.silence_duration_ms);
       
