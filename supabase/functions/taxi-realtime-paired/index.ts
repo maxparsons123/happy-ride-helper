@@ -1002,6 +1002,53 @@ const PHANTOM_PHRASES = [
   "previous video",
   "watch more",
   "watch next",
+  // 2026-01 Observed Whisper hallucinations from 8kHz telephony audio
+  "how did you like",
+  "did you like",
+  "kind attitude towards the passengers",
+  "attitude towards the passengers",
+  "thank you for your kind attitude",
+  "thank you four watching",
+  "thank you for watching and for your kind",
+  "your kind attitude",
+  "towards the passengers",
+  "thank you for your patience",
+  "thank you for your support",
+  "thank you for your time",
+  "we appreciate your",
+  "appreciate your patience",
+  "appreciate your time",
+  "have a nice day",
+  "have a great day",
+  "have a good one",
+  "take care of yourself",
+  "stay safe",
+  "stay tuned",
+  "coming right up",
+  "stand by",
+  "please hold",
+  "one moment please while i transfer",
+  "your call is important to us",
+  "please wait while",
+  "please continue to hold",
+  "thank you for holding",
+  "thank you for waiting",
+  "a representative will be with you",
+  "an agent will be with you",
+  "all our agents are busy",
+  "unusually high call volume",
+  "estimated wait time",
+  "press 1 for",
+  "press 2 for",
+  "press 0 for",
+  "to speak with a representative",
+  "to speak with an agent",
+  "for more options",
+  "main menu",
+  "goodbye and thank you",
+  "thank you and goodbye",
+  "call again",
+  "call back",
 ];
 
 // --- STT Corrections ---
@@ -1420,6 +1467,39 @@ function isPhantomHallucination(text: string): boolean {
     if (pattern.test(lower)) return true;
   }
   
+  // ═══════════════════════════════════════════════════════════════════
+  // CONVERSATIONAL HALLUCINATION DETECTION
+  // Whisper often generates polite conversational phrases on noise
+  // that are unlikely to be real taxi booking input.
+  // ═══════════════════════════════════════════════════════════════════
+  const conversationalPatterns = [
+    /^how did you (like|find|enjoy)/i,
+    /thank you (for|four) (your|you're) (kind|patience|support|time)/i,
+    /kind attitude towards/i,
+    /towards the passengers/i,
+    /attitude towards/i,
+    /thank you (for|four) (watching|listening|tuning)/i,
+    /appreciate (your|you)/i,
+    /have a (nice|great|good|wonderful) (day|evening|night|one)/i,
+    /take care of yourself/i,
+    /stay (safe|tuned|with us)/i,
+    /your call is important/i,
+    /please (hold|wait|continue)/i,
+    /estimated wait time/i,
+    /press \d+ (for|to)/i,
+    /all (our|agents|representatives) are/i,
+    /unusually high/i,
+    /goodbye and thank/i,
+    /thank you and goodbye/i,
+    /a representative will/i,
+    /an agent will/i,
+  ];
+  for (const pattern of conversationalPatterns) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
+  
   // Gibberish detection: excessive punctuation or odd patterns
   const punctCount = (text.match(/[.!?,:;]/g) || []).length;
   if (punctCount > 5 && text.length < 30) return true;
@@ -1431,6 +1511,21 @@ function isPhantomHallucination(text: string): boolean {
     if (!validAllCaps.includes(text.trim())) {
       return true;
     }
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // LONG UNRELATED SENTENCE DETECTION
+  // Real taxi booking inputs are typically short (1-10 words).
+  // Long conversational sentences (15+ words) without address keywords
+  // are likely hallucinations.
+  // ═══════════════════════════════════════════════════════════════════
+  const wordCount = lower.split(/\s+/).filter(w => w.length > 0).length;
+  const hasAddressKeyword = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|station|airport|hotel|hospital|centre|center|mall|square|park)\b/i.test(lower);
+  const hasNumber = /\b\d+[a-z]?\b/i.test(lower);
+  const hasBookingWord = /\b(pickup|destination|passenger|taxi|cab|now|asap|today|tomorrow|morning|afternoon|evening)\b/i.test(lower);
+  
+  if (wordCount >= 12 && !hasAddressKeyword && !hasNumber && !hasBookingWord) {
+    return true;
   }
   
   return false;
