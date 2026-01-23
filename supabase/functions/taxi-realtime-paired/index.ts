@@ -739,6 +739,8 @@ interface SessionState {
   callId: string;
   callerPhone: string;
   language: string; // ISO 639-1 code or "auto" for auto-detect
+  // Latest user utterance (best-effort) used to validate tool calls and prevent hallucinated overwrites.
+  lastUserText: string | null;
   booking: {
     pickup: string | null;
     destination: string | null;
@@ -1758,6 +1760,40 @@ function isValidAddress(addr: string): boolean {
   return hasKeyword || hasHouseNumber;
 }
 
+function tokenizeForMatch(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+function matchesUserText(proposed: string, userText: string, minRatio = 0.7): boolean {
+  const p = proposed.toLowerCase().trim();
+  const u = userText.toLowerCase();
+
+  // Fast path: exact substring match (covers "sweetspot" and most addresses).
+  if (p.length >= 3 && u.includes(p)) return true;
+
+  const proposedTokens = Array.from(new Set(tokenizeForMatch(proposed)));
+  if (proposedTokens.length === 0) return false;
+
+  const userTokens = new Set(tokenizeForMatch(userText));
+  let hit = 0;
+  for (const t of proposedTokens) {
+    if (userTokens.has(t)) hit++;
+  }
+  const ratio = hit / proposedTokens.length;
+  return ratio >= minRatio;
+}
+
+function shouldAcceptToolTextUpdate(proposed: string, lastUserText: string | null): boolean {
+  if (!proposed) return false;
+  if (!lastUserText) return true;
+  return matchesUserText(proposed, lastUserText);
+}
+
 
 function computeRms(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
@@ -1796,6 +1832,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     callId,
     callerPhone,
     language,
+    lastUserText: null,
     booking: {
       pickup: null,
       destination: null,
@@ -3425,6 +3462,9 @@ Otherwise, say goodbye warmly and call end_call().`
               content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
               timestamp: Date.now()
             });
+
+            // Save for tool-call validation (prevents hallucinated overwrites)
+            sessionState.lastUserText = userText;
             
             if (USE_AI_EXTRACTION) {
               console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
@@ -3437,7 +3477,7 @@ Otherwise, say goodbye warmly and call end_call().`
                   callId
                 );
                 
-                if (aiResult && aiResult.confidence !== "low") {
+                if (aiResult) {
                   // ═══════════════════════════════════════════════════════════════
                   // AI DETECTED A CORRECTION - Handle with full context
                   // ═══════════════════════════════════════════════════════════════
@@ -3448,12 +3488,12 @@ Otherwise, say goodbye warmly and call end_call().`
                     const changes: string[] = [];
                     
                     // Apply the AI's corrected values
-                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup) {
+                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup && matchesUserText(aiResult.pickup, userText)) {
                       const oldValue = sessionState.booking.pickup;
                       sessionState.booking.pickup = aiResult.pickup;
                       changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
                     }
-                    if (aiResult.fields_changed.includes("destination") && aiResult.destination) {
+                    if (aiResult.fields_changed.includes("destination") && aiResult.destination && matchesUserText(aiResult.destination, userText)) {
                       const oldValue = sessionState.booking.destination;
                       sessionState.booking.destination = aiResult.destination;
                       changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
@@ -3463,11 +3503,17 @@ Otherwise, say goodbye warmly and call end_call().`
                       sessionState.booking.passengers = aiResult.passengers;
                       changes.push(`passengers from ${oldValue ?? 'empty'} to ${aiResult.passengers}`);
                     }
-                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time) {
+                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time && matchesUserText(aiResult.pickup_time, userText, 0.5)) {
                       const oldValue = sessionState.booking.pickupTime;
                       sessionState.booking.pickupTime = aiResult.pickup_time;
                       changes.push(`time from "${oldValue || 'empty'}" to "${aiResult.pickup_time}"`);
                     }
+
+                    // If we failed to apply any change (likely mismatch/hallucination), do NOT inject correction.
+                    if (changes.length === 0) {
+                      console.log(`[${callId}] ⚠️ AI correction rejected (no changes applied after validation). user="${userText}"`);
+                      // Continue normal flow.
+                    } else {
                     
                     // Reset fare if we had one (correction invalidates it)
                     if (sessionState.pendingFare) {
@@ -3515,11 +3561,12 @@ INSTRUCTIONS:
                         }]
                       }
                     }));
-                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                    sessionState.openAiResponseActive = true;
-                    
-                    await updateLiveCall(sessionState);
-                    break; // AI correction handled
+                      openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                      sessionState.openAiResponseActive = true;
+                      
+                      await updateLiveCall(sessionState);
+                      break; // AI correction handled
+                    }
                   }
                   
                   // ═══════════════════════════════════════════════════════════════
@@ -3536,7 +3583,8 @@ INSTRUCTIONS:
                   let updated = false;
                   
                   // Only update if AI found new values (not corrections, which are handled above)
-                  if (!aiResult.is_correction) {
+                  // and the model is reasonably confident.
+                  if (!aiResult.is_correction && aiResult.confidence !== "low") {
                     if (aiResult.pickup && !sessionState.booking.pickup) {
                       console.log(`[${callId}] 🧠 AI FILL pickup: "${aiResult.pickup}"`);
                       sessionState.booking.pickup = aiResult.pickup;
@@ -3638,10 +3686,45 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           
           if (toolName === "sync_booking_data") {
             // Update booking state from tool call
-            if (toolArgs.pickup) sessionState.booking.pickup = String(toolArgs.pickup);
-            if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
-            if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
-            if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
+              const lastUser = sessionState.lastUserText;
+
+              if (toolArgs.pickup) {
+                const proposed = String(toolArgs.pickup);
+                if (shouldAcceptToolTextUpdate(proposed, lastUser)) {
+                  sessionState.booking.pickup = proposed;
+                } else {
+                  console.log(`[${callId}] 🛡️ Ignored tool pickup update (mismatch): proposed="${proposed}" user="${lastUser}"`);
+                }
+              }
+
+              if (toolArgs.destination) {
+                const proposed = String(toolArgs.destination);
+                if (shouldAcceptToolTextUpdate(proposed, lastUser)) {
+                  sessionState.booking.destination = proposed;
+                } else {
+                  console.log(`[${callId}] 🛡️ Ignored tool destination update (mismatch): proposed="${proposed}" user="${lastUser}"`);
+                }
+              }
+
+              if (toolArgs.passengers !== undefined) {
+                const proposed = Number(toolArgs.passengers);
+                // Only accept passenger updates if user likely said a number.
+                const userSaidNumber = !!lastUser && /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\b/i.test(lastUser);
+                if (!lastUser || userSaidNumber) {
+                  sessionState.booking.passengers = proposed;
+                } else {
+                  console.log(`[${callId}] 🛡️ Ignored tool passengers update (user didn't say a number): proposed=${proposed} user="${lastUser}"`);
+                }
+              }
+
+              if (toolArgs.pickup_time) {
+                const proposed = String(toolArgs.pickup_time);
+                if (shouldAcceptToolTextUpdate(proposed, lastUser) || /\b(asap|now)\b/i.test(lastUser || "")) {
+                  sessionState.booking.pickupTime = proposed;
+                } else {
+                  console.log(`[${callId}] 🛡️ Ignored tool time update (mismatch): proposed="${proposed}" user="${lastUser}"`);
+                }
+              }
             if (toolArgs.nearest_pickup) sessionState.booking.nearestPickup = String(toolArgs.nearest_pickup);
             if (toolArgs.nearest_dropoff) sessionState.booking.nearestDropoff = String(toolArgs.nearest_dropoff);
             if (toolArgs.last_question_asked) {
