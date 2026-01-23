@@ -1577,13 +1577,16 @@ interface SessionState {
   callerLastPickup: string | null;
   callerLastDestination: string | null;
 
-  // Inbound audio format from bridge: "ulaw" (8kHz), "slin" (8kHz), or "slin16" (16kHz)
-  inboundAudioFormat: "ulaw" | "slin" | "slin16";
-  inboundSampleRate: number; // 8000 or 16000
+  // Inbound audio format from bridge: "ulaw" (8kHz), "slin" (8kHz), "slin16" (16kHz), or "pcm48" (48kHz from Opus decode)
+  inboundAudioFormat: "ulaw" | "slin" | "slin16" | "pcm48";
+  inboundSampleRate: number; // 8000, 16000, or 48000
 
   // Rasa-style audio processing toggle
   useRasaAudioProcessing: boolean;
   callerTotalBookings: number;
+  
+  // 48kHz audio logging flag (to avoid spamming logs)
+  _logged48k?: boolean;
 
 
   // Streaming assistant transcript assembly (OpenAI sends token deltas)
@@ -7537,8 +7540,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         // Also update settings from init message if pre-connected
         if (state && preConnected) {
-          state.inboundAudioFormat = (message.inbound_format as "ulaw" | "slin" | "slin16") ?? state.inboundAudioFormat;
-          state.inboundSampleRate = message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000);
+          state.inboundAudioFormat = (message.inbound_format as "ulaw" | "slin" | "slin16" | "pcm48") ?? state.inboundAudioFormat;
+          // Derive sample rate from format if not explicitly provided
+          const formatToRate: Record<string, number> = { "pcm48": 48000, "slin16": 16000, "slin": 8000, "ulaw": 8000 };
+          state.inboundSampleRate = message.inbound_sample_rate || formatToRate[message.inbound_format || "ulaw"] || 8000;
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
           state.halfDuplex = message.half_duplex ?? false;
           state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
@@ -8411,10 +8416,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         return;
       }
 
-      // Handle audio format update from bridge (ulaw, slin, slin16)
+      // Handle audio format update from bridge (ulaw, slin, slin16, pcm48)
       if (message.type === "update_format" && state) {
-        const newFormat = message.inbound_format as "ulaw" | "slin" | "slin16";
-        const newRate = message.inbound_sample_rate || (newFormat === "slin16" ? 16000 : 8000);
+        const newFormat = message.inbound_format as "ulaw" | "slin" | "slin16" | "pcm48";
+        const formatToRate: Record<string, number> = { "pcm48": 48000, "slin16": 16000, "slin": 8000, "ulaw": 8000 };
+        const newRate = message.inbound_sample_rate || formatToRate[newFormat] || 8000;
         
         if (newFormat && newFormat !== state.inboundAudioFormat) {
           console.log(`[${state.callId}] 🔊 Audio format update: ${state.inboundAudioFormat}@${state.inboundSampleRate}Hz → ${newFormat}@${newRate}Hz`);
@@ -8431,48 +8437,119 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           return;
         }
         
-        // Bridge sends base64-encoded 8kHz µ-law audio via JSON
+        // Bridge sends base64-encoded audio via JSON
         const binaryStr = atob(message.audio);
         const audioData = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
           audioData[i] = binaryStr.charCodeAt(i);
         }
         
-        // Step 1: Decode µ-law to 16-bit PCM (8kHz)
-        const pcm16_8k = new Int16Array(audioData.length);
-        for (let i = 0; i < audioData.length; i++) {
-          const ulaw = ~audioData[i] & 0xFF;
-          const sign = (ulaw & 0x80) ? -1 : 1;
-          const exponent = (ulaw >> 4) & 0x07;
-          const mantissa = ulaw & 0x0F;
-          let sample = ((mantissa << 3) + 0x84) << exponent;
-          sample -= 0x84;
-          pcm16_8k[i] = sign * sample;
+        // === MULTI-FORMAT AUDIO DECODER ===
+        // Convert incoming audio to 24kHz PCM16 (required by OpenAI Realtime API)
+        let pcm16_24k: Int16Array;
+        const format = state.inboundAudioFormat;
+        const sampleRate = state.inboundSampleRate;
+        
+        if (format === "pcm48" || sampleRate === 48000) {
+          // === 48kHz PCM (from Opus decode) → 24kHz (2:1 downsample) ===
+          // This is the HIGHEST QUALITY path - Opus provides 48kHz wideband audio
+          // Simple 2:1 decimation with averaging for anti-aliasing
+          const pcm16_48k = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
+          const outputLen = Math.floor(pcm16_48k.length / 2);
+          pcm16_24k = new Int16Array(outputLen);
+          for (let i = 0; i < outputLen; i++) {
+            // Average two samples for basic anti-aliasing
+            const s0 = pcm16_48k[i * 2];
+            const s1 = pcm16_48k[i * 2 + 1] ?? s0;
+            pcm16_24k[i] = Math.round((s0 + s1) / 2);
+          }
+          // Log first time we receive 48kHz audio
+          if (!state._logged48k) {
+            console.log(`[${state.callId}] 🎵 Processing 48kHz PCM (Opus decode) → 24kHz (${pcm16_48k.length} → ${pcm16_24k.length} samples)`);
+            state._logged48k = true;
+          }
+        } else if (format === "slin16" || sampleRate === 16000) {
+          // === 16kHz PCM → 24kHz (1.5x upsample) ===
+          // Decent quality - 16kHz captures most speech frequencies
+          const pcm16_16k = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
+          const outputLen = Math.floor(pcm16_16k.length * 1.5);
+          pcm16_24k = new Int16Array(outputLen);
+          for (let i = 0; i < pcm16_16k.length - 1; i++) {
+            const s0 = pcm16_16k[i];
+            const s1 = pcm16_16k[i + 1];
+            const outIdx = Math.floor(i * 1.5);
+            pcm16_24k[outIdx] = s0;
+            if (outIdx + 1 < outputLen) {
+              pcm16_24k[outIdx + 1] = Math.round(s0 + (s1 - s0) * 0.5);
+            }
+          }
+          // Handle last sample
+          const lastIdx = pcm16_16k.length - 1;
+          const lastOutIdx = Math.floor(lastIdx * 1.5);
+          if (lastOutIdx < outputLen) pcm16_24k[lastOutIdx] = pcm16_16k[lastIdx];
+        } else if (format === "slin" || (format !== "ulaw" && sampleRate === 8000)) {
+          // === 8kHz signed linear PCM → 24kHz (3x upsample) ===
+          const pcm16_8k = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
+          pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_24k[i * 3] = s0;
+            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          }
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
+        } else {
+          // === Default: µ-law 8kHz → decode → 24kHz (3x upsample) ===
+          // Step 1: Decode µ-law to 16-bit PCM (8kHz)
+          const pcm16_8k = new Int16Array(audioData.length);
+          for (let i = 0; i < audioData.length; i++) {
+            const ulaw = ~audioData[i] & 0xFF;
+            const sign = (ulaw & 0x80) ? -1 : 1;
+            const exponent = (ulaw >> 4) & 0x07;
+            const mantissa = ulaw & 0x0F;
+            let sample = ((mantissa << 3) + 0x84) << exponent;
+            sample -= 0x84;
+            pcm16_8k[i] = sign * sample;
+          }
+          // Step 2: 3x upsample to 24kHz
+          pcm16_24k = new Int16Array(pcm16_8k.length * 3);
+          for (let i = 0; i < pcm16_8k.length - 1; i++) {
+            const s0 = pcm16_8k[i];
+            const s1 = pcm16_8k[i + 1];
+            pcm16_24k[i * 3] = s0;
+            pcm16_24k[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
+            pcm16_24k[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+          }
+          const lastIdx = pcm16_8k.length - 1;
+          pcm16_24k[lastIdx * 3] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 1] = pcm16_8k[lastIdx];
+          pcm16_24k[lastIdx * 3 + 2] = pcm16_8k[lastIdx];
         }
 
         // BARGE-IN: If Ada is currently speaking and we detect real user energy,
         // cancel the current AI response immediately so Ada can hear the caller.
-        // IMPORTANT: We must NEVER drop audio - only decide whether to trigger barge-in.
         if (state.isAdaSpeaking && state.openAiResponseActive) {
-          // Skip barge-in check during initial echo guard, but DON'T drop audio
           const inEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
           
           if (!inEchoGuard) {
             let sumSq = 0;
-            for (let i = 0; i < pcm16_8k.length; i++) {
-              const s = pcm16_8k[i];
+            for (let i = 0; i < pcm16_24k.length; i++) {
+              const s = pcm16_24k[i];
               sumSq += s * s;
             }
-            const rms = Math.sqrt(sumSq / Math.max(1, pcm16_8k.length));
+            const rms = Math.sqrt(sumSq / Math.max(1, pcm16_24k.length));
 
-            // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <650)
+            // Real barge-in: moderate RMS (adjust thresholds for 24kHz signal)
             const isRealBargeIn = rms >= 650 && rms < 20000;
 
             if (isRealBargeIn) {
               console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
               try {
                 openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                // Use safeCancel logic to avoid response_cancel_not_active errors
                 if (state.openAiResponseActive) {
                   openaiWs.send(JSON.stringify({ type: "response.cancel" }));
                   state.openAiResponseActive = false;
@@ -8486,37 +8563,20 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               state.echoGuardUntil = Date.now() + 200;
               socket.send(JSON.stringify({ type: "ai_interrupted" }));
             }
-            // If not real barge-in, we just skip cancellation but STILL forward audio below
           }
         }
         
-        // Step 2: Upsample 8kHz -> 24kHz (3x linear interpolation)
-        // OpenAI Realtime API requires 24kHz PCM16
-        const pcm16_24k_json = new Int16Array(pcm16_8k.length * 3);
-        for (let i = 0; i < pcm16_8k.length - 1; i++) {
-          const s0 = pcm16_8k[i];
-          const s1 = pcm16_8k[i + 1];
-          pcm16_24k_json[i * 3] = s0;
-          pcm16_24k_json[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
-          pcm16_24k_json[i * 3 + 2] = Math.round(s0 + (s1 - s0) * 2 / 3);
+        // Convert to base64 and send to OpenAI
+        const bytes = new Uint8Array(pcm16_24k.buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
         }
-        // Handle last sample
-        const lastIdxJson = pcm16_8k.length - 1;
-        pcm16_24k_json[lastIdxJson * 3] = pcm16_8k[lastIdxJson];
-        pcm16_24k_json[lastIdxJson * 3 + 1] = pcm16_8k[lastIdxJson];
-        pcm16_24k_json[lastIdxJson * 3 + 2] = pcm16_8k[lastIdxJson];
-        
-        // Step 3: Convert to base64
-        const bytesJson = new Uint8Array(pcm16_24k_json.buffer);
-        let binaryJson = "";
-        for (let i = 0; i < bytesJson.length; i++) {
-          binaryJson += String.fromCharCode(bytesJson[i]);
-        }
-        const base64AudioJson = btoa(binaryJson);
+        const base64Audio = btoa(binary);
         
         openaiWs.send(JSON.stringify({
           type: "input_audio_buffer.append",
-          audio: base64AudioJson
+          audio: base64Audio
         }));
       }
 
