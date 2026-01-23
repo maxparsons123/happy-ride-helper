@@ -312,8 +312,11 @@ export default function DualBrainTest() {
                 <CardHeader className="pb-3">
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Brain className="h-4 w-4" />
-                    Brain 1: Last Extraction
+                    Brain 1: New Data This Turn
                   </CardTitle>
+                  <CardDescription className="text-xs">
+                    Only shows newly extracted info (nulls = not mentioned)
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <pre className="text-xs bg-muted p-3 rounded-lg overflow-auto">
