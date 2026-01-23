@@ -1341,6 +1341,50 @@ function isPhantomHallucination(text: string): boolean {
     }
   }
   
+  // ════════════════════════════════════════════════════════════════════════════
+  // LONG GIBBERISH DETECTION: Whisper hallucinates long nonsense during noise/echo
+  // Real taxi booking responses are typically short (< 80 chars)
+  // ════════════════════════════════════════════════════════════════════════════
+  if (text.length > 100) {
+    // Long text but NOT a clear address (addresses have numbers + street suffixes)
+    const hasAddressPattern = /\d+[a-z]?\s+\w+\s+(street|road|lane|avenue|drive|close|way|place|court|crescent)/i.test(text);
+    if (!hasAddressPattern) {
+      // Check for taxi-booking relevant words
+      const relevantWords = ["taxi", "cab", "pickup", "destination", "passenger", "time", "now", "asap", "street", "road", "airport", "station", "hotel"];
+      const wordCount = text.split(/\s+/).length;
+      const relevantCount = relevantWords.filter(w => lower.includes(w)).length;
+      
+      // If long text with low relevance ratio, it's likely gibberish
+      if (relevantCount < 2 && wordCount > 15) {
+        return true;
+      }
+    }
+  }
+  
+  // Detect specific gibberish patterns from Whisper hallucinations
+  // These are fragments commonly hallucinated from background noise
+  const gibberishPatterns = [
+    /complain hands/i,
+    /in your mouth/i,
+    /shooting tonight/i,
+    /on the needles/i,
+    /providing do you need/i,
+    /the ball four/i,
+    /other people's you know/i,
+    /that's where i'm hearing/i,
+    /there's a ten fought/i,
+    /inside four an application/i,
+    /Thank you for watching/i,
+    /Please subscribe/i,
+    /Like and subscribe/i,
+    /Comment below/i,
+    /Don't forget to/i,
+  ];
+  
+  for (const pattern of gibberishPatterns) {
+    if (pattern.test(text)) return true;
+  }
+  
   return false;
 }
 
@@ -4193,6 +4237,139 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
           if (typeof data.inbound_sample_rate === "number") {
             inboundSampleRate = data.inbound_sample_rate;
+          }
+          
+          // ═══════════════════════════════════════════════════════════════════
+          // SESSION RESTORATION: If bridge sends resume=true, restore state
+          // from live_calls table instead of starting fresh greeting
+          // ═══════════════════════════════════════════════════════════════════
+          const isResume = data.resume === true || data.reconnect === true;
+          const resumeCallId = data.resume_call_id || null;
+          
+          console.log(`[${callId}] 📋 Init flags: resume=${isResume}, resume_call_id=${resumeCallId}`);
+          
+          if (isResume) {
+            // Try to restore session from database
+            const lookupId = resumeCallId || callId;
+            const lookupPhone = data.phone || callerPhone;
+            
+            console.log(`[${callId}] 🔄 RESUME: Looking up session ${lookupId} or phone ${lookupPhone}`);
+            
+            try {
+              // First try by call_id
+              let restoredSession = null;
+              
+              if (lookupId) {
+                const { data: callData } = await supabase
+                  .from("live_calls")
+                  .select("*")
+                  .eq("call_id", lookupId)
+                  .maybeSingle();
+                
+                if (callData && !callData.ended_at) {
+                  restoredSession = callData;
+                  console.log(`[${callId}] ✅ Found session by call_id: ${lookupId}`);
+                }
+              }
+              
+              // Fallback: lookup by phone number (most recent active call in last 10 minutes)
+              if (!restoredSession && lookupPhone && lookupPhone !== "unknown") {
+                const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+                const { data: phoneData } = await supabase
+                  .from("live_calls")
+                  .select("*")
+                  .eq("caller_phone", lookupPhone)
+                  .in("status", ["active", "awaiting_confirmation", "confirmed"])
+                  .gt("updated_at", tenMinutesAgo)
+                  .order("updated_at", { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+                
+                if (phoneData && !phoneData.ended_at) {
+                  restoredSession = phoneData;
+                  console.log(`[${callId}] ✅ Found session by phone fallback: ${phoneData.call_id}`);
+                }
+              }
+              
+              if (restoredSession) {
+                // Restore booking state
+                sessionState.booking.pickup = restoredSession.pickup || null;
+                sessionState.booking.destination = restoredSession.destination || null;
+                sessionState.booking.passengers = restoredSession.passengers || null;
+                sessionState.bookingConfirmed = restoredSession.booking_confirmed || false;
+                sessionState.awaitingConfirmation = restoredSession.status === "awaiting_confirmation";
+                
+                // Restore conversation history
+                if (Array.isArray(restoredSession.transcripts)) {
+                  sessionState.conversationHistory = restoredSession.transcripts.map((t: any) => ({
+                    role: t.role || "user",
+                    content: t.content || t.text || "",
+                    timestamp: t.timestamp || Date.now()
+                  }));
+                }
+                
+                // Compute what step we're on based on restored state
+                if (sessionState.awaitingConfirmation || sessionState.bookingConfirmed) {
+                  sessionState.lastQuestionAsked = "confirmation";
+                } else if (sessionState.booking.passengers !== null) {
+                  sessionState.lastQuestionAsked = "time";
+                } else if (sessionState.booking.destination) {
+                  sessionState.lastQuestionAsked = "passengers";
+                } else if (sessionState.booking.pickup) {
+                  sessionState.lastQuestionAsked = "destination";
+                } else {
+                  sessionState.lastQuestionAsked = "pickup";
+                }
+                
+                // Mark greeting as already sent so we don't repeat it
+                greetingSent = true;
+                
+                console.log(`[${callId}] 🔄 RESTORED SESSION: pickup=${sessionState.booking.pickup}, dest=${sessionState.booking.destination}, pax=${sessionState.booking.passengers}, step=${sessionState.lastQuestionAsked}`);
+                
+                // Skip greeting protection since user is returning
+                sessionState.greetingProtectionUntil = 0;
+                
+                // Inject context for resumed session
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+                  const contextMsg = `[SESSION RESUMED - DO NOT GREET AGAIN]
+Previous booking state:
+- Pickup: ${sessionState.booking.pickup || "NOT SET"}
+- Destination: ${sessionState.booking.destination || "NOT SET"}  
+- Passengers: ${sessionState.booking.passengers ?? "NOT SET"}
+- Last step: ${sessionState.lastQuestionAsked}
+${sessionState.awaitingConfirmation ? "- AWAITING CONFIRMATION (fare quote was delivered)" : ""}
+
+Continue the conversation where you left off. Do NOT say hello or introduce yourself again. 
+${sessionState.awaitingConfirmation 
+  ? "Ask if they want to confirm the booking."
+  : `Ask for the ${sessionState.lastQuestionAsked === "pickup" ? "pickup address" : sessionState.lastQuestionAsked}.`
+}`;
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: contextMsg }]
+                    }
+                  }));
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create",
+                    response: {
+                      modalities: ["audio", "text"],
+                      instructions: sessionState.awaitingConfirmation 
+                        ? "The session resumed. Ask briefly if they want to go ahead with the booking - don't repeat all the details."
+                        : `The session resumed. Ask briefly for the ${sessionState.lastQuestionAsked} - one short sentence only.`
+                    }
+                  }));
+                }
+              } else {
+                console.log(`[${callId}] ⚠️ No session found to restore - starting fresh`);
+              }
+            } catch (e) {
+              console.error(`[${callId}] ❌ Error restoring session:`, e);
+            }
           }
         } else if (data.type === "keepalive_ack") {
           // Bridge acknowledged our keepalive - connection is alive
