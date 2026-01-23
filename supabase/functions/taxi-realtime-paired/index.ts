@@ -4484,6 +4484,27 @@ Do NOT skip any part. Say ALL of it warmly.]`
             sessionState.callerPhone = data.phone; // Update session state too!
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
           }
+          
+          // ====== FIX: Read format from init message (like simple mode does) ======
+          // The bridge sends format info in the init message - we were ignoring it!
+          const initFormat = data.inbound_format || data.format;
+          if (initFormat && (initFormat === "ulaw" || initFormat === "slin" || initFormat === "slin16")) {
+            const oldFormat = inboundAudioFormat;
+            const oldRate = inboundSampleRate;
+            inboundAudioFormat = initFormat;
+            // Auto-set sample rate based on format if not explicitly provided
+            if (typeof data.inbound_sample_rate === "number") {
+              inboundSampleRate = data.inbound_sample_rate;
+            } else if (typeof data.sample_rate === "number") {
+              inboundSampleRate = data.sample_rate;
+            } else {
+              // Default: slin16 = 16000Hz, others = 8000Hz
+              inboundSampleRate = initFormat === "slin16" ? 16000 : 8000;
+            }
+            if (oldFormat !== inboundAudioFormat || oldRate !== inboundSampleRate) {
+              console.log(`[${callId}] 🎛️ Audio format from init: ${oldFormat}@${oldRate}Hz → ${inboundAudioFormat}@${inboundSampleRate}Hz`);
+            }
+          }
 
           // === SESSION RESUME SUPPORT ===
           // When bridge sends reconnect=true after WebSocket drop, restore state from DB
