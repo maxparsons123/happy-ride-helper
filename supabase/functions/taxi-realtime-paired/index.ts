@@ -637,6 +637,26 @@ When the user responds, ALWAYS check what question you just asked them:
 - If you asked for PASSENGERS and they respond → it's the passenger count
 - If you asked for TIME and they respond → it's the pickup time
 NEVER swap fields. Trust the question context.
+
+# 🛠️ CORRECTIONS & EDITS (CRITICAL - ALWAYS ALLOW)
+Users can correct ANY field at ANY time, even after the summary or during pricing.
+WATCH for these correction patterns:
+- "No, it's X" / "Actually, it's X" / "I said X not Y"
+- "You put X passengers, there's Y" / "No, X passengers"
+- "That's wrong, the pickup is X" / "Change the destination to X"
+- "It should be X" / "Not X, it's Y"
+
+When user makes a correction:
+1. Acknowledge briefly: "Got it, [field] is now [new value]"
+2. Update the field using sync_booking_data
+3. If mid-summary: Re-summarize with the corrected info
+4. If after pricing: Say "Let me get an updated price" and call book_taxi(action='request_quote') again
+5. NEVER dismiss or ignore a correction - they take priority over everything
+
+Examples:
+- User: "You put seven passengers, there's three" → passengers=3, acknowledge, continue
+- User: "No, the pickup is 52B not 52A" → pickup="52B [street]", acknowledge, continue  
+- User: "Change destination to the airport" → destination="airport", acknowledge, continue
 `;
 }
 
@@ -1486,6 +1506,95 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   
   // Default to pickup correction if uncertain
   return { type: "pickup", address: extractedAddress };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIELD CORRECTION DETECTION
+// Detects when user wants to correct ANY field (passengers, time, addresses)
+// Handles patterns like "You put seven passengers, there's three" or "No, 3 not 7"
+// ═══════════════════════════════════════════════════════════════════════════════
+interface FieldCorrection {
+  field: "pickup" | "destination" | "passengers" | "time" | null;
+  value: string | number | null;
+  rawText: string;
+}
+
+function detectFieldCorrection(text: string): FieldCorrection {
+  const lower = text.toLowerCase();
+  
+  // ── PASSENGER CORRECTIONS ──
+  // "You put seven passengers, there's three" / "No, 3 not 7" / "It's three not seven"
+  const passengerCorrectionPatterns = [
+    /you (?:put|said|got)\s+(?:\w+)\s+passengers?[,\s]+(?:there'?s?|it'?s?|but|actually)\s+(\w+)/i,
+    /(?:no|not)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:not\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?/i,
+    /it'?s?\s+(\w+)\s+(?:not|instead of)\s+\w+\s*passengers?/i,
+    /(\w+)\s+passengers?\s*[,.]?\s*not\s+\w+/i,
+    /(?:there'?s?|there are|we'?re?)\s+(?:only\s+)?(\w+)\s+(?:of us|passengers?|people)/i,
+    /(?:just|only)\s+(\w+)\s+passengers?/i,
+    /change\s+(?:that\s+)?(?:to\s+)?(\w+)\s+passengers?/i,
+    /(\w+)\s+(?:passengers?|people)\s*[,.]?\s*(?:not\s+\w+|please)/i,
+  ];
+  
+  const wordToNumber: Record<string, number> = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5,
+    "6": 6, "7": 7, "8": 8, "9": 9, "10": 10
+  };
+  
+  for (const pattern of passengerCorrectionPatterns) {
+    const match = lower.match(pattern);
+    if (match) {
+      // Extract the corrected number (usually the first capture group)
+      const numStr = match[1]?.toLowerCase();
+      if (numStr && wordToNumber[numStr] !== undefined) {
+        console.log(`[FieldCorrection] Detected passenger correction: "${text}" → ${wordToNumber[numStr]}`);
+        return {
+          field: "passengers",
+          value: wordToNumber[numStr],
+          rawText: text
+        };
+      }
+    }
+  }
+  
+  // Also detect simple "three passengers" if there's a negation/correction context
+  if (/(no|not|wrong|incorrect|change|actually)/i.test(lower)) {
+    const simpleMatch = lower.match(/(\w+)\s+passengers?/i);
+    if (simpleMatch && wordToNumber[simpleMatch[1].toLowerCase()] !== undefined) {
+      return {
+        field: "passengers",
+        value: wordToNumber[simpleMatch[1].toLowerCase()],
+        rawText: text
+      };
+    }
+  }
+  
+  // ── TIME CORRECTIONS ──
+  const timeCorrectionPatterns = [
+    /(?:change|make)\s+(?:it|that|the time)\s+(?:to\s+)?(.+)/i,
+    /(?:no|not|actually)[,\s]+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm|o'?clock)?)/i,
+  ];
+  
+  for (const pattern of timeCorrectionPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      const timeValue = match[1].trim().replace(/[.,!?]+$/, '');
+      if (/\d|now|asap|today|tomorrow|morning|afternoon|evening/i.test(timeValue)) {
+        console.log(`[FieldCorrection] Detected time correction: "${text}" → "${timeValue}"`);
+        return {
+          field: "time",
+          value: timeValue,
+          rawText: text
+        };
+      }
+    }
+  }
+  
+  // ── ADDRESS CORRECTIONS (fallback to detectAddressCorrection) ──
+  // This function focuses on non-address corrections; address ones are handled separately
+  
+  return { field: null, value: null, rawText: text };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3353,6 +3462,64 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               
               await updateLiveCall(sessionState);
               break; // Correction handled, don't run normal context pairing
+            }
+            
+            // FIELD CORRECTION DETECTION (passengers, time, etc.)
+            // Handles "You put seven passengers, there's three" and similar patterns
+            const fieldCorrection = detectFieldCorrection(userText);
+            if (fieldCorrection.field && fieldCorrection.value !== null) {
+              console.log(`[${callId}] 🔄 FIELD CORRECTION DETECTED: ${fieldCorrection.field} → ${fieldCorrection.value}`);
+              
+              // Update the booking state immediately
+              if (fieldCorrection.field === "passengers") {
+                sessionState.booking.passengers = fieldCorrection.value as number;
+              } else if (fieldCorrection.field === "time") {
+                sessionState.booking.pickupTime = fieldCorrection.value as string;
+              }
+              
+              // Add to history with correction annotation
+              sessionState.conversationHistory.push({
+                role: "user",
+                content: `[CORRECTION: User corrected ${fieldCorrection.field} to "${fieldCorrection.value}"] ${userText}`,
+                timestamp: Date.now()
+              });
+              
+              // Determine if we need to re-quote
+              const needsRequote = sessionState.awaitingConfirmation || sessionState.pendingFare;
+              
+              // Tell OpenAI about the correction so Ada acknowledges it
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[FIELD CORRECTION] The user corrected the ${fieldCorrection.field} to: ${fieldCorrection.value}.
+
+IMPORTANT: 
+- The ${fieldCorrection.field} is NOW ${fieldCorrection.value}
+- Acknowledge briefly: "Got it, ${fieldCorrection.field === "passengers" ? fieldCorrection.value + " passengers" : fieldCorrection.value}"
+${needsRequote ? `- Since we already had a price, you need to get an updated quote. Say "Let me get an updated price for ${fieldCorrection.value} passengers" then call book_taxi(action='request_quote')` : `- Continue to the next step in the booking flow`}
+
+Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
+                  }]
+                }
+              }));
+              
+              // If we need a new quote, reset the fare state
+              if (needsRequote) {
+                sessionState.pendingFare = null;
+                sessionState.pendingEta = null;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuoteRequestedAt = 0;
+              }
+              
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              
+              await updateLiveCall(sessionState);
+              break; // Correction handled
             }
             
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
