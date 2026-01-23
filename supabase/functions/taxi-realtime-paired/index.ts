@@ -4026,8 +4026,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
           // CRITICAL FIX: Only allow barge-in if awaitingConfirmation is TRUE (meaning quote was received).
           // Do NOT barge-in just because lastQuestionAsked === "confirmation" - that's set BEFORE Ada
           // speaks the summary, so background noise would cancel the summary prematurely.
-          // ADDITIONAL FIX: Add 500ms cooldown after awaitingConfirmation is set to let stale audio drain
-          const bargeInCooldownMs = 500;
+          // ADDITIONAL FIX: Add 2000ms cooldown after awaitingConfirmation is set to let Ada speak
+          // the fare quote intro ("Hi, your price is...") before allowing user barge-in
+          const bargeInCooldownMs = 2000;
           const bargeInCooldownPassed = Date.now() - sessionState.awaitingConfirmationSetAt > bargeInCooldownMs;
           
           if (
