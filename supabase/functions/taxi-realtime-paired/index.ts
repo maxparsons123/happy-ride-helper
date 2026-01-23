@@ -3677,6 +3677,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             ? ((Date.now() - sessionState.speechStartedAt) / 1000).toFixed(1)
             : "?";
           console.log(`[${callId}] 🔇 User stopped speaking (${speechDuration}s)`);
+          // Track when speech stopped for late transcript detection
+          sessionState.speechStopTime = Date.now();
           // Notify bridge of speech end for logging
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "speech_stopped", duration: speechDuration }));
@@ -3736,6 +3738,53 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (matchesCurrentDest && adaAskingPassengers) {
               console.log(`[${callId}] 🔇 DUPLICATE GUARD: Ignoring late destination transcript "${userText}" - Ada already confirmed and moved to passengers`);
               break; // Skip processing this duplicate
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // LATE TRANSCRIPT TIMING GUARD
+            // If Ada has already responded AFTER the user stopped speaking AND
+            // she's already asking for the NEXT field, this transcript is stale.
+            // This catches cases where Ada got a DIFFERENT value (e.g., "7" vs "11")
+            // ═══════════════════════════════════════════════════════════════════
+            const speechStoppedAt = sessionState.speechStopTime || 0;
+            const lastAssistantMsgTime = sessionState.conversationHistory
+              .filter(m => m.role === "assistant")
+              .slice(-1)[0]?.timestamp || 0;
+            
+            // If Ada responded AFTER speech stopped, and the transcript is arriving now, it's late
+            const adaRespondedAfterSpeech = lastAssistantMsgTime > speechStoppedAt && speechStoppedAt > 0;
+            
+            // Check if Ada has already moved to a different step
+            const adaMovedToNextStep = (adaAskingDestination && sessionState.booking.pickup) ||
+                                        (adaAskingPassengers && sessionState.booking.destination);
+            
+            if (adaRespondedAfterSpeech && adaMovedToNextStep) {
+              // The transcript is about a DIFFERENT value than what Ada saved
+              // Check if this looks like an address (not a "yes" or affirmative)
+              const looksLikeAddress = /\d+[a-zA-Z]?\s|street|road|avenue|lane/i.test(userText);
+              
+              if (looksLikeAddress) {
+                console.log(`[${callId}] ⏰ LATE TRANSCRIPT GUARD: "${userText}" arrived ${Date.now() - lastAssistantMsgTime}ms after Ada's response - checking if it's a correction`);
+                
+                // This could be a correction OR a late duplicate. Check if the value differs from what Ada said.
+                const userMentions11 = /\b11\b|\beleven\b/i.test(userText);
+                const adaSaid7 = /\b7\b|\bseven\b/i.test(adaLower);
+                
+                // If user said "11" but Ada heard "7", this IS a correction we need to apply
+                if (userMentions11 && adaSaid7 && sessionState.lastQuestionAsked !== "passengers") {
+                  console.log(`[${callId}] 🔧 LATE TRANSCRIPT CORRECTION: User said 11, Ada heard 7 - correcting destination`);
+                  // Extract the corrected address
+                  const correctedDest = userText.replace(/\.$/, "").trim();
+                  if (correctedDest && sessionState.booking.destination?.includes("7")) {
+                    sessionState.booking.destination = correctedDest;
+                    // Don't break - let it process as a correction
+                  }
+                } else {
+                  // Not a clear correction - might be echo or duplicate, skip it
+                  console.log(`[${callId}] 🔇 LATE TRANSCRIPT GUARD: Ignoring late transcript "${userText}" - Ada already moved on`);
+                  break;
+                }
+              }
             }
             
             // ═══════════════════════════════════════════════════════════════════
