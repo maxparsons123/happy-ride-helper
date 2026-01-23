@@ -1821,13 +1821,23 @@ function containsKnownVenue(text: string): string | null {
   return null;
 }
 
-// matchesUserText - used for AI extraction validation only (not tool calls)
-function matchesUserText(proposed: string, userText: string, minRatio = 0.7): boolean {
+// matchesUserText - used for AI extraction validation
+// RELAXED for corrections: if user is correcting, we trust the AI more
+function matchesUserText(proposed: string, userText: string, minRatio = 0.5): boolean {
   const p = proposed.toLowerCase().trim();
   const u = userText.toLowerCase();
 
   // Fast path: exact substring match
   if (p.length >= 3 && u.includes(p)) return true;
+  
+  // Reverse check: proposed contains user's key words
+  // Handles "Pick-up is 52A David Road" → "52A David Road"
+  const proposedWords = p.split(/\s+/).filter(w => w.length > 1);
+  const userWords = u.split(/\s+/).filter(w => w.length > 1);
+  if (proposedWords.length >= 2) {
+    const matchedWords = proposedWords.filter(pw => userWords.some(uw => uw.includes(pw) || pw.includes(uw)));
+    if (matchedWords.length >= Math.ceil(proposedWords.length * 0.5)) return true;
+  }
   
   // Check if user mentioned a known venue and proposed contains it
   const userVenue = containsKnownVenue(u);
@@ -1836,6 +1846,16 @@ function matchesUserText(proposed: string, userText: string, minRatio = 0.7): bo
     const userVenueNorm = userVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
     const proposedVenueNorm = proposedVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
     if (userVenueNorm === proposedVenueNorm || userVenueNorm.includes(proposedVenueNorm) || proposedVenueNorm.includes(userVenueNorm)) {
+      return true;
+    }
+  }
+  
+  // Check for house number + street pattern match
+  const houseNumMatch = p.match(/^(\d+[a-zA-Z]?)\s+(.+)/);
+  if (houseNumMatch) {
+    const [, houseNum, street] = houseNumMatch;
+    // If user said the same house number and part of street name, accept it
+    if (u.includes(houseNum.toLowerCase()) && u.includes(street.split(/\s+/)[0].toLowerCase())) {
       return true;
     }
   }
@@ -1850,6 +1870,32 @@ function matchesUserText(proposed: string, userText: string, minRatio = 0.7): bo
   }
   const ratio = hit / proposedTokens.length;
   return ratio >= minRatio;
+}
+
+// For corrections specifically, be even more lenient
+function matchesUserTextForCorrection(proposed: string, userText: string): boolean {
+  // For corrections, just check if key components are present
+  const p = proposed.toLowerCase().trim();
+  const u = userText.toLowerCase();
+  
+  // Direct substring in either direction
+  if (p.length >= 3 && (u.includes(p) || p.includes(u.replace(/[^a-z0-9\s]/g, "").trim()))) return true;
+  
+  // Extract numbers from both
+  const propNums = p.match(/\d+[a-zA-Z]?/g) || [];
+  const userNums = u.match(/\d+[a-zA-Z]?/g) || [];
+  
+  // If proposed has a house number that user mentioned, likely correct
+  if (propNums.length > 0 && userNums.length > 0) {
+    for (const pn of propNums) {
+      if (userNums.some(un => un.toLowerCase() === pn.toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  
+  // Fall back to standard matching with lower threshold
+  return matchesUserText(proposed, userText, 0.4);
 }
 
 
@@ -3398,6 +3444,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Notify bridge of speech activity for logging
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "speech_started" }));
+            // ACTIVITY HEARTBEAT: Reset timeout while user is speaking
+            socket.send(JSON.stringify({ type: "activity_heartbeat", timestamp: Date.now() }));
           }
           break;
           
@@ -3545,13 +3593,13 @@ Otherwise, say goodbye warmly and call end_call().`
                     // Track what changed for the system message
                     const changes: string[] = [];
                     
-                    // Apply the AI's corrected values
-                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup && matchesUserText(aiResult.pickup, userText)) {
+                    // Apply the AI's corrected values using the LENIENT correction matcher
+                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup && matchesUserTextForCorrection(aiResult.pickup, userText)) {
                       const oldValue = sessionState.booking.pickup;
                       sessionState.booking.pickup = aiResult.pickup;
                       changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
                     }
-                    if (aiResult.fields_changed.includes("destination") && aiResult.destination && matchesUserText(aiResult.destination, userText)) {
+                    if (aiResult.fields_changed.includes("destination") && aiResult.destination && matchesUserTextForCorrection(aiResult.destination, userText)) {
                       const oldValue = sessionState.booking.destination;
                       sessionState.booking.destination = aiResult.destination;
                       changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
@@ -3561,7 +3609,7 @@ Otherwise, say goodbye warmly and call end_call().`
                       sessionState.booking.passengers = aiResult.passengers;
                       changes.push(`passengers from ${oldValue ?? 'empty'} to ${aiResult.passengers}`);
                     }
-                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time && matchesUserText(aiResult.pickup_time, userText, 0.5)) {
+                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time && matchesUserTextForCorrection(aiResult.pickup_time, userText)) {
                       const oldValue = sessionState.booking.pickupTime;
                       sessionState.booking.pickupTime = aiResult.pickup_time;
                       changes.push(`time from "${oldValue || 'empty'}" to "${aiResult.pickup_time}"`);
