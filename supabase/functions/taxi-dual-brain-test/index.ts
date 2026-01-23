@@ -29,60 +29,64 @@ function createInitialState(): BookingState {
 }
 
 // --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
-// Maps raw transcript to structured BookingState with correction detection
+// Maps raw transcript to structured BookingState - PRESERVES existing values
+// Returns the MERGED state, not just new extractions
 async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
   console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
   console.log(`[BRAIN1] Ada's last question: "${state.lastQuestion}"`);
   console.log(`[BRAIN1] Current state: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.pickup_time}`);
 
-  const systemPrompt = `You are a Taxi Intent Parser.
+  // Build current values string for the prompt
+  const currentPickup = state.pickup || "NOT SET";
+  const currentDestination = state.destination || "NOT SET";
+  const currentPassengers = state.passengers !== null ? state.passengers : "NOT SET";
+  const currentTime = state.pickup_time || "NOT SET";
 
-CONTEXT:
-- Ada's Last Question: "${state.lastQuestion}"
-- Current Data: Pickup: ${state.pickup || 'null'}, Destination: ${state.destination || 'null'}, Passengers: ${state.passengers || 'null'}, Time: ${state.pickup_time || 'null'}
+  const systemPrompt = `You are a Taxi Intent Parser that PRESERVES existing data.
+
+CURRENT BOOKING STATE (preserve these unless user explicitly changes them):
+- Pickup: ${currentPickup}
+- Destination: ${currentDestination}
+- Passengers: ${currentPassengers}
+- Pickup Time: ${currentTime}
+
+ADA'S LAST QUESTION: "${state.lastQuestion}"
 
 TASK:
-1. Identify if the user is answering the specific question Ada asked.
-2. Extract the response into the CORRECT field based on what Ada asked:
-   - If Ada asked about pickup/collection/picked up → put address in "pickup"
-   - If Ada asked about destination/where going/where to → put address in "destination"  
-   - If Ada asked about passengers/how many/people → put number in "passengers"
-   - If Ada asked about time/when → put time in "pickup_time" (e.g., "now", "asap", "in 10 minutes", "3pm")
-3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
-4. **CORRECTION DETECTION**: Set 'is_correction: true' if:
-   - User says "Actually...", "No, change...", "Wait, not that...", "I meant...", "Not quite"
-   - User says "Actually change the pickup to [address]" → set pickup AND is_correction: true
-   - User says "No, I want to go to [address]" → set destination AND is_correction: true
-   - User provides new info that CONFLICTS with Current Data above → is_correction: true
-   - User explicitly says to change/update a field
+1. Look at what Ada asked and what the user said.
+2. Extract NEW information from the user's response.
+3. MERGE new info with existing state - NEVER lose existing data!
+4. Return the COMPLETE merged state.
+
+FIELD MAPPING (based on Ada's question):
+- If Ada asked about pickup/collection/picked up → user's address goes in "pickup"
+- If Ada asked about destination/where going/where to → user's address goes in "destination"
+- If Ada asked about passengers/how many/people → number goes in "passengers"
+- If Ada asked about time/when → answer goes in "pickup_time" (e.g., "now", "asap", "3pm")
 
 WORD-TO-NUMBER MAPPING:
 - "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
 
 TIME KEYWORDS:
 - "now", "asap", "as soon as possible", "straight away" → pickup_time: "now"
-- "in X minutes", "at X o'clock", "around X" → pickup_time: as spoken
 
-CORRECTION EXAMPLES:
-- Current pickup is "52A David Road", user says "Actually, 52B David Road" → pickup: "52B David Road", is_correction: true
-- Current destination is null, user says "No wait, take me to the airport instead" → destination: "the airport", is_correction: true
-- User says "Change passengers to 4" → passengers: 4, is_correction: true
+SPECIAL FLAGS:
+- is_affirmative: true if user confirms ("Yes", "Correct", "That's right", "Book it", "Yeah")
+- is_correction: true if user says "Actually...", "No, change...", "I meant..."
 
 CRITICAL RULES:
-- For NEW data (field is null), fill normally with is_correction: false
-- For UPDATES (field already has value), fill new value with is_correction: true
-- If Ada asked "Where to?" or "destination" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
-- If Ada asked "How many passengers?" and user says "two" → passengers: 2 (NOT an address!)
+- PRESERVE existing values! If pickup is "${currentPickup}", keep it unless user provides a new pickup.
+- Only update a field if the user explicitly provides new info for that field.
+- Return the FULL merged state, not just new data.
 
-Return valid JSON only:
+Return valid JSON:
 {
-  "pickup": null,
-  "destination": null,
-  "passengers": null,
-  "pickup_time": null,
+  "pickup": "${currentPickup === "NOT SET" ? "null or new value" : currentPickup + " or new value"}",
+  "destination": "${currentDestination === "NOT SET" ? "null or new value" : currentDestination + " or new value"}",
+  "passengers": ${currentPassengers === "NOT SET" ? "null or new number" : currentPassengers + " or new number"},
+  "pickup_time": "${currentTime === "NOT SET" ? "null or new value" : currentTime + " or new value"}",
   "is_affirmative": false,
-  "is_correction": false,
-  "corrected_field": null
+  "is_correction": false
 }`;
 
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -103,7 +107,15 @@ Return valid JSON only:
 
   if (!res.ok) {
     console.error(`[BRAIN1] API error: ${res.status}`);
-    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
+    // On error, return current state to preserve data
+    return { 
+      pickup: state.pickup, 
+      destination: state.destination, 
+      passengers: state.passengers, 
+      pickup_time: state.pickup_time, 
+      is_affirmative: false, 
+      is_correction: false 
+    };
   }
 
   const data = await res.json();
@@ -118,11 +130,30 @@ Return valid JSON only:
     if (rawMatch) jsonStr = rawMatch[0];
     
     const parsed = JSON.parse(jsonStr);
-    console.log(`[BRAIN1] Extracted:`, parsed);
-    return parsed;
+    
+    // SAFETY: Ensure we never lose existing data due to LLM errors
+    const merged = {
+      pickup: parsed.pickup || state.pickup,
+      destination: parsed.destination || state.destination,
+      passengers: typeof parsed.passengers === 'number' ? parsed.passengers : state.passengers,
+      pickup_time: parsed.pickup_time || state.pickup_time,
+      is_affirmative: parsed.is_affirmative || false,
+      is_correction: parsed.is_correction || false,
+    };
+    
+    console.log(`[BRAIN1] Extracted & Merged:`, merged);
+    return merged;
   } catch (e) {
     console.error(`[BRAIN1] JSON parse error:`, e, content);
-    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
+    // On parse error, return current state to preserve data
+    return { 
+      pickup: state.pickup, 
+      destination: state.destination, 
+      passengers: state.passengers, 
+      pickup_time: state.pickup_time, 
+      is_affirmative: false, 
+      is_correction: false 
+    };
   }
 }
 
@@ -209,38 +240,38 @@ async function processTurn(state: BookingState, transcript: string, apiKey: stri
   // Add user message to conversation history
   state.conversationHistory.push({ role: "user", content: transcript });
 
-  // Step A: Extract Data (Brain 1)
+  // Step A: Extract Data (Brain 1) - returns MERGED state
   const extraction = await extractIntent(transcript, state, apiKey);
   
   // Log correction detection
   if (extraction.is_correction) {
-    console.log(`[STATE] ⚠️ CORRECTION DETECTED - updating field(s)`);
-    if (extraction.corrected_field) {
-      console.log(`[STATE] Corrected field: ${extraction.corrected_field}`);
-    }
+    console.log(`[STATE] ⚠️ CORRECTION DETECTED`);
   }
   
-  // Update State - corrections override existing values
-  if (extraction.pickup && extraction.pickup !== "null") {
-    const wasUpdate = state.pickup !== null;
-    state.pickup = extraction.pickup;
-    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup: ${state.pickup}`);
+  // Brain 1 now returns the full merged state - apply it directly
+  const pickupChanged = extraction.pickup !== state.pickup;
+  const destChanged = extraction.destination !== state.destination;
+  const paxChanged = extraction.passengers !== state.passengers;
+  const timeChanged = extraction.pickup_time !== state.pickup_time;
+  
+  if (pickupChanged) {
+    console.log(`[STATE] ${state.pickup ? '🔄 UPDATED' : '✅ Set'} pickup: ${extraction.pickup}`);
   }
-  if (extraction.destination && extraction.destination !== "null") {
-    const wasUpdate = state.destination !== null;
-    state.destination = extraction.destination;
-    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} destination: ${state.destination}`);
+  if (destChanged) {
+    console.log(`[STATE] ${state.destination ? '🔄 UPDATED' : '✅ Set'} destination: ${extraction.destination}`);
   }
-  if (extraction.passengers && typeof extraction.passengers === 'number') {
-    const wasUpdate = state.passengers !== null;
-    state.passengers = extraction.passengers;
-    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} passengers: ${state.passengers}`);
+  if (paxChanged) {
+    console.log(`[STATE] ${state.passengers ? '🔄 UPDATED' : '✅ Set'} passengers: ${extraction.passengers}`);
   }
-  if (extraction.pickup_time && extraction.pickup_time !== "null") {
-    const wasUpdate = state.pickup_time !== null;
-    state.pickup_time = extraction.pickup_time;
-    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup_time: ${state.pickup_time}`);
+  if (timeChanged) {
+    console.log(`[STATE] ${state.pickup_time ? '🔄 UPDATED' : '✅ Set'} pickup_time: ${extraction.pickup_time}`);
   }
+  
+  // Apply merged state from Brain 1
+  state.pickup = extraction.pickup;
+  state.destination = extraction.destination;
+  state.passengers = extraction.passengers;
+  state.pickup_time = extraction.pickup_time;
   
   // If correction detected during summary, go back to collecting to re-confirm
   if (extraction.is_correction && state.step === "summary") {
