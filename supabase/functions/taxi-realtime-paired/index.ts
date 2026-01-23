@@ -3695,6 +3695,50 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             
             // ═══════════════════════════════════════════════════════════════════
+            // DUPLICATE TRANSCRIPT GUARD
+            // If Ada already confirmed this address in her LAST response, ignore
+            // the late-arriving transcript. This prevents "re-processing" the 
+            // same address that Ada already acknowledged.
+            // ═══════════════════════════════════════════════════════════════════
+            const lastAssistantMsg = sessionState.conversationHistory
+              .filter(m => m.role === "assistant")
+              .slice(-1)[0]?.content || "";
+            
+            const userLower = userText.toLowerCase().trim();
+            const adaLower = lastAssistantMsg.toLowerCase();
+            
+            // Check if Ada's response already contains this exact address
+            // We look for phrases like "pickup is 52A David Road" or "got it, 52A David Road"
+            const isAddressInAdaResponse = (addr: string): boolean => {
+              if (!addr || addr.length < 3) return false;
+              const addrLower = addr.toLowerCase().trim();
+              return adaLower.includes(addrLower);
+            };
+            
+            // If the transcript matches what's already saved AND Ada already mentioned it
+            const matchesCurrentPickup = sessionState.booking.pickup && 
+              userLower.includes(sessionState.booking.pickup.toLowerCase()) &&
+              isAddressInAdaResponse(sessionState.booking.pickup);
+            
+            const matchesCurrentDest = sessionState.booking.destination && 
+              userLower.includes(sessionState.booking.destination.toLowerCase()) &&
+              isAddressInAdaResponse(sessionState.booking.destination);
+            
+            // Also check if Ada is currently asking for the NEXT field (not the same one)
+            const adaAskingDestination = /where would you like to go|what is your destination|destination/i.test(adaLower);
+            const adaAskingPassengers = /how many people|how many passengers/i.test(adaLower);
+            
+            if (matchesCurrentPickup && adaAskingDestination) {
+              console.log(`[${callId}] 🔇 DUPLICATE GUARD: Ignoring late pickup transcript "${userText}" - Ada already confirmed and moved to destination`);
+              break; // Skip processing this duplicate
+            }
+            
+            if (matchesCurrentDest && adaAskingPassengers) {
+              console.log(`[${callId}] 🔇 DUPLICATE GUARD: Ignoring late destination transcript "${userText}" - Ada already confirmed and moved to passengers`);
+              break; // Skip processing this duplicate
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
             // CONTEXT-AWARE SEVEN→THREE CORRECTION
             // When asking about passengers AND previous address had "7",
             // "seven" is very likely misheard "three" (phonetic confusion)
