@@ -1092,6 +1092,22 @@ const STT_CORRECTIONS: Record<string, string> = {
   "sweet puff": "Sweet Spot",
   "sweets spot": "Sweet Spot",
   "sweetsspot": "Sweet Spot",
+  // "two sweet spot" → "to Sweet Spot" (common STT mishearing "to" as "two")
+  "two sweet spot": "to Sweet Spot",
+  "two sweetspot": "to Sweet Spot",
+  "two street spot": "to Sweet Spot",
+  "two a sweet spot": "to Sweet Spot",
+  "to a sweet spot": "to Sweet Spot",
+  "pickup two sweet spot": "pickup to Sweet Spot",
+  "pick up two sweet spot": "pickup to Sweet Spot",
+  "pick-up two sweet spot": "pickup to Sweet Spot",
+  "from sweet spot": "from Sweet Spot",
+  "at sweet spot": "at Sweet Spot",
+  "the sweet spot": "the Sweet Spot",
+  "a sweet spot": "Sweet Spot",
+  "assault from sweetspot": "from Sweet Spot",
+  "assault from street spot": "from Sweet Spot",
+  "streetspot": "Sweet Spot",
 
   // Number mishearings - standalone numbers
   "free": "three",
@@ -1769,12 +1785,70 @@ function tokenizeForMatch(text: string): string[] {
     .filter(Boolean);
 }
 
+// Known venue/landmark names that should be accepted as-is
+const KNOWN_VENUES = new Set([
+  "sweet spot", "sweetspot", "the sweet spot",
+  "fargo village", "fargo", "the fargo",
+  "the mailbox", "mailbox",
+  "the bullring", "bullring",
+  "new street station", "new street",
+  "birmingham airport", "bhx",
+  "coventry station", "coventry railway station",
+  "coventry cathedral", "the cathedral",
+  "ricoh arena", "cbs arena",
+  "university hospital", "walsgrave hospital",
+  "warwick university", "warwick uni",
+  "coventry university", "coventry uni",
+  "heathrow", "heathrow airport",
+  "gatwick", "gatwick airport",
+  "luton", "luton airport",
+  "stansted", "stansted airport",
+  "birmingham new street",
+  "euston", "euston station",
+  "kings cross", "king's cross",
+  "st pancras", "st. pancras",
+  "paddington", "paddington station",
+]);
+
+// Check if text contains a known venue name
+function containsKnownVenue(text: string): string | null {
+  const lower = text.toLowerCase();
+  for (const venue of KNOWN_VENUES) {
+    if (lower.includes(venue)) {
+      return venue;
+    }
+  }
+  return null;
+}
+
 function matchesUserText(proposed: string, userText: string, minRatio = 0.7): boolean {
   const p = proposed.toLowerCase().trim();
   const u = userText.toLowerCase();
 
   // Fast path: exact substring match (covers "sweetspot" and most addresses).
   if (p.length >= 3 && u.includes(p)) return true;
+  
+  // Check if user mentioned a known venue and proposed contains it
+  const userVenue = containsKnownVenue(u);
+  const proposedVenue = containsKnownVenue(p);
+  if (userVenue && proposedVenue) {
+    // Both mention a known venue - accept if same venue family
+    const userVenueNorm = userVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
+    const proposedVenueNorm = proposedVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
+    if (userVenueNorm === proposedVenueNorm || userVenueNorm.includes(proposedVenueNorm) || proposedVenueNorm.includes(userVenueNorm)) {
+      return true;
+    }
+  }
+  
+  // REJECT if proposed is an address but user said a venue (hallucination guard)
+  if (userVenue && !proposedVenue) {
+    // User said "Sweet Spot" but proposed is something like "52B David Road"
+    const proposedLooksLikeAddress = /^\d+[a-zA-Z]?\s+\w+/.test(proposed) || /\b(road|street|lane|avenue|drive|way|close|court)\b/i.test(p);
+    if (proposedLooksLikeAddress) {
+      console.log(`[VENUE GUARD] Rejected: user said venue "${userVenue}" but proposed is address "${proposed}"`);
+      return false;
+    }
+  }
 
   const proposedTokens = Array.from(new Set(tokenizeForMatch(proposed)));
   if (proposedTokens.length === 0) return false;
@@ -1791,7 +1865,12 @@ function matchesUserText(proposed: string, userText: string, minRatio = 0.7): bo
 function shouldAcceptToolTextUpdate(proposed: string, lastUserText: string | null): boolean {
   if (!proposed) return false;
   if (!lastUserText) return true;
-  return matchesUserText(proposed, lastUserText);
+  
+  const accepted = matchesUserText(proposed, lastUserText);
+  if (!accepted) {
+    console.log(`[VALIDATION GUARD] REJECTED: proposed="${proposed}" doesn't match user="${lastUserText}"`);
+  }
+  return accepted;
 }
 
 
