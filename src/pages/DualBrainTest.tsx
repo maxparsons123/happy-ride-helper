@@ -61,6 +61,10 @@ export default function DualBrainTest() {
 
     try {
       const startTime = Date.now();
+      
+      // Log what we're sending so we can debug state persistence
+      console.log("[DualBrain] Sending state:", serverState);
+      
       const { data, error } = await supabase.functions.invoke("taxi-dual-brain-test", {
         body: { 
           transcript: userInput,
@@ -69,6 +73,10 @@ export default function DualBrainTest() {
       });
 
       if (error) throw error;
+
+      console.log("[DualBrain] Received response:", data);
+      console.log("[DualBrain] Extraction (new data this turn):", data.extraction);
+      console.log("[DualBrain] Full state (accumulated):", data.state);
 
       const turn: Turn = {
         id: turns.length + 1,
@@ -85,7 +93,7 @@ export default function DualBrainTest() {
       // Store FULL updated state for next request (including conversationHistory)
       // The edge function returns the complete state with all preserved fields
       setServerState(data.state);
-      console.log("[DualBrain] State updated:", data.state);
+      console.log("[DualBrain] State stored for next request:", data.state);
 
       if (data.end) {
         toast.success("Booking confirmed!");
