@@ -3625,11 +3625,112 @@ Otherwise, say goodbye warmly and call end_call().`
             // Save for tool-call validation (prevents hallucinated overwrites)
             sessionState.lastUserText = userText;
             
+            const lowerUserText = userText.toLowerCase();
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // ADDRESS CORRECTION DETECTION (ported from simple mode - highest priority)
+            // Detect phrases like "No, it's...", "Actually...", "The pickup is..."
+            // This catches corrections that explicit patterns miss
+            // ═══════════════════════════════════════════════════════════════════
+            const addressCorrection = detectAddressCorrection(userText, sessionState.booking.pickup, sessionState.booking.destination);
+            
+            if (addressCorrection.type && addressCorrection.address && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              console.log(`[${callId}] 🔧 ADDRESS CORRECTION DETECTED: ${addressCorrection.type} = "${addressCorrection.address}"`);
+              
+              const correctedAddress = addressCorrection.address;
+              const oldValue = addressCorrection.type === "pickup" ? sessionState.booking.pickup : sessionState.booking.destination;
+              
+              // Update booking state immediately
+              if (addressCorrection.type === "pickup") {
+                sessionState.booking.pickup = correctedAddress;
+              } else {
+                sessionState.booking.destination = correctedAddress;
+              }
+              
+              console.log(`[${callId}] ✅ Updated ${addressCorrection.type}: "${oldValue}" → "${correctedAddress}"`);
+              
+              // Reset fare if address changed after quote
+              if (sessionState.pendingFare) {
+                console.log(`[${callId}] 💰 Resetting fare due to ${addressCorrection.type} correction`);
+                sessionState.pendingFare = null;
+                sessionState.pendingEta = null;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuoteRequestedAt = 0;
+              }
+              
+              // Cancel any in-flight response
+              if (sessionState.openAiResponseActive) {
+                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+              
+              // Sync to database
+              const updatePayload: Record<string, any> = { updated_at: new Date().toISOString() };
+              if (addressCorrection.type === "pickup") {
+                updatePayload.pickup = correctedAddress;
+              } else {
+                updatePayload.destination = correctedAddress;
+              }
+              supabase.from("live_calls").update(updatePayload).eq("call_id", callId).then(() => {
+                console.log(`[${callId}] ✅ live_calls updated with ${addressCorrection.type} correction`);
+              });
+              
+              // Determine next question based on current state
+              const fieldLabel = addressCorrection.type === "pickup" ? "pickup" : "destination";
+              const hasAllCore = sessionState.booking.pickup && sessionState.booking.destination && 
+                                 sessionState.booking.passengers !== null && sessionState.booking.pickupTime;
+              
+              let nextInstruction: string;
+              if (hasAllCore) {
+                nextInstruction = "All 4 fields are now complete. Give the updated booking summary and ask for confirmation.";
+              } else if (!sessionState.booking.destination && addressCorrection.type === "pickup") {
+                nextInstruction = "Ask ONLY: 'And what is your destination?'";
+              } else if (!sessionState.booking.pickup && addressCorrection.type === "destination") {
+                nextInstruction = "Ask ONLY: 'Where would you like to be picked up?'";
+              } else if (sessionState.booking.passengers === null) {
+                nextInstruction = "Ask ONLY: 'How many people will be travelling?'";
+              } else if (!sessionState.booking.pickupTime) {
+                nextInstruction = "Ask ONLY: 'When do you need the taxi?'";
+              } else {
+                nextInstruction = "Summarize the booking and ask for confirmation.";
+              }
+              
+              // Inject acknowledgment and continue flow
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[${fieldLabel.toUpperCase()} CORRECTED BY USER]
+The user changed the ${fieldLabel} from "${oldValue || 'empty'}" to "${correctedAddress}".
+
+## UPDATED BOOKING STATE:
+- Pickup: ${sessionState.booking.pickup || "not yet provided"}
+- Destination: ${sessionState.booking.destination || "not yet provided"}
+- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
+- Time: ${sessionState.booking.pickupTime || "ASAP"}
+
+INSTRUCTIONS:
+1. Acknowledge briefly: "Got it, ${fieldLabel} is now ${correctedAddress}."
+2. ${nextInstruction}
+3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
+                  }]
+                }
+              }));
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+              sessionState.openAiResponseActive = true;
+              await updateLiveCall(sessionState);
+              break; // Handled the correction - skip normal processing
+            }
+            
             // ═══════════════════════════════════════════════════════════════════
             // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (before AI extraction)
             // Patterns like "change the pickup to X" or "can I change pickup to X"
             // ═══════════════════════════════════════════════════════════════════
-            const lowerUserText = userText.toLowerCase();
             // ═══════════════════════════════════════════════════════════════════
             // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (COMPREHENSIVE)
             // Must catch: "change my pickup to X", "change pickup point to X", 
