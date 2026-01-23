@@ -3679,12 +3679,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           console.log(`[${callId}] 🔇 User stopped speaking (${speechDuration}s)`);
           // Track when speech stopped for late transcript detection
           sessionState.speechStopTime = Date.now();
-          // ═══════════════════════════════════════════════════════════════════
-          // TRANSCRIPTION GATE: Block responses until transcript is processed
-          // This prevents Ada from responding before we have the full text
-          // ═══════════════════════════════════════════════════════════════════
-          sessionState.extractionInProgress = true;
-          console.log(`[${callId}] 🚧 TRANSCRIPTION GATE: Blocking responses until transcript arrives`);
+          // NOTE: We no longer set extractionInProgress here - it was causing 10+ second delays.
+          // The Full Stop Gate in the transcript handler is sufficient for timing control.
           // Notify bridge of speech end for logging
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "speech_stopped", duration: speechDuration }));
