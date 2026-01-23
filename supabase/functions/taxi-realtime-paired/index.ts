@@ -3703,6 +3703,28 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             
             // ═══════════════════════════════════════════════════════════════════
+            // FULL STOP TRANSCRIPTION GATE
+            // Wait for Whisper to signal sentence completion via punctuation.
+            // This prevents Ada from responding to partial/incomplete sentences.
+            // Whisper inserts ., ?, or ! when it determines a logical sentence end.
+            // ═══════════════════════════════════════════════════════════════════
+            const isFinishedSentence = /[.?!]$/.test(userText);
+            
+            // Allow very short affirmatives through without punctuation (yes, ok, etc.)
+            const isShortAffirmative = /^(yes|yeah|yep|yup|no|nope|ok|okay|sure|please|thanks?|cheers|correct|right|absolutely)$/i.test(userText.trim());
+            
+            // Allow numbers through (for passenger count)
+            const isJustNumber = /^(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)$/i.test(userText.trim());
+            
+            if (!isFinishedSentence && !isShortAffirmative && !isJustNumber) {
+              console.log(`[${callId}] ⏳ FULL STOP GATE: Sentence incomplete "${userText}" - waiting for punctuation`);
+              // Keep extractionInProgress = true so responses remain blocked
+              break; // Don't process incomplete sentence - wait for more
+            }
+            
+            console.log(`[${callId}] 🏁 FULL STOP GATE: Sentence complete "${userText}" - processing...`);
+            
+            // ═══════════════════════════════════════════════════════════════════
             // DUPLICATE TRANSCRIPT GUARD
             // If Ada already confirmed this address in her LAST response, ignore
             // the late-arriving transcript. This prevents "re-processing" the 
