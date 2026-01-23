@@ -108,7 +108,9 @@ OPUS_APPLICATION = "voip"     # Optimized for speech
 
 # Format Detection
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)  # False = auto-detect
-PREFER_OPUS = _env_bool("PREFER_OPUS", True)  # Prefer Opus when available
+# Prefer Opus ONLY when the Opus codec is actually available in this runtime.
+# (Prevents false positives + "Opus frame but no decoder" loops.)
+PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE)
 PREFER_SLIN16 = True  # Prefer wideband when available
 FORMAT_LOCK_DURATION_S = 0.75  # Debounce format switching
 
@@ -509,6 +511,11 @@ class TaxiBridge:
         """
         if len(payload) < 2:
             return False
+
+        # AudioSocket PCM frames are commonly exactly 160/320/640 bytes (20ms)
+        # and must NEVER be mistaken for Opus.
+        if len(payload) in (160, 320, 640):
+            return False
         
         # Opus frames are typically variable length but have recognizable patterns
         # PCM would be even length and have predictable sizes (320, 640, etc.)
@@ -528,7 +535,7 @@ class TaxiBridge:
         # If we get frames much smaller than PCM equivalent, likely Opus
         opus_20ms_mono_pcm_size = int(RATE_OPUS * 0.02 * 2)  # 1920 bytes
         
-        # If payload is less than half the PCM size, probably Opus
+        # If payload is much smaller than the PCM size, probably Opus
         if len(payload) < opus_20ms_mono_pcm_size // 4:
             return True
         
@@ -547,7 +554,14 @@ class TaxiBridge:
         CANONICAL_SIZES = {160, 320, 640}
         
         # Check for Opus first (variable size, special detection)
-        if payload and self._is_opus_frame(payload):
+        # Only do this if Opus is enabled AND we have a decoder.
+        if (
+            payload
+            and PREFER_OPUS
+            and self.audio_processor.opus_codec
+            and frame_len not in CANONICAL_SIZES
+            and self._is_opus_frame(payload)
+        ):
             if self.state.ast_codec != "opus":
                 self.state.ast_codec = "opus"
                 self.state.ast_rate = RATE_OPUS
