@@ -38,20 +38,29 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // IMPORTANT: WebSocket upgrades are also GET requests.
+  // Only treat GET as a health check when it's NOT a WebSocket upgrade.
+  const upgradeHeader = req.headers.get("upgrade")?.toLowerCase() ?? "";
+  const isWebSocketUpgrade = upgradeHeader === "websocket";
+
   // Health check endpoint
-  if (req.method === "GET") {
-    return new Response(JSON.stringify({
-      status: "ready",
-      endpoint: "taxi-realtime-gemini",
-      protocol: "websocket",
-      pipeline: "STT → Gemini → TTS"
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  if (req.method === "GET" && !isWebSocketUpgrade) {
+    return new Response(
+      JSON.stringify({
+        status: "ready",
+        endpoint: "taxi-realtime-gemini",
+        protocol: "websocket",
+        pipeline: "STT → Gemini → TTS",
+      }),
+      {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   }
 
   // Upgrade to WebSocket
   const { socket, response } = Deno.upgradeWebSocket(req);
+  console.log(`[taxi-realtime-gemini] 🔌 websocket upgrade accepted`);
   
   const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY"); // For Groq Whisper STT
   const DEEPGRAM_API_KEY = Deno.env.get("DEEPGRAM_API_KEY"); // For Deepgram Nova STT & Aura TTS

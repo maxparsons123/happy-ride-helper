@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.livekit-token]
 verify_jwt = false
+
+[functions.taxi-realtime-gemini]
+verify_jwt = false
