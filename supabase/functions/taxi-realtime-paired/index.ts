@@ -4172,6 +4172,122 @@ INSTRUCTIONS:
               break; // Handled the destination change
             }
             
+            // ═══════════════════════════════════════════════════════════════════════
+            // FAST PATH CONFIRMATION (REGEX) - Check BEFORE AI extraction to avoid latency
+            // If user says "yes" while we're awaiting confirmation, confirm immediately
+            // ═══════════════════════════════════════════════════════════════════════
+            const isYesRegex = /^(yes|yeah|yep|yea|yup|sure|ok|okay|alright|go ahead|book it|confirm|please|yes please|that's? (?:right|correct)|correct|definitely|absolutely|affirmative)$/i.test(userText.trim()) ||
+                               /^(?:yes|yeah|yep|yup|sure|ok|okay|please)[,.\s]*(please|book it|go ahead|thanks?|cheers)?$/i.test(userText.trim());
+            
+            if (isYesRegex && sessionState.awaitingConfirmation && !sessionState.bookingConfirmed) {
+              console.log(`[${callId}] 🚀 REGEX FAST PATH CONFIRMATION: User said "${userText}" while awaitingConfirmation=true`);
+              
+              // Cancel any active response
+              if (sessionState.openAiResponseActive) {
+                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
+              
+              // Set confirmed flag IMMEDIATELY
+              sessionState.bookingConfirmed = true;
+              sessionState.awaitingConfirmation = false;
+              sessionState.quoteInFlight = false;
+              
+              // Send CONFIRMED webhook to dispatch
+              console.log(`[${callId}] 📤 REGEX FAST PATH: Sending CONFIRMED webhook...`);
+              await sendDispatchWebhook(sessionState, "confirmed", {
+                pickup: sessionState.booking.pickup,
+                destination: sessionState.booking.destination,
+                passengers: sessionState.booking.passengers,
+                pickup_time: sessionState.booking.pickupTime
+              });
+              console.log(`[${callId}] ✅ REGEX FAST PATH: CONFIRMED webhook sent`);
+              
+              // POST confirmation to callback_url if provided
+              if (sessionState.pendingConfirmationCallback) {
+                try {
+                  console.log(`[${callId}] 📡 REGEX FAST PATH: POSTing to callback_url: ${sessionState.pendingConfirmationCallback}`);
+                  const confirmPayload = {
+                    call_id: callId,
+                    job_id: sessionState.dispatchJobId || null,
+                    action: "confirmed",
+                    response: "confirmed",
+                    pickup: sessionState.booking.pickup,
+                    destination: sessionState.booking.destination,
+                    fare: sessionState.pendingFare,
+                    eta: sessionState.pendingEta,
+                    pickup_time: sessionState.booking.pickupTime || "ASAP",
+                    passengers: sessionState.booking.passengers || 1,
+                    caller_phone: sessionState.callerPhone,
+                    booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
+                    timestamp: new Date().toISOString()
+                  };
+                  
+                  const confirmResp = await fetch(sessionState.pendingConfirmationCallback, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(confirmPayload)
+                  });
+                  console.log(`[${callId}] 📬 REGEX FAST PATH: Callback response: ${confirmResp.status}`);
+                } catch (callbackErr) {
+                  console.error(`[${callId}] ⚠️ REGEX FAST PATH: Callback failed:`, callbackErr);
+                }
+              }
+              
+              // Protect goodbye speech
+              sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+              sessionState.lastQuestionAsked = "none";
+              
+              // Get language-aware closing script
+              const closingScript = getClosingScript(sessionState.language);
+              const randomTip = closingScript.whatsappTips[Math.floor(Math.random() * closingScript.whatsappTips.length)];
+              const langInstruction = sessionState.language === "auto" 
+                ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller."
+                : "";
+              
+              // Inject POST-CONFIRMATION mode
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[POST-CONFIRMATION MODE ACTIVE] The booking is NOW CONFIRMED and COMPLETE.
+                    
+🚨 CRITICAL RULES:
+- The customer just said "${userText}" to confirm - the booking is DONE
+- Do NOT ask "shall I book that taxi?" - it's ALREADY BOOKED  
+- Do NOT loop back to any booking questions
+- Your ONLY job now is to deliver the closing script and end the call
+
+${langInstruction}
+
+Deliver this closing script:
+1. "${closingScript.confirmation}"
+2. "${closingScript.whatsappDetails}"
+3. "${randomTip}"
+4. "${closingScript.goodbye}"
+
+Then IMMEDIATELY call end_call().`
+                  }]
+                }
+              }));
+              
+              // Trigger the goodbye response
+              openaiWs!.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `The customer confirmed with "${userText}". Deliver the booking confirmation and closing script warmly. Then call end_call().`
+                }
+              }));
+              sessionState.openAiResponseActive = true;
+              
+              await updateLiveCall(sessionState);
+              break; // Exit transcript handler - confirmation handled via fast path
+            }
+            
             if (USE_AI_EXTRACTION) {
               console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
               
@@ -4328,11 +4444,125 @@ INSTRUCTIONS:
                   }
                   
                   // ═══════════════════════════════════════════════════════════════
-                  // AI DETECTED AFFIRMATIVE (yes/confirm) - Fast path
+                  // AI DETECTED AFFIRMATIVE (yes/confirm) - FAST PATH CONFIRMATION
+                  // When awaitingConfirmation is true and user says "yes", directly 
+                  // trigger the booking confirmation without waiting for OpenAI tool call
                   // ═══════════════════════════════════════════════════════════════
-                  if (aiResult.is_affirmative && aiResult.intent === "confirm_booking") {
-                    console.log(`[${callId}] 🧠 AI DETECTED CONFIRMATION: User confirmed the booking`);
-                    // Let normal flow handle this, but note it for logging
+                  if (aiResult.is_affirmative && (aiResult.intent === "confirm_booking" || sessionState.awaitingConfirmation)) {
+                    console.log(`[${callId}] 🧠 AI DETECTED CONFIRMATION: User said yes (awaitingConfirmation=${sessionState.awaitingConfirmation})`);
+                    
+                    // FAST PATH: If we're awaiting confirmation and user said yes, trigger confirmation directly
+                    if (sessionState.awaitingConfirmation && !sessionState.bookingConfirmed) {
+                      console.log(`[${callId}] 🚀 FAST PATH CONFIRMATION: Bypassing OpenAI tool call, confirming directly`);
+                      
+                      // Clear extraction guard first
+                      sessionState.extractionInProgress = false;
+                      
+                      // Cancel any active response
+                      if (sessionState.openAiResponseActive) {
+                        openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                        sessionState.openAiResponseActive = false;
+                      }
+                      
+                      // Set confirmed flag IMMEDIATELY
+                      sessionState.bookingConfirmed = true;
+                      sessionState.awaitingConfirmation = false;
+                      sessionState.quoteInFlight = false;
+                      
+                      // Send CONFIRMED webhook to dispatch
+                      console.log(`[${callId}] 📤 FAST PATH: Sending CONFIRMED webhook...`);
+                      await sendDispatchWebhook(sessionState, "confirmed", {
+                        pickup: sessionState.booking.pickup,
+                        destination: sessionState.booking.destination,
+                        passengers: sessionState.booking.passengers,
+                        pickup_time: sessionState.booking.pickupTime
+                      });
+                      console.log(`[${callId}] ✅ FAST PATH: CONFIRMED webhook sent`);
+                      
+                      // POST confirmation to callback_url if provided
+                      if (sessionState.pendingConfirmationCallback) {
+                        try {
+                          console.log(`[${callId}] 📡 FAST PATH: POSTing to callback_url: ${sessionState.pendingConfirmationCallback}`);
+                          const confirmPayload = {
+                            call_id: callId,
+                            job_id: sessionState.dispatchJobId || null,
+                            action: "confirmed",
+                            response: "confirmed",
+                            pickup: sessionState.booking.pickup,
+                            destination: sessionState.booking.destination,
+                            fare: sessionState.pendingFare,
+                            eta: sessionState.pendingEta,
+                            pickup_time: sessionState.booking.pickupTime || "ASAP",
+                            passengers: sessionState.booking.passengers || 1,
+                            caller_phone: sessionState.callerPhone,
+                            booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
+                            timestamp: new Date().toISOString()
+                          };
+                          
+                          const confirmResp = await fetch(sessionState.pendingConfirmationCallback, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(confirmPayload)
+                          });
+                          console.log(`[${callId}] 📬 FAST PATH: Callback response: ${confirmResp.status}`);
+                        } catch (callbackErr) {
+                          console.error(`[${callId}] ⚠️ FAST PATH: Callback failed:`, callbackErr);
+                        }
+                      }
+                      
+                      // Protect goodbye speech
+                      sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                      sessionState.lastQuestionAsked = "none";
+                      
+                      // Get language-aware closing script
+                      const closingScript = getClosingScript(sessionState.language);
+                      const randomTip = closingScript.whatsappTips[Math.floor(Math.random() * closingScript.whatsappTips.length)];
+                      const langInstruction = sessionState.language === "auto" 
+                        ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller."
+                        : "";
+                      
+                      // Inject POST-CONFIRMATION mode
+                      openaiWs!.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                          type: "message",
+                          role: "system",
+                          content: [{
+                            type: "input_text",
+                            text: `[POST-CONFIRMATION MODE ACTIVE] The booking is NOW CONFIRMED and COMPLETE.
+                            
+🚨 CRITICAL RULES:
+- The customer just said YES to confirm - the booking is DONE
+- Do NOT ask "shall I book that taxi?" - it's ALREADY BOOKED  
+- Do NOT loop back to any booking questions
+- Your ONLY job now is to deliver the closing script and end the call
+
+${langInstruction}
+
+Deliver this closing script:
+1. "${closingScript.confirmation}"
+2. "${closingScript.whatsappDetails}"
+3. "${randomTip}"
+4. "${closingScript.goodbye}"
+
+Then IMMEDIATELY call end_call().`
+                          }]
+                        }
+                      }));
+                      
+                      // Trigger the goodbye response
+                      openaiWs!.send(JSON.stringify({
+                        type: "response.create",
+                        response: {
+                          modalities: ["audio", "text"],
+                          instructions: `The customer confirmed with "${userText}". Deliver the booking confirmation and closing script warmly. Then call end_call().`
+                        }
+                      }));
+                      sessionState.openAiResponseActive = true;
+                      
+                      await updateLiveCall(sessionState);
+                      break; // Exit transcript handler - confirmation handled
+                    }
                   }
                   
                   // ═══════════════════════════════════════════════════════════════
