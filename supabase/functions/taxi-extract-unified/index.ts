@@ -97,8 +97,13 @@ EXTRACTION RULES (NEW BOOKING)
    - Example: Ada asks "Is that correct?" and user says "The pickup is the Sweet Spot" → is_correction=true, pickup="Sweet Spot"
    - If user provides an address/value AFTER Ada has already confirmed a different value for that field → ALWAYS treat as correction
    
+   BUSINESS NAMES AND LANDMARKS ARE VALID ADDRESSES:
+   - "Sweetspot", "The Mailbox", "Train Station", "Airport", "Tesco", "Costa", "City Centre" are ALL valid pickup/destination values
+   - If user says "It's [BusinessName]!" after Ada confirmed a street address → CORRECTION to that business name
+   - Do NOT reject short names like "Sweetspot" - they ARE valid destinations/pickups
+   
    Compare user's response against Ada's last confirmed values:
-   - If user says a DIFFERENT address than what Ada stated → is_correction=true + update that field
+   - If user says a DIFFERENT address/place than what Ada stated → is_correction=true + update that field
    - Look at Ada's last message to see what she confirmed, compare to user's response
    
    LATEST customer response for a field ALWAYS wins over earlier responses.
