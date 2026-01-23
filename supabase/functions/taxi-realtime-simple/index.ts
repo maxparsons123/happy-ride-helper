@@ -8629,6 +8629,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         return;
       }
 
+      // Handle application-level ping from bridge (keeps connection alive)
+      if (message.type === "ping") {
+        try {
+          socket.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+        } catch (e) {
+          // Ignore send errors on pong
+        }
+        return;
+      }
 
       if (message.type === "audio" && openaiConnected && openaiWs && state) {
         // ECHO GUARD: Always ignore audio for a short window after Ada finishes speaking.
