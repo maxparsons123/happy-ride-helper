@@ -45,6 +45,8 @@ interface AIExtractionResult {
   pickup_time: string | null;
   confidence: string;
   fields_changed?: string[];
+  nearest_pickup?: string | null;
+  nearest_dropoff?: string | null;
 }
 
 async function extractBookingWithAI(
@@ -107,7 +109,9 @@ async function extractBookingWithAI(
       passengers: result.passengers ?? null,
       pickup_time: result.pickup_time || null,
       confidence: result.confidence || "low",
-      fields_changed: result.fields_changed
+      fields_changed: result.fields_changed,
+      nearest_pickup: result.nearest_pickup || null,
+      nearest_dropoff: result.nearest_dropoff || null
     };
   } catch (error) {
     console.error(`[${callId}] ❌ AI extraction error:`, error);
@@ -549,7 +553,22 @@ Then ask about the time.
 ✅ ACCEPT ANY ADDRESS AS-IS - do NOT ask for house numbers, postcodes, or more details.
 ✅ Accept business names, landmarks, partial addresses, and place names immediately.
 
-# PHASE 3: THE SUMMARY (Gate Keeper)
+# NEAREST/CLOSEST PLACES
+When user says "nearest X" or "closest X" (e.g., "nearest hotel", "closest hospital", "nearest train station"):
+- Accept this as a valid destination or pickup
+- Do NOT ask for a specific address - just accept "nearest hotel" as the destination
+- The dispatch system will find the actual nearest location based on their GPS/pickup
+- Use sync_booking_data to store the nearest place type
+
+# LOCAL INFORMATION (POST-BOOKING ONLY)
+After the booking is confirmed and you ask "Is there anything else I can help with?":
+- If user asks about local events, what's on, restaurants, hotels, bars, or attractions:
+  - Be helpful and suggest 2-3 popular options in their area if you know them
+  - For Coventry: suggest FarGo Village, Coventry Cathedral, The Wave, local pubs
+  - For Birmingham: suggest Bullring, Mailbox, Jewellery Quarter venues
+  - If you don't know, say "I'd recommend checking local event listings online"
+- This is ONLY for post-booking chat - during booking, stay focused on the taxi
+
 Only after the checklist is 100% complete, summarize the booking in the caller's language:
 Pickup address, destination address, number of passengers, pickup time. Ask if correct.
 
@@ -634,6 +653,8 @@ const TOOLS = [
         destination: { type: "string", description: "Destination address if the user just provided it" },
         passengers: { type: "integer", description: "Number of passengers if the user just provided it" },
         pickup_time: { type: "string", description: "Pickup time if the user just provided it (e.g., 'now', '3pm')" },
+        nearest_pickup: { type: "string", description: "Type of place for 'nearest X' pickup (e.g., 'hotel', 'hospital', 'train station')" },
+        nearest_dropoff: { type: "string", description: "Type of place for 'nearest X' destination (e.g., 'hotel', 'hospital', 'train station')" },
         last_question_asked: { 
           type: "string", 
           enum: ["pickup", "destination", "passengers", "time", "confirmation", "none"],
@@ -692,6 +713,8 @@ interface SessionState {
     destination: string | null;
     passengers: number | null;
     pickupTime: string | null;
+    nearestPickup: string | null;
+    nearestDropoff: string | null;
   };
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
@@ -1627,7 +1650,9 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       pickup: null,
       destination: null,
       passengers: null,
-      pickupTime: null
+      pickupTime: null,
+      nearestPickup: null,
+      nearestDropoff: null
     },
     lastQuestionAsked: "none",
     conversationHistory: [],
@@ -1799,6 +1824,8 @@ async function restoreSessionFromDb(callId: string, resumeCallId: string, caller
         destination: liveCall.destination || null,
         passengers: liveCall.passengers || null,
         pickupTime: null,
+        nearestPickup: null,
+        nearestDropoff: null,
       },
       conversationHistory: transcripts as SessionState["conversationHistory"],
       bookingConfirmed: liveCall.booking_confirmed || false,
@@ -1877,8 +1904,8 @@ async function sendDispatchWebhook(
     ada_destination: normalizeAddressForDispatch(expandedDestination),
     callers_pickup: null,
     callers_dropoff: null,
-    nearest_pickup: null,
-    nearest_dropoff: null,
+    nearest_pickup: sessionState.booking.nearestPickup || null,
+    nearest_dropoff: sessionState.booking.nearestDropoff || null,
     user_transcripts: userTranscripts,
     gps_lat: null,
     gps_lon: null,
@@ -3416,6 +3443,8 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
             if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
             if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
+            if (toolArgs.nearest_pickup) sessionState.booking.nearestPickup = String(toolArgs.nearest_pickup);
+            if (toolArgs.nearest_dropoff) sessionState.booking.nearestDropoff = String(toolArgs.nearest_dropoff);
             if (toolArgs.last_question_asked) {
               sessionState.lastQuestionAsked = toolArgs.last_question_asked as SessionState["lastQuestionAsked"];
             }
