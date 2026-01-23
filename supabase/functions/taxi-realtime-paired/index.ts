@@ -3636,6 +3636,114 @@ Otherwise, say goodbye warmly and call end_call().`
             const lowerUserText = userText.toLowerCase();
             
             // ═══════════════════════════════════════════════════════════════════
+            // KNOWN VENUE EXTRACTION (HIGHEST PRIORITY - before any other detection)
+            // If user mentions a known venue like "Sweet Spot", extract it immediately
+            // This prevents AI hallucinations from overwriting valid venue names
+            // ═══════════════════════════════════════════════════════════════════
+            const mentionedVenue = containsKnownVenue(userText);
+            if (mentionedVenue && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              // Determine if it's pickup or destination based on context words
+              const isPickupContext = /\b(pick[\s-]?up|pickup|from|collect)\b/i.test(lowerUserText);
+              const isDestContext = /\b(destination|to|going|drop|heading|take me)\b/i.test(lowerUserText);
+              
+              // Also check if user is changing something (correction context)
+              const isCorrectionContext = /\b(change|no|but|actually|not|instead)\b/i.test(lowerUserText);
+              
+              // If it's clearly a correction mentioning a known venue, apply it
+              if (isCorrectionContext || (!sessionState.booking.pickup && isPickupContext) || (!sessionState.booking.destination && isDestContext)) {
+                const fieldToUpdate = isDestContext && !isPickupContext ? "destination" : "pickup";
+                const oldValue = fieldToUpdate === "pickup" ? sessionState.booking.pickup : sessionState.booking.destination;
+                const properVenueName = mentionedVenue.charAt(0).toUpperCase() + mentionedVenue.slice(1); // Capitalize
+                
+                console.log(`[${callId}] 🏪 KNOWN VENUE DETECTED: "${mentionedVenue}" → updating ${fieldToUpdate}`);
+                console.log(`[${callId}] 🏪 Context: pickup=${isPickupContext}, dest=${isDestContext}, correction=${isCorrectionContext}`);
+                
+                // Only apply if it's different from current value
+                if (oldValue?.toLowerCase() !== mentionedVenue.toLowerCase()) {
+                  if (fieldToUpdate === "pickup") {
+                    sessionState.booking.pickup = properVenueName;
+                  } else {
+                    sessionState.booking.destination = properVenueName;
+                  }
+                  
+                  console.log(`[${callId}] ✅ Updated ${fieldToUpdate}: "${oldValue}" → "${properVenueName}"`);
+                  
+                  // Reset fare if address changed after quote
+                  if (sessionState.pendingFare) {
+                    console.log(`[${callId}] 💰 Resetting fare due to ${fieldToUpdate} change (known venue)`);
+                    sessionState.pendingFare = null;
+                    sessionState.pendingEta = null;
+                    sessionState.awaitingConfirmation = false;
+                    sessionState.quoteInFlight = false;
+                    sessionState.lastQuoteRequestedAt = 0;
+                  }
+                  
+                  // Cancel any in-flight response
+                  if (sessionState.openAiResponseActive) {
+                    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                    sessionState.openAiResponseActive = false;
+                  }
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                  
+                  // Sync to database
+                  const updatePayload: Record<string, any> = { updated_at: new Date().toISOString() };
+                  updatePayload[fieldToUpdate] = properVenueName;
+                  supabase.from("live_calls").update(updatePayload).eq("call_id", callId).then(() => {
+                    console.log(`[${callId}] ✅ live_calls updated with ${fieldToUpdate} = ${properVenueName}`);
+                  });
+                  
+                  // Determine next instruction
+                  const hasAllCore = sessionState.booking.pickup && sessionState.booking.destination && 
+                                     sessionState.booking.passengers !== null && sessionState.booking.pickupTime;
+                  
+                  let nextInstruction: string;
+                  if (hasAllCore) {
+                    nextInstruction = "All 4 fields are now complete. Give the updated booking summary and ask for confirmation.";
+                  } else if (!sessionState.booking.destination && fieldToUpdate === "pickup") {
+                    nextInstruction = "Ask ONLY: 'And what is your destination?'";
+                  } else if (!sessionState.booking.pickup && fieldToUpdate === "destination") {
+                    nextInstruction = "Ask ONLY: 'Where would you like to be picked up?'";
+                  } else if (sessionState.booking.passengers === null) {
+                    nextInstruction = "Ask ONLY: 'How many people will be travelling?'";
+                  } else if (!sessionState.booking.pickupTime) {
+                    nextInstruction = "Ask ONLY: 'When do you need the taxi?'";
+                  } else {
+                    nextInstruction = "Summarize the booking and ask for confirmation.";
+                  }
+                  
+                  // Inject acknowledgment and continue flow
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [{
+                        type: "input_text",
+                        text: `[${fieldToUpdate.toUpperCase()} CHANGED TO KNOWN VENUE]
+The user changed the ${fieldToUpdate} to "${properVenueName}".
+
+## UPDATED BOOKING STATE:
+- Pickup: ${sessionState.booking.pickup || "not yet provided"}
+- Destination: ${sessionState.booking.destination || "not yet provided"}
+- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
+- Time: ${sessionState.booking.pickupTime || "ASAP"}
+
+INSTRUCTIONS:
+1. Acknowledge briefly: "Got it, ${fieldToUpdate} is now ${properVenueName}."
+2. ${nextInstruction}
+3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
+                      }]
+                    }
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "response.create" }));
+                  sessionState.openAiResponseActive = true;
+                  await updateLiveCall(sessionState);
+                  break; // Handled the known venue - skip normal processing
+                }
+              }
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
             // ADDRESS CORRECTION DETECTION (ported from simple mode - highest priority)
             // Detect phrases like "No, it's...", "Actually...", "The pickup is..."
             // This catches corrections that explicit patterns miss
