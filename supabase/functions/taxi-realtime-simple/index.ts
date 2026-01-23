@@ -2117,6 +2117,65 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
 
+    // ═══════════════════════════════════════════════════════════════════
+    // GREETING / RESUME HANDLING
+    // If greetingDelivered=true (from session restoration), skip the greeting
+    // and inject a context-aware resume prompt instead
+    // ═══════════════════════════════════════════════════════════════════
+    if (sessionState.greetingDelivered) {
+      // SESSION RESUMED - inject context prompt instead of greeting
+      console.log(`[${sessionState.callId}] 🔄 SESSION RESUMED - skipping greeting, injecting context`);
+      
+      // Build resume prompt based on current booking step
+      let resumeInstruction = "";
+      const { pickup, destination, passengers } = sessionState.booking;
+      
+      if (sessionState.bookingStep === "confirmed") {
+        resumeInstruction = "The booking has already been confirmed. Ask if there's anything else you can help with.";
+      } else if (sessionState.bookingStep === "summary") {
+        resumeInstruction = `Continue with the booking summary. Pickup: "${pickup || 'not set'}", Destination: "${destination || 'not set'}", Passengers: ${passengers || 'not set'}. Ask if the details are correct.`;
+      } else if (sessionState.bookingStep === "time") {
+        resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}" for ${passengers} passengers. Ask when they need the taxi.`;
+      } else if (sessionState.bookingStep === "passengers") {
+        resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
+      } else if (sessionState.bookingStep === "destination") {
+        resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+      } else {
+        resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+      }
+      
+      // Inject resume context
+      openaiWs?.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `[SESSION RESUMED - DO NOT GREET AGAIN] ${resumeInstruction}` }]
+        }
+      }));
+      
+      // Brief acknowledgment that continues naturally
+      const resumeText = pickup && destination && passengers
+        ? `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. When do you need the taxi?`
+        : pickup && destination
+        ? `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`
+        : pickup
+        ? `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`
+        : `Sorry about that. Where would you like to be picked up?`;
+      
+      openaiWs?.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["text", "audio"],
+          instructions: `Say this EXACTLY (brief reconnection acknowledgment): "${resumeText}" - STOP after asking. Do NOT re-introduce yourself.`
+        }
+      }));
+      
+      console.log(`[${sessionState.callId}] 📝 Resume prompt injected (step: ${sessionState.bookingStep})`);
+      return;
+    }
+    
+    // === NORMAL GREETING (first connection) ===
     // Inject the exact welcome greeting as a conversation item to force OpenAI to speak it
     // This prevents OpenAI from skipping or paraphrasing the greeting
     const greetingText = sessionState.hasActiveBooking
@@ -7404,16 +7463,67 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
       if (message.type === "init") {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
-        const isReconnect = message.reconnect === true;
+        const isReconnect = message.reconnect === true || message.resume === true;
+        const resumeCallId = message.resume_call_id || null;
         
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, preConnected=${preConnected})`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, resume_call_id=${resumeCallId}, preConnected=${preConnected})`);
 
-        // Reconnect handling:
-        // The Python bridge may reconnect mid-call (network blip / websocket reset).
-        // Simple mode does NOT support true session resumption, but we should NOT hard-fail the call.
-        // Instead, treat reconnect as a fresh simple session to avoid infinite reconnect loops.
+        // ═══════════════════════════════════════════════════════════════════
+        // SESSION RESTORATION: If bridge sends reconnect=true or resume=true,
+        // restore state from live_calls table instead of starting fresh greeting
+        // ═══════════════════════════════════════════════════════════════════
+        let restoredSession: any = null;
+        let skipGreeting = false;
+        
         if (isReconnect) {
-          console.log(`[${callId}] ♻️ Reconnect received - treating as fresh simple session (no resume)`);
+          console.log(`[${callId}] 🔄 RESUME: Looking up session ${resumeCallId || callId} or phone ${phone}`);
+          
+          try {
+            // First try by call_id
+            if (resumeCallId || callId) {
+              const lookupId = resumeCallId || callId;
+              const { data: callData } = await supabase
+                .from("live_calls")
+                .select("*")
+                .eq("call_id", lookupId)
+                .maybeSingle();
+              
+              if (callData && !callData.ended_at) {
+                restoredSession = callData;
+                console.log(`[${callId}] ✅ Found session by call_id: ${lookupId}`);
+              }
+            }
+            
+            // Fallback: lookup by phone number (most recent active call in last 10 minutes)
+            if (!restoredSession && phone && phone !== "unknown") {
+              const phoneKey = normalizePhone(phone);
+              const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+              const { data: phoneData } = await supabase
+                .from("live_calls")
+                .select("*")
+                .eq("caller_phone", phoneKey)
+                .in("status", ["active", "awaiting_confirmation", "confirmed"])
+                .gt("updated_at", tenMinutesAgo)
+                .order("updated_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              
+              if (phoneData && !phoneData.ended_at) {
+                restoredSession = phoneData;
+                console.log(`[${callId}] ✅ Found session by phone fallback: ${phoneData.call_id}`);
+              }
+            }
+            
+            if (restoredSession) {
+              skipGreeting = true;
+              console.log(`[${callId}] 📦 RESTORED STATE: pickup=${restoredSession.pickup}, dest=${restoredSession.destination}, pax=${restoredSession.passengers}`);
+            } else {
+              console.log(`[${callId}] ♻️ No session found to restore - will use fresh greeting`);
+            }
+          } catch (e) {
+            console.error(`[${callId}] Session restore lookup failed:`, e);
+            // Continue without restoration
+          }
         }
 
         // Detect language from phone number FIRST (fast, no DB)
@@ -7530,13 +7640,54 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastSpokenQuestion: null,
             lastSpokenQuestionAt: null,
             lastMultiQuestionFixAt: null,
-            greetingDelivered: false,
-            bookingStep: "pickup", // Start at pickup step
+            greetingDelivered: skipGreeting, // If resuming, mark greeting as already delivered
+            bookingStep: "pickup", // Start at pickup step (may be updated below)
             bookingStepAdvancedAt: null,
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
           };
+          
+          // ═══════════════════════════════════════════════════════════════════
+          // APPLY RESTORED SESSION DATA (if available)
+          // ═══════════════════════════════════════════════════════════════════
+          if (restoredSession) {
+            // Restore booking state
+            state.booking.pickup = restoredSession.pickup || null;
+            state.booking.destination = restoredSession.destination || null;
+            state.booking.passengers = restoredSession.passengers || null;
+            state.customerName = restoredSession.caller_name || state.customerName;
+            state.callerTotalBookings = restoredSession.caller_total_bookings || 0;
+            state.callerLastPickup = restoredSession.caller_last_pickup || null;
+            state.callerLastDestination = restoredSession.caller_last_destination || null;
+            state.bookingFullyConfirmed = restoredSession.booking_confirmed || false;
+            
+            // Restore conversation history
+            if (Array.isArray(restoredSession.transcripts)) {
+              state.transcripts = restoredSession.transcripts.map((t: any) => ({
+                role: t.role || "user",
+                text: t.text || t.content || "",
+                timestamp: t.timestamp || new Date().toISOString()
+              }));
+            }
+            
+            // Compute what step we're on based on restored state
+            if (state.bookingFullyConfirmed) {
+              state.bookingStep = "confirmed";
+            } else if (restoredSession.status === "awaiting_confirmation") {
+              state.bookingStep = "summary";
+            } else if (state.booking.passengers !== null && state.booking.passengers > 0) {
+              state.bookingStep = "time";
+            } else if (state.booking.destination) {
+              state.bookingStep = "passengers";
+            } else if (state.booking.pickup) {
+              state.bookingStep = "destination";
+            } else {
+              state.bookingStep = "pickup";
+            }
+            
+            console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}`);
+          }
         }
         
         // Also update settings from init message if pre-connected
