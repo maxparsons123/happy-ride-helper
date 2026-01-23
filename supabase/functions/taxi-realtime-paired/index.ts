@@ -3630,12 +3630,56 @@ Otherwise, say goodbye warmly and call end_call().`
             // Patterns like "change the pickup to X" or "can I change pickup to X"
             // ═══════════════════════════════════════════════════════════════════
             const lowerUserText = userText.toLowerCase();
-            const pickupChangeMatch = lowerUserText.match(/(?:change|update|switch|make)\s+(?:the\s+)?pick[\s-]?up\s+(?:to|two)\s+(?:the\s+)?(.+)/i) ||
-                                      lowerUserText.match(/pick[\s-]?up\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i) ||
-                                      lowerUserText.match(/(?:can i|could i|i want to)\s+change\s+(?:the\s+)?pick[\s-]?up\s+(?:to|two)\s+(?:the\s+)?(.+)/i);
-            const destChangeMatch = lowerUserText.match(/(?:change|update|switch|make)\s+(?:the\s+)?destination\s+(?:to|two)\s+(?:the\s+)?(.+)/i) ||
-                                    lowerUserText.match(/destination\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i) ||
-                                    lowerUserText.match(/(?:can i|could i|i want to)\s+change\s+(?:the\s+)?destination\s+(?:to|two)\s+(?:the\s+)?(.+)/i);
+            // ═══════════════════════════════════════════════════════════════════
+            // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (COMPREHENSIVE)
+            // Must catch: "change my pickup to X", "change pickup point to X", 
+            // "can I change the pickup to X", "I want to change my pick-up to X"
+            // ═══════════════════════════════════════════════════════════════════
+            const pickupPatterns = [
+              // "change my pickup to X", "change the pickup to X", "change pickup to X"
+              /(?:change|update|switch|make)\s+(?:my\s+)?(?:the\s+)?pick[\s-]?up(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
+              // "can I change my pickup to X", "could I change the pickup to X"
+              /(?:can i|could i|i want to|i'd like to|i would like to)\s+change\s+(?:my\s+)?(?:the\s+)?pick[\s-]?up(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
+              // "pickup should be X", "pickup is X" (after summary)
+              /pick[\s-]?up\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i,
+              // "actually from X" / "no, from X"
+              /(?:actually|no)[,\s]+(?:from|pickup is|pickup from)\s+(?:the\s+)?(.+)/i,
+              // "the pickup is X" / "my pickup is X"
+              /(?:the|my)\s+pick[\s-]?up\s+(?:is|should be)\s+(?:the\s+)?(.+)/i,
+            ];
+            
+            const destPatterns = [
+              // "change my destination to X", "change the destination to X"
+              /(?:change|update|switch|make)\s+(?:my\s+)?(?:the\s+)?destination(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
+              // "can I change my destination to X"
+              /(?:can i|could i|i want to|i'd like to|i would like to)\s+change\s+(?:my\s+)?(?:the\s+)?destination(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
+              // "destination should be X", "destination is X"
+              /destination\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i,
+              // "actually to X" / "no, going to X"
+              /(?:actually|no)[,\s]+(?:to|going to|destination is|heading to)\s+(?:the\s+)?(.+)/i,
+              // "the destination is X" / "my destination is X"
+              /(?:the|my)\s+destination\s+(?:is|should be)\s+(?:the\s+)?(.+)/i,
+            ];
+            
+            // Test all pickup patterns
+            let pickupChangeMatch: RegExpMatchArray | null = null;
+            for (const pattern of pickupPatterns) {
+              pickupChangeMatch = lowerUserText.match(pattern);
+              if (pickupChangeMatch) {
+                console.log(`[${callId}] 🎯 Pickup pattern matched: ${pattern}`);
+                break;
+              }
+            }
+            
+            // Test all destination patterns
+            let destChangeMatch: RegExpMatchArray | null = null;
+            for (const pattern of destPatterns) {
+              destChangeMatch = lowerUserText.match(pattern);
+              if (destChangeMatch) {
+                console.log(`[${callId}] 🎯 Destination pattern matched: ${pattern}`);
+                break;
+              }
+            }
             
             if (pickupChangeMatch && pickupChangeMatch[1]) {
               const newPickup = pickupChangeMatch[1].replace(/please\s*$/i, "").trim();
