@@ -1417,22 +1417,41 @@ interface AddressCorrection {
 function detectAddressCorrection(text: string, currentPickup: string | null, currentDestination: string | null): AddressCorrection {
   const lower = text.toLowerCase();
   
-  // Correction trigger phrases
+  // Correction trigger phrases - comprehensive patterns for address changes
   const correctionPhrases = [
-    /^it'?s\s+(.+)/i,                          // "It's 52A David Road"
-    /^no[,\s]+it'?s\s+(.+)/i,                  // "No, it's..."
-    /^actually[,\s]+(.+)/i,                    // "Actually 52A David Road"
-    /^i meant\s+(.+)/i,                        // "I meant 52A..."
-    /^i said\s+(.+)/i,                         // "I said 52A..."
-    /^should be\s+(.+)/i,                      // "Should be 52A..."
-    /^it should be\s+(.+)/i,                   // "It should be..."
-    /^sorry[,\s]+(.+)/i,                       // "Sorry, 52A David Road"
-    /^correction[:\s]+(.+)/i,                  // "Correction: 52A..."
-    /^the (?:pickup|address) is\s+(.+)/i,     // "The pickup is..."
-    /^(?:no[,\s]+)?that'?s\s+(.+)/i,          // "That's 52A..." or "No, that's 52A..."
+    /^it'?s\s+(.+)/i,                                   // "It's 52A David Road"
+    /^no[,\s]+it'?s\s+(.+)/i,                           // "No, it's..."
+    /^no[,\s]+the\s+(?:pick[- ]?up|pickup)\s+is\s+(?:at\s+)?(.+)/i,  // "No, the pickup is at Sweet Spot"
+    /^no[,\s]+the\s+destination\s+is\s+(.+)/i,          // "No, the destination is..."
+    /^no[,\s]+(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(.+)/i,   // "No, pickup is at..."
+    /^no[,\s]+from\s+(.+)/i,                            // "No, from Sweet Spot"
+    /^no[,\s]+to\s+(.+)/i,                              // "No, to the airport"
+    /^actually[,\s]+(.+)/i,                             // "Actually 52A David Road"
+    /^i meant\s+(.+)/i,                                 // "I meant 52A..."
+    /^i said\s+(.+)/i,                                  // "I said 52A..."
+    /^should be\s+(.+)/i,                               // "Should be 52A..."
+    /^it should be\s+(.+)/i,                            // "It should be..."
+    /^sorry[,\s]+(.+)/i,                                // "Sorry, 52A David Road"
+    /^correction[:\s]+(.+)/i,                           // "Correction: 52A..."
+    /^the\s+(?:pick[- ]?up|pickup)\s+is\s+(?:at\s+)?(.+)/i,  // "The pickup is at..."
+    /^the\s+(?:destination|dropoff|drop off)\s+is\s+(.+)/i,   // "The destination is..."
+    /^(?:no[,\s]+)?that'?s\s+(.+)/i,                    // "That's 52A..." or "No, that's 52A..."
+    /^change\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\s+(.+)/i,  // "Change the pickup to..."
+    /^change\s+(?:the\s+)?(?:destination|dropoff)\s+to\s+(.+)/i, // "Change destination to..."
+    /^not\s+(.+)[,\s]+(?:it'?s|but)\s+(.+)/i,          // "Not 52A, it's 52B"
+    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(.+)/i,  // "Pickup is at Sweet Spot" (without "no")
+    /^from\s+(.+)/i,                                    // "From Sweet Spot" (if context suggests correction)
   ];
   
   let extractedAddress: string | null = null;
+  let explicitFieldType: "pickup" | "destination" | null = null;
+  
+  // Check for explicit field mentions in the correction phrase BEFORE extracting
+  if (/\b(?:pick[- ]?up|pickup|from)\b/i.test(lower)) {
+    explicitFieldType = "pickup";
+  } else if (/\b(?:destination|dropoff|drop off|to|going to)\b/i.test(lower)) {
+    explicitFieldType = "destination";
+  }
   
   for (const pattern of correctionPhrases) {
     const match = text.match(pattern);
@@ -1466,18 +1485,29 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   
   // Also filter out if it's just a name (likely user saying "yes, [name]" or "correct, [name]")
   // Names are typically short and don't contain address keywords
-  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park"];
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park", "spot", "bar", "pub", "restaurant", "shop", "store", "gym", "club"];
   const hasAddressKeyword = addressKeywords.some(kw => lowerExtracted.includes(kw));
   const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(extractedAddress) || /\d+[a-zA-Z]?$/.test(extractedAddress);
+  const isVenueName = extractedAddress.split(/\s+/).length >= 2; // "Sweet Spot", "The Mailbox", etc.
   
-  // If no address keywords and no house number, it's probably not a real address
-  if (!hasAddressKeyword && !hasHouseNumber && extractedAddress.split(/\s+/).length <= 2) {
+  // If no address keywords and no house number and not a multi-word venue name, reject
+  // BUT if we have an explicit field type (user said "pickup is at" or "from"), be more lenient
+  if (!hasAddressKeyword && !hasHouseNumber && !isVenueName && !explicitFieldType) {
     // Could be "correct, Jeff" or similar - reject it
     return { type: null, address: "" };
   }
   
-  // Determine if this is correcting pickup or destination
-  // Check for explicit field mentions
+  // Single word without keywords is likely not a real location (unless explicit field type)
+  if (extractedAddress.split(/\s+/).length === 1 && !hasAddressKeyword && !hasHouseNumber && !explicitFieldType) {
+    return { type: null, address: "" };
+  }
+  
+  // Use explicit field type if we detected one, otherwise try to infer
+  if (explicitFieldType) {
+    return { type: explicitFieldType, address: extractedAddress };
+  }
+  
+  // Fallback: check for field mentions (redundant now but kept for safety)
   if (lower.includes("pickup") || lower.includes("pick up") || lower.includes("from")) {
     return { type: "pickup", address: extractedAddress };
   }
