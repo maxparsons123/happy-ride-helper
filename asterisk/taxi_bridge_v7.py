@@ -1090,6 +1090,12 @@ class TaxiBridge:
                     self.state.call_formally_ended = True
                     raise CallEndedException()
                 
+                elif msg_type == "hangup":
+                    logger.info("[%s] 📴 Hangup from edge function: %s", 
+                               self.state.call_id, data.get("reason", "end_call"))
+                    self.state.call_formally_ended = True
+                    raise CallEndedException()
+                
                 elif msg_type == "keepalive":
                     if self.ws and self.state.ws_connected:
                         await self.ws.send(json.dumps({
