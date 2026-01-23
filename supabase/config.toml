@@ -23,3 +23,6 @@ verify_jwt = false
 
 [functions.taxi-realtime-gemini]
 verify_jwt = false
+
+[functions.taxi-text-handler]
+verify_jwt = false
