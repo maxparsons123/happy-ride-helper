@@ -122,7 +122,7 @@ public class CallSession : IDisposable
             if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
             {
                 _logger.LogInformation("Call {CallId} answered - Codec: {Codec} @ {Rate}Hz",
-                    _callId, selectedFormat.Value.Name(), selectedFormat.Value.ClockRate());
+                    _callId, selectedFormat.Value.FormatName, selectedFormat.Value.ClockRate);
             }
             else
             {
@@ -201,13 +201,21 @@ public class CallSession : IDisposable
             // 1. Decode μ-law to PCM16 bytes
             var pcm16Bytes = G711Codec.UlawToPcm16(payload);
 
-            // 2. Apply DSP pipeline (high-pass, noise gate, AGC) - expects byte[]
-            var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16Bytes);
+            // 2. Convert to short[] for DSP processing
+            var pcm16Samples = new short[pcm16Bytes.Length / 2];
+            Buffer.BlockCopy(pcm16Bytes, 0, pcm16Samples, 0, pcm16Bytes.Length);
 
-            // 3. Resample 8kHz to 24kHz for Ada
-            var resampled = AudioResampler.Resample(processed, 8000, 24000);
+            // 3. Apply DSP pipeline (high-pass, noise gate, AGC)
+            var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16Samples);
 
-            // 4. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
+            // 4. Convert back to bytes for resampling
+            var processedBytes = new byte[processed.Length * 2];
+            Buffer.BlockCopy(processed, 0, processedBytes, 0, processedBytes.Length);
+
+            // 5. Resample 8kHz to 24kHz for Ada
+            var resampled = AudioResampler.Resample(processedBytes, 8000, 24000);
+
+            // 6. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
             _ = SendBinaryAudio(resampled);
         }
         catch (Exception ex)

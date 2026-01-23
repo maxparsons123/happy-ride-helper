@@ -62,17 +62,6 @@ ${callerCity ? `Default city: ${callerCity}` : ""}
 ${aliasInstruction}
 
 ==================================================
-INTENT DETECTION (REQUIRED)
-==================================================
-You MUST set the 'intent' field based on user's message:
-• "new_booking" - User wants to book a taxi (first time, no existing booking)
-• "update_booking" - User is modifying an existing booking field
-• "confirm_booking" - User says "yes", "correct", "confirm", "that's right"
-• "cancel_booking" - User wants to cancel
-• "get_status" - User asks "where is my taxi", "ETA", "how long"
-• "other" - Unrelated to booking
-
-==================================================
 EXTRACTION RULES (NEW BOOKING)
 ==================================================
 1. **QUESTION-ANSWER FLOW (HIGHEST PRIORITY)**:
@@ -84,35 +73,16 @@ EXTRACTION RULES (NEW BOOKING)
    - When Ada repeats a question (e.g., "Sorry, what is your destination again?") → this is a CORRECTION, update that field
    - The Q&A flow OVERRIDES keyword detection. If Ada asks for pickup and user says "18 Exmoor Road", that IS the pickup.
 
-2. **CORRECTIONS (CRITICAL - DETECT BOTH EXPLICIT AND IMPLICIT)**:
-   
-   EXPLICIT corrections (easy to detect):
-   - "No, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
-   - "That's wrong, it should be X"
-   - "No, the pickup is X" / "No, destination is X"
-   
-   IMPLICIT corrections (VERY IMPORTANT - user just states correct value):
-   - If Ada confirmed/summarized a booking with address A, and user then says "It's X" or "X please" or just "X" where X is different from A → THIS IS A CORRECTION
-   - Example: Ada says "pickup at 52A David Road", user says "It's Sweetspot!" → is_correction=true, pickup="Sweetspot"
-   - Example: Ada asks "Is that correct?" and user says "The pickup is the Sweet Spot" → is_correction=true, pickup="Sweet Spot"
-   - If user provides an address/value AFTER Ada has already confirmed a different value for that field → ALWAYS treat as correction
-   
-   BUSINESS NAMES AND LANDMARKS ARE VALID ADDRESSES:
-   - "Sweetspot", "The Mailbox", "Train Station", "Airport", "Tesco", "Costa", "City Centre" are ALL valid pickup/destination values
-   - If user says "It's [BusinessName]!" after Ada confirmed a street address → CORRECTION to that business name
-   - Do NOT reject short names like "Sweetspot" - they ARE valid destinations/pickups
-   
-   Compare user's response against Ada's last confirmed values:
-   - If user says a DIFFERENT address/place than what Ada stated → is_correction=true + update that field
-   - Look at Ada's last message to see what she confirmed, compare to user's response
-   
-   LATEST customer response for a field ALWAYS wins over earlier responses.
-   Set is_correction=true AND fields_changed=['pickup'/'destination'] when correcting.
+2. **CORRECTIONS (CRITICAL)**:
+   - If a customer gives an address after Ada summarizes/confirms → check which field Ada is confirming
+   - If customer says "no, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
+   - If customer corrects after "Is that correct?" → update the corrected field
+   - LATEST customer response for a field ALWAYS wins over earlier responses
 
 3. **Location Detection (Secondary - use when no Q&A context)**:
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
-   - 'my location', 'here', 'current location' → pickup_location = 'by_gps'
+   - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
    - 'nearest X' or 'closest X' for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY
    - 'nearest X' or 'closest X' for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY
    - 'as directed' or no destination → dropoff_location = 'as directed'
@@ -135,24 +105,16 @@ EXTRACTION RULES (NEW BOOKING)
    - DO NOT default to 1. Leave null if unknown.
    - Context matters: answer to "how many passengers?" → passengers
 
-7. **Luggage (PRIORITY OVER special_requests)**:
-   Keywords: "luggage", "bags", "bag", "suitcase", "suitcases", "cases", "holdall", "backpack", "rucksack"
+7. **Luggage**:
    - "two bags/suitcases" → luggage = "2 bags"
-   - "I have luggage" → luggage = "luggage"
-   - "remove luggage" → luggage = "CLEAR"
-   - ANY mention of these words MUST go to 'luggage' field, NEVER to special_requests
 
-8. **Vehicle Types**:
+7. **Vehicle Types**:
    - saloon, estate, MPV, minibus, 6-seater, 8-seater
    - Only set if explicitly requested
 
-9. **Special Requests**:
+8. **Special Requests**:
    - "ring when outside", "wheelchair access", "child seat", driver requests
    - Do NOT include phone numbers
-   - Do NOT include luggage here (use luggage field)
-
-10. **Affirmative Detection**:
-    - Set is_affirmative = true for: "yes", "yeah", "correct", "that's right", "confirmed", "sounds good"
 
 `;
 };
@@ -189,19 +151,6 @@ pickup_location, dropoff_location, pickup_time, number_of_passengers, luggage
 
 You MUST ALWAYS reply in English, even if the input is in another language.
 Try to put user message into structured format with good English.
-
-==================================================
-IMPLICIT CORRECTION DETECTION (VERY IMPORTANT)
-==================================================
-When Ada confirms a value and user then provides a DIFFERENT value:
-• Ada: "Pickup at 52A David Road" → User: "It's Sweetspot!" 
-  → is_correction=true, fields_changed=["pickup"], pickup_location="Sweetspot"
-• Ada: "destination 7 Russell Street" → User: "No the destination is the train station"
-  → is_correction=true, fields_changed=["destination"], dropoff_location="the train station"
-• Ada summarizes booking → User says "Actually pickup from Sweet Spot"
-  → is_correction=true, fields_changed=["pickup"], pickup_location="Sweet Spot"
-
-Compare user's latest message to Ada's last confirmed values. If different → CORRECTION.
 
 ==================================================
 CHANGE DETECTION RULES (CRITICAL)
@@ -347,7 +296,7 @@ const buildSystemPrompt = (
   return buildNewBookingPrompt(now, callerName, callerCity, aliases);
 };
 
-// Tool definition for structured extraction (enhanced with C#-style intent tracking)
+// Tool definition for structured extraction
 // For modifications: AI returns COMPLETE booking with all fields populated
 const BOOKING_EXTRACTION_TOOL = {
   type: "function",
@@ -357,14 +306,9 @@ const BOOKING_EXTRACTION_TOOL = {
     parameters: {
       type: "object",
       properties: {
-        intent: {
-          type: "string",
-          enum: ["new_booking", "update_booking", "confirm_booking", "cancel_booking", "get_status", "other"],
-          description: "The user's intent. 'new_booking' for first booking, 'update_booking' when modifying, 'confirm_booking' when user says yes/confirm, 'cancel_booking' when user wants to cancel, 'get_status' for ETA/where is queries."
-        },
         pickup_location: { 
           type: "string", 
-          description: "Pickup address. Use 'by_gps' if user says 'my location', 'here', 'current location'. For updates: return existing value if not changed by user." 
+          description: "Pickup address. For updates: return existing value if not changed by user." 
         },
         dropoff_location: { 
           type: "string", 
@@ -380,7 +324,7 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         luggage: { 
           type: "string", 
-          description: "Luggage description (bags, suitcases, etc.). 'CLEAR' to remove. PRIORITY over special_requests - any luggage mention MUST go here, not special_requests." 
+          description: "Luggage description. 'CLEAR' to remove. For updates: return existing if not changed." 
         },
         vehicle_type: { 
           type: "string", 
@@ -389,7 +333,7 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         special_requests: { 
           type: "string", 
-          description: "Driver instructions, preferences, notes. DO NOT include luggage here - luggage has its own field." 
+          description: "Special requests (driver preferences, accessibility, etc.)" 
         },
         nearest_pickup: { 
           type: "string", 
@@ -399,28 +343,15 @@ const BOOKING_EXTRACTION_TOOL = {
           type: "string", 
           description: "If user asks to go to 'nearest' or 'closest' something (e.g., 'take me to the nearest hospital' → 'hospital')" 
         },
-        fields_extracted: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of fields that were extracted/updated in this turn (e.g., ['pickup', 'destination', 'passengers'])"
-        },
         fields_changed: {
           type: "array",
           items: { type: "string" },
-          description: "List of fields that were CHANGED from existing values in this update"
+          description: "List of fields that were CHANGED in this update (e.g., ['pickup', 'destination'])"
         },
         missing_fields: {
           type: "array",
           items: { type: "string" },
-          description: "List of essential fields still needed for a complete booking"
-        },
-        is_affirmative: {
-          type: "boolean",
-          description: "True if user's response is affirmative (yes, correct, that's right, confirm)"
-        },
-        is_correction: {
-          type: "boolean",
-          description: "TRUE if user is correcting a previously confirmed value. INCLUDES: explicit ('no, it's X') AND implicit corrections ('It's Sweetspot!' after Ada said '52A David Road'). If user provides a DIFFERENT value than what Ada last confirmed for a field, this is a correction."
+          description: "List of essential fields still needed"
         },
         confidence: {
           type: "string",
@@ -432,7 +363,7 @@ const BOOKING_EXTRACTION_TOOL = {
           description: "Brief note about changes detected, ambiguity, or alias resolutions"
         }
       },
-      required: ["intent", "pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "confidence"]
+      required: ["pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "confidence"]
     }
   }
 };
@@ -612,11 +543,7 @@ serve(async (req) => {
 
     // AI now returns COMPLETE booking for modifications (unchanged fields preserved)
     // Only need fallback merge if AI returns null for fields that should be preserved
-    // Determine intent (fallback logic if AI didn't return it)
-    const resolvedIntent = extracted.intent || (is_modification ? "update_booking" : "new_booking");
-    
     let finalResult = {
-      intent: resolvedIntent,
       pickup: extracted.pickup_location || (is_modification && current_booking?.pickup) || null,
       destination: extracted.dropoff_location || (is_modification && current_booking?.destination) || null,
       // Keep passengers as null if not explicitly provided - don't default to 1
@@ -627,12 +554,8 @@ serve(async (req) => {
       special_requests: extracted.special_requests || (is_modification && current_booking?.special_requests) || null,
       nearest_pickup: extracted.nearest_pickup || null,
       nearest_dropoff: extracted.nearest_dropoff || null,
-      // Enhanced tracking fields
-      fields_extracted: extracted.fields_extracted || [],
       fields_changed: extracted.fields_changed || [],
       missing_fields: extracted.missing_fields || [],
-      is_affirmative: extracted.is_affirmative || false,
-      is_correction: extracted.is_correction || false,
       confidence: extracted.confidence || "medium",
       extraction_notes: extracted.extraction_notes || null,
       is_modification: is_modification,

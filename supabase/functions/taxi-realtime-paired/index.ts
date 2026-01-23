@@ -37,7 +37,6 @@ const USE_AI_EXTRACTION = true;
 // ---------------------------------------------------------------------------
 // AI-Based Extraction (calls taxi-extract-unified edge function)
 // More accurate than regex patterns for extracting booking details
-// Now includes intent detection for corrections, confirmations, etc.
 // ---------------------------------------------------------------------------
 interface AIExtractionResult {
   pickup: string | null;
@@ -46,13 +45,6 @@ interface AIExtractionResult {
   pickup_time: string | null;
   confidence: string;
   fields_changed?: string[];
-  nearest_pickup?: string | null;
-  nearest_dropoff?: string | null;
-  // Intent detection (AI-based, replaces regex)
-  intent: "new_booking" | "update_booking" | "confirm_booking" | "cancel_booking" | "get_status" | "other";
-  is_correction: boolean;
-  is_affirmative: boolean;
-  fields_extracted?: string[];
 }
 
 async function extractBookingWithAI(
@@ -107,7 +99,7 @@ async function extractBookingWithAI(
     const result = await response.json();
     const latency = Date.now() - startTime;
     
-    console.log(`[${callId}] 🧠 AI EXTRACTION (${latency}ms): intent=${result.intent}, pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, is_correction=${result.is_correction}, is_affirmative=${result.is_affirmative}, conf=${result.confidence}`);
+    console.log(`[${callId}] 🧠 AI EXTRACTION (${latency}ms): pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, conf=${result.confidence}`);
     
     return {
       pickup: result.pickup || null,
@@ -115,14 +107,7 @@ async function extractBookingWithAI(
       passengers: result.passengers ?? null,
       pickup_time: result.pickup_time || null,
       confidence: result.confidence || "low",
-      fields_changed: result.fields_changed || [],
-      nearest_pickup: result.nearest_pickup || null,
-      nearest_dropoff: result.nearest_dropoff || null,
-      // Intent detection from AI
-      intent: result.intent || "new_booking",
-      is_correction: result.is_correction || false,
-      is_affirmative: result.is_affirmative || false,
-      fields_extracted: result.fields_extracted || []
+      fields_changed: result.fields_changed
     };
   } catch (error) {
     console.error(`[${callId}] ❌ AI extraction error:`, error);
@@ -546,12 +531,6 @@ Follow this order exactly. Only move to the next if you have the current answer:
 🚨 ACKNOWLEDGE PASSENGER COUNT: After user says a number, briefly confirm the count.
 Then ask about the time.
 
-🔊 PASSENGER COUNT STT CORRECTION:
-- If the previous address contained "7" (e.g., "7 Russell Street") and user says passengers:
-- "Seven" right after a "7 [street]" address is likely the user saying "Three" (phonetic confusion)
-- Common mishearings: "Boston Juice" = three, "Ozempic Juice" = three
-- When uncertain, ask: "Was that three passengers?" to clarify
-
 🚨 CRITICAL: NEVER ASK USER TO CONFIRM/REPEAT AN ADDRESS 🚨
 🚫 DO NOT ask "Could you please confirm the pickup address?"
 🚫 DO NOT ask "Could you confirm the destination?"
@@ -564,22 +543,7 @@ Then ask about the time.
 ✅ ACCEPT ANY ADDRESS AS-IS - do NOT ask for house numbers, postcodes, or more details.
 ✅ Accept business names, landmarks, partial addresses, and place names immediately.
 
-# NEAREST/CLOSEST PLACES
-When user says "nearest X" or "closest X" (e.g., "nearest hotel", "closest hospital", "nearest train station"):
-- Accept this as a valid destination or pickup
-- Do NOT ask for a specific address - just accept "nearest hotel" as the destination
-- The dispatch system will find the actual nearest location based on their GPS/pickup
-- Use sync_booking_data to store the nearest place type
-
-# LOCAL INFORMATION (POST-BOOKING ONLY)
-After the booking is confirmed and you ask "Is there anything else I can help with?":
-- If user asks about local events, what's on, restaurants, hotels, bars, or attractions:
-  - Be helpful and suggest 2-3 popular options in their area if you know them
-  - For Coventry: suggest FarGo Village, Coventry Cathedral, The Wave, local pubs
-  - For Birmingham: suggest Bullring, Mailbox, Jewellery Quarter venues
-  - If you don't know, say "I'd recommend checking local event listings online"
-- This is ONLY for post-booking chat - during booking, stay focused on the taxi
-
+# PHASE 3: THE SUMMARY (Gate Keeper)
 Only after the checklist is 100% complete, summarize the booking in the caller's language:
 Pickup address, destination address, number of passengers, pickup time. Ask if correct.
 
@@ -648,26 +612,6 @@ When the user responds, ALWAYS check what question you just asked them:
 - If you asked for PASSENGERS and they respond → it's the passenger count
 - If you asked for TIME and they respond → it's the pickup time
 NEVER swap fields. Trust the question context.
-
-# 🛠️ CORRECTIONS & EDITS (CRITICAL - ALWAYS ALLOW)
-Users can correct ANY field at ANY time, even after the summary or during pricing.
-WATCH for these correction patterns:
-- "No, it's X" / "Actually, it's X" / "I said X not Y"
-- "You put X passengers, there's Y" / "No, X passengers"
-- "That's wrong, the pickup is X" / "Change the destination to X"
-- "It should be X" / "Not X, it's Y"
-
-When user makes a correction:
-1. Acknowledge briefly: "Got it, [field] is now [new value]"
-2. Update the field using sync_booking_data
-3. If mid-summary: Re-summarize with the corrected info
-4. If after pricing: Say "Let me get an updated price" and call book_taxi(action='request_quote') again
-5. NEVER dismiss or ignore a correction - they take priority over everything
-
-Examples:
-- User: "You put seven passengers, there's three" → passengers=3, acknowledge, continue
-- User: "No, the pickup is 52B not 52A" → pickup="52B [street]", acknowledge, continue  
-- User: "Change destination to the airport" → destination="airport", acknowledge, continue
 `;
 }
 
@@ -684,8 +628,6 @@ const TOOLS = [
         destination: { type: "string", description: "Destination address if the user just provided it" },
         passengers: { type: "integer", description: "Number of passengers if the user just provided it" },
         pickup_time: { type: "string", description: "Pickup time if the user just provided it (e.g., 'now', '3pm')" },
-        nearest_pickup: { type: "string", description: "Type of place for 'nearest X' pickup (e.g., 'hotel', 'hospital', 'train station')" },
-        nearest_dropoff: { type: "string", description: "Type of place for 'nearest X' destination (e.g., 'hotel', 'hospital', 'train station')" },
         last_question_asked: { 
           type: "string", 
           enum: ["pickup", "destination", "passengers", "time", "confirmation", "none"],
@@ -734,53 +676,20 @@ const TOOLS = [
   }
 ];
 
-// === BOOKING STEP STATE MACHINE (ported from simple mode) ===
-type BookingStep = "pickup" | "destination" | "passengers" | "time" | "summary" | "confirmed";
-const BOOKING_STEP_ORDER: BookingStep[] = ["pickup", "destination", "passengers", "time", "summary", "confirmed"];
-
-function getNextStep(currentStep: BookingStep): BookingStep | null {
-  const idx = BOOKING_STEP_ORDER.indexOf(currentStep);
-  if (idx === -1 || idx >= BOOKING_STEP_ORDER.length - 1) return null;
-  return BOOKING_STEP_ORDER[idx + 1];
-}
-
-function isStepComplete(step: BookingStep, booking: { pickup: string | null; destination: string | null; passengers: number | null; pickupTime: string | null }): boolean {
-  switch (step) {
-    case "pickup": return !!booking.pickup && booking.pickup.length > 2;
-    case "destination": return !!booking.destination && booking.destination.length > 2;
-    case "passengers": return booking.passengers !== null && booking.passengers > 0;
-    case "time": return booking.pickupTime !== null;
-    case "summary": return true;
-    case "confirmed": return true;
-    default: return false;
-  }
-}
-
 // Session state interface
 interface SessionState {
   callId: string;
   callerPhone: string;
   language: string; // ISO 639-1 code or "auto" for auto-detect
-  // Latest user utterance (best-effort) used to validate tool calls and prevent hallucinated overwrites.
-  lastUserText: string | null;
   booking: {
     pickup: string | null;
     destination: string | null;
     passengers: number | null;
     pickupTime: string | null;
-    nearestPickup: string | null;
-    nearestDropoff: string | null;
   };
-  // === NEW: Step-based state machine (ported from simple) ===
-  bookingStep: BookingStep;
-  bookingStepAdvancedAt: number | null;
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
-  // === NEW: Greeting delivered tracking (for session resume) ===
-  greetingDelivered: boolean;
-  // === NEW: Fare spoken tracking (prevents repetition after handoff) ===
-  fareSpoken: boolean;
   openAiResponseActive: boolean;
   // Track when Ada started speaking (ms since epoch) to prevent echo-triggered barge-in
   openAiSpeechStartedAt: number;
@@ -812,16 +721,6 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
-  // Track when user started speaking (for duration logging)
-  speechStartedAt: number;
-  // === NEW: Speech timing for pre-emptive extraction guard ===
-  speechStopTime: number;
-  extractionInProgress: boolean;
-  // === NEW: Handoff tracking (ported from simple) ===
-  handoffTriggered: boolean;
-  // === NEW: Post-booking chat mode ===
-  askedAnythingElse: boolean;
-  bookingFullyConfirmed: boolean;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -842,13 +741,6 @@ const ASSISTANT_LEADIN_IGNORE_MS = 700;
 // Keep MIN low or Ada will never hear quiet callers during her own speech.
 const RMS_BARGE_IN_MIN = 5;     // Minimum for barge-in during Ada speech
 const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
-
-// === NEW: OpenAI reconnection settings (ported from simple mode) ===
-const MAX_OPENAI_RECONNECT_ATTEMPTS = 3;
-
-// === NEW: Session timeout and handoff settings (ported from simple mode) ===
-const MAX_SESSION_DURATION_MS = 4 * 60 * 1000; // 4 minutes
-const HANDOFF_DELAY_AFTER_DISPATCH_MS = 2000; // 2s delay after fare quote received
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
@@ -1002,53 +894,6 @@ const PHANTOM_PHRASES = [
   "previous video",
   "watch more",
   "watch next",
-  // 2026-01 Observed Whisper hallucinations from 8kHz telephony audio
-  "how did you like",
-  "did you like",
-  "kind attitude towards the passengers",
-  "attitude towards the passengers",
-  "thank you for your kind attitude",
-  "thank you four watching",
-  "thank you for watching and for your kind",
-  "your kind attitude",
-  "towards the passengers",
-  "thank you for your patience",
-  "thank you for your support",
-  "thank you for your time",
-  "we appreciate your",
-  "appreciate your patience",
-  "appreciate your time",
-  "have a nice day",
-  "have a great day",
-  "have a good one",
-  "take care of yourself",
-  "stay safe",
-  "stay tuned",
-  "coming right up",
-  "stand by",
-  "please hold",
-  "one moment please while i transfer",
-  "your call is important to us",
-  "please wait while",
-  "please continue to hold",
-  "thank you for holding",
-  "thank you for waiting",
-  "a representative will be with you",
-  "an agent will be with you",
-  "all our agents are busy",
-  "unusually high call volume",
-  "estimated wait time",
-  "press 1 for",
-  "press 2 for",
-  "press 0 for",
-  "to speak with a representative",
-  "to speak with an agent",
-  "for more options",
-  "main menu",
-  "goodbye and thank you",
-  "thank you and goodbye",
-  "call again",
-  "call back",
 ];
 
 // --- STT Corrections ---
@@ -1183,22 +1028,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   "sweet puff": "Sweet Spot",
   "sweets spot": "Sweet Spot",
   "sweetsspot": "Sweet Spot",
-  // "two sweet spot" → "to Sweet Spot" (common STT mishearing "to" as "two")
-  "two sweet spot": "to Sweet Spot",
-  "two sweetspot": "to Sweet Spot",
-  "two street spot": "to Sweet Spot",
-  "two a sweet spot": "to Sweet Spot",
-  "to a sweet spot": "to Sweet Spot",
-  "pickup two sweet spot": "pickup to Sweet Spot",
-  "pick up two sweet spot": "pickup to Sweet Spot",
-  "pick-up two sweet spot": "pickup to Sweet Spot",
-  "from sweet spot": "from Sweet Spot",
-  "at sweet spot": "at Sweet Spot",
-  "the sweet spot": "the Sweet Spot",
-  "a sweet spot": "Sweet Spot",
-  "assault from sweetspot": "from Sweet Spot",
-  "assault from street spot": "from Sweet Spot",
-  "streetspot": "Sweet Spot",
 
   // Number mishearings - standalone numbers
   "free": "three",
@@ -1467,39 +1296,6 @@ function isPhantomHallucination(text: string): boolean {
     if (pattern.test(lower)) return true;
   }
   
-  // ═══════════════════════════════════════════════════════════════════
-  // CONVERSATIONAL HALLUCINATION DETECTION
-  // Whisper often generates polite conversational phrases on noise
-  // that are unlikely to be real taxi booking input.
-  // ═══════════════════════════════════════════════════════════════════
-  const conversationalPatterns = [
-    /^how did you (like|find|enjoy)/i,
-    /thank you (for|four) (your|you're) (kind|patience|support|time)/i,
-    /kind attitude towards/i,
-    /towards the passengers/i,
-    /attitude towards/i,
-    /thank you (for|four) (watching|listening|tuning)/i,
-    /appreciate (your|you)/i,
-    /have a (nice|great|good|wonderful) (day|evening|night|one)/i,
-    /take care of yourself/i,
-    /stay (safe|tuned|with us)/i,
-    /your call is important/i,
-    /please (hold|wait|continue)/i,
-    /estimated wait time/i,
-    /press \d+ (for|to)/i,
-    /all (our|agents|representatives) are/i,
-    /unusually high/i,
-    /goodbye and thank/i,
-    /thank you and goodbye/i,
-    /a representative will/i,
-    /an agent will/i,
-  ];
-  for (const pattern of conversationalPatterns) {
-    if (pattern.test(lower)) {
-      return true;
-    }
-  }
-  
   // Gibberish detection: excessive punctuation or odd patterns
   const punctCount = (text.match(/[.!?,:;]/g) || []).length;
   if (punctCount > 5 && text.length < 30) return true;
@@ -1511,21 +1307,6 @@ function isPhantomHallucination(text: string): boolean {
     if (!validAllCaps.includes(text.trim())) {
       return true;
     }
-  }
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // LONG UNRELATED SENTENCE DETECTION
-  // Real taxi booking inputs are typically short (1-10 words).
-  // Long conversational sentences (15+ words) without address keywords
-  // are likely hallucinations.
-  // ═══════════════════════════════════════════════════════════════════
-  const wordCount = lower.split(/\s+/).filter(w => w.length > 0).length;
-  const hasAddressKeyword = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|station|airport|hotel|hospital|centre|center|mall|square|park)\b/i.test(lower);
-  const hasNumber = /\b\d+[a-z]?\b/i.test(lower);
-  const hasBookingWord = /\b(pickup|destination|passenger|taxi|cab|now|asap|today|tomorrow|morning|afternoon|evening)\b/i.test(lower);
-  
-  if (wordCount >= 12 && !hasAddressKeyword && !hasNumber && !hasBookingWord) {
-    return true;
   }
   
   return false;
@@ -1585,70 +1366,22 @@ interface AddressCorrection {
 function detectAddressCorrection(text: string, currentPickup: string | null, currentDestination: string | null): AddressCorrection {
   const lower = text.toLowerCase();
   
-  // ═══════════════════════════════════════════════════════════════════════════
-  // EARLY EXIT: Reject time-related phrases that are NOT address corrections
-  // "Pick up timings now", "pickup time now", "now please", etc.
-  // ═══════════════════════════════════════════════════════════════════════════
-  const timeRelatedPatterns = [
-    /\b(?:pick[- ]?up|pickup)\s+(?:time|timings?)\b/i,  // "pickup time", "pick up timings"
-    /^(?:now|asap|immediately|right now|straight away)\s*(?:please)?$/i,  // Just "now", "asap"
-    /\b(?:time|timing|when|at|for)\s+(?:is\s+)?(?:now|asap|immediately)\b/i,  // "time is now"
-    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:now|asap|immediately)/i,  // "pickup is now", "pick up now" 
-    /\bnow\s*(?:please|thanks?)?\s*[.!]?$/i,  // Ends with "now" 
-  ];
-  
-  for (const pattern of timeRelatedPatterns) {
-    if (pattern.test(lower)) {
-      return { type: null, address: "" };
-    }
-  }
-  
-  // Correction trigger phrases - comprehensive patterns for address changes
+  // Correction trigger phrases
   const correctionPhrases = [
-    /^it'?s\s+(.+)/i,                                   // "It's 52A David Road"
-    /^no[,\s]+it'?s\s+(.+)/i,                           // "No, it's..."
-    /^no[,\s]+the\s+(?:pick[- ]?up|pickup)\s+is\s+(?:at\s+)?(.+)/i,  // "No, the pickup is at Sweet Spot"
-    /^no[,\s]+the\s+destination\s+is\s+(.+)/i,          // "No, the destination is..."
-    /^no[,\s]+(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(.+)/i,   // "No, pickup is at..."
-    /^no[,\s]+from\s+(.+)/i,                            // "No, from Sweet Spot"
-    /^no[,\s]+to\s+(.+)/i,                              // "No, to the airport"
-    /^actually[,\s]+(.+)/i,                             // "Actually 52A David Road"
-    /^i meant\s+(.+)/i,                                 // "I meant 52A..."
-    /^i said\s+(.+)/i,                                  // "I said 52A..."
-    /^should be\s+(.+)/i,                               // "Should be 52A..."
-    /^it should be\s+(.+)/i,                            // "It should be..."
-    /^sorry[,\s]+(.+)/i,                                // "Sorry, 52A David Road"
-    /^correction[:\s]+(.+)/i,                           // "Correction: 52A..."
-    /^the\s+(?:pick[- ]?up|pickup)\s+is\s+(?:at\s+)?(.+)/i,  // "The pickup is at..."
-    /^the\s+(?:destination|dropoff|drop off)\s+is\s+(.+)/i,   // "The destination is..."
-    /^(?:no[,\s]+)?that'?s\s+(.+)/i,                    // "That's 52A..." or "No, that's 52A..."
-    /^change\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\s+(.+)/i,  // "Change the pickup to..."
-    /^change\s+(?:the\s+)?(?:destination|dropoff)\s+to\s+(.+)/i, // "Change destination to..."
-    /^not\s+(.+)[,\s]+(?:it'?s|but)\s+(.+)/i,          // "Not 52A, it's 52B"
-    // REMOVED: Overly aggressive "pick up X" patterns that catch time phrases
-    // Only match "pickup at [location]" or "pickup from [location]" with explicit location words
-    /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?at\s+(.+)/i,  // "Pickup is at Sweet Spot" (requires "at")
-    /^from\s+(.+)/i,                                    // "From Sweet Spot" (if context suggests correction)
-    // === Mid-sentence corrections with explicit "change" or "but" ===
-    /(?:but\s+)?change\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\s+(.+?)(?:\s+please)?$/i,  // "but change pickup to Sweet Spot"
-    /(?:change|make)\s+(?:it\s+)?(?:to\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,          // "make it the Sweet Spot please"
-    // === "no [something], but [actual change]" ===
-    /^no\s+[\w\s]+[,\s]+but\s+(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i, // "No key change, but pick up the Sweet Spot please"
+    /^it'?s\s+(.+)/i,                          // "It's 52A David Road"
+    /^no[,\s]+it'?s\s+(.+)/i,                  // "No, it's..."
+    /^actually[,\s]+(.+)/i,                    // "Actually 52A David Road"
+    /^i meant\s+(.+)/i,                        // "I meant 52A..."
+    /^i said\s+(.+)/i,                         // "I said 52A..."
+    /^should be\s+(.+)/i,                      // "Should be 52A..."
+    /^it should be\s+(.+)/i,                   // "It should be..."
+    /^sorry[,\s]+(.+)/i,                       // "Sorry, 52A David Road"
+    /^correction[:\s]+(.+)/i,                  // "Correction: 52A..."
+    /^the (?:pickup|address) is\s+(.+)/i,     // "The pickup is..."
+    /^(?:no[,\s]+)?that'?s\s+(.+)/i,          // "That's 52A..." or "No, that's 52A..."
   ];
   
   let extractedAddress: string | null = null;
-  let explicitFieldType: "pickup" | "destination" | null = null;
-  
-  // Check for explicit field mentions in the correction phrase BEFORE extracting
-  // BUT exclude time-related contexts like "pickup time"
-  if (/\b(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at|from)\b/i.test(lower)) {
-    // Only set pickup if there's a location indicator (at/from)
-    explicitFieldType = "pickup";
-  } else if (/\bchange\s+(?:the\s+)?(?:pick[- ]?up|pickup)\s+to\b/i.test(lower)) {
-    explicitFieldType = "pickup";
-  } else if (/\b(?:destination|dropoff|drop off|going to)\b/i.test(lower)) {
-    explicitFieldType = "destination";
-  }
   
   for (const pattern of correctionPhrases) {
     const match = text.match(pattern);
@@ -1682,29 +1415,18 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   
   // Also filter out if it's just a name (likely user saying "yes, [name]" or "correct, [name]")
   // Names are typically short and don't contain address keywords
-  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park", "spot", "bar", "pub", "restaurant", "shop", "store", "gym", "club"];
+  const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital", "mall", "centre", "center", "square", "park"];
   const hasAddressKeyword = addressKeywords.some(kw => lowerExtracted.includes(kw));
   const hasHouseNumber = /^\d+[a-zA-Z]?\s/.test(extractedAddress) || /\d+[a-zA-Z]?$/.test(extractedAddress);
-  const isVenueName = extractedAddress.split(/\s+/).length >= 2; // "Sweet Spot", "The Mailbox", etc.
   
-  // If no address keywords and no house number and not a multi-word venue name, reject
-  // BUT if we have an explicit field type (user said "pickup is at" or "from"), be more lenient
-  if (!hasAddressKeyword && !hasHouseNumber && !isVenueName && !explicitFieldType) {
+  // If no address keywords and no house number, it's probably not a real address
+  if (!hasAddressKeyword && !hasHouseNumber && extractedAddress.split(/\s+/).length <= 2) {
     // Could be "correct, Jeff" or similar - reject it
     return { type: null, address: "" };
   }
   
-  // Single word without keywords is likely not a real location (unless explicit field type)
-  if (extractedAddress.split(/\s+/).length === 1 && !hasAddressKeyword && !hasHouseNumber && !explicitFieldType) {
-    return { type: null, address: "" };
-  }
-  
-  // Use explicit field type if we detected one, otherwise try to infer
-  if (explicitFieldType) {
-    return { type: explicitFieldType, address: extractedAddress };
-  }
-  
-  // Fallback: check for field mentions (redundant now but kept for safety)
+  // Determine if this is correcting pickup or destination
+  // Check for explicit field mentions
   if (lower.includes("pickup") || lower.includes("pick up") || lower.includes("from")) {
     return { type: "pickup", address: extractedAddress };
   }
@@ -1733,95 +1455,6 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
   
   // Default to pickup correction if uncertain
   return { type: "pickup", address: extractedAddress };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FIELD CORRECTION DETECTION
-// Detects when user wants to correct ANY field (passengers, time, addresses)
-// Handles patterns like "You put seven passengers, there's three" or "No, 3 not 7"
-// ═══════════════════════════════════════════════════════════════════════════════
-interface FieldCorrection {
-  field: "pickup" | "destination" | "passengers" | "time" | null;
-  value: string | number | null;
-  rawText: string;
-}
-
-function detectFieldCorrection(text: string): FieldCorrection {
-  const lower = text.toLowerCase();
-  
-  // ── PASSENGER CORRECTIONS ──
-  // "You put seven passengers, there's three" / "No, 3 not 7" / "It's three not seven"
-  const passengerCorrectionPatterns = [
-    /you (?:put|said|got)\s+(?:\w+)\s+passengers?[,\s]+(?:there'?s?|it'?s?|but|actually)\s+(\w+)/i,
-    /(?:no|not)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:not\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)?/i,
-    /it'?s?\s+(\w+)\s+(?:not|instead of)\s+\w+\s*passengers?/i,
-    /(\w+)\s+passengers?\s*[,.]?\s*not\s+\w+/i,
-    /(?:there'?s?|there are|we'?re?)\s+(?:only\s+)?(\w+)\s+(?:of us|passengers?|people)/i,
-    /(?:just|only)\s+(\w+)\s+passengers?/i,
-    /change\s+(?:that\s+)?(?:to\s+)?(\w+)\s+passengers?/i,
-    /(\w+)\s+(?:passengers?|people)\s*[,.]?\s*(?:not\s+\w+|please)/i,
-  ];
-  
-  const wordToNumber: Record<string, number> = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5,
-    "6": 6, "7": 7, "8": 8, "9": 9, "10": 10
-  };
-  
-  for (const pattern of passengerCorrectionPatterns) {
-    const match = lower.match(pattern);
-    if (match) {
-      // Extract the corrected number (usually the first capture group)
-      const numStr = match[1]?.toLowerCase();
-      if (numStr && wordToNumber[numStr] !== undefined) {
-        console.log(`[FieldCorrection] Detected passenger correction: "${text}" → ${wordToNumber[numStr]}`);
-        return {
-          field: "passengers",
-          value: wordToNumber[numStr],
-          rawText: text
-        };
-      }
-    }
-  }
-  
-  // Also detect simple "three passengers" if there's a negation/correction context
-  if (/(no|not|wrong|incorrect|change|actually)/i.test(lower)) {
-    const simpleMatch = lower.match(/(\w+)\s+passengers?/i);
-    if (simpleMatch && wordToNumber[simpleMatch[1].toLowerCase()] !== undefined) {
-      return {
-        field: "passengers",
-        value: wordToNumber[simpleMatch[1].toLowerCase()],
-        rawText: text
-      };
-    }
-  }
-  
-  // ── TIME CORRECTIONS ──
-  const timeCorrectionPatterns = [
-    /(?:change|make)\s+(?:it|that|the time)\s+(?:to\s+)?(.+)/i,
-    /(?:no|not|actually)[,\s]+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm|o'?clock)?)/i,
-  ];
-  
-  for (const pattern of timeCorrectionPatterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      const timeValue = match[1].trim().replace(/[.,!?]+$/, '');
-      if (/\d|now|asap|today|tomorrow|morning|afternoon|evening/i.test(timeValue)) {
-        console.log(`[FieldCorrection] Detected time correction: "${text}" → "${timeValue}"`);
-        return {
-          field: "time",
-          value: timeValue,
-          rawText: text
-        };
-      }
-    }
-  }
-  
-  // ── ADDRESS CORRECTIONS (fallback to detectAddressCorrection) ──
-  // This function focuses on non-address corrections; address ones are handled separately
-  
-  return { field: null, value: null, rawText: text };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1944,151 +1577,6 @@ function isValidAddress(addr: string): boolean {
   return hasKeyword || hasHouseNumber;
 }
 
-function tokenizeForMatch(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
-
-// Known venue/landmark names that should be accepted as-is
-const KNOWN_VENUES = new Set([
-  "sweet spot", "sweetspot", "the sweet spot",
-  "fargo village", "fargo", "the fargo",
-  "the mailbox", "mailbox",
-  "the bullring", "bullring",
-  "new street station", "new street",
-  "birmingham airport", "bhx",
-  "coventry station", "coventry railway station",
-  "coventry cathedral", "the cathedral",
-  "ricoh arena", "cbs arena",
-  "university hospital", "walsgrave hospital",
-  "warwick university", "warwick uni",
-  "coventry university", "coventry uni",
-  "heathrow", "heathrow airport",
-  "gatwick", "gatwick airport",
-  "luton", "luton airport",
-  "stansted", "stansted airport",
-  "birmingham new street",
-  "euston", "euston station",
-  "kings cross", "king's cross",
-  "st pancras", "st. pancras",
-  "paddington", "paddington station",
-]);
-
-// Check if text contains a known venue name
-function containsKnownVenue(text: string): string | null {
-  const lower = text.toLowerCase();
-  for (const venue of KNOWN_VENUES) {
-    if (lower.includes(venue)) {
-      return venue;
-    }
-  }
-  return null;
-}
-
-// matchesUserText - used for AI extraction validation
-// RELAXED for corrections: if user is correcting, we trust the AI more
-function matchesUserText(proposed: string, userText: string, minRatio = 0.5): boolean {
-  const p = proposed.toLowerCase().trim();
-  const u = userText.toLowerCase();
-
-  // Fast path: exact substring match
-  if (p.length >= 3 && u.includes(p)) return true;
-  
-  // Reverse check: proposed contains user's key words
-  // Handles "Pick-up is 52A David Road" → "52A David Road"
-  const proposedWords = p.split(/\s+/).filter(w => w.length > 1);
-  const userWords = u.split(/\s+/).filter(w => w.length > 1);
-  if (proposedWords.length >= 2) {
-    const matchedWords = proposedWords.filter(pw => userWords.some(uw => uw.includes(pw) || pw.includes(uw)));
-    if (matchedWords.length >= Math.ceil(proposedWords.length * 0.5)) return true;
-  }
-  
-  // Check if user mentioned a known venue and proposed contains it
-  const userVenue = containsKnownVenue(u);
-  const proposedVenue = containsKnownVenue(p);
-  if (userVenue && proposedVenue) {
-    const userVenueNorm = userVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
-    const proposedVenueNorm = proposedVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
-    if (userVenueNorm === proposedVenueNorm || userVenueNorm.includes(proposedVenueNorm) || proposedVenueNorm.includes(userVenueNorm)) {
-      return true;
-    }
-  }
-  
-  // Check for house number + street pattern match
-  const houseNumMatch = p.match(/^(\d+[a-zA-Z]?)\s+(.+)/);
-  if (houseNumMatch) {
-    const [, houseNum, street] = houseNumMatch;
-    // If user said the same house number and part of street name, accept it
-    if (u.includes(houseNum.toLowerCase()) && u.includes(street.split(/\s+/)[0].toLowerCase())) {
-      return true;
-    }
-  }
-
-  const proposedTokens = Array.from(new Set(tokenizeForMatch(proposed)));
-  if (proposedTokens.length === 0) return false;
-
-  const userTokens = new Set(tokenizeForMatch(userText));
-  let hit = 0;
-  for (const t of proposedTokens) {
-    if (userTokens.has(t)) hit++;
-  }
-  const ratio = hit / proposedTokens.length;
-  return ratio >= minRatio;
-}
-
-// For corrections specifically, be even more lenient
-function matchesUserTextForCorrection(proposed: string, userText: string): boolean {
-  // For corrections, check if key components are present with very lenient matching
-  const p = proposed.toLowerCase().trim();
-  const u = userText.toLowerCase();
-  
-  // Normalize STT variations: "two" → "to", "too" → "to" 
-  const normalizedUser = u
-    .replace(/\btwo\b/gi, "to")
-    .replace(/\btoo\b/gi, "to");
-  
-  // Direct substring in either direction
-  if (p.length >= 3 && (normalizedUser.includes(p) || p.includes(normalizedUser.replace(/[^a-z0-9\s]/g, "").trim()))) return true;
-  
-  // Check if user text contains any significant words from proposed (2+ chars)
-  const proposedWords = p.split(/\s+/).filter(w => w.length >= 2);
-  const userWords = normalizedUser.split(/\s+/).filter(w => w.length >= 2);
-  
-  // If at least one significant word matches, it's likely correct
-  // This handles "Sweet Spot" matching "the Sweet Spot please"
-  for (const pw of proposedWords) {
-    if (userWords.some(uw => uw.includes(pw) || pw.includes(uw))) {
-      return true;
-    }
-  }
-  
-  // Extract numbers from both
-  const propNums = p.match(/\d+[a-zA-Z]?/g) || [];
-  const userNums = u.match(/\d+[a-zA-Z]?/g) || [];
-  
-  // If proposed has a house number that user mentioned, likely correct
-  if (propNums.length > 0 && userNums.length > 0) {
-    for (const pn of propNums) {
-      if (userNums.some(un => un.toLowerCase() === pn.toLowerCase())) {
-        return true;
-      }
-    }
-  }
-  
-  // Check for known venues - if proposed is a known venue that appears in user text
-  const proposedVenue = containsKnownVenue(p);
-  if (proposedVenue && normalizedUser.includes(proposedVenue.replace(/^the\s+/, ""))) {
-    return true;
-  }
-  
-  // Fall back to standard matching with lower threshold
-  return matchesUserText(proposed, userText, 0.3); // Even lower threshold for corrections
-}
-
 
 function computeRms(pcm: Int16Array): number {
   if (pcm.length === 0) return 0;
@@ -2127,24 +1615,15 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     callId,
     callerPhone,
     language,
-    lastUserText: null,
     booking: {
       pickup: null,
       destination: null,
       passengers: null,
-      pickupTime: null,
-      nearestPickup: null,
-      nearestDropoff: null
+      pickupTime: null
     },
-    // NEW: Step-based state machine (ported from simple)
-    bookingStep: "pickup",
-    bookingStepAdvancedAt: null,
     lastQuestionAsked: "none",
     conversationHistory: [],
     bookingConfirmed: false,
-    // NEW: Greeting/fare tracking for session resume
-    greetingDelivered: false,
-    fareSpoken: false,
     openAiResponseActive: false,
     openAiSpeechStartedAt: 0,
     echoGuardUntil: 0,
@@ -2162,16 +1641,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false,
-    speechStartedAt: 0,
-    // NEW: Speech timing for pre-emptive extraction guard
-    speechStopTime: 0,
-    extractionInProgress: false,
-    // NEW: Handoff tracking
-    handoffTriggered: false,
-    // NEW: Post-booking chat mode
-    askedAnythingElse: false,
-    bookingFullyConfirmed: false
+    saidOneMoment: false
   };
 }
 
@@ -2218,9 +1688,7 @@ async function updateLiveCall(sessionState: SessionState) {
         pickup: sessionState.booking.pickup,
         destination: sessionState.booking.destination,
         passengers: sessionState.booking.passengers,
-        fare: sessionState.pendingFare || null,
-        eta: sessionState.pendingEta || null,
-        status: sessionState.bookingConfirmed ? "confirmed" : (sessionState.awaitingConfirmation ? "awaiting_confirmation" : "active"),
+        status: sessionState.bookingConfirmed ? "confirmed" : "active",
         booking_confirmed: sessionState.bookingConfirmed,
         transcripts: sessionState.conversationHistory,
         source: "paired",
@@ -2232,107 +1700,6 @@ async function updateLiveCall(sessionState: SessionState) {
     }
   } catch (e) {
     console.error(`[${sessionState.callId}] Error updating live_calls:`, e);
-  }
-}
-
-// Restore session state from DB (for resumed sessions after handoff/reconnect)
-// NOTE: resumeCallId may not match if the edge function generated a new timestamp-based callId
-// Fallback: find most recent in-flight session for the same caller phone
-async function restoreSessionFromDb(callId: string, resumeCallId: string, callerPhone: string | null): Promise<{
-  booking: SessionState["booking"];
-  conversationHistory: SessionState["conversationHistory"];
-  bookingConfirmed: boolean;
-  awaitingConfirmation: boolean;
-  lastQuestionAsked: SessionState["lastQuestionAsked"];
-  pendingFare: string | null;
-  pendingEta: string | null;
-} | null> {
-  try {
-    // First try exact call_id match
-    let { data: liveCall } = await supabase
-      .from("live_calls")
-      .select("*")
-      .eq("call_id", resumeCallId)
-      .maybeSingle();
-    
-    if (!liveCall) {
-      console.log(`[${callId}] ⚠️ No live_call found for resume_call_id: ${resumeCallId}`);
-      
-      // Fallback: find the most recent in-flight call for this caller (within last 10 min)
-      if (callerPhone && callerPhone !== "unknown") {
-        const phoneKey = normalizePhone(callerPhone);
-        const cutoffIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-        
-        console.log(`[${callId}] 🔍 Fallback: searching for recent call by phone=${phoneKey}, since=${cutoffIso}`);
-        
-        const { data: fallbackLiveCall } = await supabase
-          .from("live_calls")
-          .select("*")
-          .eq("caller_phone", phoneKey)
-          .gte("started_at", cutoffIso)
-          .in("status", ["active", "awaiting_confirmation", "confirmed"])
-          .order("started_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        
-        if (fallbackLiveCall) {
-          liveCall = fallbackLiveCall;
-          console.log(`[${callId}] ✅ Resume fallback matched: requested=${resumeCallId}, matched=${fallbackLiveCall.call_id}`);
-        }
-      }
-      
-      if (!liveCall) {
-        console.log(`[${callId}] ⚠️ No fallback session found either`);
-        return null;
-      }
-    }
-    
-    console.log(`[${callId}] ✅ Restored session from DB:`);
-    console.log(`[${callId}]   pickup: ${liveCall.pickup}`);
-    console.log(`[${callId}]   destination: ${liveCall.destination}`);
-    console.log(`[${callId}]   passengers: ${liveCall.passengers}`);
-    console.log(`[${callId}]   fare: ${liveCall.fare}`);
-    console.log(`[${callId}]   status: ${liveCall.status}`);
-    console.log(`[${callId}]   booking_confirmed: ${liveCall.booking_confirmed}`);
-    
-    // Parse transcripts if stored as JSON
-    const transcripts = Array.isArray(liveCall.transcripts) ? liveCall.transcripts : [];
-    
-    // Determine lastQuestionAsked from state
-    let lastQ: SessionState["lastQuestionAsked"] = "none";
-    if (liveCall.booking_confirmed) {
-      lastQ = "confirmation";
-    } else if (liveCall.fare) {
-      lastQ = "confirmation"; // We have fare, waiting for final yes/no
-    } else if (!liveCall.pickup) {
-      lastQ = "pickup";
-    } else if (!liveCall.destination) {
-      lastQ = "destination";
-    } else if (!liveCall.passengers) {
-      lastQ = "passengers";
-    } else {
-      lastQ = "time";
-    }
-    
-    return {
-      booking: {
-        pickup: liveCall.pickup || null,
-        destination: liveCall.destination || null,
-        passengers: liveCall.passengers || null,
-        pickupTime: null,
-        nearestPickup: null,
-        nearestDropoff: null,
-      },
-      conversationHistory: transcripts as SessionState["conversationHistory"],
-      bookingConfirmed: liveCall.booking_confirmed || false,
-      awaitingConfirmation: !!liveCall.fare && !liveCall.booking_confirmed,
-      lastQuestionAsked: lastQ,
-      pendingFare: liveCall.fare || null,
-      pendingEta: liveCall.eta || null,
-    };
-  } catch (e) {
-    console.error(`[${callId}] ❌ Failed to restore session:`, e);
-    return null;
   }
 }
 
@@ -2400,8 +1767,8 @@ async function sendDispatchWebhook(
     ada_destination: normalizeAddressForDispatch(expandedDestination),
     callers_pickup: null,
     callers_dropoff: null,
-    nearest_pickup: sessionState.booking.nearestPickup || null,
-    nearest_dropoff: sessionState.booking.nearestDropoff || null,
+    nearest_pickup: null,
+    nearest_dropoff: null,
     user_transcripts: userTranscripts,
     gps_lat: null,
     gps_lon: null,
@@ -2554,44 +1921,6 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
-  // ---------------------------------------------------------------------------
-  // TRANSCRIPT GATE (fast)
-  // Problem: OpenAI server VAD can trigger response.created BEFORE we receive the
-  // final Whisper transcript, causing Ada to respond early and mis-assign fields.
-  // Fix: briefly block/cancel responses after speech_stopped until transcript arrives.
-  // ---------------------------------------------------------------------------
-  let transcriptGateActive = false;
-  let transcriptGateTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const startTranscriptGate = () => {
-    transcriptGateActive = true;
-    clearTrackedTimeout(transcriptGateTimer);
-    // Keep this short: just enough time for transcription.completed to arrive.
-    transcriptGateTimer = trackedTimeout(() => {
-      transcriptGateActive = false;
-      transcriptGateTimer = null;
-      console.log(`[${callId}] ⏱️ TRANSCRIPT GATE: timeout elapsed - allowing responses`);
-    }, 900);
-    console.log(`[${callId}] 🚧 TRANSCRIPT GATE: blocking responses until transcript arrives`);
-  };
-
-  const stopTranscriptGate = (reason: string) => {
-    if (!transcriptGateActive && !transcriptGateTimer) return;
-    transcriptGateActive = false;
-    clearTrackedTimeout(transcriptGateTimer);
-    transcriptGateTimer = null;
-    console.log(`[${callId}] ✅ TRANSCRIPT GATE: released (${reason})`);
-  };
-
-  // === NEW: OpenAI reconnection tracking (ported from simple mode) ===
-  let openaiReconnectAttempts = 0;
-  let lastOpenAiConnectedAt: number | null = null;
-  let openaiConnected = false;
-  
-  // === NEW: Session timeout watchdog (ported from simple mode) ===
-  let sessionStartTime = Date.now();
-  let closingGracePeriodActive = false;
-
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
   let inboundSampleRate = 8000;
@@ -2718,49 +2047,12 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   
   // Clear keepalive on cleanup
   const originalCleanup = cleanup;
-  // Note: stopOpenAiPing() is defined later but called via closure - this works because
-  // cleanupWithKeepalive is only called after OpenAI handlers are set up
   const cleanupWithKeepalive = async () => {
     if (keepaliveInterval) {
       clearInterval(keepaliveInterval);
       keepaliveInterval = null;
     }
-    // Stop OpenAI ping if running (function defined after OpenAI WS setup)
-    try {
-      if (typeof stopOpenAiPing === "function") stopOpenAiPing();
-    } catch { /* stopOpenAiPing may not exist yet during early cleanup */ }
     await originalCleanup();
-  };
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Safe Response Create Helper (ported from simple mode)
-  // Prevents 'conversation_already_has_active_response' errors by canceling
-  // any active response before creating a new one
-  // ═══════════════════════════════════════════════════════════════════════════
-  const safeResponseCreate = (reason: string, responseOptions?: { instructions?: string; modalities?: string[] }) => {
-    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-      console.log(`[${callId}] ⚠️ safeResponseCreate(${reason}) skipped - OpenAI not connected`);
-      return;
-    }
-    
-    // If a response is active, cancel it first
-    if (sessionState.openAiResponseActive) {
-      console.log(`[${callId}] 🔄 safeResponseCreate(${reason}) - canceling active response first`);
-      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-      sessionState.openAiResponseActive = false;
-    }
-    
-    const responsePayload: any = {
-      type: "response.create",
-      response: {
-        modalities: responseOptions?.modalities || ["audio", "text"],
-        ...(responseOptions?.instructions ? { instructions: responseOptions.instructions } : {})
-      }
-    };
-    
-    openaiWs.send(JSON.stringify(responsePayload));
-    sessionState.openAiResponseActive = true;
-    console.log(`[${callId}] 🚀 safeResponseCreate(${reason}) sent`);
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2841,64 +2133,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
     sessionState.lastQuestionAsked = "confirmation";
-    sessionState.fareSpoken = true; // Track that fare was spoken (prevents repetition after handoff)
-    sessionState.bookingStep = "summary"; // Advance to summary step
-    
-    // === SESSION HANDOFF TRIGGER (ported from simple mode) ===
-    // After receiving fare quote, trigger handoff after a short delay
-    // This allows Ada to speak the fare before the bridge reconnects
-    if (!sessionState.handoffTriggered) {
-      sessionState.handoffTriggered = true;
-      console.log(`[${callId}] 🔄 Dispatch-triggered handoff will occur in ${HANDOFF_DELAY_AFTER_DISPATCH_MS}ms`);
-      
-      trackedTimeout(async () => {
-        if (cleanedUp) return;
-        
-        console.log(`[${callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Saving state for seamless reconnection...`);
-        
-        // Save handoff state to database
-        const handoffState = {
-          pickup: sessionState.booking.pickup,
-          destination: sessionState.booking.destination,
-          passengers: sessionState.booking.passengers,
-          pickup_time: sessionState.booking.pickupTime,
-          bookingStep: sessionState.bookingStep,
-          language: sessionState.language,
-          greetingDelivered: sessionState.greetingDelivered,
-          fareSpoken: sessionState.fareSpoken,
-          pendingFare: sessionState.pendingFare,
-          pendingEta: sessionState.pendingEta,
-          handoffAt: new Date().toISOString(),
-        };
-        
-        // Update live_calls with handoff status
-        await supabase.from("live_calls").update({
-          status: "handoff",
-          pickup: sessionState.booking.pickup,
-          destination: sessionState.booking.destination,
-          passengers: sessionState.booking.passengers,
-          fare: sessionState.pendingFare,
-          eta: sessionState.pendingEta,
-          transcripts: sessionState.conversationHistory.slice(-20),
-          updated_at: new Date().toISOString(),
-        }).eq("call_id", callId);
-        
-        console.log(`[${callId}] ✅ Handoff state saved to DB`);
-        
-        // Send handoff signal to bridge
-        try {
-          socket.send(JSON.stringify({
-            type: "session.handoff",
-            call_id: callId,
-            reason: "dispatch_response",
-            state: handoffState,
-          }));
-          console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
-        } catch (e) {
-          console.warn(`[${callId}] ⚠️ Failed to send handoff signal:`, e);
-        }
-      }, HANDOFF_DELAY_AFTER_DISPATCH_MS);
-    }
   });
   
   dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
@@ -3032,12 +2266,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   // Monitoring: throttle DB inserts for audio playback in the LiveCalls panel
   let monitorAiChunkCount = 0;
   
-  // === SESSION RESUME STATE ===
-  // Set when bridge reconnects mid-call - we skip greeting and inject continuation
-  let isResumedSession = false;
-  // deno-lint-ignore no-explicit-any
-  let resumedStateData: any = null;  // Will hold restored session state for resumed calls
-  
   const sendGreeting = () => {
     if (greetingSent || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
       console.log(`[${callId}] ⚠️ sendGreeting skipped: sent=${greetingSent}, wsOpen=${openaiWs?.readyState === WebSocket.OPEN}`);
@@ -3046,45 +2274,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     greetingSent = true;
     
-    // === RESUMED SESSION: Send continuation prompt instead of greeting ===
-    if (isResumedSession && resumedStateData) {
-      console.log(`[${callId}] 🔄 RESUMED SESSION - sending continuation prompt instead of greeting`);
-      
-      let continuationInstruction: string;
-      const rsd = resumedStateData;
-      
-      if (rsd.awaitingConfirmation && rsd.pendingFare) {
-        // We were waiting for user to confirm the fare quote
-        continuationInstruction = `Sorry, I didn't catch that. Your fare is ${rsd.pendingFare} and driver will arrive in ${rsd.pendingEta || "a few minutes"}. Would you like me to book that for you?`;
-      } else if (rsd.bookingConfirmed) {
-        // Booking was already confirmed, deliver closing
-        continuationInstruction = `Your taxi is on the way. Thank you for booking with us! Have a great journey!`;
-      } else {
-        // Mid-booking, determine next question
-        const bk = rsd.booking || {};
-        const nextQ = !bk.pickup ? "pickup" :
-                      !bk.destination ? "destination" :
-                      !bk.passengers ? "passengers" : "time";
-        const questionText = nextQ === "pickup" ? "Where would you like to be picked up?" 
-                           : nextQ === "destination" ? "And where are you heading to?" 
-                           : nextQ === "passengers" ? "How many passengers?" 
-                           : "What time would you like the taxi?";
-        continuationInstruction = `Sorry about that brief interruption. Let me continue. ${questionText}`;
-      }
-      
-      openaiWs!.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          instructions: `Say EXACTLY this: "${continuationInstruction}". Then WAIT for the caller's response.`
-        }
-      }));
-      
-      console.log(`[${callId}] ✅ Continuation prompt sent`);
-      return;
-    }
-    
-    // === NORMAL GREETING (not resumed) ===
     console.log(`[${callId}] 🎙️ Sending initial greeting (language: ${sessionState.language})...`);
     
     // Get language-specific greeting or fall back to English for auto-detect
@@ -3169,13 +2358,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Increased silence_duration_ms to 1200ms to give user more time to finish speaking
-          // and prevent Ada from responding before the transcript is fully processed.
-          // This helps avoid the race condition where Ada starts speaking based on VAD
-          // before the Whisper transcription completes.
+          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
           threshold: 0.5,
           prefix_padding_ms: 300,
-          silence_duration_ms: 1200, // Increased from 1000ms to reduce race conditions
+          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
         },
         tools: TOOLS,
         tool_choice: "auto",
@@ -3187,56 +2373,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs.send(JSON.stringify(sessionConfig));
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // OpenAI-side heartbeat: Send minimal silent audio every 20s to prevent 
-  // OpenAI from dropping the WebSocket during long pauses (e.g., waiting for
-  // dispatch quote or user thinking time).
-  // ═══════════════════════════════════════════════════════════════════════════
-  const OPENAI_PING_INTERVAL_MS = 20000; // 20s - well under OpenAI's ~60s idle timeout
-  let openaiPingInterval: ReturnType<typeof setInterval> | null = null;
-  
-  const startOpenAiPing = () => {
-    if (openaiPingInterval) return; // Already running
-    
-    openaiPingInterval = setInterval(() => {
-      if (cleanedUp || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-        if (openaiPingInterval) {
-          clearInterval(openaiPingInterval);
-          openaiPingInterval = null;
-        }
-        return;
-      }
-      
-      // Send a tiny silent audio frame (32 samples of silence = 64 bytes)
-      // This is enough to reset OpenAI's idle timer without affecting conversation
-      const silentPcm = new Int16Array(32); // All zeros = silence
-      const silentBase64 = pcm16ToBase64(silentPcm);
-      
-      try {
-        openaiWs.send(JSON.stringify({
-          type: "input_audio_buffer.append",
-          audio: silentBase64,
-        }));
-        console.log(`[${callId}] 💓 OpenAI ping sent (silent audio)`);
-      } catch (e) {
-        console.error(`[${callId}] ⚠️ OpenAI ping failed:`, e);
-      }
-    }, OPENAI_PING_INTERVAL_MS);
-  };
-  
-  const stopOpenAiPing = () => {
-    if (openaiPingInterval) {
-      clearInterval(openaiPingInterval);
-      openaiPingInterval = null;
-    }
-  };
-
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
-    openaiConnected = true;
-    openaiReconnectAttempts = 0; // Reset on successful connection
-    lastOpenAiConnectedAt = Date.now();
-    startOpenAiPing(); // Start pinging to prevent idle timeout
   };
 
   openaiWs.onmessage = async (event) => {
@@ -3275,24 +2413,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "response.created":
           // Mark response as active immediately (before any audio)
           sessionState.openAiResponseActive = true;
-
-          // ✅ TRANSCRIPT GATE: If we haven't received the final transcript yet, block.
-          // This prevents Ada from responding based on VAD alone.
-          if (transcriptGateActive) {
-            console.log(`[${callId}] 🛡️ BLOCKING response - waiting for transcript`);
-            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-            sessionState.openAiResponseActive = false;
-            break;
-          }
-          
-          // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
-          // We'll trigger the correct response once extraction completes with full context
-          if (sessionState.extractionInProgress) {
-            console.log(`[${callId}] 🛡️ BLOCKING response - extraction in progress, will respond after`);
-            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-            sessionState.openAiResponseActive = false;
-            break;
-          }
           
           // SILENCE MODE GUARD: If we're waiting for a quote, cancel any new responses
           if (sessionState.waitingForQuoteSilence && sessionState.saidOneMoment) {
@@ -3370,9 +2490,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             sessionState.openAiResponseActive = true;
             
-            // NOTE: We now buffer transcripts and send the complete sentence in response.audio_transcript.done
-            // This reduces log noise from word-by-word logging
-            
             // PRICE/ETA HALLUCINATION GUARD: If Ada mentions a price/ETA but we haven't received one from dispatch, cancel!
             if (isPriceOrEtaHallucination(data.delta, !!sessionState.pendingFare)) {
               console.log(`[${callId}] 🚫 PRICE/ETA HALLUCINATION DETECTED: "${data.delta}" - cancelling response`);
@@ -3412,17 +2529,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               timestamp: Date.now()
             });
             
-            console.log(`[${callId}] 🤖 Ada: "${data.transcript.substring(0, 100)}${data.transcript.length > 100 ? '...' : ''}"`);
+            console.log(`[${callId}] 🤖 Ada: "${data.transcript.substring(0, 80)}..."`);
             
-            // Forward complete transcript to bridge for logging (cleaner than word-by-word)
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({
-                type: "transcript",
-                text: data.transcript,
-                role: "assistant"
-              }));
-            }
-
             // SILENCE MODE CHECK: If Ada just said "one moment", block any further responses
             const transcriptLower = data.transcript.toLowerCase();
             if (sessionState.waitingForQuoteSilence && 
@@ -3453,9 +2561,50 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms`);
             }
             
-            // NOTE: AI extraction is now done SYNCHRONOUSLY in the user transcript handler
-            // (case "conversation.item.input_audio_transcription.completed") so Ada has
-            // full context including corrections before responding.
+            // ═══════════════════════════════════════════════════════════════════
+            // AI-BASED EXTRACTION (replaces buggy regex "Ada First Echo" mode)
+            // Uses Gemini to accurately extract booking details from transcripts
+            // ═══════════════════════════════════════════════════════════════════
+            if (!isSummary && USE_AI_EXTRACTION && sessionState.conversationHistory.length > 0) {
+              // Run AI extraction in the background (non-blocking)
+              extractBookingWithAI(
+                sessionState.conversationHistory,
+                sessionState.booking,
+                sessionState.callerPhone,
+                callId
+              ).then(async (aiResult) => {
+                if (!aiResult || aiResult.confidence === "low") return;
+                
+                let updated = false;
+                
+                // Update pickup if AI found one and it's different
+                if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
+                  console.log(`[${callId}] 🧠 AI UPDATE pickup: "${sessionState.booking.pickup}" → "${aiResult.pickup}"`);
+                  sessionState.booking.pickup = aiResult.pickup;
+                  updated = true;
+                }
+                
+                // Update destination if AI found one and it's different
+                if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
+                  console.log(`[${callId}] 🧠 AI UPDATE destination: "${sessionState.booking.destination}" → "${aiResult.destination}"`);
+                  sessionState.booking.destination = aiResult.destination;
+                  updated = true;
+                }
+                
+                // Update passengers if AI found them and they're different
+                if (aiResult.passengers !== null && aiResult.passengers !== sessionState.booking.passengers) {
+                  console.log(`[${callId}] 🧠 AI UPDATE passengers: ${sessionState.booking.passengers} → ${aiResult.passengers}`);
+                  sessionState.booking.passengers = aiResult.passengers;
+                  updated = true;
+                }
+                
+                if (updated) {
+                  await updateLiveCall(sessionState);
+                }
+              }).catch(err => {
+                console.error(`[${callId}] AI extraction background error:`, err);
+              });
+            }
             
             // AUTO-TRIGGER WEBHOOK: If Ada says "check the price" but the mini model didn't call the tool,
             // automatically trigger the webhook. This works around mini model's weak tool calling.
@@ -3528,42 +2677,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                     six: 6, seven: 7, eight: 8, nine: 9, ten: 10
                   };
                   
-                  let lowerV = v.toLowerCase().trim();
+                  const lowerV = v.toLowerCase().trim();
                   let parsedCount: number | null = null;
-                  
-                  // ═══════════════════════════════════════════════════════════════════
-                  // CONTEXT-AWARE STT CORRECTION: "Seven" vs "Three" confusion
-                  // When the previous answer was "7 Russell Street", the audio context
-                  // can cause Whisper to mishear "Three" as "Seven" for passengers.
-                  // ═══════════════════════════════════════════════════════════════════
-                  const prevDestination = sessionState.booking.destination?.toLowerCase() || "";
-                  const prevPickup = sessionState.booking.pickup?.toLowerCase() || "";
-                  const lastAddressHad7 = /\b7\b/.test(prevDestination) || /\b7\b/.test(prevPickup);
-                  
-                  // If user says "seven" or "7" right after a "7 [street]" address, 
-                  // check if they might have meant "three" (common phonetic confusion)
-                  if (lastAddressHad7 && (lowerV === "seven" || lowerV === "7" || lowerV === "seven passengers" || lowerV === "7 passengers")) {
-                    // Look at the raw transcript for phonetic hints
-                    // "Three" and "Seven" sound similar - "th" vs "s" prefix
-                    // If we just asked for passengers after a "7 X Street" address, 
-                    // this is likely a context bleed from the STT
-                    console.log(`[${callId}] 🔄 CONTEXT STT CHECK: User said "${v}" after "7 [street]" address - possible "Three"→"Seven" confusion`);
-                    
-                    // Check conversation history for phonetic hints
-                    const recentUserInputs = sessionState.conversationHistory
-                      .filter(h => h.role === "user")
-                      .slice(-3)
-                      .map(h => h.content.toLowerCase());
-                    
-                    // If they previously used "three" or we detect phonetic similarity patterns
-                    const hasThreeContext = recentUserInputs.some(t => /\bthree\b|\b3\b/.test(t) && !/street|road/i.test(t));
-                    
-                    // For now, log the potential confusion but don't auto-correct
-                    // The AI extraction will also catch this with better context
-                    if (!hasThreeContext) {
-                      console.log(`[${callId}] ⚠️ Potential STT confusion: "seven" after "7 street" - may have meant "three"`);
-                    }
-                  }
                   
                   // IMPORTANT: Only accept passenger counts that LOOK like just a number.
                   // Reject if transcript looks like an address (contains street/road keywords or is too long).
@@ -3796,212 +2911,22 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
 
         case "input_audio_buffer.speech_started":
           console.log(`[${callId}] 🎤 User started speaking`);
-          sessionState.speechStartedAt = Date.now();
-          // Notify bridge of speech activity for logging
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "speech_started" }));
-            // ACTIVITY HEARTBEAT: Reset timeout while user is speaking
-            socket.send(JSON.stringify({ type: "activity_heartbeat", timestamp: Date.now() }));
-          }
           break;
-          
-        case "input_audio_buffer.speech_stopped": {
-          const speechDuration = sessionState.speechStartedAt 
-            ? ((Date.now() - sessionState.speechStartedAt) / 1000).toFixed(1)
-            : "?";
-          console.log(`[${callId}] 🔇 User stopped speaking (${speechDuration}s)`);
-          // Track when speech stopped for late transcript detection
-          sessionState.speechStopTime = Date.now();
-          // Start a short transcript gate to prevent VAD-only early responses.
-          startTranscriptGate();
-          // Notify bridge of speech end for logging
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "speech_stopped", duration: speechDuration }));
-          }
-          break;
-        }
 
         case "conversation.item.input_audio_transcription.completed":
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
             const rawText = data.transcript.trim();
             // Apply STT corrections for common telephony mishearings
-            let userText = correctTranscript(rawText);
+            const userText = correctTranscript(rawText);
             if (userText !== rawText) {
               console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
-            }
-
-            // Release transcript gate as soon as we have the final transcript.
-            stopTranscriptGate("transcript received");
-            
-            console.log(`[${callId}] 🏁 Transcript received: "${userText}"`);
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // DUPLICATE TRANSCRIPT GUARD
-            // If Ada already confirmed this address in her LAST response, ignore
-            // the late-arriving transcript. This prevents "re-processing" the 
-            // same address that Ada already acknowledged.
-            // ═══════════════════════════════════════════════════════════════════
-            const lastAssistantMsg = sessionState.conversationHistory
-              .filter(m => m.role === "assistant")
-              .slice(-1)[0]?.content || "";
-            
-            const userLower = userText.toLowerCase().trim();
-            const adaLower = lastAssistantMsg.toLowerCase();
-            
-            // Check if Ada's response already contains this exact address
-            // We look for phrases like "pickup is 52A David Road" or "got it, 52A David Road"
-            const isAddressInAdaResponse = (addr: string): boolean => {
-              if (!addr || addr.length < 3) return false;
-              const addrLower = addr.toLowerCase().trim();
-              return adaLower.includes(addrLower);
-            };
-            
-            // If the transcript matches what's already saved AND Ada already mentioned it
-            const matchesCurrentPickup = sessionState.booking.pickup && 
-              userLower.includes(sessionState.booking.pickup.toLowerCase()) &&
-              isAddressInAdaResponse(sessionState.booking.pickup);
-            
-            const matchesCurrentDest = sessionState.booking.destination && 
-              userLower.includes(sessionState.booking.destination.toLowerCase()) &&
-              isAddressInAdaResponse(sessionState.booking.destination);
-            
-            // Also check if Ada is currently asking for the NEXT field (not the same one)
-            const adaAskingDestination = /where would you like to go|what is your destination|destination/i.test(adaLower);
-            const adaAskingPassengers = /how many people|how many passengers/i.test(adaLower);
-            
-            if (matchesCurrentPickup && adaAskingDestination) {
-              console.log(`[${callId}] 🔇 DUPLICATE GUARD: Ignoring late pickup transcript "${userText}" - Ada already confirmed and moved to destination`);
-              break; // Skip processing this duplicate
-            }
-            
-            if (matchesCurrentDest && adaAskingPassengers) {
-              console.log(`[${callId}] 🔇 DUPLICATE GUARD: Ignoring late destination transcript "${userText}" - Ada already confirmed and moved to passengers`);
-              break; // Skip processing this duplicate
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // LATE TRANSCRIPT TIMING GUARD
-            // If Ada has already responded AFTER the user stopped speaking AND
-            // she's already asking for the NEXT field, this transcript is stale.
-            // This catches cases where Ada got a DIFFERENT value (e.g., "7" vs "11")
-            // ═══════════════════════════════════════════════════════════════════
-            const speechStoppedAt = sessionState.speechStopTime || 0;
-            const lastAssistantMsgTime = sessionState.conversationHistory
-              .filter(m => m.role === "assistant")
-              .slice(-1)[0]?.timestamp || 0;
-            
-            // If Ada responded AFTER speech stopped, and the transcript is arriving now, it's late
-            const adaRespondedAfterSpeech = lastAssistantMsgTime > speechStoppedAt && speechStoppedAt > 0;
-            
-            // Check if Ada has already moved to a different step
-            const adaMovedToNextStep = (adaAskingDestination && sessionState.booking.pickup) ||
-                                        (adaAskingPassengers && sessionState.booking.destination);
-            
-            if (adaRespondedAfterSpeech && adaMovedToNextStep) {
-              // The transcript is about a DIFFERENT value than what Ada saved
-              // Check if this looks like an address (not a "yes" or affirmative)
-              const looksLikeAddress = /\d+[a-zA-Z]?\s|street|road|avenue|lane/i.test(userText);
-              
-              if (looksLikeAddress) {
-                console.log(`[${callId}] ⏰ LATE TRANSCRIPT GUARD: "${userText}" arrived ${Date.now() - lastAssistantMsgTime}ms after Ada's response - checking if it's a correction`);
-                
-                // This could be a correction OR a late duplicate. Check if the value differs from what Ada said.
-                const userMentions11 = /\b11\b|\beleven\b/i.test(userText);
-                const adaSaid7 = /\b7\b|\bseven\b/i.test(adaLower);
-                
-                // If user said "11" but Ada heard "7", this IS a correction we need to apply
-                if (userMentions11 && adaSaid7 && sessionState.lastQuestionAsked !== "passengers") {
-                  console.log(`[${callId}] 🔧 LATE TRANSCRIPT CORRECTION: User said 11, Ada heard 7 - correcting destination`);
-                  // Extract the corrected address
-                  const correctedDest = userText.replace(/\.$/, "").trim();
-                  if (correctedDest && sessionState.booking.destination?.includes("7")) {
-                    sessionState.booking.destination = correctedDest;
-                    // Don't break - let it process as a correction
-                  }
-                } else {
-                  // Not a clear correction - might be echo or duplicate, skip it
-                  console.log(`[${callId}] 🔇 LATE TRANSCRIPT GUARD: Ignoring late transcript "${userText}" - Ada already moved on`);
-                  break;
-                }
-              }
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // CONTEXT-AWARE SEVEN→THREE CORRECTION
-            // When asking about passengers AND previous address had "7",
-            // "seven" is very likely misheard "three" (phonetic confusion)
-            // ═══════════════════════════════════════════════════════════════════
-            if (sessionState.lastQuestionAsked === "passengers") {
-              const lowerText = userText.toLowerCase();
-              const prevDest = sessionState.booking.destination?.toLowerCase() || "";
-              const prevPickup = sessionState.booking.pickup?.toLowerCase() || "";
-              const addressHad7 = /\b7\b/.test(prevDest) || /\b7\b/.test(prevPickup);
-              
-              // Check if user said "seven" or "7 passengers" when we expect passengers
-              const saidSeven = /\bseven\b|\b7\s*passengers?\b|\b7\s*people\b/i.test(lowerText);
-              
-              if (addressHad7 && saidSeven) {
-                // Strong signal: previous address had "7", now user says "seven" for passengers
-                // This is almost certainly "three" being misheard due to audio context bleed
-                console.log(`[${callId}] 🔄 CONTEXT STT FIX: Detected "seven" after "7 [street]" - correcting to "three"`);
-                
-                // Replace "seven" → "three" and "7 passengers" → "3 passengers"
-                userText = userText
-                  .replace(/\bseven\s+passengers?\b/gi, "three passengers")
-                  .replace(/\b7\s+passengers?\b/gi, "3 passengers")
-                  .replace(/\bseven\s+people\b/gi, "three people")
-                  .replace(/\b7\s+people\b/gi, "3 people")
-                  .replace(/\bseven\b/gi, "three")
-                  .replace(/\b7\b/g, "3");
-                
-                console.log(`[${callId}] ✅ Corrected passenger transcript: "${rawText}" → "${userText}"`);
-              }
             }
             
             // Filter out phantom hallucinations from Whisper
             if (isPhantomHallucination(userText)) {
               console.log(`[${callId}] 👻 Filtered phantom hallucination: "${userText}"`);
               break;
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // AFFIRMATIVE DETECTION - Prevent "That's right" → "three passengers" hallucination
-            // ═══════════════════════════════════════════════════════════════════
-            const isAffirmativeResponse = /^\s*(yes|yeah|yep|yup|correct|that's right|thats right|that is right|that's correct|right|exactly|perfect|absolutely|affirmative|uh-huh|sure|okay|ok|go ahead|please|lovely|wonderful|great)\s*[.!,]?\s*$/i.test(userText);
-            
-            // If this is an affirmative response to PASSENGERS question, DO NOT let it become passenger count
-            if (isAffirmativeResponse && sessionState.lastQuestionAsked === "passengers") {
-              console.log(`[${callId}] 🛡️ AFFIRMATIVE GUARD: "${userText}" is not a passenger count - asking Ada to clarify`);
-              
-              // Inject clarification request - the user confirmed something, not gave passenger count
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[AFFIRMATIVE DETECTED - NOT PASSENGER COUNT]
-The user said "${userText}" which is an AFFIRMATIVE response (yes/correct/right), NOT a passenger count.
-This might mean they confirmed something you said earlier, or they're agreeing but haven't answered yet.
-
-DO NOT interpret this as "three passengers" or any number.
-Ask for the NUMBER of passengers clearly: "How many passengers will be traveling?"`
-                  }]
-                }
-              }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              break; // Don't process further
-            }
-            
-            // Forward user transcript to bridge for logging (like simple mode)
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({
-                type: "transcript",
-                text: userText,
-                role: "user"
-              }));
             }
             
             // POST-CONFIRMATION GUARD: After booking is confirmed, enter open conversation mode
@@ -4043,310 +2968,35 @@ Otherwise, say goodbye warmly and call end_call().`
             
             console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
-            // ═══════════════════════════════════════════════════════════════════
-            // AI-BASED INTENT DETECTION (replaces brittle regex)
-            // Run extraction SYNCHRONOUSLY so Ada has full context before responding
-            // ═══════════════════════════════════════════════════════════════════
+            // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
+            const correction = detectAddressCorrection(
+              userText, 
+              sessionState.booking.pickup, 
+              sessionState.booking.destination
+            );
             
-            // First, add the user message to history for AI extraction
-            sessionState.conversationHistory.push({
-              role: "user",
-              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
-              timestamp: Date.now()
-            });
-
-            // Save for tool-call validation (prevents hallucinated overwrites)
-            sessionState.lastUserText = userText;
-            
-            const lowerUserText = userText.toLowerCase();
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // KNOWN VENUE EXTRACTION (HIGHEST PRIORITY - before any other detection)
-            // If user mentions a known venue like "Sweet Spot", extract it immediately
-            // This prevents AI hallucinations from overwriting valid venue names
-            // ═══════════════════════════════════════════════════════════════════
-            const mentionedVenue = containsKnownVenue(userText);
-            if (mentionedVenue && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-              // Determine if it's pickup or destination based on context words
-              const isPickupContext = /\b(pick[\s-]?up|pickup|from|collect)\b/i.test(lowerUserText);
-              const isDestContext = /\b(destination|to|going|drop|heading|take me)\b/i.test(lowerUserText);
+            if (correction.type && correction.address) {
+              const oldValue = correction.type === "pickup" 
+                ? sessionState.booking.pickup 
+                : sessionState.booking.destination;
               
-              // Also check if user is changing something (correction context)
-              const isCorrectionContext = /\b(change|no|but|actually|not|instead)\b/i.test(lowerUserText);
+              console.log(`[${callId}] 🔄 ADDRESS CORRECTION DETECTED: ${correction.type} "${oldValue}" → "${correction.address}"`);
               
-              // If it's clearly a correction mentioning a known venue, apply it
-              if (isCorrectionContext || (!sessionState.booking.pickup && isPickupContext) || (!sessionState.booking.destination && isDestContext)) {
-                const fieldToUpdate = isDestContext && !isPickupContext ? "destination" : "pickup";
-                const oldValue = fieldToUpdate === "pickup" ? sessionState.booking.pickup : sessionState.booking.destination;
-                const properVenueName = mentionedVenue.charAt(0).toUpperCase() + mentionedVenue.slice(1); // Capitalize
-                
-                console.log(`[${callId}] 🏪 KNOWN VENUE DETECTED: "${mentionedVenue}" → updating ${fieldToUpdate}`);
-                console.log(`[${callId}] 🏪 Context: pickup=${isPickupContext}, dest=${isDestContext}, correction=${isCorrectionContext}`);
-                
-                // Only apply if it's different from current value
-                if (oldValue?.toLowerCase() !== mentionedVenue.toLowerCase()) {
-                  if (fieldToUpdate === "pickup") {
-                    sessionState.booking.pickup = properVenueName;
-                  } else {
-                    sessionState.booking.destination = properVenueName;
-                  }
-                  
-                  console.log(`[${callId}] ✅ Updated ${fieldToUpdate}: "${oldValue}" → "${properVenueName}"`);
-                  
-                  // Reset fare if address changed after quote
-                  if (sessionState.pendingFare) {
-                    console.log(`[${callId}] 💰 Resetting fare due to ${fieldToUpdate} change (known venue)`);
-                    sessionState.pendingFare = null;
-                    sessionState.pendingEta = null;
-                    sessionState.awaitingConfirmation = false;
-                    sessionState.quoteInFlight = false;
-                    sessionState.lastQuoteRequestedAt = 0;
-                  }
-                  
-                  // Cancel any in-flight response
-                  if (sessionState.openAiResponseActive) {
-                    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                    sessionState.openAiResponseActive = false;
-                  }
-                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  
-                  // Sync to database
-                  const updatePayload: Record<string, any> = { updated_at: new Date().toISOString() };
-                  updatePayload[fieldToUpdate] = properVenueName;
-                  supabase.from("live_calls").update(updatePayload).eq("call_id", callId).then(() => {
-                    console.log(`[${callId}] ✅ live_calls updated with ${fieldToUpdate} = ${properVenueName}`);
-                  });
-                  
-                  // Determine next instruction
-                  const hasAllCore = sessionState.booking.pickup && sessionState.booking.destination && 
-                                     sessionState.booking.passengers !== null && sessionState.booking.pickupTime;
-                  
-                  let nextInstruction: string;
-                  if (hasAllCore) {
-                    nextInstruction = "All 4 fields are now complete. Give the updated booking summary and ask for confirmation.";
-                  } else if (!sessionState.booking.destination && fieldToUpdate === "pickup") {
-                    nextInstruction = "Ask ONLY: 'And what is your destination?'";
-                  } else if (!sessionState.booking.pickup && fieldToUpdate === "destination") {
-                    nextInstruction = "Ask ONLY: 'Where would you like to be picked up?'";
-                  } else if (sessionState.booking.passengers === null) {
-                    nextInstruction = "Ask ONLY: 'How many people will be travelling?'";
-                  } else if (!sessionState.booking.pickupTime) {
-                    nextInstruction = "Ask ONLY: 'When do you need the taxi?'";
-                  } else {
-                    nextInstruction = "Summarize the booking and ask for confirmation.";
-                  }
-                  
-                  // Inject acknowledgment and continue flow
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "system",
-                      content: [{
-                        type: "input_text",
-                        text: `[${fieldToUpdate.toUpperCase()} CHANGED TO KNOWN VENUE]
-The user changed the ${fieldToUpdate} to "${properVenueName}".
-
-## UPDATED BOOKING STATE:
-- Pickup: ${sessionState.booking.pickup || "not yet provided"}
-- Destination: ${sessionState.booking.destination || "not yet provided"}
-- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
-- Time: ${sessionState.booking.pickupTime || "ASAP"}
-
-INSTRUCTIONS:
-1. Acknowledge briefly: "Got it, ${fieldToUpdate} is now ${properVenueName}."
-2. ${nextInstruction}
-3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
-                      }]
-                    }
-                  }));
-                  openaiWs.send(JSON.stringify({ type: "response.create" }));
-                  sessionState.openAiResponseActive = true;
-                  await updateLiveCall(sessionState);
-                  break; // Handled the known venue - skip normal processing
-                }
-              }
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // ADDRESS CORRECTION DETECTION (ported from simple mode - highest priority)
-            // Detect phrases like "No, it's...", "Actually...", "The pickup is..."
-            // This catches corrections that explicit patterns miss
-            // ═══════════════════════════════════════════════════════════════════
-            const addressCorrection = detectAddressCorrection(userText, sessionState.booking.pickup, sessionState.booking.destination);
-            
-            if (addressCorrection.type && addressCorrection.address && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-              console.log(`[${callId}] 🔧 ADDRESS CORRECTION DETECTED: ${addressCorrection.type} = "${addressCorrection.address}"`);
-              
-              const correctedAddress = addressCorrection.address;
-              const oldValue = addressCorrection.type === "pickup" ? sessionState.booking.pickup : sessionState.booking.destination;
-              
-              // Update booking state immediately
-              if (addressCorrection.type === "pickup") {
-                sessionState.booking.pickup = correctedAddress;
+              // Update the booking state immediately
+              if (correction.type === "pickup") {
+                sessionState.booking.pickup = correction.address;
               } else {
-                sessionState.booking.destination = correctedAddress;
+                sessionState.booking.destination = correction.address;
               }
               
-              console.log(`[${callId}] ✅ Updated ${addressCorrection.type}: "${oldValue}" → "${correctedAddress}"`);
-              
-              // Reset fare if address changed after quote
-              if (sessionState.pendingFare) {
-                console.log(`[${callId}] 💰 Resetting fare due to ${addressCorrection.type} correction`);
-                sessionState.pendingFare = null;
-                sessionState.pendingEta = null;
-                sessionState.awaitingConfirmation = false;
-                sessionState.quoteInFlight = false;
-                sessionState.lastQuoteRequestedAt = 0;
-              }
-              
-              // Cancel any in-flight response
-              if (sessionState.openAiResponseActive) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-              
-              // Sync to database
-              const updatePayload: Record<string, any> = { updated_at: new Date().toISOString() };
-              if (addressCorrection.type === "pickup") {
-                updatePayload.pickup = correctedAddress;
-              } else {
-                updatePayload.destination = correctedAddress;
-              }
-              supabase.from("live_calls").update(updatePayload).eq("call_id", callId).then(() => {
-                console.log(`[${callId}] ✅ live_calls updated with ${addressCorrection.type} correction`);
+              // Add to history with correction annotation
+              sessionState.conversationHistory.push({
+                role: "user",
+                content: `[CORRECTION: User corrected ${correction.type} to "${correction.address}"] ${userText}`,
+                timestamp: Date.now()
               });
               
-              // Determine next question based on current state
-              const fieldLabel = addressCorrection.type === "pickup" ? "pickup" : "destination";
-              const hasAllCore = sessionState.booking.pickup && sessionState.booking.destination && 
-                                 sessionState.booking.passengers !== null && sessionState.booking.pickupTime;
-              
-              let nextInstruction: string;
-              if (hasAllCore) {
-                nextInstruction = "All 4 fields are now complete. Give the updated booking summary and ask for confirmation.";
-              } else if (!sessionState.booking.destination && addressCorrection.type === "pickup") {
-                nextInstruction = "Ask ONLY: 'And what is your destination?'";
-              } else if (!sessionState.booking.pickup && addressCorrection.type === "destination") {
-                nextInstruction = "Ask ONLY: 'Where would you like to be picked up?'";
-              } else if (sessionState.booking.passengers === null) {
-                nextInstruction = "Ask ONLY: 'How many people will be travelling?'";
-              } else if (!sessionState.booking.pickupTime) {
-                nextInstruction = "Ask ONLY: 'When do you need the taxi?'";
-              } else {
-                nextInstruction = "Summarize the booking and ask for confirmation.";
-              }
-              
-              // Inject acknowledgment and continue flow
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[${fieldLabel.toUpperCase()} CORRECTED BY USER]
-The user changed the ${fieldLabel} from "${oldValue || 'empty'}" to "${correctedAddress}".
-
-## UPDATED BOOKING STATE:
-- Pickup: ${sessionState.booking.pickup || "not yet provided"}
-- Destination: ${sessionState.booking.destination || "not yet provided"}
-- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
-- Time: ${sessionState.booking.pickupTime || "ASAP"}
-
-INSTRUCTIONS:
-1. Acknowledge briefly: "Got it, ${fieldLabel} is now ${correctedAddress}."
-2. ${nextInstruction}
-3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
-                  }]
-                }
-              }));
-              openaiWs.send(JSON.stringify({ type: "response.create" }));
-              sessionState.openAiResponseActive = true;
-              await updateLiveCall(sessionState);
-              break; // Handled the correction - skip normal processing
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════
-            // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (before AI extraction)
-            // Patterns like "change the pickup to X" or "can I change pickup to X"
-            // ═══════════════════════════════════════════════════════════════════
-            // ═══════════════════════════════════════════════════════════════════
-            // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (COMPREHENSIVE)
-            // Must catch: "change my pickup to X", "change pickup point to X", 
-            // "can I change the pickup to X", "I want to change my pick-up to X"
-            // ═══════════════════════════════════════════════════════════════════
-            const pickupPatterns = [
-              // "change my pickup to X", "change the pickup to X", "change pickup to X"
-              /(?:change|update|switch|make)\s+(?:my\s+)?(?:the\s+)?pick[\s-]?up(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
-              // "can I change my pickup to X", "could I change the pickup to X"
-              /(?:can i|could i|i want to|i'd like to|i would like to)\s+change\s+(?:my\s+)?(?:the\s+)?pick[\s-]?up(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
-              // "pickup should be X", "pickup is X" (after summary)
-              /pick[\s-]?up\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i,
-              // "actually from X" / "no, from X"
-              /(?:actually|no)[,\s]+(?:from|pickup is|pickup from)\s+(?:the\s+)?(.+)/i,
-              // "the pickup is X" / "my pickup is X"
-              /(?:the|my)\s+pick[\s-]?up\s+(?:is|should be)\s+(?:the\s+)?(.+)/i,
-            ];
-            
-            const destPatterns = [
-              // "change my destination to X", "change the destination to X"
-              /(?:change|update|switch|make)\s+(?:my\s+)?(?:the\s+)?destination(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
-              // "can I change my destination to X"
-              /(?:can i|could i|i want to|i'd like to|i would like to)\s+change\s+(?:my\s+)?(?:the\s+)?destination(?:\s+point|\s+location|\s+address)?\s+(?:to|two)\s+(?:the\s+)?(.+)/i,
-              // "destination should be X", "destination is X"
-              /destination\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i,
-              // "actually to X" / "no, going to X"
-              /(?:actually|no)[,\s]+(?:to|going to|destination is|heading to)\s+(?:the\s+)?(.+)/i,
-              // "the destination is X" / "my destination is X"
-              /(?:the|my)\s+destination\s+(?:is|should be)\s+(?:the\s+)?(.+)/i,
-            ];
-            
-            // Test all pickup patterns
-            let pickupChangeMatch: RegExpMatchArray | null = null;
-            for (const pattern of pickupPatterns) {
-              pickupChangeMatch = lowerUserText.match(pattern);
-              if (pickupChangeMatch) {
-                console.log(`[${callId}] 🎯 Pickup pattern matched: ${pattern}`);
-                break;
-              }
-            }
-            
-            // Test all destination patterns
-            let destChangeMatch: RegExpMatchArray | null = null;
-            for (const pattern of destPatterns) {
-              destChangeMatch = lowerUserText.match(pattern);
-              if (destChangeMatch) {
-                console.log(`[${callId}] 🎯 Destination pattern matched: ${pattern}`);
-                break;
-              }
-            }
-            
-            if (pickupChangeMatch && pickupChangeMatch[1]) {
-              const newPickup = pickupChangeMatch[1].replace(/please\s*$/i, "").trim();
-              console.log(`[${callId}] 🔄 EXPLICIT PICKUP CHANGE DETECTED: "${sessionState.booking.pickup}" → "${newPickup}"`);
-              
-              const oldPickup = sessionState.booking.pickup;
-              sessionState.booking.pickup = newPickup;
-              
-              // Reset fare since pickup changed
-              if (sessionState.pendingFare) {
-                console.log(`[${callId}] 💰 Resetting fare due to pickup change`);
-                sessionState.pendingFare = null;
-                sessionState.pendingEta = null;
-                sessionState.awaitingConfirmation = false;
-                sessionState.quoteInFlight = false;
-                sessionState.lastQuoteRequestedAt = 0;
-              }
-              
-              // Cancel any in-progress response
-              if (sessionState.openAiResponseActive) {
-                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              
-              // Tell Ada about the change
+              // Tell OpenAI about the correction so Ada acknowledges it
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -4354,568 +3004,18 @@ INSTRUCTIONS:
                   role: "system",
                   content: [{
                     type: "input_text",
-                    text: `[PICKUP CHANGED BY USER]
-The user changed the pickup from "${oldPickup || 'empty'}" to "${newPickup}".
-
-## UPDATED BOOKING STATE:
-- Pickup: ${newPickup}
-- Destination: ${sessionState.booking.destination || "not yet provided"}
-- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
-- Time: ${sessionState.booking.pickupTime || "ASAP"}
-
-INSTRUCTIONS:
-1. Acknowledge briefly: "Got it, pickup is now ${newPickup}."
-2. If all 4 fields are complete, summarize and ask for confirmation
-3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
+                    text: `[ADDRESS CORRECTION] The user just corrected their ${correction.type} address to: "${correction.address}". 
+                    
+IMPORTANT: Update your understanding. The ${correction.type} is now "${correction.address}" (not the previous value).
+DO NOT ask them to confirm this change - just acknowledge briefly and continue to the next step.
+Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
                   }]
                 }
               }));
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              sessionState.openAiResponseActive = true;
-              await updateLiveCall(sessionState);
-              break; // Handled the pickup change
-            }
-            
-            if (destChangeMatch && destChangeMatch[1]) {
-              const newDest = destChangeMatch[1].replace(/please\s*$/i, "").trim();
-              console.log(`[${callId}] 🔄 EXPLICIT DESTINATION CHANGE DETECTED: "${sessionState.booking.destination}" → "${newDest}"`);
-              
-              const oldDest = sessionState.booking.destination;
-              sessionState.booking.destination = newDest;
-              
-              // Reset fare since destination changed
-              if (sessionState.pendingFare) {
-                console.log(`[${callId}] 💰 Resetting fare due to destination change`);
-                sessionState.pendingFare = null;
-                sessionState.pendingEta = null;
-                sessionState.awaitingConfirmation = false;
-                sessionState.quoteInFlight = false;
-                sessionState.lastQuoteRequestedAt = 0;
-              }
-              
-              // Cancel any in-progress response
-              if (sessionState.openAiResponseActive) {
-                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              
-              // Tell Ada about the change
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[DESTINATION CHANGED BY USER]
-The user changed the destination from "${oldDest || 'empty'}" to "${newDest}".
-
-## UPDATED BOOKING STATE:
-- Pickup: ${sessionState.booking.pickup || "not yet provided"}
-- Destination: ${newDest}
-- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
-- Time: ${sessionState.booking.pickupTime || "ASAP"}
-
-INSTRUCTIONS:
-1. Acknowledge briefly: "Got it, destination is now ${newDest}."
-2. If all 4 fields are complete, summarize and ask for confirmation
-3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
-                  }]
-                }
-              }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              sessionState.openAiResponseActive = true;
-              await updateLiveCall(sessionState);
-              break; // Handled the destination change
-            }
-            
-            // ═══════════════════════════════════════════════════════════════════════
-            // FAST PATH CONFIRMATION (REGEX) - Check BEFORE AI extraction to avoid latency
-            // If user says "yes" while we're awaiting confirmation, confirm immediately
-            // ═══════════════════════════════════════════════════════════════════════
-            const isYesRegex = /^(yes|yeah|yep|yea|yup|sure|ok|okay|alright|go ahead|book it|confirm|please|yes please|that's? (?:right|correct)|correct|definitely|absolutely|affirmative)$/i.test(userText.trim()) ||
-                               /^(?:yes|yeah|yep|yup|sure|ok|okay|please)[,.\s]*(please|book it|go ahead|thanks?|cheers)?$/i.test(userText.trim());
-            
-            if (isYesRegex && sessionState.awaitingConfirmation && !sessionState.bookingConfirmed) {
-              console.log(`[${callId}] 🚀 REGEX FAST PATH CONFIRMATION: User said "${userText}" while awaitingConfirmation=true`);
-              
-              // Cancel any active response
-              if (sessionState.openAiResponseActive) {
-                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              
-              // Set confirmed flag IMMEDIATELY
-              sessionState.bookingConfirmed = true;
-              sessionState.awaitingConfirmation = false;
-              sessionState.quoteInFlight = false;
-              
-              // Send CONFIRMED webhook to dispatch
-              console.log(`[${callId}] 📤 REGEX FAST PATH: Sending CONFIRMED webhook...`);
-              await sendDispatchWebhook(sessionState, "confirmed", {
-                pickup: sessionState.booking.pickup,
-                destination: sessionState.booking.destination,
-                passengers: sessionState.booking.passengers,
-                pickup_time: sessionState.booking.pickupTime
-              });
-              console.log(`[${callId}] ✅ REGEX FAST PATH: CONFIRMED webhook sent`);
-              
-              // POST confirmation to callback_url if provided
-              if (sessionState.pendingConfirmationCallback) {
-                try {
-                  console.log(`[${callId}] 📡 REGEX FAST PATH: POSTing to callback_url: ${sessionState.pendingConfirmationCallback}`);
-                  const confirmPayload = {
-                    call_id: callId,
-                    job_id: sessionState.dispatchJobId || null,
-                    action: "confirmed",
-                    response: "confirmed",
-                    pickup: sessionState.booking.pickup,
-                    destination: sessionState.booking.destination,
-                    fare: sessionState.pendingFare,
-                    eta: sessionState.pendingEta,
-                    pickup_time: sessionState.booking.pickupTime || "ASAP",
-                    passengers: sessionState.booking.passengers || 1,
-                    caller_phone: sessionState.callerPhone,
-                    booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
-                    timestamp: new Date().toISOString()
-                  };
-                  
-                  const confirmResp = await fetch(sessionState.pendingConfirmationCallback, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(confirmPayload)
-                  });
-                  console.log(`[${callId}] 📬 REGEX FAST PATH: Callback response: ${confirmResp.status}`);
-                } catch (callbackErr) {
-                  console.error(`[${callId}] ⚠️ REGEX FAST PATH: Callback failed:`, callbackErr);
-                }
-              }
-              
-              // Protect goodbye speech
-              sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-              sessionState.lastQuestionAsked = "none";
-              
-              // Get language-aware closing script
-              const closingScript = getClosingScript(sessionState.language);
-              const randomTip = closingScript.whatsappTips[Math.floor(Math.random() * closingScript.whatsappTips.length)];
-              const langInstruction = sessionState.language === "auto" 
-                ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller."
-                : "";
-              
-              // Inject POST-CONFIRMATION mode
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[POST-CONFIRMATION MODE ACTIVE] The booking is NOW CONFIRMED and COMPLETE.
-                    
-🚨 CRITICAL RULES:
-- The customer just said "${userText}" to confirm - the booking is DONE
-- Do NOT ask "shall I book that taxi?" - it's ALREADY BOOKED  
-- Do NOT loop back to any booking questions
-- Your ONLY job now is to deliver the closing script and end the call
-
-${langInstruction}
-
-Deliver this closing script:
-1. "${closingScript.confirmation}"
-2. "${closingScript.whatsappDetails}"
-3. "${randomTip}"
-4. "${closingScript.goodbye}"
-
-Then IMMEDIATELY call end_call().`
-                  }]
-                }
-              }));
-              
-              // Trigger the goodbye response
-              openaiWs!.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio", "text"],
-                  instructions: `The customer confirmed with "${userText}". Deliver the booking confirmation and closing script warmly. Then call end_call().`
-                }
-              }));
-              sessionState.openAiResponseActive = true;
               
               await updateLiveCall(sessionState);
-              break; // Exit transcript handler - confirmation handled via fast path
-            }
-            
-            if (USE_AI_EXTRACTION) {
-              console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
-              
-              // ✅ SET EXTRACTION GUARD: Block any VAD-triggered responses until we're done
-              sessionState.extractionInProgress = true;
-              
-              try {
-                const aiResult = await extractBookingWithAI(
-                  sessionState.conversationHistory,
-                  sessionState.booking,
-                  sessionState.callerPhone,
-                  callId
-                );
-                
-                if (aiResult) {
-                  // ═══════════════════════════════════════════════════════════════
-                  // AI DETECTED A CORRECTION - Handle with full context
-                  // ═══════════════════════════════════════════════════════════════
-                  if (aiResult.is_correction && aiResult.fields_changed && aiResult.fields_changed.length > 0) {
-                    console.log(`[${callId}] 🧠 AI DETECTED CORRECTION: fields_changed=${aiResult.fields_changed.join(", ")}`);
-                    
-                    // Track what changed for the system message
-                    const changes: string[] = [];
-                    
-                    console.log(`[${callId}] 🔍 AI correction validation: fields_changed=${JSON.stringify(aiResult.fields_changed)}, pickup="${aiResult.pickup}", dest="${aiResult.destination}"`);
-                    
-                    // For corrections, be more lenient - trust AI extraction for known venues
-                    // Apply the AI's corrected values
-                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup) {
-                      // Accept if it's a known venue OR if it passes lenient matching
-                      const isKnownVenue = containsKnownVenue(aiResult.pickup) !== null;
-                      const passesLenientMatch = matchesUserTextForCorrection(aiResult.pickup, userText);
-                      
-                      console.log(`[${callId}] 🔍 Pickup validation: venue=${isKnownVenue}, lenientMatch=${passesLenientMatch}, proposed="${aiResult.pickup}", user="${userText}"`);
-                      
-                      if (isKnownVenue || passesLenientMatch) {
-                        const oldValue = sessionState.booking.pickup;
-                        sessionState.booking.pickup = aiResult.pickup;
-                        changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
-                      } else {
-                        console.log(`[${callId}] ⚠️ AI pickup correction rejected: "${aiResult.pickup}" not in user text "${userText}"`);
-                      }
-                    }
-                    if (aiResult.fields_changed.includes("destination") && aiResult.destination) {
-                      const isKnownVenue = containsKnownVenue(aiResult.destination) !== null;
-                      const passesLenientMatch = matchesUserTextForCorrection(aiResult.destination, userText);
-                      
-                      console.log(`[${callId}] 🔍 Destination validation: venue=${isKnownVenue}, lenientMatch=${passesLenientMatch}, proposed="${aiResult.destination}", user="${userText}"`);
-                      
-                      if (isKnownVenue || passesLenientMatch) {
-                        const oldValue = sessionState.booking.destination;
-                        sessionState.booking.destination = aiResult.destination;
-                        changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
-                      } else {
-                        console.log(`[${callId}] ⚠️ AI destination correction rejected: "${aiResult.destination}" not in user text "${userText}"`);
-                      }
-                    }
-                    if (aiResult.fields_changed.includes("passengers") && aiResult.passengers !== null) {
-                      const oldValue = sessionState.booking.passengers;
-                      sessionState.booking.passengers = aiResult.passengers;
-                      changes.push(`passengers from ${oldValue ?? 'empty'} to ${aiResult.passengers}`);
-                    }
-                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time && matchesUserTextForCorrection(aiResult.pickup_time, userText)) {
-                      const oldValue = sessionState.booking.pickupTime;
-                      sessionState.booking.pickupTime = aiResult.pickup_time;
-                      changes.push(`time from "${oldValue || 'empty'}" to "${aiResult.pickup_time}"`);
-                    }
-                    
-                    // FALLBACK: If fields_changed is empty but we have new values that don't match current state,
-                    // treat them as implicit corrections (common with AI hallucination of fields_changed)
-                    if (changes.length === 0 && !aiResult.fields_changed?.length) {
-                      console.log(`[${callId}] 🔄 Empty fields_changed - checking for implicit corrections...`);
-                      
-                      // Check if AI extraction found a destination that's different from current
-                      if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
-                        const passesMatch = matchesUserTextForCorrection(aiResult.destination, userText);
-                        if (passesMatch) {
-                          const oldValue = sessionState.booking.destination;
-                          sessionState.booking.destination = aiResult.destination;
-                          changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
-                          console.log(`[${callId}] ✅ Implicit destination correction applied: "${aiResult.destination}"`);
-                        }
-                      }
-                      // Check pickup
-                      if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
-                        const passesMatch = matchesUserTextForCorrection(aiResult.pickup, userText);
-                        if (passesMatch) {
-                          const oldValue = sessionState.booking.pickup;
-                          sessionState.booking.pickup = aiResult.pickup;
-                          changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
-                          console.log(`[${callId}] ✅ Implicit pickup correction applied: "${aiResult.pickup}"`);
-                        }
-                      }
-                    }
-
-                    // If we failed to apply any change (likely mismatch/hallucination), do NOT inject correction.
-                    if (changes.length === 0) {
-                      console.log(`[${callId}] ⚠️ AI correction rejected (no changes applied after validation). user="${userText}"`);
-                      // Continue normal flow.
-                    } else {
-                    
-                    // Reset fare if we had one (correction invalidates it)
-                    if (sessionState.pendingFare) {
-                      console.log(`[${callId}] 💰 Resetting fare due to AI-detected correction`);
-                      sessionState.pendingFare = null;
-                      sessionState.pendingEta = null;
-                      sessionState.awaitingConfirmation = false;
-                      sessionState.quoteInFlight = false;
-                      sessionState.lastQuoteRequestedAt = 0;
-                    }
-                    
-                    // CANCEL any in-progress response to prevent old state from being used
-                    if (sessionState.openAiResponseActive) {
-                      openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                      sessionState.openAiResponseActive = false;
-                    }
-                    
-                    // Build the corrected state for the summary
-                    const correctedPickup = sessionState.booking.pickup || "not yet provided";
-                    const correctedDest = sessionState.booking.destination || "not yet provided";
-                    const correctedPax = sessionState.booking.passengers ?? "not yet provided";
-                    const correctedTime = sessionState.booking.pickupTime || "ASAP";
-                    
-                    // Tell OpenAI about the correction with FULL context
-                    openaiWs!.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[AI-DETECTED CORRECTION]
-The user corrected: ${changes.join(", ")}.
-
-## UPDATED BOOKING STATE (USE ONLY THESE VALUES):
-- Pickup: ${correctedPickup}
-- Destination: ${correctedDest}  
-- Passengers: ${correctedPax}
-- Time: ${correctedTime}
-
-INSTRUCTIONS:
-1. Acknowledge the correction briefly
-2. If all 4 fields are captured, proceed to summarize the booking using ONLY the values above
-3. NEVER mention the old incorrect values`
-                        }]
-                      }
-                    }));
-                      openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                      sessionState.openAiResponseActive = true;
-                      
-                      await updateLiveCall(sessionState);
-                      break; // AI correction handled
-                    }
-                  }
-                  
-                  // ═══════════════════════════════════════════════════════════════
-                  // AI DETECTED AFFIRMATIVE (yes/confirm) - FAST PATH CONFIRMATION
-                  // When awaitingConfirmation is true and user says "yes", directly 
-                  // trigger the booking confirmation without waiting for OpenAI tool call
-                  // ═══════════════════════════════════════════════════════════════
-                  if (aiResult.is_affirmative && (aiResult.intent === "confirm_booking" || sessionState.awaitingConfirmation)) {
-                    console.log(`[${callId}] 🧠 AI DETECTED CONFIRMATION: User said yes (awaitingConfirmation=${sessionState.awaitingConfirmation})`);
-                    
-                    // FAST PATH: If we're awaiting confirmation and user said yes, trigger confirmation directly
-                    if (sessionState.awaitingConfirmation && !sessionState.bookingConfirmed) {
-                      console.log(`[${callId}] 🚀 FAST PATH CONFIRMATION: Bypassing OpenAI tool call, confirming directly`);
-                      
-                      // Clear extraction guard first
-                      sessionState.extractionInProgress = false;
-                      
-                      // Cancel any active response
-                      if (sessionState.openAiResponseActive) {
-                        openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                        sessionState.openAiResponseActive = false;
-                      }
-                      
-                      // Set confirmed flag IMMEDIATELY
-                      sessionState.bookingConfirmed = true;
-                      sessionState.awaitingConfirmation = false;
-                      sessionState.quoteInFlight = false;
-                      
-                      // Send CONFIRMED webhook to dispatch
-                      console.log(`[${callId}] 📤 FAST PATH: Sending CONFIRMED webhook...`);
-                      await sendDispatchWebhook(sessionState, "confirmed", {
-                        pickup: sessionState.booking.pickup,
-                        destination: sessionState.booking.destination,
-                        passengers: sessionState.booking.passengers,
-                        pickup_time: sessionState.booking.pickupTime
-                      });
-                      console.log(`[${callId}] ✅ FAST PATH: CONFIRMED webhook sent`);
-                      
-                      // POST confirmation to callback_url if provided
-                      if (sessionState.pendingConfirmationCallback) {
-                        try {
-                          console.log(`[${callId}] 📡 FAST PATH: POSTing to callback_url: ${sessionState.pendingConfirmationCallback}`);
-                          const confirmPayload = {
-                            call_id: callId,
-                            job_id: sessionState.dispatchJobId || null,
-                            action: "confirmed",
-                            response: "confirmed",
-                            pickup: sessionState.booking.pickup,
-                            destination: sessionState.booking.destination,
-                            fare: sessionState.pendingFare,
-                            eta: sessionState.pendingEta,
-                            pickup_time: sessionState.booking.pickupTime || "ASAP",
-                            passengers: sessionState.booking.passengers || 1,
-                            caller_phone: sessionState.callerPhone,
-                            booking_ref: sessionState.pendingBookingRef || sessionState.bookingRef || null,
-                            timestamp: new Date().toISOString()
-                          };
-                          
-                          const confirmResp = await fetch(sessionState.pendingConfirmationCallback, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(confirmPayload)
-                          });
-                          console.log(`[${callId}] 📬 FAST PATH: Callback response: ${confirmResp.status}`);
-                        } catch (callbackErr) {
-                          console.error(`[${callId}] ⚠️ FAST PATH: Callback failed:`, callbackErr);
-                        }
-                      }
-                      
-                      // Protect goodbye speech
-                      sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-                      sessionState.lastQuestionAsked = "none";
-                      
-                      // Get language-aware closing script
-                      const closingScript = getClosingScript(sessionState.language);
-                      const randomTip = closingScript.whatsappTips[Math.floor(Math.random() * closingScript.whatsappTips.length)];
-                      const langInstruction = sessionState.language === "auto" 
-                        ? "Deliver this in the SAME LANGUAGE you've been speaking with the caller."
-                        : "";
-                      
-                      // Inject POST-CONFIRMATION mode
-                      openaiWs!.send(JSON.stringify({
-                        type: "conversation.item.create",
-                        item: {
-                          type: "message",
-                          role: "system",
-                          content: [{
-                            type: "input_text",
-                            text: `[POST-CONFIRMATION MODE ACTIVE] The booking is NOW CONFIRMED and COMPLETE.
-                            
-🚨 CRITICAL RULES:
-- The customer just said YES to confirm - the booking is DONE
-- Do NOT ask "shall I book that taxi?" - it's ALREADY BOOKED  
-- Do NOT loop back to any booking questions
-- Your ONLY job now is to deliver the closing script and end the call
-
-${langInstruction}
-
-Deliver this closing script:
-1. "${closingScript.confirmation}"
-2. "${closingScript.whatsappDetails}"
-3. "${randomTip}"
-4. "${closingScript.goodbye}"
-
-Then IMMEDIATELY call end_call().`
-                          }]
-                        }
-                      }));
-                      
-                      // Trigger the goodbye response
-                      openaiWs!.send(JSON.stringify({
-                        type: "response.create",
-                        response: {
-                          modalities: ["audio", "text"],
-                          instructions: `The customer confirmed with "${userText}". Deliver the booking confirmation and closing script warmly. Then call end_call().`
-                        }
-                      }));
-                      sessionState.openAiResponseActive = true;
-                      
-                      await updateLiveCall(sessionState);
-                      break; // Exit transcript handler - confirmation handled
-                    }
-                  }
-                  
-                  // ═══════════════════════════════════════════════════════════════
-                  // AI EXTRACTED NEW DATA - Update state BEFORE Ada responds
-                  // ═══════════════════════════════════════════════════════════════
-                  let updated = false;
-                  
-                  // Only update if AI found new values (not corrections, which are handled above)
-                  // and the model is reasonably confident.
-                  if (!aiResult.is_correction && aiResult.confidence !== "low") {
-                    if (aiResult.pickup && !sessionState.booking.pickup) {
-                      console.log(`[${callId}] 🧠 AI FILL pickup: "${aiResult.pickup}"`);
-                      sessionState.booking.pickup = aiResult.pickup;
-                      updated = true;
-                    }
-                    if (aiResult.destination && !sessionState.booking.destination) {
-                      console.log(`[${callId}] 🧠 AI FILL destination: "${aiResult.destination}"`);
-                      sessionState.booking.destination = aiResult.destination;
-                      updated = true;
-                    }
-                    // GUARD: Only fill passengers if AI explicitly extracted it AND it's not a default value
-                    // The AI often returns passengers=1 as a default even when user didn't mention it
-                    const passengerMentioned = /\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|people|person|of us)?s?\b/i.test(userText) ||
-                                                /\bjust\s*(me|myself)\b/i.test(userText);
-                    if (aiResult.passengers !== null && sessionState.booking.passengers === null && passengerMentioned) {
-                      console.log(`[${callId}] 🧠 AI FILL passengers: ${aiResult.passengers} (user said: "${userText}")`);
-                      sessionState.booking.passengers = aiResult.passengers;
-                      updated = true;
-                    } else if (aiResult.passengers !== null && sessionState.booking.passengers === null) {
-                      console.log(`[${callId}] ⚠️ AI FILL passengers BLOCKED: ${aiResult.passengers} (user didn't explicitly mention passengers)`);
-                    }
-                    
-                    // GUARD: Only fill time if AI explicitly extracted it AND it's not just "ASAP" as a default
-                    // The AI often returns "ASAP" when user didn't mention time at all
-                    const timeMentioned = /\b(asap|now|immediately|right now|straight away|soon|in \d+ minutes?|at \d+|tomorrow|later|morning|afternoon|evening|tonight)\b/i.test(userText);
-                    if (aiResult.pickup_time && !sessionState.booking.pickupTime && timeMentioned) {
-                      console.log(`[${callId}] 🧠 AI FILL time: "${aiResult.pickup_time}" (user said: "${userText}")`);
-                      sessionState.booking.pickupTime = aiResult.pickup_time;
-                      updated = true;
-                    } else if (aiResult.pickup_time && !sessionState.booking.pickupTime) {
-                      console.log(`[${callId}] ⚠️ AI FILL time BLOCKED: "${aiResult.pickup_time}" (user didn't explicitly mention time)`);
-                    }
-                  }
-                  
-                  if (updated) {
-                    await updateLiveCall(sessionState);
-                  }
-                }
-              } catch (aiErr) {
-                console.error(`[${callId}] ⚠️ AI extraction error (falling back to normal flow):`, aiErr);
-              } finally {
-                // ✅ CLEAR EXTRACTION GUARD: Allow responses to proceed now
-                sessionState.extractionInProgress = false;
-                
-                // ═══════════════════════════════════════════════════════════════════
-                // RACE CONDITION FIX: If Ada is ALREADY speaking (VAD triggered too early),
-                // cancel her response and force a re-response with correct state.
-                // This prevents the "Ada registered my address after she said address" bug.
-                // ═══════════════════════════════════════════════════════════════════
-                if (sessionState.openAiResponseActive) {
-                  console.log(`[${callId}] 🛑 RACE FIX: Ada was already speaking when extraction finished - cancelling and re-triggering`);
-                  openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                  sessionState.openAiResponseActive = false;
-                  
-                  // Small delay to ensure cancel is processed before new response
-                  await new Promise(r => setTimeout(r, 50));
-                }
-                
-                // ✅ INJECT STATE CONTEXT: Give OpenAI the full extracted state BEFORE it responds
-                // This ensures Ada knows the correct pickup/destination before speaking
-                const stateInjection = {
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{
-                      type: "input_text",
-                      text: `[VERIFIED BOOKING STATE - USE ONLY THESE VALUES]
-- Pickup: ${sessionState.booking.pickup || "NOT YET PROVIDED"}
-- Destination: ${sessionState.booking.destination || "NOT YET PROVIDED"}  
-- Passengers: ${sessionState.booking.passengers ?? "NOT YET PROVIDED"}
-- Time: ${sessionState.booking.pickupTime || "NOT YET PROVIDED"}
-
-CRITICAL: Use EXACTLY these values in your response. Do NOT invent or change any addresses.`
-                    }]
-                  }
-                };
-                openaiWs!.send(JSON.stringify(stateInjection));
-                
-                // ✅ Force a new response with correct state if we had to cancel
-                // This ensures Ada responds with the correct, extracted values
-                if (!sessionState.openAiResponseActive) {
-                  openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                  sessionState.openAiResponseActive = true;
-                }
-              }
+              break; // Correction handled, don't run normal context pairing
             }
             
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
@@ -4927,6 +3027,13 @@ CRITICAL: Use EXACTLY these values in your response. Do NOT invent or change any
               
               if (looksLikeAddress && !hasNumber && !isJustNumber) {
                 console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
+                
+                // Store the address for later (might be a correction they want to make)
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
+                  timestamp: Date.now()
+                });
                 
                 // Force immediate re-prompt for passengers
                 openaiWs!.send(JSON.stringify({
@@ -4952,7 +3059,14 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
               }
             }
             
-            // Send context-aware prompt to OpenAI with FULL extracted state
+            // Add to history with context annotation (normal flow)
+            sessionState.conversationHistory.push({
+              role: "user",
+              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
+              timestamp: Date.now()
+            });
+            
+            // Send context-aware prompt to OpenAI
             const contextPrompt = {
               type: "conversation.item.create",
               item: {
@@ -4987,13 +3101,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           console.log(`[${callId}] 🔧 Tool: ${toolName}`, toolArgs);
           
           if (toolName === "sync_booking_data") {
-            // Update booking state from tool call - trust Ada's updates directly
+            // Update booking state from tool call
             if (toolArgs.pickup) sessionState.booking.pickup = String(toolArgs.pickup);
             if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
             if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
             if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
-            if (toolArgs.nearest_pickup) sessionState.booking.nearestPickup = String(toolArgs.nearest_pickup);
-            if (toolArgs.nearest_dropoff) sessionState.booking.nearestDropoff = String(toolArgs.nearest_dropoff);
             if (toolArgs.last_question_asked) {
               sessionState.lastQuestionAsked = toolArgs.last_question_asked as SessionState["lastQuestionAsked"];
             }
@@ -5499,10 +3611,6 @@ Do NOT skip any part. Say ALL of it warmly.]`
   };
 
   openaiWs.onclose = (ev) => {
-    // Stop the OpenAI ping immediately
-    stopOpenAiPing();
-    openaiConnected = false;
-    
     // Include close codes/reasons to debug unexpected disconnects.
     // NOTE: Deno's WS close event may not always include reason.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -5512,111 +3620,6 @@ Do NOT skip any part. Say ALL of it warmly.]`
         (anyEv?.code ? ` code=${anyEv.code}` : "") +
         (anyEv?.reason ? ` reason=${anyEv.reason}` : ""),
     );
-    
-    // === OPENAI RECONNECTION LOGIC (ported from simple mode) ===
-    // If the call is still active and we haven't exceeded retry limit, attempt reconnection
-    if (!cleanedUp && !closingGracePeriodActive && openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS) {
-      const timeSinceConnect = lastOpenAiConnectedAt ? Date.now() - lastOpenAiConnectedAt : 0;
-      
-      // Only reconnect if we were connected for a reasonable time (not immediate failures)
-      if (timeSinceConnect > 5000) {
-        openaiReconnectAttempts++;
-        const backoffMs = Math.min(1000 * openaiReconnectAttempts, 3000); // 1s, 2s, 3s backoff
-        
-        console.log(`[${callId}] 🔄 OpenAI disconnected mid-call, attempting reconnect (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS}) in ${backoffMs}ms`);
-        
-        // Notify bridge that we're reconnecting
-        try {
-          socket.send(JSON.stringify({
-            type: "openai_reconnecting",
-            attempt: openaiReconnectAttempts,
-            maxAttempts: MAX_OPENAI_RECONNECT_ATTEMPTS
-          }));
-        } catch (e) {
-          // Bridge socket may be closed
-        }
-        
-        trackedTimeout(() => {
-          if (!cleanedUp && !closingGracePeriodActive && socket.readyState === WebSocket.OPEN) {
-            console.log(`[${callId}] 🔌 Attempting OpenAI reconnect...`);
-            
-            // Reconnect to OpenAI
-            try {
-              const wsUrl = `${OPENAI_REALTIME_URL}`;
-              openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
-              
-              openaiWs.onopen = () => {
-                console.log(`[${callId}] ✅ OpenAI reconnected successfully`);
-                openaiConnected = true;
-                openaiReconnectAttempts = 0;
-                lastOpenAiConnectedAt = Date.now();
-                sessionState.greetingDelivered = true; // Don't replay greeting
-                startOpenAiPing();
-              };
-              
-              // Reuse existing message handler
-              openaiWs.onmessage = async (event) => {
-                // The existing onmessage handler will be invoked
-                // This is handled by the runtime when we create the new WebSocket
-              };
-              
-              openaiWs.onerror = (error) => {
-                console.error(`[${callId}] ❌ OpenAI reconnect error:`, error);
-              };
-              
-              openaiWs.onclose = (ev2) => {
-                // Recursive - will retry again if needed
-                openaiConnected = false;
-                stopOpenAiPing();
-                
-                const anyEv2: any = ev2;
-                console.log(`[${callId}] OpenAI reconnected WebSocket closed` +
-                  (anyEv2?.code ? ` code=${anyEv2.code}` : "") +
-                  (anyEv2?.reason ? ` reason=${anyEv2.reason}` : "")
-                );
-                
-                // Try reconnecting again if we have attempts left
-                if (openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS && !cleanedUp && !closingGracePeriodActive) {
-                  openaiReconnectAttempts++;
-                  const nextBackoff = Math.min(1000 * openaiReconnectAttempts, 3000);
-                  console.log(`[${callId}] 🔄 Reconnect failed, retrying in ${nextBackoff}ms (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS})`);
-                  trackedTimeout(() => {
-                    // Recursive reconnect attempt
-                    if (socket.readyState === WebSocket.OPEN && !cleanedUp) {
-                      console.log(`[${callId}] 🔌 Retry reconnect...`);
-                      // This will be handled by the outer reconnect logic on next close
-                    }
-                  }, nextBackoff);
-                } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
-                  console.error(`[${callId}] ❌ OpenAI reconnection failed after ${MAX_OPENAI_RECONNECT_ATTEMPTS} attempts - ending call`);
-                  try {
-                    socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
-                  } catch (e) {
-                    // Ignore
-                  }
-                  cleanupWithKeepalive();
-                }
-              };
-            } catch (e) {
-              console.error(`[${callId}] ❌ Failed to create reconnect WebSocket:`, e);
-              cleanupWithKeepalive();
-            }
-          }
-        }, backoffMs);
-        
-        return; // Don't cleanup yet - we're attempting reconnection
-      } else {
-        console.log(`[${callId}] ⚠️ OpenAI disconnected too quickly (${timeSinceConnect}ms) - not reconnecting`);
-      }
-    } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
-      console.error(`[${callId}] ❌ OpenAI reconnection limit reached - ending call`);
-      try {
-        socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
-      } catch (e) {
-        // Ignore
-      }
-    }
-    
     cleanupWithKeepalive();
   };
 
@@ -5635,24 +3638,6 @@ Do NOT skip any part. Say ALL of it warmly.]`
           : event.data;
 
         audioDiag.packetsReceived++;
-
-        // AUTO-DETECT format from frame size (handles race where format update arrives after audio)
-        // slin16 (16kHz PCM16): 640 bytes = 20ms, 320 bytes = 10ms
-        // slin (8kHz PCM16): 320 bytes = 20ms, 160 bytes = 10ms
-        // 
-        // IMPORTANT: Do NOT auto-correct back to 8kHz just because we see 320-byte frames!
-        // 320 bytes is valid for BOTH 8kHz (20ms) and 16kHz (10ms).
-        // Only upgrade to 16kHz on unambiguous evidence (640-byte frames).
-        // Trust explicit format updates over frame-size guessing.
-        if (audioBytes.length === 640 && inboundSampleRate === 8000) {
-          // 640 bytes can ONLY be 16kHz (20ms) - safe to upgrade
-          console.log(`[${callId}] 🔄 Auto-detected slin16 @ 16kHz from 640-byte frame size`);
-          inboundSampleRate = 16000;
-          inboundAudioFormat = "slin16";
-        }
-        // REMOVED: Auto-correction to 8kHz from 320-byte frames - this was WRONG!
-        // 320 bytes can be either 8kHz (20ms) OR 16kHz (10ms), cannot distinguish.
-        // The bridge sends explicit format_update messages which we should trust.
 
         // Decode to PCM for RMS calculation
         let pcmInput: Int16Array;
@@ -5834,94 +3819,11 @@ Do NOT skip any part. Say ALL of it warmly.]`
             sessionState.callerPhone = data.phone; // Update session state too!
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
           }
-          
-          // ====== FIX: Read format from init message (like simple mode does) ======
-          // The bridge sends format info in the init message - we were ignoring it!
-          const initFormat = data.inbound_format || data.format;
-          if (initFormat && (initFormat === "ulaw" || initFormat === "slin" || initFormat === "slin16")) {
-            const oldFormat = inboundAudioFormat;
-            const oldRate = inboundSampleRate;
-            inboundAudioFormat = initFormat;
-            // Auto-set sample rate based on format if not explicitly provided
-            if (typeof data.inbound_sample_rate === "number") {
-              inboundSampleRate = data.inbound_sample_rate;
-            } else if (typeof data.sample_rate === "number") {
-              inboundSampleRate = data.sample_rate;
-            } else {
-              // Default: slin16 = 16000Hz, others = 8000Hz
-              inboundSampleRate = initFormat === "slin16" ? 16000 : 8000;
-            }
-            if (oldFormat !== inboundAudioFormat || oldRate !== inboundSampleRate) {
-              console.log(`[${callId}] 🎛️ Audio format from init: ${oldFormat}@${oldRate}Hz → ${inboundAudioFormat}@${inboundSampleRate}Hz`);
-            }
-          }
-
-          // === SESSION RESUME SUPPORT ===
-          // When bridge sends reconnect=true after WebSocket drop, restore state from DB
-          const isReconnect = data.reconnect === true;
-          const isResume = data.resume === true;
-          const resumeCallId = data.resume_call_id || data.call_id || null;
-          
-          if ((isReconnect || isResume) && resumeCallId && !greetingSent) {
-            console.log(`[${callId}] 🔄 RESUME/RECONNECT detected: reconnect=${isReconnect}, resume=${isResume}, resumeCallId=${resumeCallId}`);
-            
-            const restoredState = await restoreSessionFromDb(callId, resumeCallId, callerPhone);
-            
-            if (restoredState) {
-              // Restore booking state
-              sessionState.booking = restoredState.booking;
-              sessionState.conversationHistory = restoredState.conversationHistory;
-              sessionState.bookingConfirmed = restoredState.bookingConfirmed;
-              sessionState.awaitingConfirmation = restoredState.awaitingConfirmation;
-              sessionState.lastQuestionAsked = restoredState.lastQuestionAsked;
-              sessionState.pendingFare = restoredState.pendingFare;
-              sessionState.pendingEta = restoredState.pendingEta;
-              
-              // === KEY FIX: Set resume flags so sendGreeting() sends continuation instead ===
-              // Don't mark greetingSent=true here - we want sendGreeting() to fire after session.updated
-              // but with the continuation prompt instead of the regular greeting
-              isResumedSession = true;
-              resumedStateData = {
-                booking: restoredState.booking,
-                awaitingConfirmation: restoredState.awaitingConfirmation,
-                pendingFare: restoredState.pendingFare,
-                pendingEta: restoredState.pendingEta,
-                bookingConfirmed: restoredState.bookingConfirmed
-              };
-              
-              // Clear the fallback timer so we wait for proper session.updated
-              if (greetingFallbackTimer) {
-                clearTrackedTimeout(greetingFallbackTimer);
-                greetingFallbackTimer = null;
-              }
-              
-              console.log(`[${callId}] ✅ Session restored - will send continuation prompt after session.updated`);
-              console.log(`[${callId}]   pickup: ${restoredState.booking.pickup}, dest: ${restoredState.booking.destination}, pax: ${restoredState.booking.passengers}`);
-              console.log(`[${callId}]   awaitingConfirmation: ${restoredState.awaitingConfirmation}, fare: ${restoredState.pendingFare}`);
-              
-              // Notify client we're ready
-              sendSessionReady();
-            } else {
-              console.log(`[${callId}] ⚠️ No state found in DB for resume, will send fresh greeting`);
-            }
-          }
 
           if (data.inbound_format && (data.inbound_format === "ulaw" || data.inbound_format === "slin" || data.inbound_format === "slin16")) {
-            const oldFormat = inboundAudioFormat;
-            const oldRate = inboundSampleRate;
             inboundAudioFormat = data.inbound_format;
-            // Auto-set sample rate based on format if not explicitly provided (match simple mode behavior)
-            if (typeof data.inbound_sample_rate === "number") {
-              inboundSampleRate = data.inbound_sample_rate;
-            } else {
-              // Default: slin16 = 16000Hz, others = 8000Hz
-              inboundSampleRate = data.inbound_format === "slin16" ? 16000 : 8000;
-            }
-            // Log format changes for debugging
-            if (oldFormat !== inboundAudioFormat || oldRate !== inboundSampleRate) {
-              console.log(`[${callId}] 🎛️ Audio format updated: ${oldFormat}@${oldRate}Hz → ${inboundAudioFormat}@${inboundSampleRate}Hz`);
-            }
-          } else if (typeof data.inbound_sample_rate === "number") {
+          }
+          if (typeof data.inbound_sample_rate === "number") {
             inboundSampleRate = data.inbound_sample_rate;
           }
         } else if (data.type === "keepalive_ack") {

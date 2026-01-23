@@ -52,10 +52,9 @@ public class AdaAudioClient : IDisposable
         var playbackFormat = new WaveFormat(24000, 16, 1);
         _playbackBuffer = new BufferedWaveProvider(playbackFormat)
         {
-            // IMPORTANT: if the server streams audio faster than real-time, the buffer can overflow.
-            // Discard on overflow to avoid exceptions and keep playback near real-time.
-            BufferDuration = TimeSpan.FromSeconds(5),
-            DiscardOnBufferOverflow = true
+            // Ada's full greeting can be 8-10 seconds - ensure enough buffer
+            BufferDuration = TimeSpan.FromSeconds(15),
+            DiscardOnBufferOverflow = false  // Block rather than silently lose audio
         };
 
         _waveOut = new WaveOutEvent { DesiredLatency = 100 };
@@ -458,14 +457,9 @@ public class AdaAudioClient : IDisposable
                     break;
             }
         }
-        catch (JsonException ex)
-        {
-            Log($"⚠️ WS JSON parse error: {ex.Message}");
-        }
         catch (Exception ex)
         {
-            // This catch can include downstream audio handling errors too.
-            Log($"⚠️ WS message handling error: {ex.Message}");
+            Log($"⚠️ Parse error: {ex.Message}");
         }
     }
 
@@ -487,20 +481,7 @@ public class AdaAudioClient : IDisposable
         }
 
         var playbackBytes = AudioCodecs.ShortsToBytes(pcm24k);
-        if (_playbackBuffer != null)
-        {
-            try
-            {
-                _playbackBuffer.AddSamples(playbackBytes, 0, playbackBytes.Length);
-            }
-            catch (Exception ex)
-            {
-                // Defensive: don't let local playback overflow break the call.
-                // Clear and continue (we'd rather drop some audio than crash the pipeline).
-                try { _playbackBuffer.ClearBuffer(); } catch { }
-                Log($"⚠️ Playback buffer overflow - dropping audio ({ex.Message})");
-            }
-        }
+        _playbackBuffer?.AddSamples(playbackBytes, 0, playbackBytes.Length);
 
         // Resample to 8kHz and encode to μ-law (skip de-emphasis to avoid crackling)
         var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);

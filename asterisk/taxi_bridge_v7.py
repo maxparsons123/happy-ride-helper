@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Taxi AI Asterisk Bridge v7.5 - LOUD AND CLEAR
+# Taxi AI Asterisk Bridge v7.4 - LOUD AND CLEAR
 #
 # Key features:
 # 1) Direct connection to taxi-realtime-paired (context-pairing architecture)
@@ -58,9 +58,9 @@ if not WS_URL:
             _config = json.load(f)
             edge = _config.get("edge_functions", {})
             WS_URL = (
-                edge.get("taxi_realtime_paired_ws")  # PRIORITY: paired has context-pairing architecture
-                or edge.get("taxi_realtime_simple_ws")
+                edge.get("taxi_realtime_paired_ws")
                 or edge.get("taxi_realtime_ws")
+                or edge.get("taxi_realtime_simple_ws")
                 # IMPORTANT: WebSocket routing is more reliable via the .functions subdomain.
                 or "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired"
             )
@@ -75,20 +75,10 @@ ULAW_RATE = 8000    # µ-law telephony (8kHz)
 SLIN16_RATE = 16000 # slin16 = signed linear 16kHz
 AI_RATE = 24000     # OpenAI TTS
 
-# FORMAT DETECTION: Allow dynamic detection from Asterisk frame size
-# v7.5: Re-enabled slin16 detection - ulaw lock was causing 2x playback when Asterisk sends slin/slin16.
-# IMPORTANT: If the bridge keeps encoding AI audio as ulaw while Asterisk expects slin, playback can sound
-# "robotic" and effectively speed up (sample-width mismatch). So the default is UNLOCKED.
-PREFER_SLIN16 = True   # Prefer higher quality when detected
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-# Allow overriding at runtime, but default to False (auto-detect).
-LOCK_FORMAT_ULAW = _env_flag("LOCK_FORMAT_ULAW", False)
+# LOCK TO ULAW: Disable slin16 auto-detection - it was corrupting audio
+# The format detection was switching mid-call causing garbled audio
+PREFER_SLIN16 = False
+LOCK_FORMAT_ULAW = True  # NEW: Prevent any format switching
 
 # Pre-emphasis coefficient for boosting high frequencies (consonants)
 # Higher values (0.95-0.97) boost more, helping distinguish 'S' vs 'F' sounds
@@ -312,12 +302,6 @@ class CallState:
     # Format detection debounce - prevents flip-flopping between formats
     format_locked: bool = False
     format_lock_time: float = 0.0
-    
-    # Asterisk keep-alive tracking (from v6)
-    last_asterisk_send: float = field(default_factory=time.time)
-    last_asterisk_recv: float = field(default_factory=time.time)
-    keepalive_count: int = 0
-    handoff_count: int = 0
 
 
 # =============================================================================
@@ -351,55 +335,43 @@ class TaxiBridgeV7:
         - slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
         - slin 8kHz: 320 bytes (2 bytes/sample × 8000 × 0.02)
         """
-        # Optional ulaw lock (mostly for legacy/diagnostics).
-        # NOTE: If Asterisk is actually sending PCM (320/640-byte frames), staying locked to ulaw will
-        # cause us to encode AI audio as ulaw while Asterisk expects slin/slin16, leading to distorted/
-        # "too fast" playback. So if we detect PCM-sized frames we fall back to auto-detect.
+        # v7.4: LOCK TO ULAW - ignore format changes entirely
         if LOCK_FORMAT_ULAW:
-            if frame_len == 160:
-                self.state.ast_codec = "ulaw"
-                self.state.ast_rate = ULAW_RATE
-                self.state.ast_frame_bytes = 160
-                return
-            logger.warning(
-                "[%s] ⚠️ ULAW lock enabled but received %d-byte frames; switching to auto-detect",
-                self.state.call_id,
-                frame_len,
-            )
+            if frame_len != self.state.ast_frame_bytes:
+                logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (locked to ulaw)",
+                              self.state.call_id, self.state.ast_frame_bytes, frame_len)
+            # Always treat as ulaw regardless of frame size
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = ULAW_RATE
+            self.state.ast_frame_bytes = frame_len
+            return
         
-        # Debounce format switching (prevents flip-flopping), but NEVER ignore strong signals.
-        # Strong signals are the canonical 20ms sizes for ulaw/slin/slin16.
-        STRONG_FRAME_SIZES = {160, 320, 640}
-        FORMAT_LOCK_DURATION = 0.75
+        # Original format detection (disabled when LOCK_FORMAT_ULAW=True)
+        FORMAT_LOCK_DURATION = 5.0
         if self.state.format_locked:
-            if (time.time() - self.state.format_lock_time) < FORMAT_LOCK_DURATION and frame_len not in STRONG_FRAME_SIZES:
+            if time.time() - self.state.format_lock_time < FORMAT_LOCK_DURATION:
                 self.state.ast_frame_bytes = frame_len
                 return
             self.state.format_locked = False
         
         old_codec = self.state.ast_codec
-        old_rate = self.state.ast_rate
         
         if frame_len == 640:
-            # slin16: 16kHz × 2 bytes × 20ms = 640 bytes
             self.state.ast_codec = "slin16"
             self.state.ast_rate = SLIN16_RATE
             self.state.ast_frame_bytes = 640
-            logger.info("[%s] ✅ Detected: slin16 @ 16kHz (640-byte frames)", self.state.call_id)
+            logger.info("[%s] ✅ Detected: slin16 @ 16kHz", self.state.call_id)
         elif frame_len == 320:
-            # slin: 8kHz × 2 bytes × 20ms = 320 bytes
             self.state.ast_codec = "slin"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 320
-            logger.info("[%s] 🔎 Detected: slin @ 8kHz (320-byte frames)", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: slin @ 8kHz", self.state.call_id)
         elif frame_len == 160:
-            # ulaw: 8kHz × 1 byte × 20ms = 160 bytes
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = 160
-            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz (160-byte frames)", self.state.call_id)
+            logger.info("[%s] 🔎 Detected: ulaw @ 8kHz", self.state.call_id)
         else:
-            # Unusual frame size - use heuristic
             if frame_len > 400:
                 self.state.ast_codec = "slin16"
                 self.state.ast_rate = SLIN16_RATE
@@ -407,25 +379,21 @@ class TaxiBridgeV7:
                 self.state.ast_codec = "slin"
                 self.state.ast_rate = ULAW_RATE
             self.state.ast_frame_bytes = frame_len
-            logger.warning("[%s] ⚠️ Unusual frame size %d bytes, assuming %s @ %dHz", 
+            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s @ %dHz", 
                           self.state.call_id, frame_len, self.state.ast_codec, self.state.ast_rate)
         
         self.state.format_locked = True
         self.state.format_lock_time = time.time()
         
-        # Notify edge function of format change (rate may change 8kHz ↔ 16kHz)
-        format_changed = (old_codec != self.state.ast_codec or old_rate != self.state.ast_rate)
-        if format_changed and self.ws and self.state.ws_connected:
-            # When sending processed audio, always report as slin (PCM16) but with correct rate
-            send_format = "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec
+        if old_codec != self.state.ast_codec and self.ws and self.state.ws_connected:
             await self.ws.send(json.dumps({
                 "type": "update_format",
                 "call_id": self.state.call_id,
-                "inbound_format": send_format,
-                "inbound_sample_rate": self.state.ast_rate,  # 8000 or 16000
+                "inbound_format": self.state.ast_codec,
+                "inbound_sample_rate": self.state.ast_rate,
             }))
             logger.info("[%s] 📡 Sent format update: %s @ %dHz", 
-                       self.state.call_id, send_format, self.state.ast_rate)
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate)
 
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
@@ -534,19 +502,15 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     async def heartbeat_loop(self) -> None:
-        """Periodic heartbeat logging (v6 style with WS + AST status)."""
+        """Periodic heartbeat logging."""
         try:
             while self.running:
                 await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-                if not self.running:
+                if not self.running:  # 🔥 FIXED: Early exit check after sleep
                     break
-                ws_age = time.time() - self.state.last_ws_activity
-                ast_age = time.time() - self.state.last_asterisk_recv
-                ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
-                ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
-                logger.info("[%s] 💓 WS%s AST%s KA:%d HO:%d", 
-                           self.state.call_id, ws_status, ast_status, 
-                           self.state.keepalive_count, self.state.handoff_count)
+                age = time.time() - self.state.last_ws_activity
+                status = "🟢" if age < 5 else "🟡" if age < 15 else "🔴"
+                logger.info("[%s] 💓 %s (%.1fs)", self.state.call_id, status, age)
         except asyncio.CancelledError:
             logger.debug("[%s] Heartbeat task cancelled", self.state.call_id)
 
@@ -696,7 +660,6 @@ class TaxiBridgeV7:
 
                 try:
                     header = await asyncio.wait_for(self.reader.readexactly(3), timeout=30.0)
-                    self.state.last_asterisk_recv = time.time()  # Track for heartbeat
                     m_type = header[0]
                     m_len = struct.unpack(">H", header[1:3])[0]
                     payload = await self.reader.readexactly(m_len)
@@ -830,13 +793,6 @@ class TaxiBridgeV7:
                     text = data.get("text", "")
                     logger.info("[%s] 💬 %s: %s", self.state.call_id, role, text)
 
-                elif msg_type == "speech_started":
-                    logger.info("[%s] 🎤 Speech started", self.state.call_id)
-
-                elif msg_type == "speech_stopped":
-                    duration = data.get("duration", "?")
-                    logger.info("[%s] 🔇 Speech ended (%ss)", self.state.call_id, duration)
-
                 elif msg_type == "ai_interrupted":
                     flushed = len(self.audio_queue)
                     self.audio_queue.clear()
@@ -845,23 +801,6 @@ class TaxiBridgeV7:
 
                 elif msg_type == "redirect":
                     raise RedirectException(data.get("url", WS_URL), data.get("init_data", {}))
-
-                elif msg_type == "session.handoff":
-                    # Edge function is about to hit 90s limit - reconnect with resume flag
-                    resume_call_id = data.get("call_id", self.state.call_id)
-                    self.state.handoff_count += 1
-                    logger.info("[%s] 🔄 Session handoff #%d received, reconnecting with resume",
-                               self.state.call_id, self.state.handoff_count)
-                    raise RedirectException(
-                        url=self.state.current_ws_url,
-                        init_data={
-                            "resume": True,
-                            "resume_call_id": resume_call_id,
-                            "phone": self.state.phone,
-                            "inbound_format": "slin" if not SEND_NATIVE_FORMAT else self.state.ast_codec,
-                            "inbound_sample_rate": self.state.ast_rate,
-                        }
-                    )
 
                 elif msg_type == "call_ended":
                     logger.info("[%s] 📴 AI ended: %s", 
@@ -900,52 +839,42 @@ class TaxiBridgeV7:
     # -------------------------------------------------------------------------
 
     async def queue_to_asterisk(self) -> None:
-        """Stream audio from queue to Asterisk at correct pacing (v6 style)."""
+        """Stream audio from queue to Asterisk at correct pacing."""
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
-        last_keepalive_log = time.time()
 
         try:
             while self.running:
-                # Drain queue to buffer FIRST (v6 order)
+                # Calculate bytes_per_sec dynamically (format can change mid-call)
+                bytes_per_sec = self.state.ast_rate * (1 if self.state.ast_codec == "ulaw" else 2)
+                
+                # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Pace using observed frame size (20ms per frame) to avoid speed bugs from codec/sample-width mismatches.
-                # 20ms => 50 frames/sec.
-                bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
-                
-                # Pace output to real-time (v6 style)
-                expected_time = start_time + (bytes_played / bytes_per_sec)
-                sleep_time = max(0, expected_time - time.time())
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
+                # Pace output to real-time
+                expected_time = start_time + (bytes_played / max(bytes_per_sec, 1))
+                delay = expected_time - time.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
-                # Early exit check after sleep
+                # 🔥 FIXED: Early exit check after sleep
                 if not self.running:
                     break
 
-                # Determine if this is audio or a keep-alive silence frame (v6 style)
-                has_audio = len(buffer) >= self.state.ast_frame_bytes
-                if has_audio:
+                # Get next frame
+                if len(buffer) >= self.state.ast_frame_bytes:
                     chunk = bytes(buffer[:self.state.ast_frame_bytes])
                     del buffer[:self.state.ast_frame_bytes]
                 else:
                     chunk = self._silence()
-                    self.state.keepalive_count += 1
-                    # Log keep-alive activity every 30 seconds (v6 style)
-                    if time.time() - last_keepalive_log > 30:
-                        logger.info("[%s] 💤 Keep-alives sent: %d", 
-                                   self.state.call_id, self.state.keepalive_count)
-                        last_keepalive_log = time.time()
 
                 # Send to Asterisk
                 try:
                     self.writer.write(struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk)
                     await self.writer.drain()
                     bytes_played += len(chunk)
-                    self.state.last_asterisk_send = time.time()
                 except (BrokenPipeError, ConnectionResetError, OSError) as e:
                     logger.warning("[%s] 🔌 Pipe closed: %s", self.state.call_id, e)
                     await self.stop_call("Asterisk disconnected")
@@ -955,11 +884,13 @@ class TaxiBridgeV7:
                     await self.stop_call("Write failed")
                     return
         except asyncio.CancelledError:
+            # 🔥 FIXED: Handle task cancellation gracefully
             logger.debug("[%s] Queue->Asterisk task cancelled", self.state.call_id)
 
     def _silence(self) -> bytes:
         """Generate one frame of silence."""
-        return (b"\xFF" if self.state.ast_codec == "ulaw" else b"\x00") * self.state.ast_frame_bytes
+        b = 0xFF if self.state.ast_codec == "ulaw" else 0x00
+        return bytes([b]) * self.state.ast_frame_bytes
 
 
 # =============================================================================
@@ -974,12 +905,11 @@ async def main() -> None:
     )
 
     startup_lines = [
-        "🚀 Taxi Bridge v7.5 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
+        "🚀 Taxi Bridge v7.3 - HIGH-FIDELITY AUDIO (PAIRED MODE)",
         f"   Listening on {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Connecting to: {WS_URL}",
         f"   Pre-emphasis: {PRE_EMPHASIS_COEFF} (boosts consonants for STT)",
-        f"   Format lock (ulaw): {LOCK_FORMAT_ULAW} (False = auto-detect slin/slin16)",
-        f"   Prefer slin16: {PREFER_SLIN16}",
+        f"   Preferred codec: slin16 @ 16kHz (auto-detected from Asterisk)",
         f"   Resampling: resample_poly (preserves high-frequency transients)",
     ]
     for line in startup_lines:

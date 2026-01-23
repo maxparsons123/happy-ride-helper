@@ -5,14 +5,12 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// ================= BOOKING STATE =================
+// --- 1. STATE INTERFACE (stateless - state passed from client) ---
 interface BookingState {
   pickup: string | null;
   destination: string | null;
   passengers: number | null;
   pickup_time: string | null;
-  luggage: string | null;
-  special_requests: string | null;
   lastQuestion: string;
   step: "collecting" | "summary" | "confirmed";
   conversationHistory: Array<{ role: string; content: string }>;
@@ -24,101 +22,68 @@ function createInitialState(): BookingState {
     destination: null,
     passengers: null,
     pickup_time: null,
-    luggage: null,
-    special_requests: null,
     lastQuestion: "Where would you like to be picked up?",
     step: "collecting",
     conversationHistory: [],
   };
 }
 
-// ================= TOOL DEFINITION (Like C# ToolDefinition) =================
-const TAXI_EXTRACTION_TOOL = {
-  type: "function",
-  function: {
-    name: "extract_booking",
-    description: "Extract taxi booking data from user message",
-    parameters: {
-      type: "object",
-      properties: {
-        intent: {
-          type: "string",
-          enum: ["new_booking", "update_booking", "confirm_booking", "cancel_booking", "get_status", "other"],
-          description: "The user's intent"
-        },
-        pickup_location: {
-          type: "string",
-          nullable: true,
-          description: "Pickup address exactly as spoken"
-        },
-        dropoff_location: {
-          type: "string",
-          nullable: true,
-          description: "Destination address exactly as spoken"
-        },
-        pickup_time: {
-          type: "string",
-          nullable: true,
-          description: "When to pickup: 'now', 'ASAP', or specific time"
-        },
-        number_of_passengers: {
-          type: "integer",
-          nullable: true,
-          description: "Number of passengers"
-        },
-        luggage: {
-          type: "string",
-          nullable: true,
-          description: "Luggage details exactly as spoken"
-        },
-        special_requests: {
-          type: "string",
-          nullable: true,
-          description: "Any driver instructions or special requests"
-        },
-        is_affirmative: {
-          type: "boolean",
-          description: "True if user confirms (yes, correct, that's right)"
-        },
-        is_correction: {
-          type: "boolean",
-          description: "True if user is correcting info (actually, no change to)"
-        },
-        fields_extracted: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of fields extracted this turn"
-        }
-      },
-      required: ["intent", "is_affirmative", "is_correction", "fields_extracted"]
-    }
-  }
-};
+// --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
+// Maps raw transcript to structured BookingState with correction detection
+async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
+  console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
+  console.log(`[BRAIN1] Ada's last question: "${state.lastQuestion}"`);
+  console.log(`[BRAIN1] Current state: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.pickup_time}`);
 
-// ================= GET LONDON TIME =================
-function getLondonTime(): string {
-  return new Date().toLocaleString("en-GB", {
-    timeZone: "Europe/London",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
+  const systemPrompt = `You are a Taxi Intent Parser.
 
-// ================= BRAIN 1: EXTRACTION WITH TOOL CALLING =================
-async function extractIntent(transcript: string, state: BookingState, isUpdate: boolean, apiKey: string) {
-  console.log(`[BRAIN1] Extracting from: "${transcript}"`);
-  console.log(`[BRAIN1] Mode: ${isUpdate ? "UPDATE" : "NEW"}, State: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}`);
+CONTEXT:
+- Ada's Last Question: "${state.lastQuestion}"
+- Current Data: Pickup: ${state.pickup || 'null'}, Destination: ${state.destination || 'null'}, Passengers: ${state.passengers || 'null'}, Time: ${state.pickup_time || 'null'}
 
-  const now = getLondonTime();
-  
-  // Build the appropriate prompt based on mode
-  const systemPrompt = isUpdate 
-    ? buildUpdatePrompt(now, state)
-    : buildNewBookingPrompt(now, state);
+TASK:
+1. Identify if the user is answering the specific question Ada asked.
+2. Extract the response into the CORRECT field based on what Ada asked:
+   - If Ada asked about pickup/collection/picked up → put address in "pickup"
+   - If Ada asked about destination/where going/where to → put address in "destination"  
+   - If Ada asked about passengers/how many/people → put number in "passengers"
+   - If Ada asked about time/when → put time in "pickup_time" (e.g., "now", "asap", "in 10 minutes", "3pm")
+3. Detect 'is_affirmative' (true if user says "Yes", "Correct", "That's right", "Book it", "Yeah", "Ok").
+4. **CORRECTION DETECTION**: Set 'is_correction: true' if:
+   - User says "Actually...", "No, change...", "Wait, not that...", "I meant...", "Not quite"
+   - User says "Actually change the pickup to [address]" → set pickup AND is_correction: true
+   - User says "No, I want to go to [address]" → set destination AND is_correction: true
+   - User provides new info that CONFLICTS with Current Data above → is_correction: true
+   - User explicitly says to change/update a field
+
+WORD-TO-NUMBER MAPPING:
+- "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
+
+TIME KEYWORDS:
+- "now", "asap", "as soon as possible", "straight away" → pickup_time: "now"
+- "in X minutes", "at X o'clock", "around X" → pickup_time: as spoken
+
+CORRECTION EXAMPLES:
+- Current pickup is "52A David Road", user says "Actually, 52B David Road" → pickup: "52B David Road", is_correction: true
+- Current destination is null, user says "No wait, take me to the airport instead" → destination: "the airport", is_correction: true
+- User says "Change passengers to 4" → passengers: 4, is_correction: true
+
+CRITICAL RULES:
+- For NEW data (field is null), fill normally with is_correction: false
+- For UPDATES (field already has value), fill new value with is_correction: true
+- If Ada asked "Where to?" or "destination" and user says "7 Russell Street" → destination: "7 Russell Street" (NOT pickup!)
+- If Ada asked "How many passengers?" and user says "two" → passengers: 2 (NOT an address!)
+
+Return valid JSON only:
+{
+  "pickup": null,
+  "destination": null,
+  "passengers": null,
+  "pickup_time": null,
+  "is_affirmative": false,
+  "is_correction": false,
+  "corrected_field": null
+}`;
 
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
@@ -130,218 +95,76 @@ async function extractIntent(transcript: string, state: BookingState, isUpdate: 
       model: "google/gemini-2.5-flash",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: transcript }
+        { role: "user", content: `User just said: "${transcript}"` }
       ],
-      tools: [TAXI_EXTRACTION_TOOL],
-      tool_choice: { type: "function", function: { name: "extract_booking" } },
+      max_tokens: 200,
     }),
   });
 
   if (!res.ok) {
     console.error(`[BRAIN1] API error: ${res.status}`);
-    return createEmptyExtraction(state);
+    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
   }
 
   const data = await res.json();
+  const content = data.choices?.[0]?.message?.content || "{}";
   
   try {
-    // Parse tool call arguments (like C# ParseToolArguments)
-    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall?.function?.arguments) {
-      console.error(`[BRAIN1] No tool call in response`);
-      return createEmptyExtraction(state);
-    }
-
-    const args = JSON.parse(toolCall.function.arguments);
-    console.log(`[BRAIN1] Tool extracted:`, args);
+    // Extract JSON from potential markdown
+    let jsonStr = content;
+    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+    const rawMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (rawMatch) jsonStr = rawMatch[0];
     
-    // Merge with existing state (like C# Mapper.Apply)
-    const merged = mergeExtraction(args, state);
-    console.log(`[BRAIN1] Merged state:`, merged);
-    
-    if (merged.fields_extracted.length > 1) {
-      console.log(`[BRAIN1] 🚀 FREE-FORM: Extracted ${merged.fields_extracted.length} fields at once!`);
-    }
-    
-    return merged;
+    const parsed = JSON.parse(jsonStr);
+    console.log(`[BRAIN1] Extracted:`, parsed);
+    return parsed;
   } catch (e) {
-    console.error(`[BRAIN1] Parse error:`, e);
-    return createEmptyExtraction(state);
+    console.error(`[BRAIN1] JSON parse error:`, e, content);
+    return { pickup: null, destination: null, passengers: null, pickup_time: null, is_affirmative: false, is_correction: false };
   }
 }
 
-// ================= NEW BOOKING PROMPT =================
-function buildNewBookingPrompt(now: string, state: BookingState): string {
-  return `You are a STRICT taxi booking AI for voice calls.
-Current time (London): ${now}
-Ada's last question: "${state.lastQuestion}"
-
-CURRENT BOOKING STATE:
-- Pickup: ${state.pickup || "NOT SET"}
-- Destination: ${state.destination || "NOT SET"}
-- Passengers: ${state.passengers ?? "NOT SET"}
-- Pickup Time: ${state.pickup_time || "NOT SET"}
-- Luggage: ${state.luggage || "NOT SET"}
-- Special Requests: ${state.special_requests || "NOT SET"}
-
-==================================================
-EXTRACTION RULES (CRITICAL)
-==================================================
-Extract ALL booking fields mentioned. User may provide:
-- Just one piece: "52A David Road"
-- Multiple fields: "Pick me up from 52A David Road, going to Manchester, 3 passengers"
-- Everything at once: "Taxi from 52A David Road to the airport for 2 people at 3pm"
-
-FIELD DETECTION:
-• PICKUP: "from", "pick me up from", "at", "collection from", "I'm at"
-• DESTINATION: "to", "going to", "destination", "heading to", "drop at"
-• PASSENGERS: number + "passengers", "people", "of us", or number alone when asked
-• TIME: "now", "asap", "at [time]", "in X minutes", specific times
-• LUGGAGE: "bags", "suitcase", "luggage", "cases" - extract EXACTLY as spoken
-• SPECIAL: driver instructions, preferences, accessibility needs
-
-CONTEXT-AWARE MAPPING:
-If Ada asked about pickup and user says an address → it's pickup_location
-If Ada asked about destination and user says an address → it's dropoff_location
-If Ada asked about passengers and user says a number → it's passengers
-If Ada asked about time and user gives a time → it's pickup_time
-
-WORD-TO-NUMBER: one=1, two=2, three=3, four=4, five=5, six=6, seven=7, eight=8
-
-TIME RULES:
-• "now", "asap", "straight away" → pickup_time = "now"
-• "tonight" → 21:00, "this evening" → 19:00, "morning" → 09:00
-• "in X minutes" → add to current time
-• Specific times: "3pm" → "15:00"
-
-AFFIRMATIVE DETECTION:
-is_affirmative = true if: "yes", "correct", "that's right", "book it", "confirmed", "yeah"
-
-CORRECTION DETECTION:
-is_correction = true if: "actually", "no change", "I meant", "not that", "wait"
-
-ADDRESS RULES:
-• Return addresses EXACTLY as spoken - no corrections, no postcodes added
-• If user says "my location" or "here" → pickup_location = "by_gps"
-• Remove leading articles: "the high street" → "high street"
-
-CRITICAL: 
-- Extract EVERYTHING mentioned in one sentence
-- fields_extracted must list ALL fields found: ["pickup_location", "dropoff_location", etc.]
-- intent = "new_booking" for new data, "confirm_booking" if user confirms`;
-}
-
-// ================= UPDATE BOOKING PROMPT =================
-function buildUpdatePrompt(now: string, state: BookingState): string {
-  return `You are a STRICT taxi booking AI handling UPDATES ONLY.
-Current time (London): ${now}
-Ada's last question: "${state.lastQuestion}"
-
-EXISTING BOOKING (DO NOT COPY - only update what user changes):
-- Pickup: ${state.pickup || "NOT SET"}
-- Destination: ${state.destination || "NOT SET"}
-- Passengers: ${state.passengers ?? "NOT SET"}
-- Pickup Time: ${state.pickup_time || "NOT SET"}
-- Luggage: ${state.luggage || "NOT SET"}
-- Special Requests: ${state.special_requests || "NOT SET"}
-
-==================================================
-UPDATE RULES (CRITICAL)
-==================================================
-• Only return fields the user EXPLICITLY changes
-• Any field NOT changed must be returned as null
-• "remove luggage" → luggage = "CLEAR"
-
-PICKUP + DROPOFF UPDATE:
-If user says BOTH pickup AND dropoff:
-• "from X to Y" → extract BOTH
-• "change pickup to X and destination to Y" → extract BOTH
-
-CORRECTION PATTERNS:
-• "Actually, change pickup to..." → update pickup, is_correction = true
-• "No, I meant..." → update relevant field, is_correction = true
-• "Not 52A, it's 52B" → update with new value, is_correction = true
-
-CONTEXT-AWARE (based on Ada's question):
-If Ada asked about pickup → user's address is pickup
-If Ada asked about destination → user's address is destination
-If Ada asked about passengers → user's number is passengers
-If Ada asked about time → user's answer is pickup_time
-
-AFFIRMATIVE = true if user confirms booking
-intent = "update_booking" for changes, "confirm_booking" for confirmation`;
-}
-
-// ================= MERGE EXTRACTION WITH STATE (Like C# Mapper.Apply) =================
-function mergeExtraction(extraction: any, state: BookingState) {
-  return {
-    pickup: extraction.pickup_location || state.pickup,
-    destination: extraction.dropoff_location || state.destination,
-    passengers: extraction.number_of_passengers ?? state.passengers,
-    pickup_time: extraction.pickup_time || state.pickup_time,
-    luggage: extraction.luggage === "CLEAR" ? null : (extraction.luggage || state.luggage),
-    special_requests: extraction.special_requests || state.special_requests,
-    intent: extraction.intent || "new_booking",
-    is_affirmative: extraction.is_affirmative || false,
-    is_correction: extraction.is_correction || false,
-    fields_extracted: extraction.fields_extracted || [],
-  };
-}
-
-function createEmptyExtraction(state: BookingState) {
-  return {
-    pickup: state.pickup,
-    destination: state.destination,
-    passengers: state.passengers,
-    pickup_time: state.pickup_time,
-    luggage: state.luggage,
-    special_requests: state.special_requests,
-    intent: "other",
-    is_affirmative: false,
-    is_correction: false,
-    fields_extracted: [],
-  };
-}
-
-// ================= BRAIN 2: ADA SPEECH GENERATION =================
-async function getAdaSpeech(transcript: string, state: BookingState, extraction: any, apiKey: string) {
-  // Logic enforcement: If confirmed and all fields set, book the taxi
-  let forceConfirm = false;
+// --- 3. BRAIN 2: THE ADA CONTROLLER (Speech Generation) ---
+async function getAdaSpeech(transcript: string, state: BookingState, isAffirmative: boolean, apiKey: string) {
+  // Logic Enforcement: If state is summary and they said 'Yes', confirm booking
   let userMessage = transcript;
+  let forceConfirm = false;
   
-  if (extraction.is_affirmative && state.step === "summary") {
+  if (isAffirmative && state.step === "summary") {
     userMessage = "The user has confirmed everything is correct. Confirm the booking.";
     forceConfirm = true;
   }
 
-  const systemPrompt = `You are Ada, a friendly London taxi dispatcher on a voice call.
+  const systemPrompt = `You are Ada, a friendly London taxi dispatcher.
 
 CURRENT BOOKING STATE:
 - Pickup: ${state.pickup || 'NOT SET'}
-- Destination: ${state.destination || 'NOT SET'}
-- Passengers: ${state.passengers ?? 'NOT SET'}
+- Destination: ${state.destination || 'NOT SET'}  
+- Passengers: ${state.passengers || 'NOT SET'}
 - Pickup Time: ${state.pickup_time || 'NOT SET'}
-- Luggage: ${state.luggage || 'none'}
-- Special Requests: ${state.special_requests || 'none'}
 - Step: ${state.step}
-
-FIELDS JUST EXTRACTED: ${extraction.fields_extracted.join(", ") || "none"}
 
 STRICT RULES:
 1. ONLY use the data shown above. NEVER use placeholders like [number] or [address].
-2. If a required field is "NOT SET", you MUST ask for it.
+2. If a field is "NOT SET", you MUST ask for it. Do not skip or assume.
 3. Ask ONE question at a time - do not bundle questions.
-4. Required collection order: pickup → destination → passengers → time
-5. Luggage and special requests are OPTIONAL - don't ask unless user mentions them.
-6. If ALL required fields are set and step is 'collecting', give a summary and ask "Is that correct?"
-7. If user confirms in 'summary' step, say the taxi is booked.
-8. Acknowledge multiple fields if extracted: "Got it, pickup at X, going to Y with Z passengers."
+4. Collection order: pickup → destination → passengers → time
+5. If ALL fields are set and step is 'collecting', give a summary and ask "Is that correct?"
+6. If user confirms in 'summary' step, say the taxi is booked and will arrive shortly.
+7. Be warm and concise. No filler words like "Got it" or "Great".
 
-${forceConfirm ? 'USER HAS CONFIRMED. Book the taxi now and say goodbye.' : ''}
+${forceConfirm ? 'USER HAS CONFIRMED. Book the taxi now.' : ''}`;
 
-STYLE: Warm, concise, British. No filler words.`;
-
-  console.log(`[BRAIN2] Generating speech. Step: ${state.step}, Affirmative: ${extraction.is_affirmative}`);
+  console.log(`[BRAIN2] Generating speech. State:`, { 
+    pickup: state.pickup, 
+    destination: state.destination, 
+    passengers: state.passengers,
+    pickup_time: state.pickup_time,
+    step: state.step,
+    isAffirmative 
+  });
 
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
@@ -353,10 +176,10 @@ STYLE: Warm, concise, British. No filler words.`;
       model: "google/gemini-2.5-flash",
       messages: [
         { role: "system", content: systemPrompt },
-        ...state.conversationHistory.slice(-6),
+        ...state.conversationHistory.slice(-6), // Last 3 turns for context
         { role: "user", content: userMessage }
       ],
-      max_tokens: 200,
+      max_tokens: 150,
     }),
   });
 
@@ -376,77 +199,101 @@ STYLE: Warm, concise, British. No filler words.`;
   };
 }
 
-// ================= MAIN PROCESSOR =================
+// --- 4. THE MAIN PROCESSOR (Stateless - state passed in/out) ---
 async function processTurn(state: BookingState, transcript: string, apiKey: string): Promise<{
   speech: string;
   state: BookingState;
   extraction: any;
   end: boolean;
 }> {
-  // Add user message to history
+  // Add user message to conversation history
   state.conversationHistory.push({ role: "user", content: transcript });
 
-  // Determine if this is an update (has existing data)
-  const isUpdate = !!(state.pickup || state.destination || state.passengers);
-
-  // Step A: Extract with tool calling
-  const extraction = await extractIntent(transcript, state, isUpdate, apiKey);
+  // Step A: Extract Data (Brain 1)
+  const extraction = await extractIntent(transcript, state, apiKey);
   
-  // Log changes
-  const pickupChanged = extraction.pickup !== state.pickup;
-  const destChanged = extraction.destination !== state.destination;
-  const paxChanged = extraction.passengers !== state.passengers;
-  const timeChanged = extraction.pickup_time !== state.pickup_time;
+  // Log correction detection
+  if (extraction.is_correction) {
+    console.log(`[STATE] ⚠️ CORRECTION DETECTED - updating field(s)`);
+    if (extraction.corrected_field) {
+      console.log(`[STATE] Corrected field: ${extraction.corrected_field}`);
+    }
+  }
   
-  if (pickupChanged) console.log(`[STATE] ${state.pickup ? '🔄 UPDATED' : '✅ Set'} pickup: ${extraction.pickup}`);
-  if (destChanged) console.log(`[STATE] ${state.destination ? '🔄 UPDATED' : '✅ Set'} destination: ${extraction.destination}`);
-  if (paxChanged) console.log(`[STATE] ${state.passengers ? '🔄 UPDATED' : '✅ Set'} passengers: ${extraction.passengers}`);
-  if (timeChanged) console.log(`[STATE] ${state.pickup_time ? '🔄 UPDATED' : '✅ Set'} pickup_time: ${extraction.pickup_time}`);
+  // Update State - corrections override existing values
+  if (extraction.pickup && extraction.pickup !== "null") {
+    const wasUpdate = state.pickup !== null;
+    state.pickup = extraction.pickup;
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup: ${state.pickup}`);
+  }
+  if (extraction.destination && extraction.destination !== "null") {
+    const wasUpdate = state.destination !== null;
+    state.destination = extraction.destination;
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} destination: ${state.destination}`);
+  }
+  if (extraction.passengers && typeof extraction.passengers === 'number') {
+    const wasUpdate = state.passengers !== null;
+    state.passengers = extraction.passengers;
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} passengers: ${state.passengers}`);
+  }
+  if (extraction.pickup_time && extraction.pickup_time !== "null") {
+    const wasUpdate = state.pickup_time !== null;
+    state.pickup_time = extraction.pickup_time;
+    console.log(`[STATE] ${wasUpdate ? '🔄 UPDATED' : '✅ Set'} pickup_time: ${state.pickup_time}`);
+  }
   
-  // Apply merged extraction to state
-  state.pickup = extraction.pickup;
-  state.destination = extraction.destination;
-  state.passengers = extraction.passengers;
-  state.pickup_time = extraction.pickup_time;
-  state.luggage = extraction.luggage;
-  state.special_requests = extraction.special_requests;
-  
-  // Handle corrections during summary
+  // If correction detected during summary, go back to collecting to re-confirm
   if (extraction.is_correction && state.step === "summary") {
-    console.log(`[STATE] Correction during summary - back to collecting`);
+    console.log(`[STATE] Correction during summary - resetting to collecting for re-confirmation`);
     state.step = "collecting";
   }
   
-  // Check if ready for summary (all 4 required fields)
+  // Check if ready for summary (all 4 fields required)
   if (state.pickup && state.destination && state.passengers && state.pickup_time && state.step === "collecting") {
-    console.log(`[STATE] All required fields collected → summary`);
+    console.log(`[STATE] All fields collected, moving to summary`);
     state.step = "summary";
   }
 
-  // Step B: Generate Ada's response
-  const adaResponse = await getAdaSpeech(transcript, state, extraction, apiKey);
+  // Step B: Generate Response (Brain 2)
+  const adaResponse = await getAdaSpeech(transcript, state, extraction.is_affirmative || false, apiKey);
 
-  // Step C: Handle confirmation
+  // Step C: Handle Confirmation
   let shouldEnd = false;
   if (adaResponse.shouldConfirm) {
     state.step = "confirmed";
-    console.log(`[MAIN] ✅ Booking confirmed`);
+    console.log(`[MAIN] Booking confirmed`);
+    
+    // Add a graceful closing message to Ada's response
+    const closingTips = [
+      "Just so you know, you can also book a taxi by sending us a WhatsApp voice note.",
+      "Next time, feel free to book your taxi using a WhatsApp voice message.",
+      "You can always book again by simply sending us a voice note on WhatsApp."
+    ];
+    const randomTip = closingTips[Math.floor(Math.random() * closingTips.length)];
+    const closingMessage = ` You'll receive the booking details and ride updates via WhatsApp. ${randomTip} Thank you for trying the Taxibot demo, and have a safe journey.`;
+    
+    // Append closing to Ada's speech if not already there
+    if (!adaResponse.content.includes("safe journey")) {
+      adaResponse.content += closingMessage;
+    }
+    
     shouldEnd = true;
+    console.log(`[MAIN] 🛡️ Graceful close: end=true with full goodbye message`);
   }
 
-  // Save question for context
+  // Save question for next turn context
   state.lastQuestion = adaResponse.content;
   state.conversationHistory.push({ role: "assistant", content: adaResponse.content });
 
   return { 
     speech: adaResponse.content, 
-    state: { ...state },
+    state: { ...state }, // Clone to return
     extraction,
     end: shouldEnd 
   };
 }
 
-// ================= HTTP SERVER =================
+// --- 5. HTTP SERVER ---
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -454,15 +301,17 @@ serve(async (req) => {
 
   const url = new URL(req.url);
   
+  // Health check
   if (url.pathname.endsWith("/health")) {
     return new Response(JSON.stringify({ 
       status: "ok",
-      mode: "dual-brain-tool-calling" 
+      mode: "stateless" 
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 
+  // Main process endpoint
   if (req.method === "POST") {
     try {
       const body = await req.json();
@@ -475,15 +324,16 @@ serve(async (req) => {
         });
       }
 
+      // Use client state if provided, otherwise create fresh state
       const state: BookingState = clientState || createInitialState();
       
-      console.log(`[MAIN] Processing: "${transcript}"`);
-      console.log(`[MAIN] Current state:`, {
+      console.log(`[MAIN] Processing turn. Current state:`, {
         pickup: state.pickup,
         destination: state.destination,
         passengers: state.passengers,
         pickup_time: state.pickup_time,
         step: state.step,
+        lastQuestion: state.lastQuestion
       });
 
       const apiKey = Deno.env.get("LOVABLE_API_KEY");
@@ -502,15 +352,14 @@ serve(async (req) => {
         ...result,
         processingTime,
         debug: {
-          extraction: result.extraction,
+          brain1_extraction: result.extraction,
           currentStep: result.state.step,
           fieldsCollected: {
             pickup: !!result.state.pickup,
             destination: !!result.state.destination,
             passengers: !!result.state.passengers,
             pickup_time: !!result.state.pickup_time,
-          },
-          fields_extracted_this_turn: result.extraction.fields_extracted,
+          }
         }
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },

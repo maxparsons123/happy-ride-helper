@@ -66,8 +66,8 @@ serve(async (req) => {
   let userPhone = "";
   let callerName = "";
   let sessionReady = false;
-  let sttProvider = "deepgram"; // Default to Deepgram Nova-2 for speed, can be "groq" or "deepgram"
-  let ttsProvider = "deepgram"; // Default to Deepgram Aura for lowest latency, can be "elevenlabs" or "deepgram"
+  let sttProvider = "groq"; // Default to Groq, can be "groq" or "deepgram"
+  let ttsProvider = "elevenlabs"; // Default to ElevenLabs, can be "elevenlabs" or "deepgram"
   
   // Booking state
   let currentBooking = {
@@ -84,15 +84,6 @@ serve(async (req) => {
   let isAiTalking = false; // Track if AI is currently speaking
   let aiStoppedAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let consecutiveSpeechFrames = 0; // Count frames above threshold for robust barge-in
-  
-  // ════════════════════════════════════════════════════════════════════════════
-  // SESSION TIMEOUT HANDLING - Supabase closes WebSocket at 90s
-  // We save state at 75s and trigger client reconnection before platform kills us
-  // ════════════════════════════════════════════════════════════════════════════
-  const SESSION_TIMEOUT_MS = 75000; // 75s - give 15s buffer before 90s kill
-  const sessionStartTime = Date.now();
-  let sessionTimeoutTimer: number | null = null;
-  let isHandingOff = false;
   
   // Barge-in configuration
   const BARGE_IN_ECHO_GUARD_MS = 400; // Ignore speech for 400ms after AI stops (prevents echo cutoff)
@@ -157,127 +148,6 @@ serve(async (req) => {
       }
     } catch (e) {
       console.error(`[${callId}] Caller lookup error:`, e);
-    }
-  };
-  
-  // ════════════════════════════════════════════════════════════════════════════
-  // SESSION HANDOFF: Save state to DB before timeout, client reconnects fresh
-  // ════════════════════════════════════════════════════════════════════════════
-  const saveSessionState = async () => {
-    try {
-      const sessionState = {
-        call_id: callId,
-        caller_phone: userPhone,
-        caller_name: callerName,
-        booking: currentBooking,
-        conversation_history: conversationHistory.slice(-10), // Last 10 turns
-        last_assistant_response: lastAssistantResponse,
-        vad_config: vadConfig,
-        stt_provider: sttProvider,
-        tts_provider: ttsProvider,
-        handoff_at: new Date().toISOString()
-      };
-      
-      // Update live_calls with session state for resumption
-      const { error } = await supabase
-        .from("live_calls")
-        .upsert({
-          call_id: callId,
-          caller_phone: userPhone,
-          caller_name: callerName,
-          pickup: currentBooking.pickup,
-          destination: currentBooking.destination,
-          passengers: currentBooking.passengers,
-          status: "handoff",
-          source: callSource,
-          transcripts: conversationHistory,
-          updated_at: new Date().toISOString()
-        }, { onConflict: "call_id" });
-      
-      if (error) {
-        console.error(`[${callId}] Failed to save session state:`, error);
-      } else {
-        console.log(`[${callId}] 💾 Session state saved for handoff`);
-      }
-      
-      return sessionState;
-    } catch (e) {
-      console.error(`[${callId}] Session save error:`, e);
-      return null;
-    }
-  };
-  
-  const triggerSessionHandoff = async () => {
-    if (isHandingOff) return;
-    isHandingOff = true;
-    
-    console.log(`[${callId}] ⏰ Session timeout approaching, initiating handoff...`);
-    
-    // Save state to DB
-    const sessionState = await saveSessionState();
-    
-    // Notify client to reconnect
-    try {
-      socket.send(JSON.stringify({
-        type: "session.handoff",
-        reason: "timeout",
-        call_id: callId,
-        reconnect_delay_ms: 500,
-        session_state: sessionState
-      }));
-    } catch (e) {
-      console.error(`[${callId}] Failed to send handoff message:`, e);
-    }
-    
-    // Close cleanly after brief delay
-    setTimeout(() => {
-      try {
-        socket.close(1000, "session_handoff");
-      } catch (e) {
-        // Already closed
-      }
-    }, 1000);
-  };
-  
-  // Restore session from previous handoff
-  const restoreSession = async (resumeCallId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from("live_calls")
-        .select("*")
-        .eq("call_id", resumeCallId)
-        .eq("status", "handoff")
-        .maybeSingle();
-      
-      if (error || !data) {
-        console.log(`[${callId}] No session to restore for ${resumeCallId}`);
-        return false;
-      }
-      
-      // Restore state
-      callId = resumeCallId;
-      userPhone = data.caller_phone || "";
-      callerName = data.caller_name || "";
-      currentBooking.pickup = data.pickup;
-      currentBooking.destination = data.destination;
-      currentBooking.passengers = data.passengers;
-      
-      if (Array.isArray(data.transcripts)) {
-        conversationHistory = data.transcripts as { role: string; content: string }[];
-        lastAssistantResponse = conversationHistory.filter(t => t.role === "assistant").pop()?.content || "";
-      }
-      
-      // Update status to active
-      await supabase
-        .from("live_calls")
-        .update({ status: "active", updated_at: new Date().toISOString() })
-        .eq("call_id", resumeCallId);
-      
-      console.log(`[${callId}] ♻️ Session restored - pickup: ${currentBooking.pickup}, dest: ${currentBooking.destination}`);
-      return true;
-    } catch (e) {
-      console.error(`[${callId}] Session restore error:`, e);
-      return false;
     }
   };
 
@@ -411,7 +281,7 @@ serve(async (req) => {
     }
   };
 
-  // Step 2: LLM - Get response from Gemini (FREE via Lovable AI) - OPTIMIZED
+  // Step 2: LLM - Get response from Gemini (FREE via Lovable AI)
   const getGeminiResponse = async (userText: string): Promise<any> => {
     const startTime = Date.now();
     console.log(`[${callId}] 🧠 LLM: Processing "${userText}"...`);
@@ -446,8 +316,8 @@ serve(async (req) => {
             { role: "system", content: SYSTEM_INSTRUCTIONS + contextMessage },
             ...conversationHistory.map(m => ({ role: m.role, content: m.content }))
           ],
-          max_tokens: 100, // OPTIMIZED: Reduced from 150 for faster inference
-          temperature: 0.3, // OPTIMIZED: Lower = faster + more focused
+          max_tokens: 150,
+          temperature: 0.5, // Lower = more focused, less hallucination
         }),
       });
       
@@ -612,33 +482,13 @@ serve(async (req) => {
     return new Uint8Array(header);
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // OPTIMIZED PIPELINE: Parallel STT + Context Prep, Deepgram Aura TTS
-  // Target: <1s total latency (vs ~2s sequential)
-  // ═══════════════════════════════════════════════════════════════════════════
-  
-  // Pre-build LLM context (can be done while STT is running)
-  const prepareLlmContext = () => {
-    let contextMessage = "";
-    if (currentBooking.pickup || currentBooking.destination || currentBooking.passengers) {
-      contextMessage = `\n\nCurrent booking state: pickup="${currentBooking.pickup || '?'}", destination="${currentBooking.destination || '?'}", passengers=${currentBooking.passengers || '?'}`;
-    }
-    if (callerName) {
-      contextMessage += `\nCaller name: ${callerName}`;
-    }
-    return {
-      systemPrompt: SYSTEM_INSTRUCTIONS + contextMessage,
-      history: conversationHistory.slice(-20) // Pre-slice for LLM
-    };
-  };
-
-  // Process accumulated audio through the OPTIMIZED pipeline
+  // Process accumulated audio through the pipeline
   const processAudioPipeline = async () => {
     if (isProcessing || audioBuffer.length === 0) return;
     isProcessing = true;
     
     const pipelineStart = Date.now();
-    console.log(`[${callId}] 🚀 Starting OPTIMIZED Gemini pipeline...`);
+    console.log(`[${callId}] 🚀 Starting Gemini pipeline...`);
     
     try {
       // Combine audio chunks
@@ -653,29 +503,24 @@ serve(async (req) => {
       
       console.log(`[${callId}] 📦 Combined audio: ${totalLength} bytes`);
       
-      // Pad short audio for reliable STT
-      const MIN_AUDIO_BYTES = 48000; // 1 second minimum
+      // Whisper needs ~0.5-1s of audio for reliable transcription
+      // At 24kHz PCM16 (2 bytes/sample), 1s = 48000 bytes
+      // For short utterances like "yes", "hello", "no" - pad with silence
+      const MIN_AUDIO_BYTES = 48000; // 1 second minimum for reliable Whisper
       let audioToProcess = combinedAudio;
       
       if (totalLength < MIN_AUDIO_BYTES) {
-        console.log(`[${callId}] 🔇 Padding short audio (${totalLength} → ${MIN_AUDIO_BYTES} bytes)`);
+        console.log(`[${callId}] 🔇 Audio short (${totalLength}), padding with silence to ${MIN_AUDIO_BYTES} bytes`);
+        // Create padded audio with silence before and after
         const paddedAudio = new Uint8Array(MIN_AUDIO_BYTES);
+        // Center the actual audio in the middle, silence on both sides
         const startOffset = Math.floor((MIN_AUDIO_BYTES - totalLength) / 2);
         paddedAudio.set(combinedAudio, startOffset);
         audioToProcess = paddedAudio;
       }
       
-      // ════════════════════════════════════════════════════════════════════════
-      // PARALLEL OPTIMIZATION: Run STT and LLM context prep simultaneously
-      // This saves ~50-100ms by preparing context while audio is transcribing
-      // ════════════════════════════════════════════════════════════════════════
-      const sttStart = Date.now();
-      const [transcript, llmContext] = await Promise.all([
-        transcribeAudio(audioToProcess),
-        Promise.resolve(prepareLlmContext()) // Instant, but run in parallel pattern
-      ]);
-      const sttTime = Date.now() - sttStart;
-      console.log(`[${callId}] ⚡ STT + Context prep: ${sttTime}ms (parallel)`);
+      // Pipeline: STT → LLM → TTS
+      const transcript = await transcribeAudio(audioToProcess);
       
       if (!transcript || transcript.trim().length === 0) {
         console.log(`[${callId}] ⚠️ Empty transcript, skipping`);
@@ -683,81 +528,15 @@ serve(async (req) => {
         return;
       }
       
-      // Send user transcript to client IMMEDIATELY (don't wait for LLM)
+      // Send user transcript to client
       socket.send(JSON.stringify({
         type: "transcript.user",
         text: transcript
       }));
       
-      // ════════════════════════════════════════════════════════════════════════
-      // LLM: Use pre-built context for faster inference
-      // ════════════════════════════════════════════════════════════════════════
-      const llmStart = Date.now();
+      const aiResponse = await getGeminiResponse(transcript);
       
-      // Add user message to history
-      conversationHistory.push({ role: "user", content: transcript });
-      
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${LOVABLE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash", // Fast and FREE
-          messages: [
-            { role: "system", content: llmContext.systemPrompt },
-            ...llmContext.history.map(m => ({ role: m.role, content: m.content })),
-            { role: "user", content: transcript }
-          ],
-          max_tokens: 100, // Reduced from 150 for faster inference
-          temperature: 0.3, // Lower = faster + more focused
-        }),
-      });
-      
-      const llmTime = Date.now() - llmStart;
-      
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error(`[${callId}] Gemini error:`, response.status, errText);
-        throw new Error(`Gemini error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      const aiContent = data.choices?.[0]?.message?.content || "";
-      
-      // Parse JSON response
-      let parsed;
-      try {
-        const jsonMatch = aiContent.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          parsed = JSON.parse(jsonMatch[0]);
-        } else {
-          parsed = { response: aiContent, status: "collecting" };
-        }
-      } catch {
-        parsed = { response: aiContent.replace(/```json|```/g, '').trim(), status: "collecting" };
-      }
-      
-      // Update booking state
-      if (parsed.pickup) currentBooking.pickup = parsed.pickup;
-      if (parsed.destination) currentBooking.destination = parsed.destination;
-      if (parsed.passengers) currentBooking.passengers = parseInt(parsed.passengers);
-      if (parsed.status) currentBooking.status = parsed.status;
-      
-      conversationHistory.push({ role: "assistant", content: parsed.response });
-      lastAssistantResponse = parsed.response;
-      
-      console.log(`[${callId}] 🧠 LLM: ${llmTime}ms - "${parsed.response.substring(0, 50)}..."`);
-      
-      // Send LLM latency
-      socket.send(JSON.stringify({ 
-        type: "latency.llm", 
-        latency_ms: llmTime,
-        response: parsed.response 
-      }));
-      
-      if (!parsed.response) {
+      if (!aiResponse.response) {
         isProcessing = false;
         return;
       }
@@ -765,26 +544,21 @@ serve(async (req) => {
       // Send AI response text to client
       socket.send(JSON.stringify({
         type: "transcript.assistant",
-        text: parsed.response,
+        text: aiResponse.response,
         booking: currentBooking
       }));
       
-      // ════════════════════════════════════════════════════════════════════════
-      // TTS: Deepgram Aura for lowest latency (~200-400ms vs ElevenLabs ~500-800ms)
-      // ════════════════════════════════════════════════════════════════════════
-      const ttsStart = Date.now();
-      const audioData = await synthesizeSpeech(parsed.response);
-      const ttsTime = Date.now() - ttsStart;
-      console.log(`[${callId}] 🔊 TTS: ${ttsTime}ms`);
+      const audioData = await synthesizeSpeech(aiResponse.response);
       
       if (audioData) {
-        isAiTalking = true;
+        isAiTalking = true; // Mark AI as speaking
         
-        // Send audio in chunks (PCM16 format)
-        const chunkSize = 4800; // 100ms at 24kHz
+        // Send audio in chunks (PCM16 format, same as OpenAI Realtime)
+        const chunkSize = 4800; // 100ms of audio at 24kHz
         for (let i = 0; i < audioData.length; i += chunkSize) {
+          // Check if interrupted during playback
           if (!isAiTalking) {
-            console.log(`[${callId}] 🛑 Audio interrupted at chunk ${Math.floor(i/chunkSize)}`);
+            console.log(`[${callId}] 🛑 Audio playback interrupted at chunk ${i/chunkSize}`);
             break;
           }
           
@@ -797,66 +571,29 @@ serve(async (req) => {
           }));
         }
         
-        isAiTalking = false;
-        aiStoppedAt = Date.now();
-        consecutiveSpeechFrames = 0;
+        isAiTalking = false; // Mark AI as done speaking
+        aiStoppedAt = Date.now(); // Record when AI stopped for echo guard
+        consecutiveSpeechFrames = 0; // Reset barge-in detection
         socket.send(JSON.stringify({ type: "audio.done" }));
         
-        // ════════════════════════════════════════════════════════════════════════
-        // GRACEFUL DISCONNECT: Close socket cleanly after booking or goodbye
-        // This prevents Supabase timeout issues by ending connection proactively
-        // ════════════════════════════════════════════════════════════════════════
-        const isBookingComplete = parsed.booking_complete === true || 
-          currentBooking.status === "confirmed" ||
-          (currentBooking.pickup && currentBooking.destination && currentBooking.passengers && 
-           /\b(booked|confirmed|on (its|the) way|will be there|arriving)\b/i.test(parsed.response));
-        
-        const goodbyePatterns = /\b(goodbye|bye|take care|have a (great|lovely|good) (day|journey|trip)|safe travels)\b/i;
-        const isGoodbye = goodbyePatterns.test(parsed.response);
-        
-        if (isBookingComplete || isGoodbye) {
-          const reason = isBookingComplete ? "booking_complete" : "goodbye";
-          console.log(`[${callId}] ✅ Graceful disconnect scheduled - reason: ${reason}`);
-          
-          // Wait for audio to finish playing (~2-3 seconds for typical confirmation)
+        // Check if Ada said goodbye - end the call
+        const goodbyePatterns = /\b(goodbye|bye|take care|have a (great|lovely|good) (day|journey|trip))\b/i;
+        if (goodbyePatterns.test(aiResponse.response)) {
+          console.log(`[${callId}] 👋 Ada said goodbye, ending call...`);
+          // Give time for audio to play, then signal call end
           setTimeout(() => {
-            console.log(`[${callId}] 🔌 Closing WebSocket cleanly (${reason})`);
-            
-            // Notify client before closing
-            try {
-              socket.send(JSON.stringify({ 
-                type: "session.end", 
-                reason,
-                booking: currentBooking 
-              }));
-            } catch (e) {
-              // Socket may already be closing
-            }
-            
-            // Close with normal closure code (1000)
-            setTimeout(() => {
-              try {
-                socket.close(1000, reason);
-              } catch (e) {
-                console.log(`[${callId}] Socket already closed`);
-              }
-            }, 500);
-          }, 2500); // 2.5s grace period for audio playback
+            socket.send(JSON.stringify({ type: "session.end", reason: "goodbye" }));
+          }, 3000); // 3 second delay for audio playback
         }
       }
       
       const totalLatency = Date.now() - pipelineStart;
-      console.log(`[${callId}] ✅ OPTIMIZED Pipeline: ${totalLatency}ms (STT:${sttTime} + LLM:${llmTime} + TTS:${ttsTime})`);
+      console.log(`[${callId}] ✅ Pipeline complete: ${totalLatency}ms total`);
       
-      // Send detailed latency breakdown
+      // Send total latency
       socket.send(JSON.stringify({
         type: "latency.total",
-        latency_ms: totalLatency,
-        breakdown: {
-          stt_ms: sttTime,
-          llm_ms: llmTime,
-          tts_ms: ttsTime
-        }
+        latency_ms: totalLatency
       }));
       
     } catch (e) {
@@ -1001,53 +738,15 @@ serve(async (req) => {
           userPhone = msg.phone || "";
           sttProvider = msg.stt_provider || "groq"; // "groq" or "deepgram"
           ttsProvider = msg.tts_provider || "elevenlabs"; // "elevenlabs" or "deepgram"
+          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}, TTS: ${ttsProvider}`);
           
-          const isResume = msg.resume === true && msg.resume_call_id;
-          console.log(`[${callId}] 📞 Session start - source: ${callSource}, phone: ${userPhone}, STT: ${sttProvider}, TTS: ${ttsProvider}${isResume ? ', RESUMING' : ''}`);
-          
-          // Check for session resumption
-          if (isResume) {
-            const restored = await restoreSession(msg.resume_call_id);
-            if (restored) {
-              sessionReady = true;
-              socket.send(JSON.stringify({ 
-                type: "session_ready", 
-                pipeline: "gemini", 
-                resumed: true,
-                booking: currentBooking
-              }));
-              
-              // Send brief "I'm back" message instead of full greeting
-              const resumeText = "Sorry about that brief pause. Where were we?";
-              conversationHistory.push({ role: "assistant", content: resumeText });
-              socket.send(JSON.stringify({ type: "transcript.assistant", text: resumeText }));
-              const audioData = await synthesizeSpeech(resumeText);
-              if (audioData) {
-                const chunkSize = 4800;
-                for (let i = 0; i < audioData.length; i += chunkSize) {
-                  const chunk = audioData.slice(i, Math.min(i + chunkSize, audioData.length));
-                  const base64 = btoa(String.fromCharCode(...chunk));
-                  socket.send(JSON.stringify({ type: "audio.delta", delta: base64 }));
-                }
-                socket.send(JSON.stringify({ type: "audio.done" }));
-              }
-              
-              // Start timeout timer for this new session
-              sessionTimeoutTimer = setTimeout(triggerSessionHandoff, SESSION_TIMEOUT_MS);
-              break;
-            }
-          }
-          
-          // Normal flow - lookup caller
+          // Lookup caller
           if (userPhone) {
             await lookupCaller(userPhone);
           }
           
           sessionReady = true;
           socket.send(JSON.stringify({ type: "session_ready", pipeline: "gemini", stt_provider: sttProvider, tts_provider: ttsProvider }));
-          
-          // Start session timeout timer
-          sessionTimeoutTimer = setTimeout(triggerSessionHandoff, SESSION_TIMEOUT_MS);
           
           // Send initial greeting
           await sendGreeting();
@@ -1135,7 +834,6 @@ serve(async (req) => {
   socket.onclose = () => {
     console.log(`[${callId}] 🔌 WebSocket closed`);
     if (silenceTimer) clearTimeout(silenceTimer);
-    if (sessionTimeoutTimer) clearTimeout(sessionTimeoutTimer);
   };
 
   socket.onerror = (e) => {

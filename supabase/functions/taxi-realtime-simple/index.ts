@@ -1783,12 +1783,6 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
-  
-  // === HANDOFF RESUMPTION ===
-  // True if the fare prompt was already spoken BEFORE handoff (prevents re-asking after reconnect)
-  fareSpoken: boolean;
-  // True if this session was resumed from a handoff (prevents duplicate webhook sends)
-  isResumedSession: boolean;
 }
 
 serve(async (req) => {
@@ -1815,81 +1809,14 @@ serve(async (req) => {
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null; // Track for cleanup
   let isConnectionClosed = false; // Prevent operations after cleanup
   let keepAliveInterval: number | null = null; // Keep-alive ping interval to prevent timeout
-  let openaiPingInterval: number | null = null; // OpenAI WebSocket ping to prevent its idle timeout
   let closingGracePeriodActive = false; // Prevent socket.onclose from interrupting goodbye speech
   let closingGraceTimeoutId: number | null = null; // Track the closing grace timeout for cleanup
   let sessionTimeoutId: number | null = null; // Session timeout timer to prevent Supabase timeout
-  let openaiReconnectAttempts = 0; // Track OpenAI reconnection attempts
-  const MAX_OPENAI_RECONNECT_ATTEMPTS = 3; // Don't reconnect indefinitely
-  let lastOpenAiConnectedAt: number | null = null; // Track when OpenAI was last connected
   const sessionStartTime = Date.now(); // Track when the session started
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   
   // Maximum session duration (4 minutes) - end gracefully before Supabase's ~5 minute limit
   const MAX_SESSION_DURATION_MS = 4 * 60 * 1000;
-  
-  // === SESSION HANDOFF CONFIGURATION ===
-  // Handoff is now triggered by dispatch webhook response (not a fixed timer)
-  // When we receive a fare quote from dispatch, we trigger handoff to extend session
-  // This is smarter than a fixed 75s timer because:
-  // 1. No handoff needed if call finishes quickly
-  // 2. Handoff happens exactly when we need more time (fare confirmation stage)
-  const HANDOFF_AFTER_DISPATCH_DELAY_MS = 2000; // Give 2s for fare speech to start
-  let handoffTimeoutId: number | null = null;
-  let handoffInProgress = false;
-  let handoffTriggeredByDispatch = false; // Track if dispatch already triggered a handoff
-  
-  // --- OpenAI WebSocket ping to prevent OpenAI's idle timeout ---
-  // OpenAI Realtime API can drop connections after ~30s of no audio
-  const startOpenAiPing = (callId: string) => {
-    if (openaiPingInterval) return; // Already running
-    
-    // Send empty audio buffer every 20 seconds to keep OpenAI connection alive
-    // This is more reliable than relying on user audio alone
-    openaiPingInterval = setInterval(() => {
-      if (isConnectionClosed || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-        if (openaiPingInterval) {
-          clearInterval(openaiPingInterval);
-          openaiPingInterval = null;
-        }
-        return;
-      }
-      
-      try {
-        // Send a minimal silent audio frame (64 bytes of silence = ~1.3ms at 24kHz)
-        // This prevents OpenAI from timing out while waiting for user speech
-        const silentFrame = new Int16Array(32); // 32 samples of silence
-        const bytes = new Uint8Array(silentFrame.buffer);
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64Silence = btoa(binary);
-        
-        openaiWs.send(JSON.stringify({
-          type: "input_audio_buffer.append",
-          audio: base64Silence
-        }));
-        console.log(`[${callId}] 💚 OpenAI ping sent (silent frame)`);
-      } catch (e) {
-        console.error(`[${callId}] ❌ OpenAI ping failed:`, e);
-        if (openaiPingInterval) {
-          clearInterval(openaiPingInterval);
-          openaiPingInterval = null;
-        }
-      }
-    }, 20000) as unknown as number; // Every 20 seconds
-    
-    console.log(`[${callId}] 🔄 OpenAI ping started (20s interval)`);
-  };
-  
-  const stopOpenAiPing = () => {
-    if (openaiPingInterval) {
-      clearInterval(openaiPingInterval);
-      openaiPingInterval = null;
-      console.log(`[${state?.callId || "unknown"}] 🛑 OpenAI ping stopped`);
-    }
-  };
   
   // --- Keep-alive ping to prevent WebSocket timeout during dispatch callback wait ---
   const startKeepAlive = (callId: string) => {
@@ -1986,175 +1913,6 @@ serve(async (req) => {
       sessionTimeoutId = null;
     }
   };
-  
-  // --- Session Handoff: Save state to DB and signal bridge to reconnect ---
-  /**
-   * Trigger session handoff - called when dispatch webhook responds with fare/ETA
-   * This extends the session by signaling the bridge to reconnect.
-   * 
-   * Unlike the old fixed 75s timer, this is smarter:
-   * - Only triggers when we actually need more time (fare confirmation stage)
-   * - No unnecessary handoffs for quick calls that finish before 75s
-   * - Ensures continuity exactly when the caller is making a booking decision
-   */
-  const triggerDispatchHandoff = async (callId: string, reason: string = "dispatch_response") => {
-    if (handoffInProgress || handoffTriggeredByDispatch) {
-      console.log(`[${callId}] ⏭️ Handoff already in progress or triggered, skipping`);
-      return;
-    }
-    
-    if (isConnectionClosed || !state) {
-      console.log(`[${callId}] ⏭️ Connection closed or no state, skipping handoff`);
-      return;
-    }
-    
-    handoffTriggeredByDispatch = true;
-    handoffInProgress = true;
-    console.log(`[${callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Saving state for seamless reconnection (reason: ${reason})...`);
-    
-    try {
-      // Save current booking state to live_calls for resumption
-      // CRITICAL: Include fareSpoken flag so resumed session knows fare was already read
-      const fareWasSpoken = !!(state.lastQuotePromptAt && state.pendingQuote);
-      
-      const handoffState = {
-        pickup: state.booking.pickup,
-        destination: state.booking.destination,
-        passengers: state.booking.passengers,
-        pickup_time: state.booking.pickup_time,
-        bookingStep: state.bookingStep,
-        language: state.language,
-        customerName: state.customerName,
-        greetingDelivered: state.greetingDelivered,
-        transcripts: state.transcripts.slice(-20), // Last 20 transcripts for context
-        pendingQuote: state.pendingQuote,
-        fareSpoken: fareWasSpoken, // TRUE if Ada already read the fare to the customer
-        handoffAt: new Date().toISOString(),
-      };
-      
-      // Update live_calls with handoff status and state
-      await supabase.from("live_calls").update({
-        status: "handoff",
-        pickup: state.booking.pickup,
-        destination: state.booking.destination,
-        passengers: state.booking.passengers,
-        fare: state.pendingQuote?.fare || null,
-        eta: state.pendingQuote?.eta || null,
-        transcripts: state.transcripts,
-        updated_at: new Date().toISOString(),
-      }).eq("call_id", callId);
-      
-      console.log(`[${callId}] ✅ Handoff state saved to DB`);
-      console.log(`[${callId}] 📊 State: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, fare=${state.pendingQuote?.fare}`);
-      
-      // Send handoff signal to bridge - it will reconnect with resume flag
-      socket.send(JSON.stringify({
-        type: "session.handoff",
-        call_id: callId,
-        reason: reason,
-        state: handoffState,
-      }));
-      
-      console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
-      
-      // Close OpenAI connection cleanly (bridge will re-establish on reconnect)
-      if (openaiWs && openaiConnected) {
-        try {
-          openaiWs.close(1000, "session_handoff");
-        } catch (e) {
-          console.warn(`[${callId}] ⚠️ Error closing OpenAI on handoff:`, e);
-        }
-      }
-      
-      // Give bridge time to process handoff before closing
-      setTimeout(() => {
-        if (!isConnectionClosed) {
-          console.log(`[${callId}] 🔌 Closing WebSocket for handoff`);
-          isConnectionClosed = true;
-          stopKeepAlive();
-          stopOpenAiPing();
-          try {
-            socket.close(1000, "session_handoff");
-          } catch (e) {
-            console.warn(`[${callId}] ⚠️ Error closing socket on handoff:`, e);
-          }
-        }
-      }, 500);
-      
-    } catch (e) {
-      console.error(`[${callId}] ❌ Handoff failed:`, e);
-      handoffInProgress = false;
-      handoffTriggeredByDispatch = false; // Allow retry
-    }
-  };
-  
-  // Legacy function for compatibility - now does nothing (handoff is dispatch-triggered)
-  const startHandoffTimer = (_callId: string) => {
-    // No-op: Handoff is now triggered by dispatch webhook, not a fixed timer
-    // This function is kept for compatibility but does nothing
-  };
-  
-  const stopHandoffTimer = () => {
-    if (handoffTimeoutId) {
-      clearTimeout(handoffTimeoutId);
-      handoffTimeoutId = null;
-    }
-  };
-  
-  // --- Restore session state from DB (for resumed sessions) ---
-  const restoreSessionFromDb = async (callId: string, resumeCallId: string): Promise<Partial<SessionState> | null> => {
-    try {
-      const { data: liveCall } = await supabase
-        .from("live_calls")
-        .select("*")
-        .eq("call_id", resumeCallId)
-        .maybeSingle();
-      
-      if (!liveCall) {
-        console.log(`[${callId}] ⚠️ No live_call found for resume_call_id: ${resumeCallId}`);
-        return null;
-      }
-      
-      console.log(`[${callId}] ✅ Restored session from DB:`);
-      console.log(`[${callId}]   pickup: ${liveCall.pickup}`);
-      console.log(`[${callId}]   destination: ${liveCall.destination}`);
-      console.log(`[${callId}]   passengers: ${liveCall.passengers}`);
-      console.log(`[${callId}]   status: ${liveCall.status}`);
-      
-      // Parse transcripts if stored as JSON
-      const transcripts = Array.isArray(liveCall.transcripts) ? liveCall.transcripts : [];
-      
-      return {
-        booking: {
-          pickup: liveCall.pickup || null,
-          destination: liveCall.destination || null,
-          passengers: liveCall.passengers || null,
-          bags: null,
-          vehicle_type: null,
-          pickup_time: null,
-          version: 1,
-        },
-        transcripts: transcripts as TranscriptItem[],
-        callerLastPickup: liveCall.caller_last_pickup || null,
-        callerLastDestination: liveCall.caller_last_destination || null,
-        callerTotalBookings: liveCall.caller_total_bookings || 0,
-        customerName: liveCall.caller_name || null,
-        pendingQuote: liveCall.fare ? {
-          fare: liveCall.fare,
-          eta: liveCall.eta,
-          pickup: liveCall.pickup,
-          destination: liveCall.destination,
-          pickup_time: null,
-          callback_url: null,
-          timestamp: Date.now(),
-          lastPrompt: null,
-        } : null,
-      };
-    } catch (e) {
-      console.error(`[${callId}] ❌ Failed to restore session:`, e);
-      return null;
-    }
-  };
 
   // --- Connect to OpenAI (can be called early for pre-connection) ---
   const connectToOpenAI = (sessionState: SessionState, triggerGreeting: boolean = true) => {
@@ -2178,11 +1936,6 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       console.log(`[${sessionState.callId}] ✅ Connected to OpenAI Realtime`);
       openaiConnected = true;
-      openaiReconnectAttempts = 0; // Reset on successful connection
-      lastOpenAiConnectedAt = Date.now();
-      
-      // Start OpenAI ping to prevent its idle timeout
-      startOpenAiPing(sessionState.callId);
       
       // If this was a pre-connect, don't send greeting yet - wait for init
       if (preConnected && !pendingGreeting) {
@@ -2202,59 +1955,9 @@ serve(async (req) => {
       }
     };
 
-    openaiWs.onclose = (event) => {
-      console.log(`[${sessionState.callId}] 🔌 OpenAI WebSocket closed (code=${event.code}, reason=${event.reason || "none"})`);
+    openaiWs.onclose = () => {
+      console.log(`[${sessionState.callId}] 🔌 OpenAI WebSocket closed`);
       openaiConnected = false;
-      stopOpenAiPing(); // Stop pinging closed connection
-      
-      // === OPENAI RECONNECTION LOGIC ===
-      // If the call is still active and we haven't exceeded retry limit, attempt reconnection
-      if (!isConnectionClosed && !closingGracePeriodActive && openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS) {
-        const timeSinceConnect = lastOpenAiConnectedAt ? Date.now() - lastOpenAiConnectedAt : 0;
-        
-        // Only reconnect if we were connected for a reasonable time (not immediate failures)
-        if (timeSinceConnect > 5000) {
-          openaiReconnectAttempts++;
-          const backoffMs = Math.min(1000 * openaiReconnectAttempts, 3000); // 1s, 2s, 3s backoff
-          
-          console.log(`[${sessionState.callId}] 🔄 OpenAI disconnected mid-call, attempting reconnect (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS}) in ${backoffMs}ms`);
-          
-          // Notify bridge that we're reconnecting
-          try {
-            socket.send(JSON.stringify({
-              type: "openai_reconnecting",
-              attempt: openaiReconnectAttempts,
-              maxAttempts: MAX_OPENAI_RECONNECT_ATTEMPTS
-            }));
-          } catch (e) {
-            // Bridge socket may be closed
-          }
-          
-          setTimeout(() => {
-            if (!isConnectionClosed && !closingGracePeriodActive) {
-              console.log(`[${sessionState.callId}] 🔌 Attempting OpenAI reconnect...`);
-              openaiWs = null; // Clear old reference
-              connectToOpenAI(sessionState, false); // Don't replay greeting
-              
-              // After reconnect, send a session update to restore context
-              // The greeting has already been delivered, so just restore state
-              if (openaiWs) {
-                sessionState.greetingDelivered = true; // Ensure greeting doesn't replay
-              }
-            }
-          }, backoffMs);
-        } else {
-          console.log(`[${sessionState.callId}] ⚠️ OpenAI disconnected too quickly (${timeSinceConnect}ms) - not reconnecting`);
-        }
-      } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
-        console.error(`[${sessionState.callId}] ❌ OpenAI reconnection failed after ${MAX_OPENAI_RECONNECT_ATTEMPTS} attempts - ending call`);
-        // Optionally send hangup to bridge
-        try {
-          socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
-        } catch (e) {
-          // Ignore
-        }
-      }
     };
 
     openaiWs.onerror = (err) => {
@@ -2414,88 +2117,6 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     };
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
-
-    // === RESUME SESSION: Skip greeting if already delivered ===
-    // When resuming after handoff, inject continuation context instead of greeting
-    if (sessionState.greetingDelivered) {
-      console.log(`[${sessionState.callId}] 🔄 RESUME: Greeting already delivered, injecting continuation context`);
-      
-      // === FARE ALREADY SPOKEN - WAIT SILENTLY FOR YES/NO ===
-      // If the fare was already read before the handoff, do NOT re-ask anything
-      // Just wait silently for the customer's yes/no response
-      if (sessionState.fareSpoken && sessionState.pendingQuote) {
-        const fare = sessionState.pendingQuote.fare || "";
-        const eta = sessionState.pendingQuote.eta || "";
-        const langCode = sessionState.language || "en";
-        const langName = LANGUAGE_NAMES[langCode] || "English";
-        
-        const fareResumePrompt = `[SYSTEM: Session resumed after handoff. You have ALREADY told the customer the fare (${fare}, ETA ${eta}). 
-DO NOT repeat the fare. DO NOT re-ask the price. DO NOT summarize the booking again.
-The customer may have said "yes" or "no" just before the handoff.
-
-WAIT SILENTLY for their response. If they seem confused after a few seconds, say only: "Would you like me to book that?"
-
-WHEN CUSTOMER RESPONDS:
-- If YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${sessionState.booking.pickup || ''}", destination: "${sessionState.booking.destination || ''}"
-- If NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
-- If unclear, ask only: "Would you like me to book that?"
-
-IMPORTANT: Respond in ${langName.toUpperCase()}. DO NOT SPEAK unless the customer speaks first or 5 seconds pass.]`;
-        
-        console.log(`[${sessionState.callId}] 💰 FARE SPOKEN RESUME: Waiting silently for yes/no (no response.create)`);
-        openaiWs?.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: fareResumePrompt }]
-          }
-        }));
-        // DO NOT trigger response.create - wait for customer's yes/no via VAD
-        console.log(`[${sessionState.callId}] 📝 Session resumed at step: summary (fareSpoken=true, awaiting confirmation)`);
-        return;
-      }
-      
-      // Build continuation context based on current booking step
-      let continuationPrompt = "";
-      const step = sessionState.bookingStep;
-      const booking = sessionState.booking;
-      
-      if (step === "summary" || (booking.pickup && booking.destination && booking.passengers !== null)) {
-        // All fields captured - ask for confirmation
-        continuationPrompt = `[SYSTEM: Session resumed. The booking details are: Pickup: "${booking.pickup}", Destination: "${booking.destination}", Passengers: ${booking.passengers}, Time: ${booking.pickup_time || "now"}. Confirm these details with the customer and ask if they're ready to proceed.]`;
-      } else if (step === "passengers" || (booking.pickup && booking.destination && booking.passengers === null)) {
-        continuationPrompt = `[SYSTEM: Session resumed. Pickup: "${booking.pickup}", Destination: "${booking.destination}". Now ask: "How many people will be travelling?"]`;
-      } else if (step === "destination" || (booking.pickup && !booking.destination)) {
-        continuationPrompt = `[SYSTEM: Session resumed. Pickup captured: "${booking.pickup}". Now ask: "And what is your destination?"]`;
-      } else if (step === "time") {
-        continuationPrompt = `[SYSTEM: Session resumed. Pickup: "${booking.pickup}", Destination: "${booking.destination}", Passengers: ${booking.passengers}. Now ask: "When do you need the taxi?"]`;
-      } else {
-        // Default: continue the conversation naturally
-        continuationPrompt = `[SYSTEM: Session resumed. Continue the taxi booking conversation naturally. Ask for any missing information.]`;
-      }
-      
-      openaiWs?.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: continuationPrompt }]
-        }
-      }));
-      
-      // Trigger response with continuation instructions
-      openaiWs?.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["text", "audio"],
-          instructions: `Continue the conversation naturally. DO NOT repeat the greeting. Ask only the next required question based on the system context.`
-        }
-      }));
-      
-      console.log(`[${sessionState.callId}] 📝 Session resumed at step: ${step}`);
-      return;
-    }
 
     // Inject the exact welcome greeting as a conversation item to force OpenAI to speak it
     // This prevents OpenAI from skipping or paraphrasing the greeting
@@ -7662,51 +7283,23 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           }
           const base64Audio = btoa(binary);
 
-          // OpenAI can briefly be disconnected/reconnecting; never throw from the audio hot-path.
-          if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-            return;
-          }
-
-          try {
-            openaiWs.send(
-              JSON.stringify({
-                type: "input_audio_buffer.append",
-                audio: base64Audio,
-              })
-            );
-          } catch (e) {
-            console.error(`[${state.callId}] ❌ Failed to forward audio to OpenAI:`, e);
-            return;
-          }
+          openaiWs.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: base64Audio
+          }));
         }
         return;
       }
 
       // Handle JSON messages
-      if (typeof event.data !== "string") {
-        console.warn(`[${state?.callId || "unknown"}] ⚠️ Ignoring non-string WS message`);
-        return;
-      }
-
-      let message: any;
-      try {
-        message = JSON.parse(event.data);
-      } catch (e) {
-        console.warn(
-          `[${state?.callId || "unknown"}] ⚠️ Ignoring non-JSON WS message (${String(e)})`
-        );
-        return;
-      }
+      const message = JSON.parse(event.data);
 
       // PRE-CONNECT: Connect to OpenAI while phone is ringing (before answer)
-      // Also handle "eager_init" from bridge (type: "init" with eager_init: true)
-      const isPreConnect = message.type === "pre_connect" || (message.type === "init" && message.eager_init === true);
-      
-      if (isPreConnect) {
+      if (message.type === "pre_connect") {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         
-        console.log(`[${callId}] 🔔 Pre-connecting to OpenAI (eager_init=${message.eager_init || false})`);
+        console.log(`[${callId}] 🔔 Pre-connecting to OpenAI (phone ringing)`);
         
         // Detect language early
         const detectedLanguage = detectLanguageFromPhone(phone);
@@ -7822,22 +7415,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
-          fareSpoken: false, // True if fare was already spoken (for handoff resume)
-          isResumedSession: false, // True if this session was resumed from handoff
         };
         
         preConnected = true;
-        
-        // === DEMO MODE OPTIMIZATION ===
-        // In demo mode, trigger greeting IMMEDIATELY on pre-connect
-        // No need to wait for phone number since we skip caller lookup anyway
-        if (DEMO_SIMPLE_MODE) {
-          console.log(`[${callId}] ⚡ DEMO MODE: Triggering greeting on pre-connect (no caller lookup needed)`);
-          pendingGreeting = true;
-          connectToOpenAI(state!, true); // Connect AND trigger greeting immediately!
-        } else {
-          connectToOpenAI(state!, false); // Connect but DON'T trigger greeting yet (wait for init)
-        }
+        connectToOpenAI(state!, false); // Connect but DON'T trigger greeting yet
         
         socket.send(JSON.stringify({ 
           type: "pre_connected", 
@@ -7846,54 +7427,18 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         return;
       }
 
-      // Skip regular init processing for eager_init (already handled above)
-      if (message.type === "init" && !message.eager_init) {
+      if (message.type === "init") {
         const callId = message.call_id || `simple-${Date.now()}`;
         const phone = message.phone || "unknown";
         const isReconnect = message.reconnect === true;
-        const isResume = message.resume === true; // NEW: Bridge reconnecting after handoff
-        const resumeCallId = message.resume_call_id || null; // Original call_id to restore from
-        const reconnectAttempt = message.reconnect_attempt || 0;
-        const sessionAgeS = message.session_age_s || 0;
-        const bookingStateFromBridge = message.booking_state || {};
         
-        // Debug: Log raw message to trace handoff issues
-        console.log(`[${callId}] 📨 Init message received: resume=${message.resume}, resume_call_id=${message.resume_call_id}, reconnect=${message.reconnect}`);
-        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, resume=${isResume}, resumeCallId=${resumeCallId}, attempt=${reconnectAttempt}, age=${sessionAgeS}s, preConnected=${preConnected})`);
+        console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, preConnected=${preConnected})`);
 
-        // === SESSION RESUME SUPPORT ===
-        // When bridge sends resume=true after session.handoff, restore state from DB
-        let restoredState: Partial<SessionState> | null = null;
-        if (isResume && resumeCallId) {
-          console.log(`[${callId}] 🔄 RESUME: Attempting to restore from call_id: ${resumeCallId}`);
-          restoredState = await restoreSessionFromDb(callId, resumeCallId);
-          
-          if (restoredState) {
-            console.log(`[${callId}] ✅ RESUME: State restored successfully`);
-            // Mark greeting as already delivered so Ada continues the conversation
-            restoredState.greetingDelivered = true;
-          } else {
-            console.log(`[${callId}] ⚠️ RESUME: No state found in DB, starting fresh`);
-          }
-        }
-
-        // === MID-CALL RECONNECTION SUPPORT ===
-        // When Supabase kills edge function (~75s), bridge reconnects with reconnect=true
-        // We restore session state and continue the conversation seamlessly
-        if (isReconnect && !isResume) {
-          console.log(`[${callId}] 🔁 Mid-call reconnection attempt ${reconnectAttempt}, session age ${sessionAgeS}s`);
-          
-          // Check if session is too old to be resumed (5 minutes max)
-          if (sessionAgeS > 300) {
-            console.log(`[${callId}] ❌ Session too old (${sessionAgeS}s > 300s), rejecting reconnect`);
-            socket.close(1000, "Session expired");
-            return;
-          }
-          
-          // Log booking state received from bridge
-          if (Object.keys(bookingStateFromBridge).length > 0) {
-            console.log(`[${callId}] 📦 Received booking state from bridge:`, JSON.stringify(bookingStateFromBridge));
-          }
+        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
+        if (isReconnect) {
+          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
+          socket.close(1000, "Session expired");
+          return;
         }
 
         // Detect language from phone number FIRST (fast, no DB)
@@ -8019,8 +7564,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
-            fareSpoken: false, // True if fare was already spoken (for handoff resume)
-            isResumedSession: false, // True if this session was resumed from handoff
           };
         }
         
@@ -8031,104 +7574,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           state.useRasaAudioProcessing = message.rasa_audio_processing ?? false;
           state.halfDuplex = message.half_duplex ?? false;
           state.goodbyeGraceMs = message.goodbye_grace_ms ?? 3000;
-        }
-        
-        // === APPLY BOOKING STATE FROM RECONNECTING BRIDGE ===
-        // If bridge reconnected with cached booking state, restore it
-        if (isReconnect && state && Object.keys(bookingStateFromBridge).length > 0) {
-          console.log(`[${callId}] 🔄 Restoring booking state from bridge reconnect`);
-          
-          if (bookingStateFromBridge.pickup) {
-            state.booking.pickup = bookingStateFromBridge.pickup;
-          }
-          if (bookingStateFromBridge.destination) {
-            state.booking.destination = bookingStateFromBridge.destination;
-          }
-          if (bookingStateFromBridge.passengers) {
-            state.booking.passengers = bookingStateFromBridge.passengers;
-          }
-          if (bookingStateFromBridge.pickup_time) {
-            state.booking.pickup_time = bookingStateFromBridge.pickup_time;
-          }
-          if (bookingStateFromBridge.step) {
-            state.bookingStep = bookingStateFromBridge.step;
-          }
-          if (bookingStateFromBridge.greetingDelivered) {
-            state.greetingDelivered = true;
-          }
-          if (bookingStateFromBridge.bookingFullyConfirmed) {
-            state.bookingFullyConfirmed = true;
-          }
-          
-          console.log(`[${callId}] 📦 Restored state: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}`);
-        }
-        
-        // === APPLY RESTORED STATE FROM DB (for resume after handoff) ===
-        if (isResume && restoredState && state) {
-          console.log(`[${callId}] 🔄 Applying restored state from DB handoff`);
-          
-          // Apply booking state
-          if (restoredState.booking) {
-            state.booking.pickup = restoredState.booking.pickup || state.booking.pickup;
-            state.booking.destination = restoredState.booking.destination || state.booking.destination;
-            state.booking.passengers = restoredState.booking.passengers ?? state.booking.passengers;
-            state.booking.pickup_time = restoredState.booking.pickup_time || state.booking.pickup_time;
-            state.booking.version = Math.max(restoredState.booking.version || 0, state.booking.version);
-          }
-          
-          // Apply other state
-          if (restoredState.transcripts && restoredState.transcripts.length > 0) {
-            state.transcripts = restoredState.transcripts;
-          }
-          if (restoredState.customerName) {
-            state.customerName = restoredState.customerName;
-          }
-          if (restoredState.callerLastPickup) {
-            state.callerLastPickup = restoredState.callerLastPickup;
-          }
-          if (restoredState.callerLastDestination) {
-            state.callerLastDestination = restoredState.callerLastDestination;
-          }
-          if (restoredState.pendingQuote) {
-            state.pendingQuote = restoredState.pendingQuote;
-          }
-          
-          // CRITICAL: Restore fareSpoken flag if it exists in the restored state
-          // This prevents Ada from re-reading the fare after handoff
-          if ((restoredState as any).fareSpoken) {
-            state.fareSpoken = true;
-            console.log(`[${callId}] 💰 fareSpoken=true restored - will NOT re-ask fare`);
-          }
-          
-          // Mark this as a resumed session to prevent duplicate webhooks
-          state.isResumedSession = true;
-          
-          // CRITICAL: Mark greeting as delivered so Ada continues conversation
-          state.greetingDelivered = true;
-          
-          // Determine booking step based on what data we have
-          // If fare was already spoken, we're waiting for confirmation
-          if (state.fareSpoken && state.pendingQuote) {
-            state.bookingStep = "summary"; // Waiting for yes/no to fare
-            console.log(`[${callId}] 📍 Step set to summary (fareSpoken=true, awaiting confirmation)`);
-          } else if (state.booking.pickup && state.booking.destination && state.booking.passengers !== null) {
-            state.bookingStep = "summary";
-          } else if (state.booking.pickup && state.booking.destination) {
-            state.bookingStep = "passengers";
-          } else if (state.booking.pickup) {
-            state.bookingStep = "destination";
-          } else {
-            state.bookingStep = "pickup";
-          }
-          
-          console.log(`[${callId}] 📦 DB restore complete: pickup=${state.booking.pickup}, dest=${state.booking.destination}, step=${state.bookingStep}, fareSpoken=${state.fareSpoken}, transcripts=${state.transcripts.length}`);
-          
-          // Update live_calls status back to active
-          await supabase.from("live_calls").update({
-            call_id: callId, // Update to new call_id
-            status: "active",
-            updated_at: new Date().toISOString(),
-          }).eq("call_id", resumeCallId);
         }
         
         console.log(`[${callId}] 🔊 Inbound audio: ${state!.inboundAudioFormat} @ ${state!.inboundSampleRate}Hz`);
@@ -8214,19 +7659,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           connectToOpenAI(state!);
         }
 
-        // For reconnects/resumes, skip greeting - let sendSessionUpdate handle continuation
-        // The fareSpoken check and proper continuation prompt are now in sendSessionUpdate
-        if ((isReconnect || isResume) && state) {
-          state.greetingDelivered = true;  // Don't play greeting again
-          state.greetingProtectionUntil = 0;  // No greeting protection needed
-          console.log(`[${callId}] 🔄 Session resume/reconnect flagged - sendSessionUpdate will handle continuation (fareSpoken=${state.fareSpoken})`);
-        }
-
         socket.send(JSON.stringify({ 
           type: "ready", 
           call_id: callId,
-          mode: "simple",
-          reconnect: isReconnect,
+          mode: "simple"
         }));
         
         // Start keep-alive pings to prevent WebSocket timeout during dispatch callback wait
@@ -8234,10 +7670,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         // Start session timeout to end call gracefully before Supabase kills the function
         startSessionTimeout(callId);
-        
-        // Start handoff timer - at 75s, save state and signal bridge to reconnect
-        // This allows seamless continuation beyond the Supabase edge function limit
-        startHandoffTimer(callId);
 
         // Subscribe to dispatch broadcast channel for ask_confirm, say, etc.
         dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -8280,13 +7712,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // GUARD 0: If call is ending/ended, ignore ALL dispatch messages
           if (state?.callEnded) {
             console.log(`[${callId}] ⚠️ Ignoring ask_confirm - call is ended/ending`);
-            return;
-          }
-
-          // GUARD 0.1: If fare was ALREADY spoken (resumed session), ignore ask_confirm
-          // This prevents re-reading the fare after a handoff reconnection
-          if (state?.fareSpoken) {
-            console.log(`[${callId}] ⚠️ Ignoring ask_confirm - fareSpoken=true (resumed session, awaiting yes/no)`);
             return;
           }
 
@@ -8495,23 +7920,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
             }
           }));
-          
-          // ✅ Mark fare as spoken - this is persisted in handoff state
-          // Prevents re-reading fare if session is resumed after handoff
-          if (state) {
-            state.fareSpoken = true;
-            console.log(`[${callId}] 💰 fareSpoken=true set - fare prompt injected`);
-          }
-          
-          // 🔄 DISPATCH-TRIGGERED HANDOFF: Now that we have fare/ETA, trigger handoff to extend session
-          // This ensures the caller has time to hear the fare and respond without session timeout
-          // We delay slightly to let the fare speech start first
-          setTimeout(() => {
-            if (!isConnectionClosed && !handoffInProgress) {
-              console.log(`[${callId}] 🔄 Triggering dispatch-based session handoff (fare received)`);
-              triggerDispatchHandoff(callId, "dispatch_ask_confirm");
-            }
-          }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
         });
         
         dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
@@ -8712,45 +8120,29 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           }
           
           // Cancel any active response before injecting confirmation
-          if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-            console.warn(`[${callId}] ⚠️ OpenAI WS not open during dispatch_confirm - cannot inject confirmation`);
-            return;
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           }
-
-          safeCancel(state as SessionState, "dispatch_confirm - preparing confirmation");
-          try {
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-          } catch (e) {
-            console.error(`[${callId}] ❌ Failed to clear OpenAI audio buffer:`, e);
-          }
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           
           // Inject the confirmation for Ada to speak
           // Script: "That's on the way" + "Is there anything else I can help you with?"
           const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
           
-          try {
-            openaiWs.send(
-              JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [
-                    {
-                      type: "input_text",
-                      text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.`,
-                    },
-                  ],
-                },
-              })
-            );
-          } catch (e) {
-            console.error(`[${callId}] ❌ Failed to inject dispatch confirmation message:`, e);
-            return;
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.` }]
+            }
+          }));
+          
+          // Cancel any active response before creating new one (race condition fix)
+          if (state?.openAiResponseActive) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            if (state) state.openAiResponseActive = false;
           }
-
-          // Ensure we don't race-cancel a non-existent response
-          if (state) state.openAiResponseActive = false;
           // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
@@ -9330,14 +8722,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
     // Stop keep-alive pings
     stopKeepAlive();
     
-    // Stop OpenAI pings
-    stopOpenAiPing();
-    
     // Stop session timeout
     stopSessionTimeout();
-    
-    // Stop handoff timer
-    stopHandoffTimer();
     
     // Clear any pending flush timers to prevent memory leaks
     if (state?.transcriptFlushTimer) {
