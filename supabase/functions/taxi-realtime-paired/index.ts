@@ -2459,6 +2459,35 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
+  // ---------------------------------------------------------------------------
+  // TRANSCRIPT GATE (fast)
+  // Problem: OpenAI server VAD can trigger response.created BEFORE we receive the
+  // final Whisper transcript, causing Ada to respond early and mis-assign fields.
+  // Fix: briefly block/cancel responses after speech_stopped until transcript arrives.
+  // ---------------------------------------------------------------------------
+  let transcriptGateActive = false;
+  let transcriptGateTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const startTranscriptGate = () => {
+    transcriptGateActive = true;
+    clearTrackedTimeout(transcriptGateTimer);
+    // Keep this short: just enough time for transcription.completed to arrive.
+    transcriptGateTimer = trackedTimeout(() => {
+      transcriptGateActive = false;
+      transcriptGateTimer = null;
+      console.log(`[${callId}] ⏱️ TRANSCRIPT GATE: timeout elapsed - allowing responses`);
+    }, 900);
+    console.log(`[${callId}] 🚧 TRANSCRIPT GATE: blocking responses until transcript arrives`);
+  };
+
+  const stopTranscriptGate = (reason: string) => {
+    if (!transcriptGateActive && !transcriptGateTimer) return;
+    transcriptGateActive = false;
+    clearTrackedTimeout(transcriptGateTimer);
+    transcriptGateTimer = null;
+    console.log(`[${callId}] ✅ TRANSCRIPT GATE: released (${reason})`);
+  };
+
   // === NEW: OpenAI reconnection tracking (ported from simple mode) ===
   let openaiReconnectAttempts = 0;
   let lastOpenAiConnectedAt: number | null = null;
@@ -3151,6 +3180,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "response.created":
           // Mark response as active immediately (before any audio)
           sessionState.openAiResponseActive = true;
+
+          // ✅ TRANSCRIPT GATE: If we haven't received the final transcript yet, block.
+          // This prevents Ada from responding based on VAD alone.
+          if (transcriptGateActive) {
+            console.log(`[${callId}] 🛡️ BLOCKING response - waiting for transcript`);
+            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.openAiResponseActive = false;
+            break;
+          }
           
           // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
           // We'll trigger the correct response once extraction completes with full context
@@ -3679,8 +3717,8 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           console.log(`[${callId}] 🔇 User stopped speaking (${speechDuration}s)`);
           // Track when speech stopped for late transcript detection
           sessionState.speechStopTime = Date.now();
-          // NOTE: We no longer set extractionInProgress here - it was causing 10+ second delays.
-          // The Full Stop Gate in the transcript handler is sufficient for timing control.
+          // Start a short transcript gate to prevent VAD-only early responses.
+          startTranscriptGate();
           // Notify bridge of speech end for logging
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "speech_stopped", duration: speechDuration }));
@@ -3697,28 +3735,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (userText !== rawText) {
               console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
             }
+
+            // Release transcript gate as soon as we have the final transcript.
+            stopTranscriptGate("transcript received");
             
-            // ═══════════════════════════════════════════════════════════════════
-            // FULL STOP TRANSCRIPTION GATE
-            // Wait for Whisper to signal sentence completion via punctuation.
-            // This prevents Ada from responding to partial/incomplete sentences.
-            // Whisper inserts ., ?, or ! when it determines a logical sentence end.
-            // ═══════════════════════════════════════════════════════════════════
-            const isFinishedSentence = /[.?!]$/.test(userText);
-            
-            // Allow very short affirmatives through without punctuation (yes, ok, etc.)
-            const isShortAffirmative = /^(yes|yeah|yep|yup|no|nope|ok|okay|sure|please|thanks?|cheers|correct|right|absolutely)$/i.test(userText.trim());
-            
-            // Allow numbers through (for passenger count)
-            const isJustNumber = /^(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)$/i.test(userText.trim());
-            
-            if (!isFinishedSentence && !isShortAffirmative && !isJustNumber) {
-              console.log(`[${callId}] ⏳ FULL STOP GATE: Sentence incomplete "${userText}" - waiting for punctuation`);
-              // Keep extractionInProgress = true so responses remain blocked
-              break; // Don't process incomplete sentence - wait for more
-            }
-            
-            console.log(`[${callId}] 🏁 FULL STOP GATE: Sentence complete "${userText}" - processing...`);
+            console.log(`[${callId}] 🏁 Transcript received: "${userText}"`);
             
             // ═══════════════════════════════════════════════════════════════════
             // DUPLICATE TRANSCRIPT GUARD
