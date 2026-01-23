@@ -728,6 +728,9 @@ interface SessionState {
   greetingProtectionUntil: number;
   // Summary protection: block interruptions while Ada is recapping/quoting
   summaryProtectionUntil: number;
+  // When awaiting a YES/NO, if the user starts speaking while Ada is still talking,
+  // we cancel Ada's response once and allow the user through.
+  confirmationBargeInCancelled: boolean;
   // Quote request de-dupe
   quoteInFlight: boolean;
   lastQuoteRequestedAt: number;
@@ -1657,6 +1660,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     lastAdaFinishedSpeakingAt: 0,
     greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
     summaryProtectionUntil: 0,
+    confirmationBargeInCancelled: false,
     quoteInFlight: false,
     lastQuoteRequestedAt: 0,
     // Dispatch callback state
@@ -2160,6 +2164,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
     sessionState.lastQuestionAsked = "confirmation";
+    sessionState.confirmationBargeInCancelled = false;
   });
   
   dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
@@ -3048,14 +3053,22 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
             // CONFIRMATION PHASE: Handle user response to fare quote
             if (sessionState.awaitingConfirmation) {
               const lowerText = userText.toLowerCase().trim();
+              const normalized = lowerText
+                .replace(/[^a-z\s]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+              const compact = normalized.replace(/\s+/g, "");
               
               // Check for EXPLICIT affirmative confirmation (go ahead, yes, book it, etc.)
-              const affirmativePatterns = /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|book it|confirm|please|that's fine|that's good|perfect|great|lovely|brilliant|sounds good|do it|make the booking|yes please|absolutely|definitely)/i;
-              const isAffirmative = affirmativePatterns.test(lowerText);
+              // NOTE: We allow small transcription typos like "yesy"/"yess" to avoid Ada seeming unresponsive.
+              const affirmativePatterns = /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|book it|confirm|please|that's fine|that's good|perfect|great|lovely|brilliant|sounds good|do it|make the booking|yes please|absolutely|definitely)\b/i;
+              const looksLikeYesTypo = compact.startsWith("yes") && compact.length <= 5; // yesy, yess
+              const looksLikeOkTypo = compact.startsWith("ok") && compact.length <= 6;   // okk, okayy
+              const isAffirmative = affirmativePatterns.test(normalized) || looksLikeYesTypo || looksLikeOkTypo;
               
               // Check for EXPLICIT negative response
-              const negativePatterns = /^(no|nope|nah|cancel|nevermind|never mind|forget it|too expensive|too much|no thanks|no thank you)/i;
-              const isNegative = negativePatterns.test(lowerText);
+              const negativePatterns = /^(no|nope|nah|cancel|nevermind|never mind|forget it|too expensive|too much|no thanks|no thank you)\b/i;
+              const isNegative = negativePatterns.test(normalized);
               
               // Check if it looks like an address (correction attempt)
               const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "airport", "station", "hotel", "hospital"];
@@ -3958,8 +3971,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
         // and Ada appears unresponsive.
         if (Date.now() < sessionState.summaryProtectionUntil) {
           const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
-          if (sessionState.openAiResponseActive || !awaitingYesNo) {
-            return; // Drop - Ada is delivering summary/quote (or we're not in confirmation yet)
+          if (!awaitingYesNo) {
+            return; // Drop - Ada is delivering summary/quote (and we're not in confirmation yet)
           }
         }
 
@@ -3979,6 +3992,30 @@ Do NOT skip any part. Say ALL of it warmly.]`
             if (rms < RMS_BARGE_IN_MIN || rms > RMS_BARGE_IN_MAX) {
               audioDiag.packetsSkippedEcho++;
               return; // Not real speech, likely echo or noise
+            }
+          }
+
+          // CONFIRMATION BARGE-IN: if we're awaiting a YES/NO and the user starts speaking while
+          // Ada is still delivering the quote prompt, cancel Ada once so the user's "yes" isn't ignored.
+          if (
+            (sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation") &&
+            Date.now() < sessionState.summaryProtectionUntil &&
+            sessionState.openAiResponseActive &&
+            !sessionState.confirmationBargeInCancelled
+          ) {
+            sessionState.confirmationBargeInCancelled = true;
+            sessionState.summaryProtectionUntil = 0;
+            console.log(`[${callId}] 🛑 Confirmation barge-in detected - cancelling Ada response`);
+            try {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            } catch (_) {
+              // ignore
+            }
+            try {
+              socket.send(JSON.stringify({ type: "ai_interrupted" }));
+            } catch (_) {
+              // ignore
             }
           }
 
@@ -4037,8 +4074,32 @@ Do NOT skip any part. Say ALL of it warmly.]`
           // SUMMARY PROTECTION: block interruptions while Ada is recapping/quoting.
           if (Date.now() < sessionState.summaryProtectionUntil) {
             const awaitingYesNo = sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation";
-            if (sessionState.openAiResponseActive || !awaitingYesNo) {
+            if (!awaitingYesNo) {
               return; // Drop - Ada is delivering summary/quote
+            }
+          }
+
+          // CONFIRMATION BARGE-IN (C# path): we don't have RMS here, so if we're in the confirmation
+          // window and Ada is still speaking, cancel once to avoid dropping the user's "yes".
+          if (
+            (sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation") &&
+            Date.now() < sessionState.summaryProtectionUntil &&
+            sessionState.openAiResponseActive &&
+            !sessionState.confirmationBargeInCancelled
+          ) {
+            sessionState.confirmationBargeInCancelled = true;
+            sessionState.summaryProtectionUntil = 0;
+            console.log(`[${callId}] 🛑 Confirmation barge-in (C#) - cancelling Ada response`);
+            try {
+              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            } catch (_) {
+              // ignore
+            }
+            try {
+              socket.send(JSON.stringify({ type: "ai_interrupted" }));
+            } catch (_) {
+              // ignore
             }
           }
 
