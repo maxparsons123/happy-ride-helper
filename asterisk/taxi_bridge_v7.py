@@ -133,6 +133,7 @@ RECONNECT_BASE_DELAY_S = 1.0
 HEARTBEAT_INTERVAL_S = 15.0
 WS_PING_INTERVAL = 20
 WS_PING_TIMEOUT = 20
+WS_APP_PING_INTERVAL_S = 25.0  # Application-level ping to prevent Supabase idle timeout
 ASTERISK_READ_TIMEOUT_S = 30.0
 
 # Queue Bounds (memory safety)
@@ -790,6 +791,28 @@ class TaxiBridge:
         except asyncio.CancelledError:
             pass
     
+    async def ws_ping_loop(self) -> None:
+        """Send application-level ping every 25s to prevent Supabase idle disconnect."""
+        try:
+            while self.running:
+                await asyncio.sleep(WS_APP_PING_INTERVAL_S)
+                if not self.running:
+                    break
+                
+                if self.ws and self.state.ws_connected:
+                    try:
+                        await self.ws.send(json.dumps({
+                            "type": "ping",
+                            "call_id": self.state.call_id,
+                            "timestamp": int(time.time() * 1000),
+                        }))
+                        logger.debug("[%s] 🏓 App ping sent", self.state.call_id)
+                    except Exception as e:
+                        logger.warning("[%s] ⚠️ App ping failed: %s", self.state.call_id, e)
+                        
+        except asyncio.CancelledError:
+            pass
+    
     async def run(self) -> None:
         """Main bridge loop."""
         peer = self.writer.get_extra_info("peername")
@@ -797,6 +820,7 @@ class TaxiBridge:
         
         playback_task = asyncio.create_task(self.queue_to_asterisk())
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+        ping_task = asyncio.create_task(self.ws_ping_loop())
         
         try:
             while self.running:
@@ -887,10 +911,10 @@ class TaxiBridge:
             self.running = False
             
             # Cancel background tasks
-            for task in [playback_task, heartbeat_task]:
+            for task in [playback_task, heartbeat_task, ping_task]:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(playback_task, heartbeat_task, return_exceptions=True)
+            await asyncio.gather(playback_task, heartbeat_task, ping_task, return_exceptions=True)
             
             # Log final stats
             logger.info("[%s] 📊 Final: %s@%dHz TX=%d RX=%d KA=%d HO=%d",
