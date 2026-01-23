@@ -4178,18 +4178,23 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
         audioDiag.packetsReceived++;
 
-        // AUTO-DETECT slin16 from frame size (640 bytes = 20ms @ 16kHz PCM16)
-        // This handles race conditions where format update message arrives after first audio
+        // AUTO-DETECT format from frame size (handles race where format update arrives after audio)
+        // slin16 (16kHz PCM16): 640 bytes = 20ms, 320 bytes = 10ms
+        // slin (8kHz PCM16): 320 bytes = 20ms, 160 bytes = 10ms
+        // 
+        // IMPORTANT: Do NOT auto-correct back to 8kHz just because we see 320-byte frames!
+        // 320 bytes is valid for BOTH 8kHz (20ms) and 16kHz (10ms).
+        // Only upgrade to 16kHz on unambiguous evidence (640-byte frames).
+        // Trust explicit format updates over frame-size guessing.
         if (audioBytes.length === 640 && inboundSampleRate === 8000) {
+          // 640 bytes can ONLY be 16kHz (20ms) - safe to upgrade
           console.log(`[${callId}] 🔄 Auto-detected slin16 @ 16kHz from 640-byte frame size`);
           inboundSampleRate = 16000;
           inboundAudioFormat = "slin16";
-        } else if (audioBytes.length === 320 && inboundSampleRate !== 8000 && inboundAudioFormat !== "ulaw") {
-          // Correct back to 8kHz if we're getting 320-byte frames
-          console.log(`[${callId}] 🔄 Auto-corrected to slin @ 8kHz from 320-byte frame size`);
-          inboundSampleRate = 8000;
-          inboundAudioFormat = "slin";
         }
+        // REMOVED: Auto-correction to 8kHz from 320-byte frames - this was WRONG!
+        // 320 bytes can be either 8kHz (20ms) OR 16kHz (10ms), cannot distinguish.
+        // The bridge sends explicit format_update messages which we should trust.
 
         // Decode to PCM for RMS calculation
         let pcmInput: Int16Array;
@@ -4426,8 +4431,12 @@ Do NOT skip any part. Say ALL of it warmly.]`
             const oldFormat = inboundAudioFormat;
             const oldRate = inboundSampleRate;
             inboundAudioFormat = data.inbound_format;
+            // Auto-set sample rate based on format if not explicitly provided (match simple mode behavior)
             if (typeof data.inbound_sample_rate === "number") {
               inboundSampleRate = data.inbound_sample_rate;
+            } else {
+              // Default: slin16 = 16000Hz, others = 8000Hz
+              inboundSampleRate = data.inbound_format === "slin16" ? 16000 : 8000;
             }
             // Log format changes for debugging
             if (oldFormat !== inboundAudioFormat || oldRate !== inboundSampleRate) {
