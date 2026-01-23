@@ -45,12 +45,14 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 try:
     import opuslib
     from opuslib import Encoder as OpusEncoder, Decoder as OpusDecoder
-    from opuslib.api import constants as opus_constants
+    # APPLICATION_VOIP = 2048 (opuslib constant, not always importable)
+    OPUS_APPLICATION_VOIP = 2048
     OPUS_AVAILABLE = True
 except ImportError:
     OPUS_AVAILABLE = False
     OpusEncoder = None
     OpusDecoder = None
+    OPUS_APPLICATION_VOIP = 2048
 
 
 # =============================================================================
@@ -175,7 +177,7 @@ class OpusCodec:
         self.frame_size = int(sample_rate * OPUS_FRAME_MS / 1000)  # samples per frame
         
         # Create encoder
-        application = opus_constants.APPLICATION_VOIP
+        application = OPUS_APPLICATION_VOIP
         self.encoder = OpusEncoder(sample_rate, channels, application)
         self.encoder.bitrate = OPUS_BITRATE
         self.encoder.complexity = OPUS_COMPLEXITY
