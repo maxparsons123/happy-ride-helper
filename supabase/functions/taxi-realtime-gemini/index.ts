@@ -90,6 +90,17 @@ serve(async (req) => {
   let audioBuffer: Uint8Array[] = [];
   let isProcessing = false;
   let silenceTimer: number | null = null;
+
+  // IMPORTANT: Asterisk streams continuous frames (including silence), so we
+  // cannot rely on a "silence timer" that resets on every frame.
+  // Instead we do energy-based VAD to detect speech segments.
+  const INPUT_FRAME_MS = 20; // AudioSocket frames are 20ms
+  const MAX_UTTERANCE_MS = 12_000;
+  const MAX_UTTERANCE_FRAMES = Math.ceil(MAX_UTTERANCE_MS / INPUT_FRAME_MS);
+  let inSpeech = false;
+  let lastSpeechAt = 0;
+  let speechFrames = 0;
+  let preSpeechFrames: Uint8Array[] = [];
   let isAiTalking = false; // Track if AI is currently speaking
   let aiStoppedAt = 0; // Timestamp when AI stopped speaking (for echo guard)
   let consecutiveSpeechFrames = 0; // Count frames above threshold for robust barge-in
@@ -651,7 +662,7 @@ serve(async (req) => {
   // Handle incoming audio data with VAD
   let audioFrameCount = 0;
   let lastAudioLog = 0;
-  
+
   const handleAudioData = (base64Audio: string) => {
     try {
       const binaryString = atob(base64Audio);
@@ -659,60 +670,100 @@ serve(async (req) => {
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      
+
       audioFrameCount++;
-      
-      // Log audio reception periodically (every 50 frames = ~1s at 20ms/frame)
       const now = Date.now();
-      if (now - lastAudioLog > 2000) {
-        const energy = calculateEnergy(bytes);
-        console.log(`[${callId}] 🎤 Audio frames: ${audioFrameCount}, buffer: ${audioBuffer.length} chunks, energy: ${energy.toFixed(4)}`);
-        lastAudioLog = now;
-      }
-      
+
       // Calculate energy for VAD
       const energy = calculateEnergy(bytes);
-      const isSpeech = energy > vadConfig.threshold * 0.1; // Scale threshold
-      
+      const speechThreshold = vadConfig.threshold * 0.1; // scale threshold
+      const isSpeech = energy > speechThreshold;
+
+      // Log audio reception periodically
+      if (now - lastAudioLog > 2000) {
+        console.log(
+          `[${callId}] 🎤 Audio frames: ${audioFrameCount}, inSpeech=${inSpeech}, speechFrames=${speechFrames}, pre=${preSpeechFrames.length}, buf=${audioBuffer.length}, energy=${energy.toFixed(4)}`,
+        );
+        lastAudioLog = now;
+      }
+
       // Barge-in detection: if user speaks while AI is talking
       // IMPORTANT: Requires sustained speech and echo guard to prevent cutoffs
       if (isAiTalking) {
         const timeSinceAiStopped = Date.now() - aiStoppedAt;
         const inEchoGuard = aiStoppedAt > 0 && timeSinceAiStopped < BARGE_IN_ECHO_GUARD_MS;
         const isStrongSpeech = energy > BARGE_IN_ENERGY_THRESHOLD;
-        
+
         if (isStrongSpeech && !inEchoGuard) {
           consecutiveSpeechFrames++;
-          
           if (consecutiveSpeechFrames >= BARGE_IN_FRAMES_REQUIRED) {
-            console.log(`[${callId}] 🛑 Barge-in detected! energy=${energy.toFixed(3)}, frames=${consecutiveSpeechFrames}`);
+            console.log(
+              `[${callId}] 🛑 Barge-in detected! energy=${energy.toFixed(3)}, frames=${consecutiveSpeechFrames}`,
+            );
             isAiTalking = false;
             aiStoppedAt = Date.now();
             consecutiveSpeechFrames = 0;
             socket.send(JSON.stringify({ type: "audio.interrupted" }));
             // Clear any pending audio
             audioBuffer = [];
-            if (silenceTimer) clearTimeout(silenceTimer);
+            preSpeechFrames = [];
+            inSpeech = false;
+            speechFrames = 0;
           }
         } else {
-          // Reset counter if below threshold or in echo guard
           consecutiveSpeechFrames = 0;
         }
       }
-      
-      audioBuffer.push(bytes);
-      
-      // Reset silence timer
-      if (silenceTimer) {
-        clearTimeout(silenceTimer);
+
+      // --- Energy-based VAD segmentation (works with continuous frames) ---
+
+      // Keep a rolling prefix buffer so we don't clip initial consonants.
+      const prefixFramesTarget = Math.max(1, Math.ceil(vadConfig.prefix_padding_ms / INPUT_FRAME_MS));
+      preSpeechFrames.push(bytes);
+      if (preSpeechFrames.length > prefixFramesTarget) {
+        preSpeechFrames = preSpeechFrames.slice(-prefixFramesTarget);
       }
-      
-      // Start silence timer - process after configured silence duration
-      silenceTimer = setTimeout(() => {
-        console.log(`[${callId}] 🔇 Silence detected, buffer has ${audioBuffer.length} chunks`);
-        processAudioPipeline();
-      }, vadConfig.silence_duration_ms);
-      
+
+      if (!inSpeech) {
+        // Start of speech
+        if (isSpeech) {
+          inSpeech = true;
+          lastSpeechAt = now;
+          speechFrames = 0;
+          audioBuffer = [...preSpeechFrames];
+          console.log(
+            `[${callId}] 🗣️ Speech start (energy=${energy.toFixed(4)}), prefixFrames=${preSpeechFrames.length}`,
+          );
+        } else {
+          // Ignore non-speech frames when not inSpeech.
+          return;
+        }
+      }
+
+      // In speech: accumulate frames
+      audioBuffer.push(bytes);
+      speechFrames++;
+      if (isSpeech) lastSpeechAt = now;
+
+      const silenceMs = now - lastSpeechAt;
+      const shouldEnd = silenceMs >= vadConfig.silence_duration_ms;
+      const tooLong = speechFrames >= MAX_UTTERANCE_FRAMES;
+
+      if (tooLong) {
+        console.log(`[${callId}] ⏱️ Max utterance reached (${MAX_UTTERANCE_MS}ms), processing...`);
+      }
+
+      if (shouldEnd || tooLong) {
+        console.log(
+          `[${callId}] ✅ Speech end (silence=${silenceMs}ms, frames=${speechFrames}, bytes≈${audioBuffer.reduce((a, c) => a + c.length, 0)})`,
+        );
+        inSpeech = false;
+        speechFrames = 0;
+        preSpeechFrames = [];
+
+        // Trigger pipeline; it will clear audioBuffer internally.
+        void processAudioPipeline();
+      }
     } catch (e) {
       console.error(`[${callId}] Audio decode error:`, e);
     }
