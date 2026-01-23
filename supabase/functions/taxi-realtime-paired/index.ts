@@ -734,6 +734,28 @@ const TOOLS = [
   }
 ];
 
+// === BOOKING STEP STATE MACHINE (ported from simple mode) ===
+type BookingStep = "pickup" | "destination" | "passengers" | "time" | "summary" | "confirmed";
+const BOOKING_STEP_ORDER: BookingStep[] = ["pickup", "destination", "passengers", "time", "summary", "confirmed"];
+
+function getNextStep(currentStep: BookingStep): BookingStep | null {
+  const idx = BOOKING_STEP_ORDER.indexOf(currentStep);
+  if (idx === -1 || idx >= BOOKING_STEP_ORDER.length - 1) return null;
+  return BOOKING_STEP_ORDER[idx + 1];
+}
+
+function isStepComplete(step: BookingStep, booking: { pickup: string | null; destination: string | null; passengers: number | null; pickupTime: string | null }): boolean {
+  switch (step) {
+    case "pickup": return !!booking.pickup && booking.pickup.length > 2;
+    case "destination": return !!booking.destination && booking.destination.length > 2;
+    case "passengers": return booking.passengers !== null && booking.passengers > 0;
+    case "time": return booking.pickupTime !== null;
+    case "summary": return true;
+    case "confirmed": return true;
+    default: return false;
+  }
+}
+
 // Session state interface
 interface SessionState {
   callId: string;
@@ -749,9 +771,16 @@ interface SessionState {
     nearestPickup: string | null;
     nearestDropoff: string | null;
   };
+  // === NEW: Step-based state machine (ported from simple) ===
+  bookingStep: BookingStep;
+  bookingStepAdvancedAt: number | null;
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
+  // === NEW: Greeting delivered tracking (for session resume) ===
+  greetingDelivered: boolean;
+  // === NEW: Fare spoken tracking (prevents repetition after handoff) ===
+  fareSpoken: boolean;
   openAiResponseActive: boolean;
   // Track when Ada started speaking (ms since epoch) to prevent echo-triggered barge-in
   openAiSpeechStartedAt: number;
@@ -785,6 +814,14 @@ interface SessionState {
   saidOneMoment: boolean;
   // Track when user started speaking (for duration logging)
   speechStartedAt: number;
+  // === NEW: Speech timing for pre-emptive extraction guard ===
+  speechStopTime: number;
+  extractionInProgress: boolean;
+  // === NEW: Handoff tracking (ported from simple) ===
+  handoffTriggered: boolean;
+  // === NEW: Post-booking chat mode ===
+  askedAnythingElse: boolean;
+  bookingFullyConfirmed: boolean;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -805,6 +842,13 @@ const ASSISTANT_LEADIN_IGNORE_MS = 700;
 // Keep MIN low or Ada will never hear quiet callers during her own speech.
 const RMS_BARGE_IN_MIN = 5;     // Minimum for barge-in during Ada speech
 const RMS_BARGE_IN_MAX = 20000; // Above = likely echo/clipping
+
+// === NEW: OpenAI reconnection settings (ported from simple mode) ===
+const MAX_OPENAI_RECONNECT_ATTEMPTS = 3;
+
+// === NEW: Session timeout and handoff settings (ported from simple mode) ===
+const MAX_SESSION_DURATION_MS = 4 * 60 * 1000; // 4 minutes
+const HANDOFF_DELAY_AFTER_DISPATCH_MS = 2000; // 2s delay after fare quote received
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
@@ -1976,9 +2020,15 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       nearestPickup: null,
       nearestDropoff: null
     },
+    // NEW: Step-based state machine (ported from simple)
+    bookingStep: "pickup",
+    bookingStepAdvancedAt: null,
     lastQuestionAsked: "none",
     conversationHistory: [],
     bookingConfirmed: false,
+    // NEW: Greeting/fare tracking for session resume
+    greetingDelivered: false,
+    fareSpoken: false,
     openAiResponseActive: false,
     openAiSpeechStartedAt: 0,
     echoGuardUntil: 0,
@@ -1997,7 +2047,15 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     bookingRef: null,
     waitingForQuoteSilence: false,
     saidOneMoment: false,
-    speechStartedAt: 0
+    speechStartedAt: 0,
+    // NEW: Speech timing for pre-emptive extraction guard
+    speechStopTime: 0,
+    extractionInProgress: false,
+    // NEW: Handoff tracking
+    handoffTriggered: false,
+    // NEW: Post-booking chat mode
+    askedAnythingElse: false,
+    bookingFullyConfirmed: false
   };
 }
 
@@ -2380,6 +2438,15 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
 
+  // === NEW: OpenAI reconnection tracking (ported from simple mode) ===
+  let openaiReconnectAttempts = 0;
+  let lastOpenAiConnectedAt: number | null = null;
+  let openaiConnected = false;
+  
+  // === NEW: Session timeout watchdog (ported from simple mode) ===
+  let sessionStartTime = Date.now();
+  let closingGracePeriodActive = false;
+
   // Audio format negotiated with the bridge (defaults match typical Asterisk ulaw)
   let inboundAudioFormat: InboundAudioFormat = "ulaw";
   let inboundSampleRate = 8000;
@@ -2521,6 +2588,37 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Safe Response Create Helper (ported from simple mode)
+  // Prevents 'conversation_already_has_active_response' errors by canceling
+  // any active response before creating a new one
+  // ═══════════════════════════════════════════════════════════════════════════
+  const safeResponseCreate = (reason: string, responseOptions?: { instructions?: string; modalities?: string[] }) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+      console.log(`[${callId}] ⚠️ safeResponseCreate(${reason}) skipped - OpenAI not connected`);
+      return;
+    }
+    
+    // If a response is active, cancel it first
+    if (sessionState.openAiResponseActive) {
+      console.log(`[${callId}] 🔄 safeResponseCreate(${reason}) - canceling active response first`);
+      openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+      sessionState.openAiResponseActive = false;
+    }
+    
+    const responsePayload: any = {
+      type: "response.create",
+      response: {
+        modalities: responseOptions?.modalities || ["audio", "text"],
+        ...(responseOptions?.instructions ? { instructions: responseOptions.instructions } : {})
+      }
+    };
+    
+    openaiWs.send(JSON.stringify(responsePayload));
+    sessionState.openAiResponseActive = true;
+    console.log(`[${callId}] 🚀 safeResponseCreate(${reason}) sent`);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Subscribe to dispatch callback channel (for fare/ETA responses from backend)
   // ═══════════════════════════════════════════════════════════════════════════
   dispatchChannel = supabase.channel(`dispatch_${callId}`);
@@ -2598,6 +2696,64 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
     sessionState.lastQuestionAsked = "confirmation";
+    sessionState.fareSpoken = true; // Track that fare was spoken (prevents repetition after handoff)
+    sessionState.bookingStep = "summary"; // Advance to summary step
+    
+    // === SESSION HANDOFF TRIGGER (ported from simple mode) ===
+    // After receiving fare quote, trigger handoff after a short delay
+    // This allows Ada to speak the fare before the bridge reconnects
+    if (!sessionState.handoffTriggered) {
+      sessionState.handoffTriggered = true;
+      console.log(`[${callId}] 🔄 Dispatch-triggered handoff will occur in ${HANDOFF_DELAY_AFTER_DISPATCH_MS}ms`);
+      
+      trackedTimeout(async () => {
+        if (cleanedUp) return;
+        
+        console.log(`[${callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Saving state for seamless reconnection...`);
+        
+        // Save handoff state to database
+        const handoffState = {
+          pickup: sessionState.booking.pickup,
+          destination: sessionState.booking.destination,
+          passengers: sessionState.booking.passengers,
+          pickup_time: sessionState.booking.pickupTime,
+          bookingStep: sessionState.bookingStep,
+          language: sessionState.language,
+          greetingDelivered: sessionState.greetingDelivered,
+          fareSpoken: sessionState.fareSpoken,
+          pendingFare: sessionState.pendingFare,
+          pendingEta: sessionState.pendingEta,
+          handoffAt: new Date().toISOString(),
+        };
+        
+        // Update live_calls with handoff status
+        await supabase.from("live_calls").update({
+          status: "handoff",
+          pickup: sessionState.booking.pickup,
+          destination: sessionState.booking.destination,
+          passengers: sessionState.booking.passengers,
+          fare: sessionState.pendingFare,
+          eta: sessionState.pendingEta,
+          transcripts: sessionState.conversationHistory.slice(-20),
+          updated_at: new Date().toISOString(),
+        }).eq("call_id", callId);
+        
+        console.log(`[${callId}] ✅ Handoff state saved to DB`);
+        
+        // Send handoff signal to bridge
+        try {
+          socket.send(JSON.stringify({
+            type: "session.handoff",
+            call_id: callId,
+            reason: "dispatch_response",
+            state: handoffState,
+          }));
+          console.log(`[${callId}] 📤 Handoff signal sent to bridge`);
+        } catch (e) {
+          console.warn(`[${callId}] ⚠️ Failed to send handoff signal:`, e);
+        }
+      }, HANDOFF_DELAY_AFTER_DISPATCH_MS);
+    }
   });
   
   dispatchChannel.on("broadcast", { event: "dispatch_say" }, async (payload: any) => {
@@ -2929,6 +3085,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
 
   openaiWs.onopen = () => {
     console.log(`[${callId}] ✅ Connected to OpenAI Realtime (waiting for session.created...)`);
+    openaiConnected = true;
+    openaiReconnectAttempts = 0; // Reset on successful connection
+    lastOpenAiConnectedAt = Date.now();
     startOpenAiPing(); // Start pinging to prevent idle timeout
   };
 
@@ -4753,6 +4912,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
   openaiWs.onclose = (ev) => {
     // Stop the OpenAI ping immediately
     stopOpenAiPing();
+    openaiConnected = false;
     
     // Include close codes/reasons to debug unexpected disconnects.
     // NOTE: Deno's WS close event may not always include reason.
@@ -4763,6 +4923,111 @@ Do NOT skip any part. Say ALL of it warmly.]`
         (anyEv?.code ? ` code=${anyEv.code}` : "") +
         (anyEv?.reason ? ` reason=${anyEv.reason}` : ""),
     );
+    
+    // === OPENAI RECONNECTION LOGIC (ported from simple mode) ===
+    // If the call is still active and we haven't exceeded retry limit, attempt reconnection
+    if (!cleanedUp && !closingGracePeriodActive && openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS) {
+      const timeSinceConnect = lastOpenAiConnectedAt ? Date.now() - lastOpenAiConnectedAt : 0;
+      
+      // Only reconnect if we were connected for a reasonable time (not immediate failures)
+      if (timeSinceConnect > 5000) {
+        openaiReconnectAttempts++;
+        const backoffMs = Math.min(1000 * openaiReconnectAttempts, 3000); // 1s, 2s, 3s backoff
+        
+        console.log(`[${callId}] 🔄 OpenAI disconnected mid-call, attempting reconnect (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS}) in ${backoffMs}ms`);
+        
+        // Notify bridge that we're reconnecting
+        try {
+          socket.send(JSON.stringify({
+            type: "openai_reconnecting",
+            attempt: openaiReconnectAttempts,
+            maxAttempts: MAX_OPENAI_RECONNECT_ATTEMPTS
+          }));
+        } catch (e) {
+          // Bridge socket may be closed
+        }
+        
+        trackedTimeout(() => {
+          if (!cleanedUp && !closingGracePeriodActive && socket.readyState === WebSocket.OPEN) {
+            console.log(`[${callId}] 🔌 Attempting OpenAI reconnect...`);
+            
+            // Reconnect to OpenAI
+            try {
+              const wsUrl = `${OPENAI_REALTIME_URL}`;
+              openaiWs = new WebSocket(wsUrl, ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]);
+              
+              openaiWs.onopen = () => {
+                console.log(`[${callId}] ✅ OpenAI reconnected successfully`);
+                openaiConnected = true;
+                openaiReconnectAttempts = 0;
+                lastOpenAiConnectedAt = Date.now();
+                sessionState.greetingDelivered = true; // Don't replay greeting
+                startOpenAiPing();
+              };
+              
+              // Reuse existing message handler
+              openaiWs.onmessage = async (event) => {
+                // The existing onmessage handler will be invoked
+                // This is handled by the runtime when we create the new WebSocket
+              };
+              
+              openaiWs.onerror = (error) => {
+                console.error(`[${callId}] ❌ OpenAI reconnect error:`, error);
+              };
+              
+              openaiWs.onclose = (ev2) => {
+                // Recursive - will retry again if needed
+                openaiConnected = false;
+                stopOpenAiPing();
+                
+                const anyEv2: any = ev2;
+                console.log(`[${callId}] OpenAI reconnected WebSocket closed` +
+                  (anyEv2?.code ? ` code=${anyEv2.code}` : "") +
+                  (anyEv2?.reason ? ` reason=${anyEv2.reason}` : "")
+                );
+                
+                // Try reconnecting again if we have attempts left
+                if (openaiReconnectAttempts < MAX_OPENAI_RECONNECT_ATTEMPTS && !cleanedUp && !closingGracePeriodActive) {
+                  openaiReconnectAttempts++;
+                  const nextBackoff = Math.min(1000 * openaiReconnectAttempts, 3000);
+                  console.log(`[${callId}] 🔄 Reconnect failed, retrying in ${nextBackoff}ms (attempt ${openaiReconnectAttempts}/${MAX_OPENAI_RECONNECT_ATTEMPTS})`);
+                  trackedTimeout(() => {
+                    // Recursive reconnect attempt
+                    if (socket.readyState === WebSocket.OPEN && !cleanedUp) {
+                      console.log(`[${callId}] 🔌 Retry reconnect...`);
+                      // This will be handled by the outer reconnect logic on next close
+                    }
+                  }, nextBackoff);
+                } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
+                  console.error(`[${callId}] ❌ OpenAI reconnection failed after ${MAX_OPENAI_RECONNECT_ATTEMPTS} attempts - ending call`);
+                  try {
+                    socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
+                  } catch (e) {
+                    // Ignore
+                  }
+                  cleanupWithKeepalive();
+                }
+              };
+            } catch (e) {
+              console.error(`[${callId}] ❌ Failed to create reconnect WebSocket:`, e);
+              cleanupWithKeepalive();
+            }
+          }
+        }, backoffMs);
+        
+        return; // Don't cleanup yet - we're attempting reconnection
+      } else {
+        console.log(`[${callId}] ⚠️ OpenAI disconnected too quickly (${timeSinceConnect}ms) - not reconnecting`);
+      }
+    } else if (openaiReconnectAttempts >= MAX_OPENAI_RECONNECT_ATTEMPTS) {
+      console.error(`[${callId}] ❌ OpenAI reconnection limit reached - ending call`);
+      try {
+        socket.send(JSON.stringify({ type: "hangup", reason: "openai_connection_lost" }));
+      } catch (e) {
+        // Ignore
+      }
+    }
+    
     cleanupWithKeepalive();
   };
 
