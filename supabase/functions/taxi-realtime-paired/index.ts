@@ -3187,9 +3187,41 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           if (data.transcript) {
             const rawText = data.transcript.trim();
             // Apply STT corrections for common telephony mishearings
-            const userText = correctTranscript(rawText);
+            let userText = correctTranscript(rawText);
             if (userText !== rawText) {
               console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // CONTEXT-AWARE SEVEN→THREE CORRECTION
+            // When asking about passengers AND previous address had "7",
+            // "seven" is very likely misheard "three" (phonetic confusion)
+            // ═══════════════════════════════════════════════════════════════════
+            if (sessionState.lastQuestionAsked === "passengers") {
+              const lowerText = userText.toLowerCase();
+              const prevDest = sessionState.booking.destination?.toLowerCase() || "";
+              const prevPickup = sessionState.booking.pickup?.toLowerCase() || "";
+              const addressHad7 = /\b7\b/.test(prevDest) || /\b7\b/.test(prevPickup);
+              
+              // Check if user said "seven" or "7 passengers" when we expect passengers
+              const saidSeven = /\bseven\b|\b7\s*passengers?\b|\b7\s*people\b/i.test(lowerText);
+              
+              if (addressHad7 && saidSeven) {
+                // Strong signal: previous address had "7", now user says "seven" for passengers
+                // This is almost certainly "three" being misheard due to audio context bleed
+                console.log(`[${callId}] 🔄 CONTEXT STT FIX: Detected "seven" after "7 [street]" - correcting to "three"`);
+                
+                // Replace "seven" → "three" and "7 passengers" → "3 passengers"
+                userText = userText
+                  .replace(/\bseven\s+passengers?\b/gi, "three passengers")
+                  .replace(/\b7\s+passengers?\b/gi, "3 passengers")
+                  .replace(/\bseven\s+people\b/gi, "three people")
+                  .replace(/\b7\s+people\b/gi, "3 people")
+                  .replace(/\bseven\b/gi, "three")
+                  .replace(/\b7\b/g, "3");
+                
+                console.log(`[${callId}] ✅ Corrected passenger transcript: "${rawText}" → "${userText}"`);
+              }
             }
             
             // Filter out phantom hallucinations from Whisper
