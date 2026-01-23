@@ -4583,15 +4583,27 @@ Then IMMEDIATELY call end_call().`
                       sessionState.booking.destination = aiResult.destination;
                       updated = true;
                     }
-                    if (aiResult.passengers !== null && sessionState.booking.passengers === null) {
-                      console.log(`[${callId}] 🧠 AI FILL passengers: ${aiResult.passengers}`);
+                    // GUARD: Only fill passengers if AI explicitly extracted it AND it's not a default value
+                    // The AI often returns passengers=1 as a default even when user didn't mention it
+                    const passengerMentioned = /\b(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\s*(passenger|people|person|of us)?s?\b/i.test(userText) ||
+                                                /\bjust\s*(me|myself)\b/i.test(userText);
+                    if (aiResult.passengers !== null && sessionState.booking.passengers === null && passengerMentioned) {
+                      console.log(`[${callId}] 🧠 AI FILL passengers: ${aiResult.passengers} (user said: "${userText}")`);
                       sessionState.booking.passengers = aiResult.passengers;
                       updated = true;
+                    } else if (aiResult.passengers !== null && sessionState.booking.passengers === null) {
+                      console.log(`[${callId}] ⚠️ AI FILL passengers BLOCKED: ${aiResult.passengers} (user didn't explicitly mention passengers)`);
                     }
-                    if (aiResult.pickup_time && !sessionState.booking.pickupTime) {
-                      console.log(`[${callId}] 🧠 AI FILL time: "${aiResult.pickup_time}"`);
+                    
+                    // GUARD: Only fill time if AI explicitly extracted it AND it's not just "ASAP" as a default
+                    // The AI often returns "ASAP" when user didn't mention time at all
+                    const timeMentioned = /\b(asap|now|immediately|right now|straight away|soon|in \d+ minutes?|at \d+|tomorrow|later|morning|afternoon|evening|tonight)\b/i.test(userText);
+                    if (aiResult.pickup_time && !sessionState.booking.pickupTime && timeMentioned) {
+                      console.log(`[${callId}] 🧠 AI FILL time: "${aiResult.pickup_time}" (user said: "${userText}")`);
                       sessionState.booking.pickupTime = aiResult.pickup_time;
                       updated = true;
+                    } else if (aiResult.pickup_time && !sessionState.booking.pickupTime) {
+                      console.log(`[${callId}] ⚠️ AI FILL time BLOCKED: "${aiResult.pickup_time}" (user didn't explicitly mention time)`);
                     }
                   }
                   
