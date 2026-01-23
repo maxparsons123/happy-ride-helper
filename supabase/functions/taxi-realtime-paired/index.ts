@@ -1470,6 +1470,14 @@ function detectAddressCorrection(text: string, currentPickup: string | null, cur
     /^not\s+(.+)[,\s]+(?:it'?s|but)\s+(.+)/i,          // "Not 52A, it's 52B"
     /^(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(.+)/i,  // "Pickup is at Sweet Spot" (without "no")
     /^from\s+(.+)/i,                                    // "From Sweet Spot" (if context suggests correction)
+    // === NEW PATTERNS: Mid-sentence "pick up [at/the] X" ===
+    /(?:but\s+)?(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,  // "but pick up the Sweet Spot please"
+    /(?:but\s+)?(?:pick[- ]?up|pickup)\s+from\s+(?:the\s+)?(.+?)(?:\s+please)?$/i,     // "but pick up from Sweet Spot"
+    /(?:can\s+(?:you|i)\s+)?(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,  // "can you pick up the Sweet Spot"
+    /(?:change|make)\s+(?:it\s+)?(?:to\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i,          // "make it the Sweet Spot please"
+    // === NEW PATTERNS: "no [something], but [actual change]" ===
+    /^no\s+[\w\s]+[,\s]+but\s+(?:pick[- ]?up|pickup)\s+(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i, // "No key change, but pick up the Sweet Spot please"
+    /^no\s+[\w\s]+[,\s]+(?:pick[- ]?up|pickup)\s+(?:is\s+)?(?:at\s+)?(?:the\s+)?(.+?)(?:\s+please)?$/i, // "No key change, pickup is the Sweet Spot"
   ];
   
   let extractedAddress: string | null = null;
