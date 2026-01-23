@@ -481,7 +481,7 @@ LOCATION EXTRACTION:
 • "from X" or "pick up from X" or "pick me up at X" or "collect me from X" → pickup_location = X
 • "to Y" or "going to Y" or "heading to Y" or "take me to Y" → dropoff_location = Y
 • If 'nearest' or 'closest' is mentioned, include in pickup_location
-• If no drop-off given or "as directed" → dropoff_location = "as directed"
+• If no drop-off given → leave dropoff_location EMPTY (agent will ask)
 
 CRITICAL - "at X" CLARIFICATION RULE:
 • If user ONLY says "at X" or "the X" without "from", "to", "going", etc.:
