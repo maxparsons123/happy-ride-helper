@@ -3458,11 +3458,17 @@ Otherwise, say goodbye warmly and call end_call().`
               
               console.log(`[${callId}] 🔄 ADDRESS CORRECTION DETECTED: ${correction.type} "${oldValue}" → "${correction.address}"`);
               
-              // Update the booking state immediately
+              // Update the booking state IMMEDIATELY (before any OpenAI response)
               if (correction.type === "pickup") {
                 sessionState.booking.pickup = correction.address;
               } else {
                 sessionState.booking.destination = correction.address;
+              }
+              
+              // If we already have a fare, reset it - correction means we need a new quote
+              if (sessionState.pendingFare) {
+                console.log(`[${callId}] 💰 Resetting fare due to address correction`);
+                sessionState.pendingFare = null;
               }
               
               // Add to history with correction annotation
@@ -3472,7 +3478,19 @@ Otherwise, say goodbye warmly and call end_call().`
                 timestamp: Date.now()
               });
               
-              // Tell OpenAI about the correction so Ada acknowledges it
+              // CANCEL any in-progress response to prevent old state from being used
+              if (sessionState.openAiResponseActive) {
+                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
+              
+              // Build the corrected state for the summary
+              const correctedPickup = sessionState.booking.pickup || "not yet provided";
+              const correctedDest = sessionState.booking.destination || "not yet provided";
+              const correctedPax = sessionState.booking.passengers ?? "not yet provided";
+              const correctedTime = sessionState.booking.pickupTime || "ASAP";
+              
+              // STRONGER instruction: Tell OpenAI the EXACT updated state and forbid old values
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -3480,15 +3498,24 @@ Otherwise, say goodbye warmly and call end_call().`
                   role: "system",
                   content: [{
                     type: "input_text",
-                    text: `[ADDRESS CORRECTION] The user just corrected their ${correction.type} address to: "${correction.address}". 
-                    
-IMPORTANT: Update your understanding. The ${correction.type} is now "${correction.address}" (not the previous value).
-DO NOT ask them to confirm this change - just acknowledge briefly and continue to the next step.
-Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
+                    text: `[CRITICAL ADDRESS UPDATE]
+The user corrected their ${correction.type}. The OLD value "${oldValue}" is WRONG and must NEVER be mentioned again.
+
+## UPDATED BOOKING STATE (USE ONLY THESE VALUES):
+- Pickup: ${correctedPickup}
+- Destination: ${correctedDest}  
+- Passengers: ${correctedPax}
+- Time: ${correctedTime}
+
+INSTRUCTIONS:
+1. Acknowledge the correction briefly: "Got it, ${correction.type} is now ${correction.address}."
+2. If all 4 fields are captured, proceed to summarize the booking using ONLY the values above.
+3. NEVER mention "${oldValue}" - that was incorrect.`
                   }]
                 }
               }));
               openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              sessionState.openAiResponseActive = true;
               
               await updateLiveCall(sessionState);
               break; // Correction handled, don't run normal context pairing
