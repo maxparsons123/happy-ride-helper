@@ -3997,8 +3997,11 @@ Do NOT skip any part. Say ALL of it warmly.]`
 
           // CONFIRMATION BARGE-IN: if we're awaiting a YES/NO and the user starts speaking while
           // Ada is still delivering the quote prompt, cancel Ada once so the user's "yes" isn't ignored.
+          // CRITICAL FIX: Only allow barge-in if awaitingConfirmation is TRUE (meaning quote was received).
+          // Do NOT barge-in just because lastQuestionAsked === "confirmation" - that's set BEFORE Ada
+          // speaks the summary, so background noise would cancel the summary prematurely.
           if (
-            (sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation") &&
+            sessionState.awaitingConfirmation &&  // MUST have received quote - not just "confirmation" step
             Date.now() < sessionState.summaryProtectionUntil &&
             sessionState.openAiResponseActive &&
             !sessionState.confirmationBargeInCancelled
