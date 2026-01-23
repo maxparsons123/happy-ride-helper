@@ -1874,12 +1874,29 @@ function matchesUserText(proposed: string, userText: string, minRatio = 0.5): bo
 
 // For corrections specifically, be even more lenient
 function matchesUserTextForCorrection(proposed: string, userText: string): boolean {
-  // For corrections, just check if key components are present
+  // For corrections, check if key components are present with very lenient matching
   const p = proposed.toLowerCase().trim();
   const u = userText.toLowerCase();
   
+  // Normalize STT variations: "two" → "to", "too" → "to" 
+  const normalizedUser = u
+    .replace(/\btwo\b/gi, "to")
+    .replace(/\btoo\b/gi, "to");
+  
   // Direct substring in either direction
-  if (p.length >= 3 && (u.includes(p) || p.includes(u.replace(/[^a-z0-9\s]/g, "").trim()))) return true;
+  if (p.length >= 3 && (normalizedUser.includes(p) || p.includes(normalizedUser.replace(/[^a-z0-9\s]/g, "").trim()))) return true;
+  
+  // Check if user text contains any significant words from proposed (2+ chars)
+  const proposedWords = p.split(/\s+/).filter(w => w.length >= 2);
+  const userWords = normalizedUser.split(/\s+/).filter(w => w.length >= 2);
+  
+  // If at least one significant word matches, it's likely correct
+  // This handles "Sweet Spot" matching "the Sweet Spot please"
+  for (const pw of proposedWords) {
+    if (userWords.some(uw => uw.includes(pw) || pw.includes(uw))) {
+      return true;
+    }
+  }
   
   // Extract numbers from both
   const propNums = p.match(/\d+[a-zA-Z]?/g) || [];
@@ -1894,8 +1911,14 @@ function matchesUserTextForCorrection(proposed: string, userText: string): boole
     }
   }
   
+  // Check for known venues - if proposed is a known venue that appears in user text
+  const proposedVenue = containsKnownVenue(p);
+  if (proposedVenue && normalizedUser.includes(proposedVenue.replace(/^the\s+/, ""))) {
+    return true;
+  }
+  
   // Fall back to standard matching with lower threshold
-  return matchesUserText(proposed, userText, 0.4);
+  return matchesUserText(proposed, userText, 0.3); // Even lower threshold for corrections
 }
 
 
@@ -3509,6 +3532,36 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               break;
             }
             
+            // ═══════════════════════════════════════════════════════════════════
+            // AFFIRMATIVE DETECTION - Prevent "That's right" → "three passengers" hallucination
+            // ═══════════════════════════════════════════════════════════════════
+            const isAffirmativeResponse = /^\s*(yes|yeah|yep|yup|correct|that's right|thats right|that is right|that's correct|right|exactly|perfect|absolutely|affirmative|uh-huh|sure|okay|ok|go ahead|please|lovely|wonderful|great)\s*[.!,]?\s*$/i.test(userText);
+            
+            // If this is an affirmative response to PASSENGERS question, DO NOT let it become passenger count
+            if (isAffirmativeResponse && sessionState.lastQuestionAsked === "passengers") {
+              console.log(`[${callId}] 🛡️ AFFIRMATIVE GUARD: "${userText}" is not a passenger count - asking Ada to clarify`);
+              
+              // Inject clarification request - the user confirmed something, not gave passenger count
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[AFFIRMATIVE DETECTED - NOT PASSENGER COUNT]
+The user said "${userText}" which is an AFFIRMATIVE response (yes/correct/right), NOT a passenger count.
+This might mean they confirmed something you said earlier, or they're agreeing but haven't answered yet.
+
+DO NOT interpret this as "three passengers" or any number.
+Ask for the NUMBER of passengers clearly: "How many passengers will be traveling?"`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              break; // Don't process further
+            }
+            
             // Forward user transcript to bridge for logging (like simple mode)
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({
@@ -3572,6 +3625,124 @@ Otherwise, say goodbye warmly and call end_call().`
             // Save for tool-call validation (prevents hallucinated overwrites)
             sessionState.lastUserText = userText;
             
+            // ═══════════════════════════════════════════════════════════════════
+            // EXPLICIT PICKUP/DESTINATION CHANGE DETECTION (before AI extraction)
+            // Patterns like "change the pickup to X" or "can I change pickup to X"
+            // ═══════════════════════════════════════════════════════════════════
+            const lowerUserText = userText.toLowerCase();
+            const pickupChangeMatch = lowerUserText.match(/(?:change|update|switch|make)\s+(?:the\s+)?pick[\s-]?up\s+(?:to|two)\s+(?:the\s+)?(.+)/i) ||
+                                      lowerUserText.match(/pick[\s-]?up\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i) ||
+                                      lowerUserText.match(/(?:can i|could i|i want to)\s+change\s+(?:the\s+)?pick[\s-]?up\s+(?:to|two)\s+(?:the\s+)?(.+)/i);
+            const destChangeMatch = lowerUserText.match(/(?:change|update|switch|make)\s+(?:the\s+)?destination\s+(?:to|two)\s+(?:the\s+)?(.+)/i) ||
+                                    lowerUserText.match(/destination\s+(?:should be|is|to)\s+(?:the\s+)?(.+)/i) ||
+                                    lowerUserText.match(/(?:can i|could i|i want to)\s+change\s+(?:the\s+)?destination\s+(?:to|two)\s+(?:the\s+)?(.+)/i);
+            
+            if (pickupChangeMatch && pickupChangeMatch[1]) {
+              const newPickup = pickupChangeMatch[1].replace(/please\s*$/i, "").trim();
+              console.log(`[${callId}] 🔄 EXPLICIT PICKUP CHANGE DETECTED: "${sessionState.booking.pickup}" → "${newPickup}"`);
+              
+              const oldPickup = sessionState.booking.pickup;
+              sessionState.booking.pickup = newPickup;
+              
+              // Reset fare since pickup changed
+              if (sessionState.pendingFare) {
+                console.log(`[${callId}] 💰 Resetting fare due to pickup change`);
+                sessionState.pendingFare = null;
+                sessionState.pendingEta = null;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuoteRequestedAt = 0;
+              }
+              
+              // Cancel any in-progress response
+              if (sessionState.openAiResponseActive) {
+                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
+              
+              // Tell Ada about the change
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[PICKUP CHANGED BY USER]
+The user changed the pickup from "${oldPickup || 'empty'}" to "${newPickup}".
+
+## UPDATED BOOKING STATE:
+- Pickup: ${newPickup}
+- Destination: ${sessionState.booking.destination || "not yet provided"}
+- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
+- Time: ${sessionState.booking.pickupTime || "ASAP"}
+
+INSTRUCTIONS:
+1. Acknowledge briefly: "Got it, pickup is now ${newPickup}."
+2. If all 4 fields are complete, summarize and ask for confirmation
+3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              sessionState.openAiResponseActive = true;
+              await updateLiveCall(sessionState);
+              break; // Handled the pickup change
+            }
+            
+            if (destChangeMatch && destChangeMatch[1]) {
+              const newDest = destChangeMatch[1].replace(/please\s*$/i, "").trim();
+              console.log(`[${callId}] 🔄 EXPLICIT DESTINATION CHANGE DETECTED: "${sessionState.booking.destination}" → "${newDest}"`);
+              
+              const oldDest = sessionState.booking.destination;
+              sessionState.booking.destination = newDest;
+              
+              // Reset fare since destination changed
+              if (sessionState.pendingFare) {
+                console.log(`[${callId}] 💰 Resetting fare due to destination change`);
+                sessionState.pendingFare = null;
+                sessionState.pendingEta = null;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuoteRequestedAt = 0;
+              }
+              
+              // Cancel any in-progress response
+              if (sessionState.openAiResponseActive) {
+                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                sessionState.openAiResponseActive = false;
+              }
+              
+              // Tell Ada about the change
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[DESTINATION CHANGED BY USER]
+The user changed the destination from "${oldDest || 'empty'}" to "${newDest}".
+
+## UPDATED BOOKING STATE:
+- Pickup: ${sessionState.booking.pickup || "not yet provided"}
+- Destination: ${newDest}
+- Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
+- Time: ${sessionState.booking.pickupTime || "ASAP"}
+
+INSTRUCTIONS:
+1. Acknowledge briefly: "Got it, destination is now ${newDest}."
+2. If all 4 fields are complete, summarize and ask for confirmation
+3. If any price/ETA was quoted before, it's now invalid - you'll need to get a new quote`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              sessionState.openAiResponseActive = true;
+              await updateLiveCall(sessionState);
+              break; // Handled the destination change
+            }
+            
             if (USE_AI_EXTRACTION) {
               console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
               
@@ -3593,16 +3764,32 @@ Otherwise, say goodbye warmly and call end_call().`
                     // Track what changed for the system message
                     const changes: string[] = [];
                     
-                    // Apply the AI's corrected values using the LENIENT correction matcher
-                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup && matchesUserTextForCorrection(aiResult.pickup, userText)) {
-                      const oldValue = sessionState.booking.pickup;
-                      sessionState.booking.pickup = aiResult.pickup;
-                      changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
+                    // For corrections, be more lenient - trust AI extraction for known venues
+                    // Apply the AI's corrected values
+                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup) {
+                      // Accept if it's a known venue OR if it passes lenient matching
+                      const isKnownVenue = containsKnownVenue(aiResult.pickup) !== null;
+                      const passesLenientMatch = matchesUserTextForCorrection(aiResult.pickup, userText);
+                      
+                      if (isKnownVenue || passesLenientMatch) {
+                        const oldValue = sessionState.booking.pickup;
+                        sessionState.booking.pickup = aiResult.pickup;
+                        changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
+                      } else {
+                        console.log(`[${callId}] ⚠️ AI pickup correction rejected: "${aiResult.pickup}" not in user text "${userText}"`);
+                      }
                     }
-                    if (aiResult.fields_changed.includes("destination") && aiResult.destination && matchesUserTextForCorrection(aiResult.destination, userText)) {
-                      const oldValue = sessionState.booking.destination;
-                      sessionState.booking.destination = aiResult.destination;
-                      changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
+                    if (aiResult.fields_changed.includes("destination") && aiResult.destination) {
+                      const isKnownVenue = containsKnownVenue(aiResult.destination) !== null;
+                      const passesLenientMatch = matchesUserTextForCorrection(aiResult.destination, userText);
+                      
+                      if (isKnownVenue || passesLenientMatch) {
+                        const oldValue = sessionState.booking.destination;
+                        sessionState.booking.destination = aiResult.destination;
+                        changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
+                      } else {
+                        console.log(`[${callId}] ⚠️ AI destination correction rejected: "${aiResult.destination}" not in user text "${userText}"`);
+                      }
                     }
                     if (aiResult.fields_changed.includes("passengers") && aiResult.passengers !== null) {
                       const oldValue = sessionState.booking.passengers;
