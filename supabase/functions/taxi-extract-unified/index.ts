@@ -62,6 +62,17 @@ ${callerCity ? `Default city: ${callerCity}` : ""}
 ${aliasInstruction}
 
 ==================================================
+INTENT DETECTION (REQUIRED)
+==================================================
+You MUST set the 'intent' field based on user's message:
+• "new_booking" - User wants to book a taxi (first time, no existing booking)
+• "update_booking" - User is modifying an existing booking field
+• "confirm_booking" - User says "yes", "correct", "confirm", "that's right"
+• "cancel_booking" - User wants to cancel
+• "get_status" - User asks "where is my taxi", "ETA", "how long"
+• "other" - Unrelated to booking
+
+==================================================
 EXTRACTION RULES (NEW BOOKING)
 ==================================================
 1. **QUESTION-ANSWER FLOW (HIGHEST PRIORITY)**:
@@ -78,11 +89,12 @@ EXTRACTION RULES (NEW BOOKING)
    - If customer says "no, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
    - If customer corrects after "Is that correct?" → update the corrected field
    - LATEST customer response for a field ALWAYS wins over earlier responses
+   - Set is_correction = true when user is correcting a value
 
 3. **Location Detection (Secondary - use when no Q&A context)**:
    - 'from', 'pick up from', 'collect from' → pickup_location
    - 'to', 'going to', 'heading to', 'take me to' → dropoff_location
-   - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
+   - 'my location', 'here', 'current location' → pickup_location = 'by_gps'
    - 'nearest X' or 'closest X' for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY
    - 'nearest X' or 'closest X' for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY
    - 'as directed' or no destination → dropoff_location = 'as directed'
@@ -105,16 +117,24 @@ EXTRACTION RULES (NEW BOOKING)
    - DO NOT default to 1. Leave null if unknown.
    - Context matters: answer to "how many passengers?" → passengers
 
-7. **Luggage**:
+7. **Luggage (PRIORITY OVER special_requests)**:
+   Keywords: "luggage", "bags", "bag", "suitcase", "suitcases", "cases", "holdall", "backpack", "rucksack"
    - "two bags/suitcases" → luggage = "2 bags"
+   - "I have luggage" → luggage = "luggage"
+   - "remove luggage" → luggage = "CLEAR"
+   - ANY mention of these words MUST go to 'luggage' field, NEVER to special_requests
 
-7. **Vehicle Types**:
+8. **Vehicle Types**:
    - saloon, estate, MPV, minibus, 6-seater, 8-seater
    - Only set if explicitly requested
 
-8. **Special Requests**:
+9. **Special Requests**:
    - "ring when outside", "wheelchair access", "child seat", driver requests
    - Do NOT include phone numbers
+   - Do NOT include luggage here (use luggage field)
+
+10. **Affirmative Detection**:
+    - Set is_affirmative = true for: "yes", "yeah", "correct", "that's right", "confirmed", "sounds good"
 
 `;
 };
@@ -296,7 +316,7 @@ const buildSystemPrompt = (
   return buildNewBookingPrompt(now, callerName, callerCity, aliases);
 };
 
-// Tool definition for structured extraction
+// Tool definition for structured extraction (enhanced with C#-style intent tracking)
 // For modifications: AI returns COMPLETE booking with all fields populated
 const BOOKING_EXTRACTION_TOOL = {
   type: "function",
@@ -306,9 +326,14 @@ const BOOKING_EXTRACTION_TOOL = {
     parameters: {
       type: "object",
       properties: {
+        intent: {
+          type: "string",
+          enum: ["new_booking", "update_booking", "confirm_booking", "cancel_booking", "get_status", "other"],
+          description: "The user's intent. 'new_booking' for first booking, 'update_booking' when modifying, 'confirm_booking' when user says yes/confirm, 'cancel_booking' when user wants to cancel, 'get_status' for ETA/where is queries."
+        },
         pickup_location: { 
           type: "string", 
-          description: "Pickup address. For updates: return existing value if not changed by user." 
+          description: "Pickup address. Use 'by_gps' if user says 'my location', 'here', 'current location'. For updates: return existing value if not changed by user." 
         },
         dropoff_location: { 
           type: "string", 
@@ -324,7 +349,7 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         luggage: { 
           type: "string", 
-          description: "Luggage description. 'CLEAR' to remove. For updates: return existing if not changed." 
+          description: "Luggage description (bags, suitcases, etc.). 'CLEAR' to remove. PRIORITY over special_requests - any luggage mention MUST go here, not special_requests." 
         },
         vehicle_type: { 
           type: "string", 
@@ -333,7 +358,7 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         special_requests: { 
           type: "string", 
-          description: "Special requests (driver preferences, accessibility, etc.)" 
+          description: "Driver instructions, preferences, notes. DO NOT include luggage here - luggage has its own field." 
         },
         nearest_pickup: { 
           type: "string", 
@@ -343,15 +368,28 @@ const BOOKING_EXTRACTION_TOOL = {
           type: "string", 
           description: "If user asks to go to 'nearest' or 'closest' something (e.g., 'take me to the nearest hospital' → 'hospital')" 
         },
+        fields_extracted: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of fields that were extracted/updated in this turn (e.g., ['pickup', 'destination', 'passengers'])"
+        },
         fields_changed: {
           type: "array",
           items: { type: "string" },
-          description: "List of fields that were CHANGED in this update (e.g., ['pickup', 'destination'])"
+          description: "List of fields that were CHANGED from existing values in this update"
         },
         missing_fields: {
           type: "array",
           items: { type: "string" },
-          description: "List of essential fields still needed"
+          description: "List of essential fields still needed for a complete booking"
+        },
+        is_affirmative: {
+          type: "boolean",
+          description: "True if user's response is affirmative (yes, correct, that's right, confirm)"
+        },
+        is_correction: {
+          type: "boolean",
+          description: "True if user is correcting a previously given value"
         },
         confidence: {
           type: "string",
@@ -363,7 +401,7 @@ const BOOKING_EXTRACTION_TOOL = {
           description: "Brief note about changes detected, ambiguity, or alias resolutions"
         }
       },
-      required: ["pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "confidence"]
+      required: ["intent", "pickup_location", "dropoff_location", "pickup_time", "number_of_passengers", "confidence"]
     }
   }
 };
@@ -543,7 +581,11 @@ serve(async (req) => {
 
     // AI now returns COMPLETE booking for modifications (unchanged fields preserved)
     // Only need fallback merge if AI returns null for fields that should be preserved
+    // Determine intent (fallback logic if AI didn't return it)
+    const resolvedIntent = extracted.intent || (is_modification ? "update_booking" : "new_booking");
+    
     let finalResult = {
+      intent: resolvedIntent,
       pickup: extracted.pickup_location || (is_modification && current_booking?.pickup) || null,
       destination: extracted.dropoff_location || (is_modification && current_booking?.destination) || null,
       // Keep passengers as null if not explicitly provided - don't default to 1
@@ -554,8 +596,12 @@ serve(async (req) => {
       special_requests: extracted.special_requests || (is_modification && current_booking?.special_requests) || null,
       nearest_pickup: extracted.nearest_pickup || null,
       nearest_dropoff: extracted.nearest_dropoff || null,
+      // Enhanced tracking fields
+      fields_extracted: extracted.fields_extracted || [],
       fields_changed: extracted.fields_changed || [],
       missing_fields: extracted.missing_fields || [],
+      is_affirmative: extracted.is_affirmative || false,
+      is_correction: extracted.is_correction || false,
       confidence: extracted.confidence || "medium",
       extraction_notes: extracted.extraction_notes || null,
       is_modification: is_modification,
