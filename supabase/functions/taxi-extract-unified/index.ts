@@ -84,12 +84,25 @@ EXTRACTION RULES (NEW BOOKING)
    - When Ada repeats a question (e.g., "Sorry, what is your destination again?") → this is a CORRECTION, update that field
    - The Q&A flow OVERRIDES keyword detection. If Ada asks for pickup and user says "18 Exmoor Road", that IS the pickup.
 
-2. **CORRECTIONS (CRITICAL)**:
-   - If a customer gives an address after Ada summarizes/confirms → check which field Ada is confirming
-   - If customer says "no, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
-   - If customer corrects after "Is that correct?" → update the corrected field
-   - LATEST customer response for a field ALWAYS wins over earlier responses
-   - Set is_correction = true when user is correcting a value
+2. **CORRECTIONS (CRITICAL - DETECT BOTH EXPLICIT AND IMPLICIT)**:
+   
+   EXPLICIT corrections (easy to detect):
+   - "No, it's actually X" or "sorry, I meant X" → UPDATE the relevant field to X
+   - "That's wrong, it should be X"
+   - "No, the pickup is X" / "No, destination is X"
+   
+   IMPLICIT corrections (VERY IMPORTANT - user just states correct value):
+   - If Ada confirmed/summarized a booking with address A, and user then says "It's X" or "X please" or just "X" where X is different from A → THIS IS A CORRECTION
+   - Example: Ada says "pickup at 52A David Road", user says "It's Sweetspot!" → is_correction=true, pickup="Sweetspot"
+   - Example: Ada asks "Is that correct?" and user says "The pickup is the Sweet Spot" → is_correction=true, pickup="Sweet Spot"
+   - If user provides an address/value AFTER Ada has already confirmed a different value for that field → ALWAYS treat as correction
+   
+   Compare user's response against Ada's last confirmed values:
+   - If user says a DIFFERENT address than what Ada stated → is_correction=true + update that field
+   - Look at Ada's last message to see what she confirmed, compare to user's response
+   
+   LATEST customer response for a field ALWAYS wins over earlier responses.
+   Set is_correction=true AND fields_changed=['pickup'/'destination'] when correcting.
 
 3. **Location Detection (Secondary - use when no Q&A context)**:
    - 'from', 'pick up from', 'collect from' → pickup_location
@@ -171,6 +184,19 @@ pickup_location, dropoff_location, pickup_time, number_of_passengers, luggage
 
 You MUST ALWAYS reply in English, even if the input is in another language.
 Try to put user message into structured format with good English.
+
+==================================================
+IMPLICIT CORRECTION DETECTION (VERY IMPORTANT)
+==================================================
+When Ada confirms a value and user then provides a DIFFERENT value:
+• Ada: "Pickup at 52A David Road" → User: "It's Sweetspot!" 
+  → is_correction=true, fields_changed=["pickup"], pickup_location="Sweetspot"
+• Ada: "destination 7 Russell Street" → User: "No the destination is the train station"
+  → is_correction=true, fields_changed=["destination"], dropoff_location="the train station"
+• Ada summarizes booking → User says "Actually pickup from Sweet Spot"
+  → is_correction=true, fields_changed=["pickup"], pickup_location="Sweet Spot"
+
+Compare user's latest message to Ada's last confirmed values. If different → CORRECTION.
 
 ==================================================
 CHANGE DETECTION RULES (CRITICAL)
@@ -389,7 +415,7 @@ const BOOKING_EXTRACTION_TOOL = {
         },
         is_correction: {
           type: "boolean",
-          description: "True if user is correcting a previously given value"
+          description: "TRUE if user is correcting a previously confirmed value. INCLUDES: explicit ('no, it's X') AND implicit corrections ('It's Sweetspot!' after Ada said '52A David Road'). If user provides a DIFFERENT value than what Ada last confirmed for a field, this is a correction."
         },
         confidence: {
           type: "string",
