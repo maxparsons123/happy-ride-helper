@@ -187,6 +187,7 @@ class TaxiBridgeGemini:
         self.phone = "Unknown"
         self.ast_codec = "ulaw"
         self.ast_frame_bytes = 160
+        self.ast_rate = 8000  # Actual sample rate (8000 for ulaw, 16000 for slin16)
         self.last_gain = 1.0
         
         self.ws_connected = False
@@ -201,10 +202,10 @@ class TaxiBridgeGemini:
 
     def _detect_format(self, frame_len):
         if frame_len == 160:
-            self.ast_codec, self.ast_frame_bytes = "ulaw", 160
+            self.ast_codec, self.ast_frame_bytes, self.ast_rate = "ulaw", 160, 8000
         elif frame_len == 320:
-            self.ast_codec, self.ast_frame_bytes = "slin16", 320
-        print(f"[{self.call_id}] 🔎 Format: {self.ast_codec} ({frame_len} bytes)", flush=True)
+            self.ast_codec, self.ast_frame_bytes, self.ast_rate = "slin16", 320, 16000
+        print(f"[{self.call_id}] 🔎 Format: {self.ast_codec} ({frame_len} bytes, {self.ast_rate}Hz)", flush=True)
 
     async def connect_websocket(self) -> bool:
         """Connect to Gemini WebSocket endpoint."""
@@ -254,8 +255,8 @@ class TaxiBridgeGemini:
         if not self.ws_connected or not self.ws:
             return
         
-        # Resample 8kHz → 24kHz for Gemini
-        pcm_24k = resample_audio(pcm_bytes, AST_RATE, AI_RATE)
+        # Resample from actual Asterisk rate (8kHz or 16kHz) → 24kHz for Gemini
+        pcm_24k = resample_audio(pcm_bytes, self.ast_rate, AI_RATE)
         
         msg = {
             "type": "audio",
@@ -448,10 +449,10 @@ class TaxiBridgeGemini:
                     audio_b64 = data.get("delta", "")
                     if audio_b64:
                         pcm_24k = base64.b64decode(audio_b64)
-                        # Resample 24kHz → 8kHz for Asterisk
-                        pcm_8k = resample_audio(pcm_24k, AI_RATE, AST_RATE)
-                        # Convert to µ-law
-                        out = lin2ulaw(pcm_8k) if self.ast_codec == "ulaw" else pcm_8k
+                        # Resample 24kHz → actual Asterisk rate (8kHz or 16kHz)
+                        pcm_out = resample_audio(pcm_24k, AI_RATE, self.ast_rate)
+                        # Convert to µ-law only if codec is ulaw
+                        out = lin2ulaw(pcm_out) if self.ast_codec == "ulaw" else pcm_out
                         self.audio_queue.append(out)
                         self.audio_chunks_received += 1
                 
