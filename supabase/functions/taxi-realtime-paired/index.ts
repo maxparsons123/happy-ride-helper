@@ -3196,7 +3196,28 @@ Ask clearly: "Would you like me to book that taxi for you?"`
               const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
               const isJustNumber = /^[1-9]$|^1[0-9]$|^20$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(userText.trim());
               
-              if (looksLikeAddress && !hasNumber && !isJustNumber) {
+              // ECHO DETECTION: Check if transcribed text contains recently confirmed addresses
+              // This happens when Ada's voice bleeds back into the mic
+              const destLower = (sessionState.booking.destination || "").toLowerCase();
+              const pickupLower = (sessionState.booking.pickup || "").toLowerCase();
+              const userLower = userText.toLowerCase();
+              
+              // Extract key words from addresses (e.g., "Russell" from "7 Russell Street")
+              const destWords = destLower.split(/\s+/).filter(w => w.length > 3 && !/\d/.test(w));
+              const pickupWords = pickupLower.split(/\s+/).filter(w => w.length > 3 && !/\d/.test(w));
+              
+              const isEchoOfDestination = destWords.some(w => userLower.includes(w));
+              const isEchoOfPickup = pickupWords.some(w => userLower.includes(w));
+              const isEcho = isEchoOfDestination || isEchoOfPickup;
+              
+              if (isEcho && !hasNumber && !isJustNumber) {
+                // This is Ada's voice echoing back - just ignore and wait for real input
+                console.log(`[${callId}] 🔊 ECHO DETECTED: "${userText}" contains address words from booking - ignoring`);
+                // Don't reprompt, just wait for the next audio
+                break;
+              }
+              
+              if (looksLikeAddress && !hasNumber && !isJustNumber && !isEcho) {
                 console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
                 
                 // Store the address for later (might be a correction they want to make)
