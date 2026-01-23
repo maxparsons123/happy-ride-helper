@@ -7408,11 +7408,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
         
         console.log(`[${callId}] 🚀 Initializing simple session (reconnect=${isReconnect}, preConnected=${preConnected})`);
 
-        // If this is a reconnect attempt, reject it - simple mode doesn't support resumption
+        // Reconnect handling:
+        // The Python bridge may reconnect mid-call (network blip / websocket reset).
+        // Simple mode does NOT support true session resumption, but we should NOT hard-fail the call.
+        // Instead, treat reconnect as a fresh simple session to avoid infinite reconnect loops.
         if (isReconnect) {
-          console.log(`[${callId}] ❌ Simple mode does not support reconnection`);
-          socket.close(1000, "Session expired");
-          return;
+          console.log(`[${callId}] ♻️ Reconnect received - treating as fresh simple session (no resume)`);
         }
 
         // Detect language from phone number FIRST (fast, no DB)
