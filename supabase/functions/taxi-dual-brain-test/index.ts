@@ -29,65 +29,67 @@ function createInitialState(): BookingState {
 }
 
 // --- 2. BRAIN 1: THE INTENT EXTRACTOR (Runs BEFORE Ada speaks) ---
-// Maps raw transcript to structured BookingState - PRESERVES existing values
-// Returns the MERGED state, not just new extractions
+// Extracts ALL booking fields from transcript - supports free-form input
+// Returns the MERGED state, preserving existing values
 async function extractIntent(transcript: string, state: BookingState, apiKey: string) {
   console.log(`[BRAIN1] Extracting intent from: "${transcript}"`);
-  console.log(`[BRAIN1] Ada's last question: "${state.lastQuestion}"`);
   console.log(`[BRAIN1] Current state: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.pickup_time}`);
 
-  // Build current values string for the prompt
+  // Build current values for the prompt
   const currentPickup = state.pickup || "NOT SET";
   const currentDestination = state.destination || "NOT SET";
-  const currentPassengers = state.passengers !== null ? state.passengers : "NOT SET";
+  const currentPassengers = state.passengers !== null ? String(state.passengers) : "NOT SET";
   const currentTime = state.pickup_time || "NOT SET";
 
-  const systemPrompt = `You are a Taxi Intent Parser that PRESERVES existing data.
+  const systemPrompt = `You are a Taxi Booking Data Extractor. Extract ALL booking information from the user's message.
 
-CURRENT BOOKING STATE (preserve these unless user explicitly changes them):
+CURRENT BOOKING STATE (preserve unless user provides new data):
 - Pickup: ${currentPickup}
-- Destination: ${currentDestination}
+- Destination: ${currentDestination}  
 - Passengers: ${currentPassengers}
 - Pickup Time: ${currentTime}
 
 ADA'S LAST QUESTION: "${state.lastQuestion}"
 
-TASK:
-1. Look at what Ada asked and what the user said.
-2. Extract NEW information from the user's response.
-3. MERGE new info with existing state - NEVER lose existing data!
-4. Return the COMPLETE merged state.
+YOUR TASK:
+Extract ALL booking fields mentioned in the user's message. Users may provide:
+- Just one piece of info: "52A David Road"
+- Multiple fields: "Pick me up from 52A David Road, going to Manchester, 3 passengers"
+- Everything at once: "I need a taxi from 52A David Road to the airport for 2 people at 3pm"
 
-FIELD MAPPING (based on Ada's question):
-- If Ada asked about pickup/collection/picked up → user's address goes in "pickup"
-- If Ada asked about destination/where going/where to → user's address goes in "destination"
-- If Ada asked about passengers/how many/people → number goes in "passengers"
-- If Ada asked about time/when → answer goes in "pickup_time" (e.g., "now", "asap", "3pm")
+EXTRACTION RULES:
+1. Look for PICKUP indicators: "from", "pick me up from", "at", "collection from", "I'm at"
+2. Look for DESTINATION indicators: "to", "going to", "destination", "heading to", "drop at"
+3. Look for PASSENGERS: any number + "passengers", "people", "of us", or just a number when asked
+4. Look for TIME: "now", "asap", "at [time]", "in [X] minutes", specific times like "3pm"
+5. Look for AFFIRMATIVE: "yes", "correct", "that's right", "book it", "confirmed"
+6. Look for CORRECTIONS: "actually", "no change", "I meant", "not that"
 
-WORD-TO-NUMBER MAPPING:
-- "one" = 1, "two" = 2, "three" = 3, "four" = 4, "five" = 5, "six" = 6, "seven" = 7, "eight" = 8
+WORD-TO-NUMBER MAP: one=1, two=2, three=3, four=4, five=5, six=6, seven=7, eight=8
 
-TIME KEYWORDS:
-- "now", "asap", "as soon as possible", "straight away" → pickup_time: "now"
+CONTEXT-AWARE EXTRACTION:
+- If Ada asked about pickup and user says an address → it's the pickup
+- If Ada asked about destination and user says an address → it's the destination
+- If Ada asked about passengers and user says a number → it's passengers
+- If Ada asked about time and user gives a time → it's pickup_time
 
-SPECIAL FLAGS:
-- is_affirmative: true if user confirms ("Yes", "Correct", "That's right", "Book it", "Yeah")
-- is_correction: true if user says "Actually...", "No, change...", "I meant..."
+CRITICAL: 
+- PRESERVE existing values! Only update fields the user explicitly mentions.
+- Extract EVERYTHING mentioned - don't ignore extra info.
+- If user provides pickup AND destination in one sentence, extract BOTH.
 
-CRITICAL RULES:
-- PRESERVE existing values! If pickup is "${currentPickup}", keep it unless user provides a new pickup.
-- Only update a field if the user explicitly provides new info for that field.
-- Return the FULL merged state, not just new data.
-
-Return valid JSON:
+Return JSON (preserve existing values, update with new info):
 {
-  "pickup": "${currentPickup === "NOT SET" ? "null or new value" : currentPickup + " or new value"}",
-  "destination": "${currentDestination === "NOT SET" ? "null or new value" : currentDestination + " or new value"}",
-  "passengers": ${currentPassengers === "NOT SET" ? "null or new number" : currentPassengers + " or new number"},
-  "pickup_time": "${currentTime === "NOT SET" ? "null or new value" : currentTime + " or new value"}",
+  "pickup": ${currentPickup === "NOT SET" ? "null" : `"${currentPickup}"`},
+  "destination": ${currentDestination === "NOT SET" ? "null" : `"${currentDestination}"`},
+  "passengers": ${currentPassengers === "NOT SET" ? "null" : currentPassengers},
+  "pickup_time": ${currentTime === "NOT SET" ? "null" : `"${currentTime}"`},
   "is_affirmative": false,
-  "is_correction": false
-}`;
+  "is_correction": false,
+  "fields_extracted": []
+}
+
+The fields_extracted array should list which fields you found: ["pickup", "destination", "passengers", "pickup_time"]`;
 
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
@@ -99,22 +101,22 @@ Return valid JSON:
       model: "google/gemini-2.5-flash",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `User just said: "${transcript}"` }
+        { role: "user", content: `User said: "${transcript}"` }
       ],
-      max_tokens: 200,
+      max_tokens: 300,
     }),
   });
 
   if (!res.ok) {
     console.error(`[BRAIN1] API error: ${res.status}`);
-    // On error, return current state to preserve data
     return { 
       pickup: state.pickup, 
       destination: state.destination, 
       passengers: state.passengers, 
       pickup_time: state.pickup_time, 
       is_affirmative: false, 
-      is_correction: false 
+      is_correction: false,
+      fields_extracted: []
     };
   }
 
@@ -122,7 +124,6 @@ Return valid JSON:
   const content = data.choices?.[0]?.message?.content || "{}";
   
   try {
-    // Extract JSON from potential markdown
     let jsonStr = content;
     const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (jsonMatch) jsonStr = jsonMatch[1].trim();
@@ -131,7 +132,7 @@ Return valid JSON:
     
     const parsed = JSON.parse(jsonStr);
     
-    // SAFETY: Ensure we never lose existing data due to LLM errors
+    // SAFETY: Merge with existing state - never lose data
     const merged = {
       pickup: parsed.pickup || state.pickup,
       destination: parsed.destination || state.destination,
@@ -139,20 +140,24 @@ Return valid JSON:
       pickup_time: parsed.pickup_time || state.pickup_time,
       is_affirmative: parsed.is_affirmative || false,
       is_correction: parsed.is_correction || false,
+      fields_extracted: parsed.fields_extracted || [],
     };
     
     console.log(`[BRAIN1] Extracted & Merged:`, merged);
+    if (merged.fields_extracted.length > 1) {
+      console.log(`[BRAIN1] 🚀 FREE-FORM: Extracted ${merged.fields_extracted.length} fields at once!`);
+    }
     return merged;
   } catch (e) {
     console.error(`[BRAIN1] JSON parse error:`, e, content);
-    // On parse error, return current state to preserve data
     return { 
       pickup: state.pickup, 
       destination: state.destination, 
       passengers: state.passengers, 
       pickup_time: state.pickup_time, 
       is_affirmative: false, 
-      is_correction: false 
+      is_correction: false,
+      fields_extracted: []
     };
   }
 }
