@@ -741,6 +741,8 @@ interface SessionState {
   pendingFare: string | null;
   pendingEta: string | null;
   awaitingConfirmation: boolean;
+  // Timestamp when awaitingConfirmation was set - used for barge-in cooldown
+  awaitingConfirmationSetAt: number;
   bookingRef: string | null;
   // If post-confirmation speech needs to be sent but an OpenAI response is still active, queue it here.
   pendingPostConfirmResponse?: {
@@ -1672,7 +1674,9 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     awaitingConfirmation: false,
     bookingRef: null,
     waitingForQuoteSilence: false,
-    saidOneMoment: false
+    saidOneMoment: false,
+    // Timestamp when awaitingConfirmation was set - used for barge-in cooldown
+    awaitingConfirmationSetAt: 0
   };
 }
 
@@ -2163,6 +2167,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     // Track that we're waiting for confirmation
     sessionState.quoteInFlight = false;
     sessionState.awaitingConfirmation = true;
+    sessionState.awaitingConfirmationSetAt = Date.now(); // For barge-in cooldown
     sessionState.lastQuestionAsked = "confirmation";
     sessionState.confirmationBargeInCancelled = false;
   });
@@ -4021,8 +4026,13 @@ Do NOT skip any part. Say ALL of it warmly.]`
           // CRITICAL FIX: Only allow barge-in if awaitingConfirmation is TRUE (meaning quote was received).
           // Do NOT barge-in just because lastQuestionAsked === "confirmation" - that's set BEFORE Ada
           // speaks the summary, so background noise would cancel the summary prematurely.
+          // ADDITIONAL FIX: Add 500ms cooldown after awaitingConfirmation is set to let stale audio drain
+          const bargeInCooldownMs = 500;
+          const bargeInCooldownPassed = Date.now() - sessionState.awaitingConfirmationSetAt > bargeInCooldownMs;
+          
           if (
             sessionState.awaitingConfirmation &&  // MUST have received quote - not just "confirmation" step
+            bargeInCooldownPassed &&  // Wait for stale audio to drain before allowing barge-in
             Date.now() < sessionState.summaryProtectionUntil &&
             sessionState.openAiResponseActive &&
             !sessionState.confirmationBargeInCancelled
