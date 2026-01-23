@@ -619,7 +619,8 @@ class TaxiBridge:
             
             # Notify edge function of format change
             if self.ws and self.state.ws_connected:
-                inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
+                # Send actual codec name (slin16/slin/ulaw/opus) for correct edge function handling
+                inbound_fmt = self.state.ast_codec
                 await self.ws.send(json.dumps({
                     "type": "update_format",
                     "call_id": self.state.call_id,
@@ -673,7 +674,8 @@ class TaxiBridge:
                     self.state.init_sent = True
                 elif self.state.reconnect_attempts > 0 and self.state.init_sent:
                     # Reconnect init
-                    inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
+                    # Send actual codec name for correct edge function handling
+                    inbound_fmt = self.state.ast_codec
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
@@ -790,7 +792,8 @@ class TaxiBridge:
                     
                     # Send eager init on first connection
                     if not self.state.init_sent and self.ws:
-                        inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
+                        # Send actual codec name for correct edge function handling
+                        inbound_fmt = self.state.ast_codec
                         payload = {
                             "type": "init",
                             "call_id": self.state.call_id,
@@ -1052,7 +1055,8 @@ class TaxiBridge:
                     self.state.handoff_count += 1
                     logger.info("[%s] 🔄 Session handoff #%d", 
                                self.state.call_id, self.state.handoff_count)
-                    inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
+                    # Send actual codec name for correct edge function handling
+                    inbound_fmt = self.state.ast_codec
                     raise RedirectException(
                         url=self.state.current_ws_url,
                         init_data={
