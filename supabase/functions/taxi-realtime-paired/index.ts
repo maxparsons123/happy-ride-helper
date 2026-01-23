@@ -518,18 +518,22 @@ You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [
 - RIGHT: "And what is your destination?" [wait for answer]
 - Wait for a user response before asking the next question.
 
+# 🎯 SERVER-DRIVEN SEQUENCE (CRITICAL)
+The server tracks the booking flow. When you call sync_booking_data:
+- The server will tell you what to ask NEXT in the tool response
+- ALWAYS follow the server's "instruction" field - it tells you exactly what to ask
+- NEVER skip ahead or guess what to ask next
+- Trust the server's next_step instruction completely
+
 # PHASE 1: THE WELCOME (Play immediately)
 Greet the caller warmly in the appropriate language.
 
-# PHASE 2: SEQUENTIAL GATHERING (Strict Order)
-Follow this order exactly. Only move to the next if you have the current answer:
-1. Ask for pickup location → Wait for answer
-2. Ask for destination → Wait for answer
-3. Ask for passenger count → Wait for answer, then acknowledge briefly
-4. Ask for pickup time → Wait for answer (Default to 'Now' if ASAP)
-
-🚨 ACKNOWLEDGE PASSENGER COUNT: After user says a number, briefly confirm the count.
-Then ask about the time.
+# PHASE 2: SEQUENTIAL GATHERING (Strict Order - SERVER CONTROLLED)
+The server controls this sequence. After each user answer:
+1. Call sync_booking_data with ONLY the field the user just answered
+2. Read the server's response for "instruction" 
+3. Do EXACTLY what the instruction says
+4. Wait for the user's response before continuing
 
 🚨 CRITICAL: NEVER ASK USER TO CONFIRM/REPEAT AN ADDRESS 🚨
 🚫 DO NOT ask "Could you please confirm the pickup address?"
@@ -605,34 +609,29 @@ If caller says their name → CALL save_customer_name
 ✅ Accept ANY address exactly as spoken.
 ✅ Move to the next question immediately after receiving any address.
 
-# CONTEXT PAIRING (CRITICAL)
-When the user responds, ALWAYS check what question you just asked them:
-- If you asked for PICKUP and they respond → it's the pickup location
-- If you asked for DESTINATION and they respond → it's the destination  
-- If you asked for PASSENGERS and they respond → it's the passenger count
-- If you asked for TIME and they respond → it's the pickup time
-NEVER swap fields. Trust the question context.
+# CONTEXT PAIRING (CRITICAL - SERVER ENFORCED)
+When the user responds, the server injects context telling you which field they just answered.
+- The system message will say "You asked for: PICKUP" or "You asked for: DESTINATION" etc.
+- Call sync_booking_data with ONLY that specific field
+- The server response will contain "instruction" - ALWAYS follow it exactly
+- Example: Server says "instruction": "Ask for destination" → You ask for destination
+NEVER guess what to ask next. ALWAYS wait for the server's instruction.
 `;
 }
 
-// Tools - same as taxi-realtime-simple
+// Tools - with server-driven sequence (no last_question_asked - server tracks this)
 const TOOLS = [
   {
     type: "function",
     name: "sync_booking_data",
-    description: "ALWAYS call this after the user provides any booking information. Saves user answers to the correct field.",
+    description: "Call this ONLY to save the specific piece of info the user just provided. The server will tell you what to ask next.",
     parameters: {
       type: "object",
       properties: {
-        pickup: { type: "string", description: "Pickup address if the user just provided it" },
-        destination: { type: "string", description: "Destination address if the user just provided it" },
-        passengers: { type: "integer", description: "Number of passengers if the user just provided it" },
-        pickup_time: { type: "string", description: "Pickup time if the user just provided it (e.g., 'now', '3pm')" },
-        last_question_asked: { 
-          type: "string", 
-          enum: ["pickup", "destination", "passengers", "time", "confirmation", "none"],
-          description: "What question you are about to ask NEXT"
-        }
+        pickup: { type: "string", description: "Pickup address - ONLY if user just provided it in response to a pickup question" },
+        destination: { type: "string", description: "Destination address - ONLY if user just provided it in response to a destination question" },
+        passengers: { type: "integer", description: "Passenger count - ONLY if user just provided it in response to a passengers question" },
+        pickup_time: { type: "string", description: "Pickup time - ONLY if user just provided it in response to a time question" }
       }
     }
   },
@@ -675,6 +674,33 @@ const TOOLS = [
     parameters: { type: "object", properties: {} }
   }
 ];
+
+// Compute the next step based on current booking state (SERVER-DRIVEN SEQUENCE)
+function computeNextStep(booking: SessionState["booking"]): SessionState["lastQuestionAsked"] {
+  if (!booking.pickup) return "pickup";
+  if (!booking.destination) return "destination";
+  if (booking.passengers === null) return "passengers";
+  if (!booking.pickupTime) return "time";
+  return "confirmation";
+}
+
+// Get instruction for next step based on what's needed
+function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"]): string {
+  switch (nextStep) {
+    case "pickup":
+      return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
+    case "destination":
+      return `Great, pickup is ${booking.pickup}. Now ask: 'And what is your destination?' Then wait for their response.`;
+    case "passengers":
+      return `Good, destination is ${booking.destination}. Now ask: 'How many passengers will be traveling?' Then wait for their response.`;
+    case "time":
+      return `Okay, ${booking.passengers} passenger(s). Now ask: 'When do you need the taxi - now or for a specific time?' Then wait for their response.`;
+    case "confirmation":
+      return `All details collected! Now give a brief summary and call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
+    default:
+      return "Continue the conversation naturally.";
+  }
+}
 
 // Session state interface
 interface SessionState {
@@ -3109,7 +3135,16 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
               timestamp: Date.now()
             });
             
-            // Send context-aware prompt to OpenAI
+            // Send STRICT context-aware prompt to OpenAI with explicit field mapping
+            const expectedField = sessionState.lastQuestionAsked;
+            const fieldMapping: Record<string, string> = {
+              pickup: "pickup",
+              destination: "destination", 
+              passengers: "passengers",
+              time: "pickup_time"
+            };
+            const toolField = fieldMapping[expectedField] || expectedField;
+            
             const contextPrompt = {
               type: "conversation.item.create",
               item: {
@@ -3117,10 +3152,17 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                 role: "system",
                 content: [{
                   type: "input_text",
-                  text: `[CONTEXT PAIRING] You just asked about "${sessionState.lastQuestionAsked}". The user responded: "${userText}". 
-                  
-If this is a valid answer to your ${sessionState.lastQuestionAsked} question, use sync_booking_data to save it to the CORRECT field.
-Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
+                  text: `[STRICT CONTEXT PAIRING] 
+You asked for: ${expectedField.toUpperCase()}
+User said: "${userText}"
+
+🚨 REQUIRED ACTION:
+Call sync_booking_data with ONLY the "${toolField}" field set to this answer.
+Example: sync_booking_data({ ${toolField}: "${userText}" })
+
+⚠️ DO NOT put this in any other field. The server will tell you what to ask next.
+
+Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination=${sessionState.booking.destination || "NOT SET"}, passengers=${sessionState.booking.passengers ?? "NOT SET"}, time=${sessionState.booking.pickupTime || "NOT SET"}`
                 }]
               }
             };
@@ -3144,19 +3186,43 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           console.log(`[${callId}] 🔧 Tool: ${toolName}`, toolArgs);
           
           if (toolName === "sync_booking_data") {
-            // Update booking state from tool call
-            if (toolArgs.pickup) sessionState.booking.pickup = String(toolArgs.pickup);
-            if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
-            if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
-            if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
-            if (toolArgs.last_question_asked) {
-              sessionState.lastQuestionAsked = toolArgs.last_question_asked as SessionState["lastQuestionAsked"];
+            // SEQUENCE VALIDATION: Only update the field that matches lastQuestionAsked
+            // This prevents the AI from putting data in the wrong field
+            const expectedField = sessionState.lastQuestionAsked;
+            let fieldUpdated: string | null = null;
+            
+            // Validate and update ONLY the expected field
+            if (expectedField === "pickup" && toolArgs.pickup) {
+              sessionState.booking.pickup = String(toolArgs.pickup);
+              fieldUpdated = "pickup";
+            } else if (expectedField === "destination" && toolArgs.destination) {
+              sessionState.booking.destination = String(toolArgs.destination);
+              fieldUpdated = "destination";
+            } else if (expectedField === "passengers" && toolArgs.passengers !== undefined) {
+              sessionState.booking.passengers = Number(toolArgs.passengers);
+              fieldUpdated = "passengers";
+            } else if (expectedField === "time" && toolArgs.pickup_time) {
+              sessionState.booking.pickupTime = String(toolArgs.pickup_time);
+              fieldUpdated = "time";
+            } else {
+              // AI tried to update wrong field - still accept but log warning
+              console.log(`[${callId}] ⚠️ sync_booking_data: expected ${expectedField} but got`, toolArgs);
+              // Fall back to accepting whatever field was provided
+              if (toolArgs.pickup) { sessionState.booking.pickup = String(toolArgs.pickup); fieldUpdated = "pickup"; }
+              else if (toolArgs.destination) { sessionState.booking.destination = String(toolArgs.destination); fieldUpdated = "destination"; }
+              else if (toolArgs.passengers !== undefined) { sessionState.booking.passengers = Number(toolArgs.passengers); fieldUpdated = "passengers"; }
+              else if (toolArgs.pickup_time) { sessionState.booking.pickupTime = String(toolArgs.pickup_time); fieldUpdated = "time"; }
             }
             
-            console.log(`[${callId}] 📊 Booking state updated:`, sessionState.booking);
+            // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
+            const nextStep = computeNextStep(sessionState.booking);
+            sessionState.lastQuestionAsked = nextStep;
+            const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking);
+            
+            console.log(`[${callId}] 📊 Booking updated (${fieldUpdated}):`, sessionState.booking, `| Next: ${nextStep}`);
             await updateLiveCall(sessionState);
             
-            // Send tool result
+            // Send tool result with EXPLICIT next step instruction
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -3164,8 +3230,10 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                 call_id: data.call_id,
                 output: JSON.stringify({ 
                   success: true, 
+                  field_saved: fieldUpdated,
                   current_state: sessionState.booking,
-                  next_question: sessionState.lastQuestionAsked
+                  next_step: nextStep,
+                  instruction: nextInstruction
                 })
               }
             }));
