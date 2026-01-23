@@ -3018,6 +3018,49 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               break; // Correction handled, don't run normal context pairing
             }
             
+            // CONFIRMATION PHASE ADDRESS GUARD: If user says an address during confirmation, treat as correction
+            if (sessionState.lastQuestionAsked === "confirmation" || sessionState.awaitingConfirmation) {
+              const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "airport", "station", "hotel", "hospital"];
+              const lowerText = userText.toLowerCase();
+              const hasAddressKeyword = addressKeywords.some(kw => lowerText.includes(kw));
+              const hasHouseNumber = /\d+[a-zA-Z]?\s/.test(userText);
+              const looksLikeAddress = hasAddressKeyword || hasHouseNumber;
+              
+              // Check if it's NOT a simple yes/no confirmation
+              const isYesNo = /^(yes|yeah|yep|no|nope|correct|right|cancel|ok|okay|sure|go ahead|book it|confirm|please|thank you|thanks|lovely|perfect|great|brilliant|fine)\b/i.test(userText.trim());
+              
+              if (looksLikeAddress && !isYesNo) {
+                console.log(`[${callId}] 🔄 CONFIRMATION PHASE ADDRESS: "${userText}" - treating as correction request`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: User said address during confirmation phase] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                // User is providing an address during confirmation - they want to change something
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[ADDRESS DURING CONFIRMATION] The user said: "${userText}" when you asked for confirmation.
+                      
+This is NOT a yes/no - they are providing an address. They likely want to CHANGE something in the booking.
+
+DO NOT cancel the booking. Instead ask: "Would you like me to change the destination to ${userText}?" or "Would you like me to change the pickup to ${userText}?"
+
+Current booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}"`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break; // Don't process as normal confirmation
+              }
+            }
+
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
             if (sessionState.lastQuestionAsked === "passengers") {
               // Check if response looks like an address rather than a number
@@ -3512,6 +3555,72 @@ Then call end_call() with reason="booking_complete".`
             }
 
             await updateLiveCall(sessionState);
+            
+          } else if (toolName === "cancel_booking") {
+            // SAFETY GUARD: Verify user explicitly said cancel/no - prevent STT mishearings from cancelling
+            const recentTranscripts = sessionState.conversationHistory
+              .filter(m => m.role === "user")
+              .slice(-3)
+              .map(m => m.content.toLowerCase());
+            
+            const lastTranscript = recentTranscripts[recentTranscripts.length - 1] || "";
+            const hasCancelIntent = 
+              lastTranscript.includes("cancel") ||
+              lastTranscript.includes("never mind") ||
+              lastTranscript.includes("forget it") ||
+              lastTranscript.includes("no thanks") ||
+              lastTranscript.includes("no thank you") ||
+              /^no[,.\s]*$/.test(lastTranscript.trim()) ||
+              lastTranscript === "no";
+            
+            // Check if user is providing an address correction instead (contains address keywords)
+            const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "station", "airport", "hotel", "hospital"];
+            const hasAddressKeyword = addressKeywords.some(kw => lastTranscript.includes(kw));
+            const hasHouseNumber = /\d+[a-zA-Z]?\s/.test(lastTranscript);
+            const looksLikeAddress = hasAddressKeyword || hasHouseNumber;
+            
+            if (!hasCancelIntent || looksLikeAddress) {
+              // BLOCKED: User didn't explicitly cancel, or it looks like an address correction
+              console.log(`[${callId}] ⚠️ cancel_booking BLOCKED - no explicit cancel intent in transcript: "${lastTranscript}" (looksLikeAddress=${looksLikeAddress})`);
+              
+              // Inject correction context instead
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({
+                    success: false,
+                    status: "not_cancel_intent",
+                    message: "The user did not explicitly ask to cancel. They may be providing an address correction. Ask them to clarify what they want to change."
+                  })
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            } else {
+              // Real cancel - proceed
+              console.log(`[${callId}] ❌ Cancelling booking (explicit intent detected)`);
+              
+              sessionState.bookingConfirmed = false;
+              sessionState.awaitingConfirmation = false;
+              sessionState.quoteInFlight = false;
+              
+              // Update live_calls status
+              await supabase.from("live_calls").update({
+                booking_confirmed: false,
+                status: "cancelled"
+              }).eq("call_id", callId);
+              
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({ success: true, message: "Booking cancelled" })
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            }
             
           } else if (toolName === "end_call") {
             console.log(`[${callId}] 📞 Call ending: ${toolArgs.reason}`);
