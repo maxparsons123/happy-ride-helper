@@ -408,7 +408,7 @@ You are multilingual. If caller asks for a different language, switch immediatel
 # 🛑 CRITICAL LOGIC GATE: THE CHECKLIST
 You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [Time].
 - You are FORBIDDEN from moving to the 'Booking Summary' until ALL 4 items are specifically provided by the user.
-- NEVER use 'As directed' as a placeholder. If a detail is missing, ask for it.
+- If a detail is missing, ask for it.
 
 # 🚨 ONE QUESTION RULE (CRITICAL)
 - Ask ONLY ONE question per response. NEVER combine questions.
@@ -470,7 +470,7 @@ If caller says their name → CALL save_customer_name
 
 # GUARDRAILS
 ❌ NEVER state a price or ETA unless the tool returns that exact value.
-❌ NEVER use 'As directed' or any placeholder - always ask for specifics.
+❌ NEVER use placeholders - always ask for specifics.
 ❌ NEVER move to Summary until all 4 checklist items are filled.
 ❌ NEVER repeat addresses after the summary is confirmed.
 ❌ NEVER ask "is that where you want to go?" or "is that correct?" after each address - just accept it and move on.
@@ -1585,10 +1585,6 @@ interface SessionState {
   useRasaAudioProcessing: boolean;
   callerTotalBookings: number;
 
-  // GPS location from external system
-  gpsLat: number | null;
-  gpsLon: number | null;
-  gpsRequired: boolean; // If true, reject calls without GPS
 
   // Streaming assistant transcript assembly (OpenAI sends token deltas)
   assistantTranscriptIndex: number | null;
@@ -4229,7 +4225,6 @@ Do NOT say 'booked' until the tool returns success.]`
                 const lower = addr.toLowerCase().trim();
                 // Reject known placeholders
                 if (!lower || 
-                    lower === "as directed" ||
                     lower === "not set" || 
                     lower === "not specified" || 
                     lower === "unknown" || 
@@ -5001,28 +4996,10 @@ Do NOT say 'booked' until the tool returns success.]`
               const geocodeData = await geocodeResponse.json();
               
               if (geocodeData.lat && geocodeData.lon) {
-                sessionState.gpsLat = geocodeData.lat;
-                sessionState.gpsLon = geocodeData.lon;
-                
                 const formattedAddress = geocodeData.formatted_address || args.location;
                 const city = geocodeData.city || geocodeData.locality || null;
                 
                 console.log(`[${sessionState.callId}] ✅ Location geocoded: ${geocodeData.lat}, ${geocodeData.lon} (${formattedAddress})`);
-                
-                // Save to caller_gps table (temporary, expires in 1 hour)
-                await supabase.from("caller_gps").upsert({
-                  phone_number: sessionState.phone,
-                  lat: geocodeData.lat,
-                  lon: geocodeData.lon,
-                  expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
-                }, { onConflict: "phone_number" });
-                
-                // Update live_calls with GPS
-                await supabase.from("live_calls").update({
-                  gps_lat: geocodeData.lat,
-                  gps_lon: geocodeData.lon,
-                  gps_updated_at: new Date().toISOString()
-                }).eq("call_id", sessionState.callId);
                 
                 // Also save to callers table for permanent history (known_areas)
                 if (sessionState.phone && city) {
@@ -5965,9 +5942,6 @@ Do NOT say 'booked' until the tool returns success.]`
                 nearest_dropoff: extractedBooking?.nearest_dropoff || null,
                 // Raw STT transcripts from this call - each turn separately
                 user_transcripts: userTranscripts,
-                // GPS location (if available)
-                gps_lat: sessionState.gpsLat,
-                gps_lon: sessionState.gpsLon,
                 // Booking details
                 passengers: finalPassengers,
                 bags: finalBags,
@@ -7321,9 +7295,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           callerLastPickup: null,
           callerLastDestination: null,
           callerTotalBookings: 0,
-          gpsLat: null,
-          gpsLon: null,
-          gpsRequired: message.gps_required ?? false,
           assistantTranscriptIndex: null,
           transcriptFlushTimer: null,
           isAdaSpeaking: false,
@@ -7470,9 +7441,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             callerLastPickup: null,
             callerLastDestination: null,
             callerTotalBookings: 0,
-            gpsLat: null,
-            gpsLon: null,
-            gpsRequired: message.gps_required ?? false,
             assistantTranscriptIndex: null,
             transcriptFlushTimer: null,
             isAdaSpeaking: false,
@@ -8220,114 +8188,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               console.log(`[${callId}] 🎭 Demo mode: skipping early active booking lookup`);
             }
 
-            // Lookup GPS first - this determines if we can proceed
-            if (state?.gpsRequired && phone && phone !== "unknown") {
-              // Normalize phone for GPS lookup
-              let normalizedPhone = phone.replace(/\s+/g, "").replace(/-/g, "");
-              if (!normalizedPhone.startsWith("+") && normalizedPhone.length >= 10) {
-                if (normalizedPhone.startsWith("00")) {
-                  normalizedPhone = "+" + normalizedPhone.slice(2);
-                } else if (/^(44|1|33|49|31)\d+$/.test(normalizedPhone)) {
-                  normalizedPhone = "+" + normalizedPhone;
-                }
-              }
-
-              // Check caller_gps table for pre-submitted GPS
-              const { data: gpsData } = await supabase
-                .from("caller_gps")
-                .select("lat, lon, expires_at")
-                .eq("phone_number", normalizedPhone)
-                .gte("expires_at", new Date().toISOString())
-                .order("created_at", { ascending: false })
-                .limit(1)
-                .maybeSingle();
-
-              if (gpsData && state) {
-                state.gpsLat = gpsData.lat;
-                state.gpsLon = gpsData.lon;
-                console.log(`[${callId}] 📍 GPS loaded: ${gpsData.lat}, ${gpsData.lon}`);
-            } else {
-                // NO GPS found - ALWAYS ask Ada to request location (not just when required)
-                console.log(`[${callId}] ⚠️ GPS not found - Ada will ask for location`);
-
-                // Send system message to trigger location request flow
-                if (openaiWs && openaiConnected) {
-                  // Inject a system message that triggers Ada to ask for location
-                  openaiWs.send(
-                    JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }],
-                      },
-                    })
-                  );
-                  // Note: Don't create response here - let the normal greeting flow handle it
-                  // Ada will see the system message and ask for location per the prompt
-                }
-
-                // Notify bridge
-                socket.send(
-                  JSON.stringify({
-                    type: "gps_missing",
-                    message: "GPS location not received - Ada will ask for location",
-                  })
-                );
-              }
-            }
-            
-            // Also check GPS for non-gps_required calls - ALWAYS try to get location
-            if (!state?.gpsRequired && phone && phone !== "unknown" && !state?.gpsLat) {
-              // Normalize phone for GPS lookup
-              let normalizedPhone = phone.replace(/\s+/g, "").replace(/-/g, "");
-              if (!normalizedPhone.startsWith("+") && normalizedPhone.length >= 10) {
-                if (normalizedPhone.startsWith("00")) {
-                  normalizedPhone = "+" + normalizedPhone.slice(2);
-                } else if (/^(44|1|33|49|31)\d+$/.test(normalizedPhone)) {
-                  normalizedPhone = "+" + normalizedPhone;
-                }
-              }
-
-              // Check caller_gps table for pre-submitted GPS
-              const { data: gpsData2 } = await supabase
-                .from("caller_gps")
-                .select("lat, lon, expires_at")
-                .eq("phone_number", normalizedPhone)
-                .gte("expires_at", new Date().toISOString())
-                .order("created_at", { ascending: false })
-                .limit(1)
-                .maybeSingle();
-
-              if (gpsData2 && state) {
-                state.gpsLat = gpsData2.lat;
-                state.gpsLon = gpsData2.lon;
-                console.log(`[${callId}] 📍 GPS loaded (non-required): ${gpsData2.lat}, ${gpsData2.lon}`);
-              } else if (!state?.gpsLat) {
-                // NO GPS - ask Ada to request location
-                console.log(`[${callId}] ⚠️ GPS not found (non-required) - Ada will ask for location`);
-
-                if (openaiWs && openaiConnected) {
-                  openaiWs.send(
-                    JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{ type: "input_text", text: "[SYSTEM: GPS not available]" }],
-                      },
-                    })
-                  );
-                }
-
-                socket.send(
-                  JSON.stringify({
-                    type: "gps_missing",
-                    message: "GPS location not received - Ada will ask for location",
-                  })
-                );
-              }
-            }
 
             if (phone && phone !== "unknown") {
               const phoneKey = normalizePhone(phone);
@@ -8447,9 +8307,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                   status: "active",
                   source: "simple",
                   transcripts: [],
-                  gps_lat: state?.gpsLat,
-                  gps_lon: state?.gpsLon,
-                  gps_updated_at: state?.gpsLat ? new Date().toISOString() : null,
                   started_at: new Date().toISOString(),
                   ended_at: null,
                   pickup: activeBooking?.pickup ?? null,
@@ -8477,9 +8334,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     status: "active",
                     source: "simple",
                     transcripts: [],
-                    gps_lat: state?.gpsLat,
-                    gps_lon: state?.gpsLon,
-                    gps_updated_at: state?.gpsLat ? new Date().toISOString() : null,
 
                     // Optional context for the dashboard when an active booking exists
                     pickup: activeBooking?.pickup ?? null,
@@ -8570,32 +8424,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         return;
       }
 
-      // Handle GPS update during call
-      if (message.type === "gps_update" && state) {
-        const lat = message.lat || message.latitude;
-        const lon = message.lon || message.longitude;
-        
-        if (lat && lon) {
-          state.gpsLat = lat;
-          state.gpsLon = lon;
-          console.log(`[${state.callId}] 📍 GPS updated mid-call: ${lat}, ${lon}`);
-          
-          // Update live_calls with GPS
-          supabase.from("live_calls").update({
-            gps_lat: lat,
-            gps_lon: lon,
-            gps_updated_at: new Date().toISOString()
-          }).eq("call_id", state.callId)
-            .then(() => console.log(`[${state?.callId}] ✅ GPS saved to DB`));
-          
-          socket.send(JSON.stringify({
-            type: "gps_received",
-            lat,
-            lon
-          }));
-        }
-        return;
-      }
 
       if (message.type === "audio" && openaiConnected && openaiWs && state) {
         // ECHO GUARD: Always ignore audio for a short window after Ada finishes speaking.

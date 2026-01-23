@@ -85,7 +85,7 @@ EXTRACTION RULES (NEW BOOKING)
    - 'my location', 'here', 'current location' → leave pickup_location EMPTY (agent will ask)
    - 'nearest X' or 'closest X' for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY
    - 'nearest X' or 'closest X' for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY
-   - 'as directed' or no destination → dropoff_location = 'as directed'
+   - If no destination given → leave dropoff_location EMPTY (agent will ask)
 
 4. **Address Preservation - CRITICAL**:
    - Return EXACT text the user typed
@@ -191,7 +191,7 @@ You MUST NOT:
    - If only one place + 'pick up' → set as pickup_location.
    - If 'nearest' or 'closest' is mentioned for PICKUP → set nearest_pickup = place type, leave pickup_location EMPTY.
    - If 'nearest' or 'closest' is mentioned for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY.
-   - If no drop-off given or 'as directed', set dropoff_location = 'as directed'.
+   - If no drop-off given, leave dropoff_location EMPTY (agent will ask).
    - If user says 'my location', 'here', etc., leave pickup_location EMPTY (agent will ask for address).
 
 You MUST return the EXACT text the user typed for any NEW addresses.
