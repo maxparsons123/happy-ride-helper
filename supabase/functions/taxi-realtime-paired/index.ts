@@ -37,6 +37,7 @@ const USE_AI_EXTRACTION = true;
 // ---------------------------------------------------------------------------
 // AI-Based Extraction (calls taxi-extract-unified edge function)
 // More accurate than regex patterns for extracting booking details
+// Now includes intent detection for corrections, confirmations, etc.
 // ---------------------------------------------------------------------------
 interface AIExtractionResult {
   pickup: string | null;
@@ -47,6 +48,11 @@ interface AIExtractionResult {
   fields_changed?: string[];
   nearest_pickup?: string | null;
   nearest_dropoff?: string | null;
+  // Intent detection (AI-based, replaces regex)
+  intent: "new_booking" | "update_booking" | "confirm_booking" | "cancel_booking" | "get_status" | "other";
+  is_correction: boolean;
+  is_affirmative: boolean;
+  fields_extracted?: string[];
 }
 
 async function extractBookingWithAI(
@@ -101,7 +107,7 @@ async function extractBookingWithAI(
     const result = await response.json();
     const latency = Date.now() - startTime;
     
-    console.log(`[${callId}] 🧠 AI EXTRACTION (${latency}ms): pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, conf=${result.confidence}`);
+    console.log(`[${callId}] 🧠 AI EXTRACTION (${latency}ms): intent=${result.intent}, pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, is_correction=${result.is_correction}, is_affirmative=${result.is_affirmative}, conf=${result.confidence}`);
     
     return {
       pickup: result.pickup || null,
@@ -109,9 +115,14 @@ async function extractBookingWithAI(
       passengers: result.passengers ?? null,
       pickup_time: result.pickup_time || null,
       confidence: result.confidence || "low",
-      fields_changed: result.fields_changed,
+      fields_changed: result.fields_changed || [],
       nearest_pickup: result.nearest_pickup || null,
-      nearest_dropoff: result.nearest_dropoff || null
+      nearest_dropoff: result.nearest_dropoff || null,
+      // Intent detection from AI
+      intent: result.intent || "new_booking",
+      is_correction: result.is_correction || false,
+      is_affirmative: result.is_affirmative || false,
+      fields_extracted: result.fields_extracted || []
     };
   } catch (error) {
     console.error(`[${callId}] ❌ AI extraction error:`, error);
@@ -2945,50 +2956,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms`);
             }
             
-            // ═══════════════════════════════════════════════════════════════════
-            // AI-BASED EXTRACTION (replaces buggy regex "Ada First Echo" mode)
-            // Uses Gemini to accurately extract booking details from transcripts
-            // ═══════════════════════════════════════════════════════════════════
-            if (!isSummary && USE_AI_EXTRACTION && sessionState.conversationHistory.length > 0) {
-              // Run AI extraction in the background (non-blocking)
-              extractBookingWithAI(
-                sessionState.conversationHistory,
-                sessionState.booking,
-                sessionState.callerPhone,
-                callId
-              ).then(async (aiResult) => {
-                if (!aiResult || aiResult.confidence === "low") return;
-                
-                let updated = false;
-                
-                // Update pickup if AI found one and it's different
-                if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
-                  console.log(`[${callId}] 🧠 AI UPDATE pickup: "${sessionState.booking.pickup}" → "${aiResult.pickup}"`);
-                  sessionState.booking.pickup = aiResult.pickup;
-                  updated = true;
-                }
-                
-                // Update destination if AI found one and it's different
-                if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
-                  console.log(`[${callId}] 🧠 AI UPDATE destination: "${sessionState.booking.destination}" → "${aiResult.destination}"`);
-                  sessionState.booking.destination = aiResult.destination;
-                  updated = true;
-                }
-                
-                // Update passengers if AI found them and they're different
-                if (aiResult.passengers !== null && aiResult.passengers !== sessionState.booking.passengers) {
-                  console.log(`[${callId}] 🧠 AI UPDATE passengers: ${sessionState.booking.passengers} → ${aiResult.passengers}`);
-                  sessionState.booking.passengers = aiResult.passengers;
-                  updated = true;
-                }
-                
-                if (updated) {
-                  await updateLiveCall(sessionState);
-                }
-              }).catch(err => {
-                console.error(`[${callId}] AI extraction background error:`, err);
-              });
-            }
+            // NOTE: AI extraction is now done SYNCHRONOUSLY in the user transcript handler
+            // (case "conversation.item.input_audio_transcription.completed") so Ada has
+            // full context including corrections before responding.
             
             // AUTO-TRIGGER WEBHOOK: If Ada says "check the price" but the mini model didn't call the tool,
             // automatically trigger the webhook. This works around mini model's weak tool calling.
@@ -3444,62 +3414,93 @@ Otherwise, say goodbye warmly and call end_call().`
             
             console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
             
-            // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
-            const correction = detectAddressCorrection(
-              userText, 
-              sessionState.booking.pickup, 
-              sessionState.booking.destination
-            );
+            // ═══════════════════════════════════════════════════════════════════
+            // AI-BASED INTENT DETECTION (replaces brittle regex)
+            // Run extraction SYNCHRONOUSLY so Ada has full context before responding
+            // ═══════════════════════════════════════════════════════════════════
             
-            if (correction.type && correction.address) {
-              const oldValue = correction.type === "pickup" 
-                ? sessionState.booking.pickup 
-                : sessionState.booking.destination;
+            // First, add the user message to history for AI extraction
+            sessionState.conversationHistory.push({
+              role: "user",
+              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
+              timestamp: Date.now()
+            });
+            
+            if (USE_AI_EXTRACTION) {
+              console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
               
-              console.log(`[${callId}] 🔄 ADDRESS CORRECTION DETECTED: ${correction.type} "${oldValue}" → "${correction.address}"`);
-              
-              // Update the booking state IMMEDIATELY (before any OpenAI response)
-              if (correction.type === "pickup") {
-                sessionState.booking.pickup = correction.address;
-              } else {
-                sessionState.booking.destination = correction.address;
-              }
-              
-              // If we already have a fare, reset it - correction means we need a new quote
-              if (sessionState.pendingFare) {
-                console.log(`[${callId}] 💰 Resetting fare due to address correction`);
-                sessionState.pendingFare = null;
-              }
-              
-              // Add to history with correction annotation
-              sessionState.conversationHistory.push({
-                role: "user",
-                content: `[CORRECTION: User corrected ${correction.type} to "${correction.address}"] ${userText}`,
-                timestamp: Date.now()
-              });
-              
-              // CANCEL any in-progress response to prevent old state from being used
-              if (sessionState.openAiResponseActive) {
-                openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              
-              // Build the corrected state for the summary
-              const correctedPickup = sessionState.booking.pickup || "not yet provided";
-              const correctedDest = sessionState.booking.destination || "not yet provided";
-              const correctedPax = sessionState.booking.passengers ?? "not yet provided";
-              const correctedTime = sessionState.booking.pickupTime || "ASAP";
-              
-              // STRONGER instruction: Tell OpenAI the EXACT updated state and forbid old values
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[CRITICAL ADDRESS UPDATE]
-The user corrected their ${correction.type}. The OLD value "${oldValue}" is WRONG and must NEVER be mentioned again.
+              try {
+                const aiResult = await extractBookingWithAI(
+                  sessionState.conversationHistory,
+                  sessionState.booking,
+                  sessionState.callerPhone,
+                  callId
+                );
+                
+                if (aiResult && aiResult.confidence !== "low") {
+                  // ═══════════════════════════════════════════════════════════════
+                  // AI DETECTED A CORRECTION - Handle with full context
+                  // ═══════════════════════════════════════════════════════════════
+                  if (aiResult.is_correction && aiResult.fields_changed && aiResult.fields_changed.length > 0) {
+                    console.log(`[${callId}] 🧠 AI DETECTED CORRECTION: fields_changed=${aiResult.fields_changed.join(", ")}`);
+                    
+                    // Track what changed for the system message
+                    const changes: string[] = [];
+                    
+                    // Apply the AI's corrected values
+                    if (aiResult.fields_changed.includes("pickup") && aiResult.pickup) {
+                      const oldValue = sessionState.booking.pickup;
+                      sessionState.booking.pickup = aiResult.pickup;
+                      changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
+                    }
+                    if (aiResult.fields_changed.includes("destination") && aiResult.destination) {
+                      const oldValue = sessionState.booking.destination;
+                      sessionState.booking.destination = aiResult.destination;
+                      changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
+                    }
+                    if (aiResult.fields_changed.includes("passengers") && aiResult.passengers !== null) {
+                      const oldValue = sessionState.booking.passengers;
+                      sessionState.booking.passengers = aiResult.passengers;
+                      changes.push(`passengers from ${oldValue ?? 'empty'} to ${aiResult.passengers}`);
+                    }
+                    if (aiResult.fields_changed.includes("time") && aiResult.pickup_time) {
+                      const oldValue = sessionState.booking.pickupTime;
+                      sessionState.booking.pickupTime = aiResult.pickup_time;
+                      changes.push(`time from "${oldValue || 'empty'}" to "${aiResult.pickup_time}"`);
+                    }
+                    
+                    // Reset fare if we had one (correction invalidates it)
+                    if (sessionState.pendingFare) {
+                      console.log(`[${callId}] 💰 Resetting fare due to AI-detected correction`);
+                      sessionState.pendingFare = null;
+                      sessionState.pendingEta = null;
+                      sessionState.awaitingConfirmation = false;
+                      sessionState.quoteInFlight = false;
+                      sessionState.lastQuoteRequestedAt = 0;
+                    }
+                    
+                    // CANCEL any in-progress response to prevent old state from being used
+                    if (sessionState.openAiResponseActive) {
+                      openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                      sessionState.openAiResponseActive = false;
+                    }
+                    
+                    // Build the corrected state for the summary
+                    const correctedPickup = sessionState.booking.pickup || "not yet provided";
+                    const correctedDest = sessionState.booking.destination || "not yet provided";
+                    const correctedPax = sessionState.booking.passengers ?? "not yet provided";
+                    const correctedTime = sessionState.booking.pickupTime || "ASAP";
+                    
+                    // Tell OpenAI about the correction with FULL context
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[AI-DETECTED CORRECTION]
+The user corrected: ${changes.join(", ")}.
 
 ## UPDATED BOOKING STATE (USE ONLY THESE VALUES):
 - Pickup: ${correctedPickup}
@@ -3508,75 +3509,63 @@ The user corrected their ${correction.type}. The OLD value "${oldValue}" is WRON
 - Time: ${correctedTime}
 
 INSTRUCTIONS:
-1. Acknowledge the correction briefly: "Got it, ${correction.type} is now ${correction.address}."
-2. If all 4 fields are captured, proceed to summarize the booking using ONLY the values above.
-3. NEVER mention "${oldValue}" - that was incorrect.`
-                  }]
+1. Acknowledge the correction briefly
+2. If all 4 fields are captured, proceed to summarize the booking using ONLY the values above
+3. NEVER mention the old incorrect values`
+                        }]
+                      }
+                    }));
+                    openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                    sessionState.openAiResponseActive = true;
+                    
+                    await updateLiveCall(sessionState);
+                    break; // AI correction handled
+                  }
+                  
+                  // ═══════════════════════════════════════════════════════════════
+                  // AI DETECTED AFFIRMATIVE (yes/confirm) - Fast path
+                  // ═══════════════════════════════════════════════════════════════
+                  if (aiResult.is_affirmative && aiResult.intent === "confirm_booking") {
+                    console.log(`[${callId}] 🧠 AI DETECTED CONFIRMATION: User confirmed the booking`);
+                    // Let normal flow handle this, but note it for logging
+                  }
+                  
+                  // ═══════════════════════════════════════════════════════════════
+                  // AI EXTRACTED NEW DATA - Update state BEFORE Ada responds
+                  // ═══════════════════════════════════════════════════════════════
+                  let updated = false;
+                  
+                  // Only update if AI found new values (not corrections, which are handled above)
+                  if (!aiResult.is_correction) {
+                    if (aiResult.pickup && !sessionState.booking.pickup) {
+                      console.log(`[${callId}] 🧠 AI FILL pickup: "${aiResult.pickup}"`);
+                      sessionState.booking.pickup = aiResult.pickup;
+                      updated = true;
+                    }
+                    if (aiResult.destination && !sessionState.booking.destination) {
+                      console.log(`[${callId}] 🧠 AI FILL destination: "${aiResult.destination}"`);
+                      sessionState.booking.destination = aiResult.destination;
+                      updated = true;
+                    }
+                    if (aiResult.passengers !== null && sessionState.booking.passengers === null) {
+                      console.log(`[${callId}] 🧠 AI FILL passengers: ${aiResult.passengers}`);
+                      sessionState.booking.passengers = aiResult.passengers;
+                      updated = true;
+                    }
+                    if (aiResult.pickup_time && !sessionState.booking.pickupTime) {
+                      console.log(`[${callId}] 🧠 AI FILL time: "${aiResult.pickup_time}"`);
+                      sessionState.booking.pickupTime = aiResult.pickup_time;
+                      updated = true;
+                    }
+                  }
+                  
+                  if (updated) {
+                    await updateLiveCall(sessionState);
+                  }
                 }
-              }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              sessionState.openAiResponseActive = true;
-              
-              await updateLiveCall(sessionState);
-              break; // Correction handled, don't run normal context pairing
-            }
-            
-            // FIELD CORRECTION DETECTION (passengers, time, etc.)
-            // Handles "You put seven passengers, there's three" and similar patterns
-            const fieldCorrection = detectFieldCorrection(userText);
-            if (fieldCorrection.field && fieldCorrection.value !== null) {
-              console.log(`[${callId}] 🔄 FIELD CORRECTION DETECTED: ${fieldCorrection.field} → ${fieldCorrection.value}`);
-              
-              // Update the booking state immediately
-              if (fieldCorrection.field === "passengers") {
-                sessionState.booking.passengers = fieldCorrection.value as number;
-              } else if (fieldCorrection.field === "time") {
-                sessionState.booking.pickupTime = fieldCorrection.value as string;
+              } catch (aiErr) {
+                console.error(`[${callId}] ⚠️ AI extraction error (falling back to normal flow):`, aiErr);
               }
-              
-              // Add to history with correction annotation
-              sessionState.conversationHistory.push({
-                role: "user",
-                content: `[CORRECTION: User corrected ${fieldCorrection.field} to "${fieldCorrection.value}"] ${userText}`,
-                timestamp: Date.now()
-              });
-              
-              // Determine if we need to re-quote
-              const needsRequote = sessionState.awaitingConfirmation || sessionState.pendingFare;
-              
-              // Tell OpenAI about the correction so Ada acknowledges it
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[FIELD CORRECTION] The user corrected the ${fieldCorrection.field} to: ${fieldCorrection.value}.
-
-IMPORTANT: 
-- The ${fieldCorrection.field} is NOW ${fieldCorrection.value}
-- Acknowledge briefly: "Got it, ${fieldCorrection.field === "passengers" ? fieldCorrection.value + " passengers" : fieldCorrection.value}"
-${needsRequote ? `- Since we already had a price, you need to get an updated quote. Say "Let me get an updated price for ${fieldCorrection.value} passengers" then call book_taxi(action='request_quote')` : `- Continue to the next step in the booking flow`}
-
-Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
-                  }]
-                }
-              }));
-              
-              // If we need a new quote, reset the fare state
-              if (needsRequote) {
-                sessionState.pendingFare = null;
-                sessionState.pendingEta = null;
-                sessionState.awaitingConfirmation = false;
-                sessionState.quoteInFlight = false;
-                sessionState.lastQuoteRequestedAt = 0;
-              }
-              
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              
-              await updateLiveCall(sessionState);
-              break; // Correction handled
             }
             
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
@@ -3588,13 +3577,6 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               
               if (looksLikeAddress && !hasNumber && !isJustNumber) {
                 console.log(`[${callId}] 🔄 PASSENGER CLARIFICATION: Got address "${userText}" when expecting passenger count`);
-                
-                // Store the address for later (might be a correction they want to make)
-                sessionState.conversationHistory.push({
-                  role: "user",
-                  content: `[CONTEXT: Ada asked about passengers but user said an address] ${userText}`,
-                  timestamp: Date.now()
-                });
                 
                 // Force immediate re-prompt for passengers
                 openaiWs!.send(JSON.stringify({
@@ -3620,14 +3602,7 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
               }
             }
             
-            // Add to history with context annotation (normal flow)
-            sessionState.conversationHistory.push({
-              role: "user",
-              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
-              timestamp: Date.now()
-            });
-            
-            // Send context-aware prompt to OpenAI
+            // Send context-aware prompt to OpenAI with FULL extracted state
             const contextPrompt = {
               type: "conversation.item.create",
               item: {
