@@ -679,7 +679,8 @@ const TOOLS = [
 function computeNextStep(booking: SessionState["booking"]): SessionState["lastQuestionAsked"] {
   if (!booking.pickup) return "pickup";
   if (!booking.destination) return "destination";
-  if (booking.passengers === null) return "passengers";
+  // CRITICAL FIX: Check for null OR 0 OR undefined - passengers must be explicitly set to a valid count
+  if (booking.passengers === null || booking.passengers === undefined || booking.passengers <= 0) return "passengers";
   if (!booking.pickupTime) return "time";
   return "confirmation";
 }
@@ -3044,18 +3045,88 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               break; // Correction handled, don't run normal context pairing
             }
             
-            // CONFIRMATION PHASE ADDRESS GUARD: If user says an address during confirmation, treat as correction
-            if (sessionState.lastQuestionAsked === "confirmation" || sessionState.awaitingConfirmation) {
+            // CONFIRMATION PHASE: Handle user response to fare quote
+            if (sessionState.awaitingConfirmation) {
+              const lowerText = userText.toLowerCase().trim();
+              
+              // Check for EXPLICIT affirmative confirmation (go ahead, yes, book it, etc.)
+              const affirmativePatterns = /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|book it|confirm|please|that's fine|that's good|perfect|great|lovely|brilliant|sounds good|do it|make the booking|yes please|absolutely|definitely)/i;
+              const isAffirmative = affirmativePatterns.test(lowerText);
+              
+              // Check for EXPLICIT negative response
+              const negativePatterns = /^(no|nope|nah|cancel|nevermind|never mind|forget it|too expensive|too much|no thanks|no thank you)/i;
+              const isNegative = negativePatterns.test(lowerText);
+              
+              // Check if it looks like an address (correction attempt)
               const addressKeywords = ["road", "street", "avenue", "lane", "drive", "way", "close", "court", "place", "crescent", "terrace", "airport", "station", "hotel", "hospital"];
-              const lowerText = userText.toLowerCase();
               const hasAddressKeyword = addressKeywords.some(kw => lowerText.includes(kw));
               const hasHouseNumber = /\d+[a-zA-Z]?\s/.test(userText);
               const looksLikeAddress = hasAddressKeyword || hasHouseNumber;
               
-              // Check if it's NOT a simple yes/no confirmation
-              const isYesNo = /^(yes|yeah|yep|no|nope|correct|right|cancel|ok|okay|sure|go ahead|book it|confirm|please|thank you|thanks|lovely|perfect|great|brilliant|fine)\b/i.test(userText.trim());
+              console.log(`[${callId}] 🎯 CONFIRMATION CHECK: "${userText}" → affirmative=${isAffirmative}, negative=${isNegative}, address=${looksLikeAddress}`);
               
-              if (looksLikeAddress && !isYesNo) {
+              if (isAffirmative && !looksLikeAddress) {
+                // USER CONFIRMED - trigger book_taxi(confirmed) directly!
+                console.log(`[${callId}] ✅ USER CONFIRMED BOOKING with: "${userText}"`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[BOOKING CONFIRMATION] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                // Inject system message to force Ada to call book_taxi(confirmed)
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER CONFIRMED BOOKING] The user said "${userText}" which is a clear YES.
+
+🚨 IMMEDIATELY call book_taxi with action="confirmed" to complete the booking.
+Do NOT ask any more questions. The booking is confirmed.
+Call: book_taxi({ action: "confirmed" })`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+              
+              if (isNegative && !looksLikeAddress) {
+                // USER DECLINED
+                console.log(`[${callId}] ❌ USER DECLINED BOOKING with: "${userText}"`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[BOOKING DECLINED] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER DECLINED BOOKING] The user said "${userText}" which means NO.
+                      
+Say: "No problem. Is there anything else I can help you with?"
+Do NOT cancel abruptly - be polite and offer further assistance.`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                break;
+              }
+              
+              if (looksLikeAddress) {
                 console.log(`[${callId}] 🔄 CONFIRMATION PHASE ADDRESS: "${userText}" - treating as correction request`);
                 
                 sessionState.conversationHistory.push({
@@ -3083,8 +3154,26 @@ Current booking: pickup="${sessionState.booking.pickup}", destination="${session
                   }
                 }));
                 openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                break; // Don't process as normal confirmation
+                break;
               }
+              
+              // Unclear response - ask for clarification
+              console.log(`[${callId}] ❓ UNCLEAR CONFIRMATION: "${userText}"`);
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[UNCLEAR RESPONSE] The user said: "${userText}" but I'm not sure if that's a yes or no.
+                    
+Ask clearly: "Would you like me to book that taxi for you?"`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              break;
             }
 
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
@@ -3261,7 +3350,13 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             const missing: string[] = [];
             if (!sessionState.booking.pickup) missing.push("pickup");
             if (!sessionState.booking.destination) missing.push("destination");
-            if (sessionState.booking.passengers === null || Number.isNaN(sessionState.booking.passengers)) missing.push("passengers");
+            // CRITICAL FIX: Block if passengers is null, undefined, NaN, OR 0 (must be at least 1)
+            if (sessionState.booking.passengers === null || 
+                sessionState.booking.passengers === undefined ||
+                Number.isNaN(sessionState.booking.passengers) || 
+                sessionState.booking.passengers <= 0) {
+              missing.push("passengers");
+            }
 
             // De-dupe: once quote requested/in-flight, don't re-send
             const QUOTE_DEDUPE_MS = 15000;
