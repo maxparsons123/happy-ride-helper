@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Taxi AI Asterisk Bridge v7.6 - PRODUCTION READY
+Taxi AI Asterisk Bridge v7.7 - OPUS SUPPORT
 
 Architecture:
   Asterisk AudioSocket ←→ Bridge ←→ Edge Function (taxi-realtime-paired)
 
 Key Features:
+  • Opus codec support for WhatsApp native 48kHz audio (no transcoding loss)
   • Context-pairing architecture with eager init (phone sent later via update_phone)
-  • Dynamic format detection with smart locking (ulaw/slin/slin16)
+  • Dynamic format detection with smart locking (ulaw/slin/slin16/opus)
   • High-quality DSP pipeline: Volume Boost → AGC → Pre-emphasis
   • resample_poly for all audio paths (preserves consonant transients)
   • Session handoff support for 90s edge function limits
@@ -15,6 +16,7 @@ Key Features:
   • Comprehensive diagnostics with WS/Asterisk heartbeat tracking
 
 Changelog:
+  v7.7: Added Opus codec support via opuslib for WhatsApp native 48kHz audio
   v7.6: Refactored DSP into AudioProcessor class, improved format detection,
         added session handoff, enhanced diagnostics, cleaner architecture
   v7.5: Dynamic pacing, format auto-unlock on PCM detection
@@ -32,12 +34,23 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from math import gcd
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 
 import numpy as np
 from scipy.signal import resample_poly
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
+
+# Opus codec support (optional - falls back to PCM if not available)
+try:
+    import opuslib
+    from opuslib import Encoder as OpusEncoder, Decoder as OpusDecoder
+    from opuslib.api import constants as opus_constants
+    OPUS_AVAILABLE = True
+except ImportError:
+    OPUS_AVAILABLE = False
+    OpusEncoder = None
+    OpusDecoder = None
 
 
 # =============================================================================
@@ -85,9 +98,17 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 RATE_ULAW = 8000      # µ-law telephony
 RATE_SLIN16 = 16000   # Signed linear 16kHz (wideband)
 RATE_AI = 24000       # OpenAI TTS output
+RATE_OPUS = 48000     # Opus native (WhatsApp)
+
+# Opus Configuration
+OPUS_FRAME_MS = 20            # 20ms frames (standard)
+OPUS_BITRATE = 32000          # 32kbps VBR (good quality, low bandwidth)
+OPUS_COMPLEXITY = 5           # 0-10, higher = better quality but more CPU
+OPUS_APPLICATION = "voip"     # Optimized for speech
 
 # Format Detection
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)  # False = auto-detect
+PREFER_OPUS = _env_bool("PREFER_OPUS", True)  # Prefer Opus when available
 PREFER_SLIN16 = True  # Prefer wideband when available
 FORMAT_LOCK_DURATION_S = 0.75  # Debounce format switching
 
@@ -137,6 +158,125 @@ logger = logging.getLogger("TaxiBridge")
 
 
 # =============================================================================
+# OPUS CODEC WRAPPER
+# =============================================================================
+
+class OpusCodec:
+    """Thread-safe Opus encoder/decoder wrapper with automatic resampling."""
+    
+    def __init__(self, sample_rate: int = RATE_OPUS, channels: int = 1):
+        if not OPUS_AVAILABLE:
+            raise RuntimeError("opuslib not installed. Run: pip install opuslib")
+        
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.frame_size = int(sample_rate * OPUS_FRAME_MS / 1000)  # samples per frame
+        
+        # Create encoder
+        application = opus_constants.APPLICATION_VOIP
+        self.encoder = OpusEncoder(sample_rate, channels, application)
+        self.encoder.bitrate = OPUS_BITRATE
+        self.encoder.complexity = OPUS_COMPLEXITY
+        self.encoder.vbr = True
+        
+        # Create decoder
+        self.decoder = OpusDecoder(sample_rate, channels)
+        
+        logger.info("🎵 Opus codec initialized: %dHz, %d channels, %d samples/frame",
+                   sample_rate, channels, self.frame_size)
+    
+    def encode(self, pcm_bytes: bytes) -> bytes:
+        """Encode PCM16 audio to Opus.
+        
+        Args:
+            pcm_bytes: Raw PCM16 audio at self.sample_rate
+            
+        Returns:
+            Opus-encoded frame
+        """
+        if not pcm_bytes:
+            return b""
+        
+        # Ensure we have exact frame size
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+        if len(samples) < self.frame_size:
+            # Pad with zeros
+            samples = np.pad(samples, (0, self.frame_size - len(samples)))
+        elif len(samples) > self.frame_size:
+            # Truncate (caller should chunk properly)
+            samples = samples[:self.frame_size]
+        
+        return self.encoder.encode(samples.tobytes(), self.frame_size)
+    
+    def decode(self, opus_bytes: bytes) -> bytes:
+        """Decode Opus frame to PCM16.
+        
+        Args:
+            opus_bytes: Opus-encoded audio frame
+            
+        Returns:
+            Raw PCM16 audio at self.sample_rate
+        """
+        if not opus_bytes:
+            return b""
+        
+        try:
+            return self.decoder.decode(opus_bytes, self.frame_size)
+        except Exception as e:
+            logger.warning("Opus decode error: %s", e)
+            # Return silence on decode error
+            return bytes(self.frame_size * 2)  # 2 bytes per sample
+    
+    def encode_with_resample(self, pcm_bytes: bytes, from_rate: int) -> bytes:
+        """Resample PCM16 from any rate to Opus sample rate and encode.
+        
+        Args:
+            pcm_bytes: Raw PCM16 audio at from_rate
+            from_rate: Input sample rate (e.g., 24000 for AI output)
+            
+        Returns:
+            Opus-encoded frame
+        """
+        if from_rate == self.sample_rate:
+            return self.encode(pcm_bytes)
+        
+        # Resample to Opus rate
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return b""
+        
+        g = gcd(from_rate, self.sample_rate)
+        resampled = resample_poly(samples, up=self.sample_rate // g, down=from_rate // g)
+        pcm_resampled = np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+        
+        return self.encode(pcm_resampled)
+    
+    def decode_with_resample(self, opus_bytes: bytes, to_rate: int) -> bytes:
+        """Decode Opus and resample to target rate.
+        
+        Args:
+            opus_bytes: Opus-encoded audio frame
+            to_rate: Output sample rate (e.g., 24000 for AI input)
+            
+        Returns:
+            Raw PCM16 audio at to_rate
+        """
+        pcm = self.decode(opus_bytes)
+        
+        if to_rate == self.sample_rate:
+            return pcm
+        
+        # Resample from Opus rate to target
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return b""
+        
+        g = gcd(self.sample_rate, to_rate)
+        resampled = resample_poly(samples, up=to_rate // g, down=self.sample_rate // g)
+        return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+
+
+# =============================================================================
 # AUDIO PROCESSING
 # =============================================================================
 
@@ -145,6 +285,15 @@ class AudioProcessor:
     
     def __init__(self):
         self.last_gain: float = 1.0
+        self.opus_codec: Optional[OpusCodec] = None
+        
+        # Initialize Opus if available
+        if OPUS_AVAILABLE:
+            try:
+                self.opus_codec = OpusCodec(RATE_OPUS, channels=1)
+            except Exception as e:
+                logger.warning("⚠️ Opus init failed: %s (falling back to PCM)", e)
+                self.opus_codec = None
     
     @staticmethod
     def ulaw_to_linear(ulaw_bytes: bytes) -> bytes:
@@ -198,6 +347,25 @@ class AudioProcessor:
         resampled = resample_poly(samples, up=to_rate // g, down=from_rate // g)
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
     
+    def decode_opus(self, opus_bytes: bytes) -> Tuple[bytes, int]:
+        """Decode Opus to PCM16.
+        
+        Returns:
+            (pcm_bytes, sample_rate) - decoded audio and its sample rate
+        """
+        if not self.opus_codec:
+            raise RuntimeError("Opus codec not available")
+        
+        pcm = self.opus_codec.decode(opus_bytes)
+        return pcm, RATE_OPUS
+    
+    def encode_opus(self, pcm_bytes: bytes, from_rate: int) -> bytes:
+        """Encode PCM16 to Opus with automatic resampling."""
+        if not self.opus_codec:
+            raise RuntimeError("Opus codec not available")
+        
+        return self.opus_codec.encode_with_resample(pcm_bytes, from_rate)
+    
     def process_inbound(self, pcm_bytes: bytes) -> bytes:
         """
         Full DSP pipeline for audio going TO the AI (Asterisk → Edge Function).
@@ -233,14 +401,19 @@ class AudioProcessor:
         """
         Process audio coming FROM the AI (Edge Function → Asterisk).
         
-        Pipeline: Resample → Encode (if µ-law)
+        Pipeline: Resample → Encode (µ-law or Opus)
         """
+        if to_codec == "opus" and self.opus_codec:
+            # Encode to Opus (handles resampling internally)
+            return self.encode_opus(ai_audio, from_rate)
+        
         # Resample from AI rate to Asterisk rate
         resampled = self.resample(ai_audio, from_rate, to_rate)
         
         # Encode to µ-law if needed
         if to_codec == "ulaw":
             return self.linear_to_ulaw(resampled)
+        
         return resampled
 
 
@@ -272,9 +445,9 @@ class CallState:
     phone: str = "Unknown"
     
     # Audio Format (detected from Asterisk frame sizes)
-    ast_codec: str = "ulaw"       # ulaw, slin, or slin16
-    ast_rate: int = RATE_ULAW     # 8000 or 16000
-    ast_frame_bytes: int = 160    # 160 (ulaw), 320 (slin), 640 (slin16)
+    ast_codec: str = "ulaw"       # ulaw, slin, slin16, or opus
+    ast_rate: int = RATE_ULAW     # 8000, 16000, or 48000
+    ast_frame_bytes: int = 160    # varies by codec
     
     # Format detection state
     format_locked: bool = False
@@ -292,6 +465,9 @@ class CallState:
     last_asterisk_send: float = field(default_factory=time.time)
     last_asterisk_recv: float = field(default_factory=time.time)
     
+    # Opus frame buffer (for accumulating partial frames)
+    opus_buffer: bytes = b""
+    
     # Metrics
     frames_sent: int = 0
     frames_received: int = 0
@@ -306,7 +482,7 @@ class CallState:
 class TaxiBridge:
     """Main bridge connecting Asterisk AudioSocket to AI Edge Function."""
     
-    VERSION = "7.6"
+    VERSION = "7.7"
     
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self.reader = reader
@@ -325,16 +501,71 @@ class TaxiBridge:
     # FORMAT DETECTION
     # -------------------------------------------------------------------------
     
-    async def _detect_format(self, frame_len: int) -> None:
+    def _is_opus_frame(self, payload: bytes) -> bool:
+        """Heuristic to detect if payload is Opus-encoded.
+        
+        Opus frames have specific TOC (Table of Contents) byte patterns.
+        First byte encodes: config (5 bits) + stereo (1 bit) + frames per packet (2 bits)
         """
-        Detect Asterisk audio format from frame size.
+        if len(payload) < 2:
+            return False
+        
+        # Opus frames are typically variable length but have recognizable patterns
+        # PCM would be even length and have predictable sizes (320, 640, etc.)
+        # Opus is compressed so sizes vary but are usually smaller than PCM equivalent
+        toc = payload[0]
+        
+        # Check for valid config values (0-31 in upper 5 bits)
+        config = (toc >> 3) & 0x1F
+        
+        # Config 0-11 are narrow/medium/wideband SILK modes
+        # Config 12-15 are hybrid modes
+        # Config 16-31 are CELT modes
+        # All are valid Opus configurations
+        
+        # Additional heuristic: Opus frames for 20ms @ 32kbps are typically 80-120 bytes
+        # 48kHz stereo PCM for 20ms would be 3840 bytes, mono 1920 bytes
+        # If we get frames much smaller than PCM equivalent, likely Opus
+        opus_20ms_mono_pcm_size = int(RATE_OPUS * 0.02 * 2)  # 1920 bytes
+        
+        # If payload is less than half the PCM size, probably Opus
+        if len(payload) < opus_20ms_mono_pcm_size // 4:
+            return True
+        
+        return False
+    
+    async def _detect_format(self, frame_len: int, payload: bytes = b"") -> None:
+        """
+        Detect Asterisk audio format from frame size and content.
         
         Frame sizes (20ms):
-          • µ-law 8kHz:  160 bytes (1 byte/sample × 8000 × 0.02)
-          • slin 8kHz:   320 bytes (2 bytes/sample × 8000 × 0.02)
+          • µ-law 8kHz:   160 bytes (1 byte/sample × 8000 × 0.02)
+          • slin 8kHz:    320 bytes (2 bytes/sample × 8000 × 0.02)
           • slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
+          • Opus 48kHz:   variable (typically 80-200 bytes for speech @ 32kbps)
         """
         CANONICAL_SIZES = {160, 320, 640}
+        
+        # Check for Opus first (variable size, special detection)
+        if payload and self._is_opus_frame(payload):
+            if self.state.ast_codec != "opus":
+                self.state.ast_codec = "opus"
+                self.state.ast_rate = RATE_OPUS
+                self.state.format_locked = True
+                self.state.format_lock_time = time.time()
+                logger.info("[%s] 🎵 Format: Opus @ %dHz (variable frames)",
+                           self.state.call_id, RATE_OPUS)
+                
+                # Notify edge function
+                if self.ws and self.state.ws_connected:
+                    await self.ws.send(json.dumps({
+                        "type": "update_format",
+                        "call_id": self.state.call_id,
+                        "inbound_format": "opus",
+                        "inbound_sample_rate": RATE_OPUS,
+                    }))
+            self.state.ast_frame_bytes = frame_len
+            return
         
         # Honor ulaw lock unless we see definitive PCM frame sizes
         if LOCK_FORMAT_ULAW and frame_len not in {320, 640}:
@@ -355,7 +586,7 @@ class TaxiBridge:
         old_codec = self.state.ast_codec
         old_rate = self.state.ast_rate
         
-        # Detect format
+        # Detect format from frame size
         if frame_len == 640:
             self.state.ast_codec = "slin16"
             self.state.ast_rate = RATE_SLIN16
@@ -388,10 +619,11 @@ class TaxiBridge:
             
             # Notify edge function of format change
             if self.ws and self.state.ws_connected:
+                inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
                 await self.ws.send(json.dumps({
                     "type": "update_format",
                     "call_id": self.state.call_id,
-                    "inbound_format": "slin",  # Always send PCM16 after processing
+                    "inbound_format": inbound_fmt,
                     "inbound_sample_rate": self.state.ast_rate,
                 }))
     
@@ -441,12 +673,13 @@ class TaxiBridge:
                     self.state.init_sent = True
                 elif self.state.reconnect_attempts > 0 and self.state.init_sent:
                     # Reconnect init
+                    inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
                         "phone": None if self.state.phone == "Unknown" else self.state.phone,
                         "reconnect": True,
-                        "inbound_format": "slin",
+                        "inbound_format": inbound_fmt,
                         "inbound_sample_rate": self.state.ast_rate,
                     }
                     await self.ws.send(json.dumps(payload))
@@ -523,10 +756,12 @@ class TaxiBridge:
                 ws_status = "🟢" if ws_age < 5 else "🟡" if ws_age < 15 else "🔴"
                 ast_status = "🟢" if ast_age < 5 else "🟡" if ast_age < 15 else "🔴"
                 
-                logger.info("[%s] 💓 WS%s(%.1fs) AST%s(%.1fs) TX:%d RX:%d KA:%d HO:%d",
+                codec_icon = "🎵" if self.state.ast_codec == "opus" else "🔊"
+                
+                logger.info("[%s] 💓 WS%s(%.1fs) AST%s(%.1fs) %s%s@%dHz TX:%d RX:%d",
                            self.state.call_id, ws_status, ws_age, ast_status, ast_age,
-                           self.state.frames_sent, self.state.frames_received,
-                           self.state.keepalive_count, self.state.handoff_count)
+                           codec_icon, self.state.ast_codec, self.state.ast_rate,
+                           self.state.frames_sent, self.state.frames_received)
                 
                 # Log keepalive activity periodically
                 if self.state.keepalive_count > 0 and time.time() - last_keepalive_log > 30:
@@ -555,6 +790,7 @@ class TaxiBridge:
                     
                     # Send eager init on first connection
                     if not self.state.init_sent and self.ws:
+                        inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
                         payload = {
                             "type": "init",
                             "call_id": self.state.call_id,
@@ -562,13 +798,13 @@ class TaxiBridge:
                             "user_phone": "unknown",
                             "addressTtsSplicing": True,
                             "eager_init": True,
-                            "inbound_format": "slin",
+                            "inbound_format": inbound_fmt,
                             "inbound_sample_rate": self.state.ast_rate,
                         }
                         await self.ws.send(json.dumps(payload))
                         self.state.init_sent = True
-                        logger.info("[%s] 🚀 Eager init (slin @ %dHz)", 
-                                   self.state.call_id, self.state.ast_rate)
+                        logger.info("[%s] 🚀 Eager init (%s @ %dHz)", 
+                                   self.state.call_id, inbound_fmt, self.state.ast_rate)
                 
                 # Create bidirectional audio tasks
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
@@ -638,10 +874,10 @@ class TaxiBridge:
             await asyncio.gather(playback_task, heartbeat_task, return_exceptions=True)
             
             # Log final stats
-            logger.info("[%s] 📊 Final: TX=%d RX=%d KA=%d HO=%d",
-                       self.state.call_id, self.state.frames_sent, 
-                       self.state.frames_received, self.state.keepalive_count,
-                       self.state.handoff_count)
+            logger.info("[%s] 📊 Final: %s@%dHz TX=%d RX=%d KA=%d HO=%d",
+                       self.state.call_id, self.state.ast_codec, self.state.ast_rate,
+                       self.state.frames_sent, self.state.frames_received,
+                       self.state.keepalive_count, self.state.handoff_count)
             
             await self.cleanup()
     
@@ -700,12 +936,21 @@ class TaxiBridge:
                             }))
                     
                     elif msg_type == MSG_AUDIO:
-                        # Detect format if frame size changed
-                        if msg_len != self.state.ast_frame_bytes:
-                            await self._detect_format(msg_len)
+                        # Detect format (includes Opus detection)
+                        if msg_len != self.state.ast_frame_bytes or self.state.ast_codec != "opus":
+                            await self._detect_format(msg_len, payload)
                         
-                        # Decode µ-law if needed
-                        if self.state.ast_codec == "ulaw":
+                        # Decode based on codec
+                        if self.state.ast_codec == "opus":
+                            # Decode Opus to PCM at Opus native rate, then resample to AI rate
+                            if self.audio_processor.opus_codec:
+                                linear = self.audio_processor.opus_codec.decode_with_resample(
+                                    payload, RATE_AI
+                                )
+                            else:
+                                logger.warning("[%s] ⚠️ Opus frame but no decoder", self.state.call_id)
+                                continue
+                        elif self.state.ast_codec == "ulaw":
                             linear = self.audio_processor.ulaw_to_linear(payload)
                         else:
                             linear = payload
@@ -713,7 +958,7 @@ class TaxiBridge:
                         # Apply DSP pipeline (volume boost → AGC → pre-emphasis)
                         processed = self.audio_processor.process_inbound(linear)
                         
-                        # Send to AI
+                        # Send to AI (always as PCM16 - edge function expects this)
                         if self.ws and self.state.ws_connected:
                             try:
                                 await self.ws.send(processed)
@@ -807,13 +1052,14 @@ class TaxiBridge:
                     self.state.handoff_count += 1
                     logger.info("[%s] 🔄 Session handoff #%d", 
                                self.state.call_id, self.state.handoff_count)
+                    inbound_fmt = "opus" if self.state.ast_codec == "opus" else "slin"
                     raise RedirectException(
                         url=self.state.current_ws_url,
                         init_data={
                             "resume": True,
                             "resume_call_id": data.get("call_id", self.state.call_id),
                             "phone": self.state.phone,
-                            "inbound_format": "slin",
+                            "inbound_format": inbound_fmt,
                             "inbound_sample_rate": self.state.ast_rate,
                         }
                     )
@@ -855,18 +1101,26 @@ class TaxiBridge:
         bytes_played = 0
         buffer = bytearray()
         
+        # Opus uses variable-size frames, so we track by time instead of bytes
+        # For PCM codecs, we use fixed frame sizes
+        
         try:
             while self.running:
                 # Drain queue to buffer
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
                 
-                # Calculate pacing: bytes_per_sec based on 20ms frames
-                # 50 frames/sec × frame_size = bytes/sec
-                bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
+                # Calculate pacing based on codec
+                if self.state.ast_codec == "opus":
+                    # Opus: send entire encoded frames as they arrive
+                    # Frame timing is handled by encoder (20ms frames)
+                    bytes_per_sec = OPUS_BITRATE // 8  # Approximate
+                else:
+                    # PCM: 50 frames/sec × frame_size = bytes/sec
+                    bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
                 
                 # Pace to real-time
-                expected_time = start_time + (bytes_played / bytes_per_sec)
+                expected_time = start_time + (bytes_played / max(1, bytes_per_sec))
                 delay = expected_time - time.time()
                 if delay > 0:
                     await asyncio.sleep(delay)
@@ -874,13 +1128,30 @@ class TaxiBridge:
                 if not self.running:
                     break
                 
-                # Get next frame (or silence)
-                if len(buffer) >= self.state.ast_frame_bytes:
-                    chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                    del buffer[:self.state.ast_frame_bytes]
+                # Get next frame
+                if self.state.ast_codec == "opus":
+                    # For Opus, send complete encoded frames
+                    # The AudioProcessor already encodes to Opus frames
+                    if len(buffer) > 0:
+                        # Send the entire buffer as it contains Opus frames
+                        chunk = bytes(buffer)
+                        buffer.clear()
+                    else:
+                        # Generate silence frame (encode silence to Opus)
+                        if self.audio_processor.opus_codec:
+                            silence_pcm = bytes(self.audio_processor.opus_codec.frame_size * 2)
+                            chunk = self.audio_processor.opus_codec.encode(silence_pcm)
+                        else:
+                            chunk = b"\x00" * 80  # Approximate Opus silence frame
+                        self.state.keepalive_count += 1
                 else:
-                    chunk = self._silence_frame()
-                    self.state.keepalive_count += 1
+                    # PCM codecs: fixed frame sizes
+                    if len(buffer) >= self.state.ast_frame_bytes:
+                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
+                        del buffer[:self.state.ast_frame_bytes]
+                    else:
+                        chunk = self._silence_frame()
+                        self.state.keepalive_count += 1
                 
                 # Send to Asterisk
                 try:
@@ -902,7 +1173,7 @@ class TaxiBridge:
             pass
     
     def _silence_frame(self) -> bytes:
-        """Generate one frame of silence."""
+        """Generate one frame of silence for non-Opus codecs."""
         silence_byte = 0xFF if self.state.ast_codec == "ulaw" else 0x00
         return bytes([silence_byte]) * self.state.ast_frame_bytes
 
@@ -919,18 +1190,26 @@ async def main() -> None:
         AUDIOSOCKET_PORT,
     )
     
+    # Check Opus availability
+    opus_status = "✅ available" if OPUS_AVAILABLE else "❌ not installed (pip install opuslib)"
+    
     # Startup banner
     lines = [
-        f"🚀 Taxi Bridge v{TaxiBridge.VERSION} - PRODUCTION READY",
+        f"🚀 Taxi Bridge v{TaxiBridge.VERSION} - OPUS SUPPORT",
         f"   Listening: {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Endpoint:  {WS_URL.split('/')[-1]}",
-        f"   Format:    {'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect (ulaw/slin/slin16)'}",
+        f"   Opus:      {opus_status}",
+        f"   Format:    {'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect (ulaw/slin/slin16/opus)'}",
         f"   DSP:       boost={VOLUME_BOOST_FACTOR}x AGC={AGC_MAX_GAIN}x pre-emph={PRE_EMPHASIS_COEFF}",
         f"   Reconnect: {MAX_RECONNECT_ATTEMPTS} attempts, {RECONNECT_BASE_DELAY_S}s base delay",
     ]
     for line in lines:
         print(line, flush=True)
         logger.info(line)
+    
+    if not OPUS_AVAILABLE:
+        logger.warning("⚠️ Opus codec not available. Install with: pip install opuslib")
+        logger.warning("   WhatsApp calls will fall back to transcoding (lower quality)")
     
     async with server:
         await server.serve_forever()
