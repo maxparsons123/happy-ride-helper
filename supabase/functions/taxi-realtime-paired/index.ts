@@ -3024,10 +3024,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
+          // Increased silence_duration_ms to 1200ms to give user more time to finish speaking
+          // and prevent Ada from responding before the transcript is fully processed.
+          // This helps avoid the race condition where Ada starts speaking based on VAD
+          // before the Whisper transcription completes.
           threshold: 0.5,
           prefix_padding_ms: 300,
-          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
+          silence_duration_ms: 1200, // Increased from 1000ms to reduce race conditions
         },
         tools: TOOLS,
         tool_choice: "auto",
@@ -4617,6 +4620,20 @@ Then IMMEDIATELY call end_call().`
                 // ✅ CLEAR EXTRACTION GUARD: Allow responses to proceed now
                 sessionState.extractionInProgress = false;
                 
+                // ═══════════════════════════════════════════════════════════════════
+                // RACE CONDITION FIX: If Ada is ALREADY speaking (VAD triggered too early),
+                // cancel her response and force a re-response with correct state.
+                // This prevents the "Ada registered my address after she said address" bug.
+                // ═══════════════════════════════════════════════════════════════════
+                if (sessionState.openAiResponseActive) {
+                  console.log(`[${callId}] 🛑 RACE FIX: Ada was already speaking when extraction finished - cancelling and re-triggering`);
+                  openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+                  sessionState.openAiResponseActive = false;
+                  
+                  // Small delay to ensure cancel is processed before new response
+                  await new Promise(r => setTimeout(r, 50));
+                }
+                
                 // ✅ INJECT STATE CONTEXT: Give OpenAI the full extracted state BEFORE it responds
                 // This ensures Ada knows the correct pickup/destination before speaking
                 const stateInjection = {
@@ -4637,6 +4654,13 @@ CRITICAL: Use EXACTLY these values in your response. Do NOT invent or change any
                   }
                 };
                 openaiWs!.send(JSON.stringify(stateInjection));
+                
+                // ✅ Force a new response with correct state if we had to cancel
+                // This ensures Ada responds with the correct, extracted values
+                if (!sessionState.openAiResponseActive) {
+                  openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                  sessionState.openAiResponseActive = true;
+                }
               }
             }
             
