@@ -2128,20 +2128,40 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
       
       // Build resume prompt based on current booking step
       let resumeInstruction = "";
+      let resumeText = "";
       const { pickup, destination, passengers } = sessionState.booking;
+      const pendingQuote = sessionState.pendingQuote;
       
-      if (sessionState.bookingStep === "confirmed") {
+      // ✅ CRITICAL: Check if we have a pending fare quote - if so, resume from fare confirmation
+      if (pendingQuote?.fare && pendingQuote?.eta) {
+        // Resume from fare confirmation stage - user was about to confirm/reject the fare
+        const fareText = pendingQuote.fare.toString().startsWith("£") ? pendingQuote.fare : `£${pendingQuote.fare}`;
+        const etaText = pendingQuote.eta.toString().includes("minute") ? pendingQuote.eta : `${pendingQuote.eta} minutes`;
+        
+        resumeInstruction = `CRITICAL: A fare quote was already given. Resume from fare confirmation. The price is ${fareText} and driver ETA is ${etaText}. Ask if they want to book.`;
+        resumeText = `Apologies for the brief interruption. So, the price is ${fareText} and your driver will be ${etaText}. Would you like me to book that for you?`;
+        
+        console.log(`[${sessionState.callId}] 💰 Resuming from fare confirmation: fare=${fareText}, eta=${etaText}`);
+      } else if (sessionState.bookingStep === "confirmed") {
         resumeInstruction = "The booking has already been confirmed. Ask if there's anything else you can help with.";
+        resumeText = "Apologies for the brief interruption. Your booking is confirmed. Is there anything else I can help you with?";
       } else if (sessionState.bookingStep === "summary") {
         resumeInstruction = `Continue with the booking summary. Pickup: "${pickup || 'not set'}", Destination: "${destination || 'not set'}", Passengers: ${passengers || 'not set'}. Ask if the details are correct.`;
+        resumeText = pickup && destination && passengers
+          ? `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. Is that correct?`
+          : `Sorry about that. Let me confirm your booking details.`;
       } else if (sessionState.bookingStep === "time") {
         resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}" for ${passengers} passengers. Ask when they need the taxi.`;
+        resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. When do you need the taxi?`;
       } else if (sessionState.bookingStep === "passengers") {
         resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
+        resumeText = `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`;
       } else if (sessionState.bookingStep === "destination") {
         resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+        resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
       } else {
         resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+        resumeText = `Sorry about that. Where would you like to be picked up?`;
       }
       
       // Inject resume context
@@ -2154,15 +2174,6 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
       }));
       
-      // Brief acknowledgment that continues naturally
-      const resumeText = pickup && destination && passengers
-        ? `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. When do you need the taxi?`
-        : pickup && destination
-        ? `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`
-        : pickup
-        ? `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`
-        : `Sorry about that. Where would you like to be picked up?`;
-      
       openaiWs?.send(JSON.stringify({
         type: "response.create",
         response: {
@@ -2171,7 +2182,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
       }));
       
-      console.log(`[${sessionState.callId}] 📝 Resume prompt injected (step: ${sessionState.bookingStep})`);
+      console.log(`[${sessionState.callId}] 📝 Resume prompt injected (step: ${sessionState.bookingStep}, hasFare: ${!!pendingQuote?.fare})`);
       return;
     }
     
@@ -7671,9 +7682,29 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               }));
             }
             
+            // ✅ CRITICAL: Restore fare/eta from live_calls so we can resume from fare confirmation
+            if (restoredSession.fare || restoredSession.eta) {
+              state.pendingQuote = {
+                fare: restoredSession.fare || null,
+                eta: restoredSession.eta || null,
+                pickup: state.booking.pickup,
+                destination: state.booking.destination,
+                pickup_time: null, // Will be re-captured if needed
+                callback_url: null,
+                timestamp: Date.now(),
+                lastPrompt: null
+              };
+              console.log(`[${callId}] 💰 Restored pendingQuote: fare=${restoredSession.fare}, eta=${restoredSession.eta}`);
+            }
+            
             // Compute what step we're on based on restored state
+            // CRITICAL: If fare/eta exists, we're at "awaiting_confirmation" stage (after summary, waiting for fare confirmation)
             if (state.bookingFullyConfirmed) {
               state.bookingStep = "confirmed";
+            } else if (restoredSession.fare && restoredSession.eta) {
+              // Fare was already quoted - resume at summary step (awaiting fare confirmation)
+              state.bookingStep = "summary";
+              console.log(`[${callId}] 📋 Restored to fare confirmation stage (fare=${restoredSession.fare}, eta=${restoredSession.eta})`);
             } else if (restoredSession.status === "awaiting_confirmation") {
               state.bookingStep = "summary";
             } else if (state.booking.passengers !== null && state.booking.passengers > 0) {
@@ -7686,7 +7717,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               state.bookingStep = "pickup";
             }
             
-            console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}`);
+            console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}, fare=${restoredSession.fare}`);
           }
         }
         
@@ -7970,6 +8001,22 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             // Mark that we are actively prompting the fare question (prevents tool handler duplicating it)
             state.lastQuotePromptAt = Date.now();
             state.lastQuotePromptText = spokenMessage;
+            
+            // ✅ CRITICAL: Persist fare/eta to live_calls so session restoration works
+            // This ensures that if the connection drops after fare is quoted, we can resume from fare confirmation
+            supabase
+              .from("live_calls")
+              .update({
+                fare: fare || null,
+                eta: eta || eta_minutes || null,
+                status: "awaiting_confirmation",
+                updated_at: new Date().toISOString()
+              })
+              .eq("call_id", callId)
+              .then(({ error }) => {
+                if (error) console.error(`[${callId}] Failed to persist fare/eta:`, error);
+                else console.log(`[${callId}] 💾 Fare/ETA persisted to DB: fare=${fare}, eta=${eta || eta_minutes}`);
+              });
             
             // ✅ CRITICAL: Clear pendingModification when fare arrives - we've moved past the modification stage
             // The modification has already been applied, now we're awaiting fare confirmation
