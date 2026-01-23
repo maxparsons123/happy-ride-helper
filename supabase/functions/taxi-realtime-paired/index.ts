@@ -3128,6 +3128,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Mark response as active immediately (before any audio)
           sessionState.openAiResponseActive = true;
           
+          // ✅ EXTRACTION IN PROGRESS GUARD: If AI extraction is running, cancel this response
+          // We'll trigger the correct response once extraction completes with full context
+          if (sessionState.extractionInProgress) {
+            console.log(`[${callId}] 🛡️ BLOCKING response - extraction in progress, will respond after`);
+            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.openAiResponseActive = false;
+            break;
+          }
+          
           // SILENCE MODE GUARD: If we're waiting for a quote, cancel any new responses
           if (sessionState.waitingForQuoteSilence && sessionState.saidOneMoment) {
             console.log(`[${callId}] 🤫 BLOCKING new response - in silence mode waiting for fare`);
@@ -4166,6 +4175,9 @@ INSTRUCTIONS:
             if (USE_AI_EXTRACTION) {
               console.log(`[${callId}] 🧠 Running AI extraction before Ada responds...`);
               
+              // ✅ SET EXTRACTION GUARD: Block any VAD-triggered responses until we're done
+              sessionState.extractionInProgress = true;
+              
               try {
                 const aiResult = await extractBookingWithAI(
                   sessionState.conversationHistory,
@@ -4184,12 +4196,16 @@ INSTRUCTIONS:
                     // Track what changed for the system message
                     const changes: string[] = [];
                     
+                    console.log(`[${callId}] 🔍 AI correction validation: fields_changed=${JSON.stringify(aiResult.fields_changed)}, pickup="${aiResult.pickup}", dest="${aiResult.destination}"`);
+                    
                     // For corrections, be more lenient - trust AI extraction for known venues
                     // Apply the AI's corrected values
                     if (aiResult.fields_changed.includes("pickup") && aiResult.pickup) {
                       // Accept if it's a known venue OR if it passes lenient matching
                       const isKnownVenue = containsKnownVenue(aiResult.pickup) !== null;
                       const passesLenientMatch = matchesUserTextForCorrection(aiResult.pickup, userText);
+                      
+                      console.log(`[${callId}] 🔍 Pickup validation: venue=${isKnownVenue}, lenientMatch=${passesLenientMatch}, proposed="${aiResult.pickup}", user="${userText}"`);
                       
                       if (isKnownVenue || passesLenientMatch) {
                         const oldValue = sessionState.booking.pickup;
@@ -4202,6 +4218,8 @@ INSTRUCTIONS:
                     if (aiResult.fields_changed.includes("destination") && aiResult.destination) {
                       const isKnownVenue = containsKnownVenue(aiResult.destination) !== null;
                       const passesLenientMatch = matchesUserTextForCorrection(aiResult.destination, userText);
+                      
+                      console.log(`[${callId}] 🔍 Destination validation: venue=${isKnownVenue}, lenientMatch=${passesLenientMatch}, proposed="${aiResult.destination}", user="${userText}"`);
                       
                       if (isKnownVenue || passesLenientMatch) {
                         const oldValue = sessionState.booking.destination;
@@ -4220,6 +4238,33 @@ INSTRUCTIONS:
                       const oldValue = sessionState.booking.pickupTime;
                       sessionState.booking.pickupTime = aiResult.pickup_time;
                       changes.push(`time from "${oldValue || 'empty'}" to "${aiResult.pickup_time}"`);
+                    }
+                    
+                    // FALLBACK: If fields_changed is empty but we have new values that don't match current state,
+                    // treat them as implicit corrections (common with AI hallucination of fields_changed)
+                    if (changes.length === 0 && !aiResult.fields_changed?.length) {
+                      console.log(`[${callId}] 🔄 Empty fields_changed - checking for implicit corrections...`);
+                      
+                      // Check if AI extraction found a destination that's different from current
+                      if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
+                        const passesMatch = matchesUserTextForCorrection(aiResult.destination, userText);
+                        if (passesMatch) {
+                          const oldValue = sessionState.booking.destination;
+                          sessionState.booking.destination = aiResult.destination;
+                          changes.push(`destination from "${oldValue || 'empty'}" to "${aiResult.destination}"`);
+                          console.log(`[${callId}] ✅ Implicit destination correction applied: "${aiResult.destination}"`);
+                        }
+                      }
+                      // Check pickup
+                      if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
+                        const passesMatch = matchesUserTextForCorrection(aiResult.pickup, userText);
+                        if (passesMatch) {
+                          const oldValue = sessionState.booking.pickup;
+                          sessionState.booking.pickup = aiResult.pickup;
+                          changes.push(`pickup from "${oldValue || 'empty'}" to "${aiResult.pickup}"`);
+                          console.log(`[${callId}] ✅ Implicit pickup correction applied: "${aiResult.pickup}"`);
+                        }
+                      }
                     }
 
                     // If we failed to apply any change (likely mismatch/hallucination), do NOT inject correction.
@@ -4326,6 +4371,30 @@ INSTRUCTIONS:
                 }
               } catch (aiErr) {
                 console.error(`[${callId}] ⚠️ AI extraction error (falling back to normal flow):`, aiErr);
+              } finally {
+                // ✅ CLEAR EXTRACTION GUARD: Allow responses to proceed now
+                sessionState.extractionInProgress = false;
+                
+                // ✅ INJECT STATE CONTEXT: Give OpenAI the full extracted state BEFORE it responds
+                // This ensures Ada knows the correct pickup/destination before speaking
+                const stateInjection = {
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[VERIFIED BOOKING STATE - USE ONLY THESE VALUES]
+- Pickup: ${sessionState.booking.pickup || "NOT YET PROVIDED"}
+- Destination: ${sessionState.booking.destination || "NOT YET PROVIDED"}  
+- Passengers: ${sessionState.booking.passengers ?? "NOT YET PROVIDED"}
+- Time: ${sessionState.booking.pickupTime || "NOT YET PROVIDED"}
+
+CRITICAL: Use EXACTLY these values in your response. Do NOT invent or change any addresses.`
+                    }]
+                  }
+                };
+                openaiWs!.send(JSON.stringify(stateInjection));
               }
             }
             
