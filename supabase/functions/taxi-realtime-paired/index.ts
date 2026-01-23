@@ -1821,32 +1821,22 @@ function containsKnownVenue(text: string): string | null {
   return null;
 }
 
+// matchesUserText - used for AI extraction validation only (not tool calls)
 function matchesUserText(proposed: string, userText: string, minRatio = 0.7): boolean {
   const p = proposed.toLowerCase().trim();
   const u = userText.toLowerCase();
 
-  // Fast path: exact substring match (covers "sweetspot" and most addresses).
+  // Fast path: exact substring match
   if (p.length >= 3 && u.includes(p)) return true;
   
   // Check if user mentioned a known venue and proposed contains it
   const userVenue = containsKnownVenue(u);
   const proposedVenue = containsKnownVenue(p);
   if (userVenue && proposedVenue) {
-    // Both mention a known venue - accept if same venue family
     const userVenueNorm = userVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
     const proposedVenueNorm = proposedVenue.replace(/^the\s+/, "").replace(/\s+/g, "");
     if (userVenueNorm === proposedVenueNorm || userVenueNorm.includes(proposedVenueNorm) || proposedVenueNorm.includes(userVenueNorm)) {
       return true;
-    }
-  }
-  
-  // REJECT if proposed is an address but user said a venue (hallucination guard)
-  if (userVenue && !proposedVenue) {
-    // User said "Sweet Spot" but proposed is something like "52B David Road"
-    const proposedLooksLikeAddress = /^\d+[a-zA-Z]?\s+\w+/.test(proposed) || /\b(road|street|lane|avenue|drive|way|close|court)\b/i.test(p);
-    if (proposedLooksLikeAddress) {
-      console.log(`[VENUE GUARD] Rejected: user said venue "${userVenue}" but proposed is address "${proposed}"`);
-      return false;
     }
   }
 
@@ -1860,17 +1850,6 @@ function matchesUserText(proposed: string, userText: string, minRatio = 0.7): bo
   }
   const ratio = hit / proposedTokens.length;
   return ratio >= minRatio;
-}
-
-function shouldAcceptToolTextUpdate(proposed: string, lastUserText: string | null): boolean {
-  if (!proposed) return false;
-  if (!lastUserText) return true;
-  
-  const accepted = matchesUserText(proposed, lastUserText);
-  if (!accepted) {
-    console.log(`[VALIDATION GUARD] REJECTED: proposed="${proposed}" doesn't match user="${lastUserText}"`);
-  }
-  return accepted;
 }
 
 
@@ -3764,46 +3743,11 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
           console.log(`[${callId}] 🔧 Tool: ${toolName}`, toolArgs);
           
           if (toolName === "sync_booking_data") {
-            // Update booking state from tool call
-              const lastUser = sessionState.lastUserText;
-
-              if (toolArgs.pickup) {
-                const proposed = String(toolArgs.pickup);
-                if (shouldAcceptToolTextUpdate(proposed, lastUser)) {
-                  sessionState.booking.pickup = proposed;
-                } else {
-                  console.log(`[${callId}] 🛡️ Ignored tool pickup update (mismatch): proposed="${proposed}" user="${lastUser}"`);
-                }
-              }
-
-              if (toolArgs.destination) {
-                const proposed = String(toolArgs.destination);
-                if (shouldAcceptToolTextUpdate(proposed, lastUser)) {
-                  sessionState.booking.destination = proposed;
-                } else {
-                  console.log(`[${callId}] 🛡️ Ignored tool destination update (mismatch): proposed="${proposed}" user="${lastUser}"`);
-                }
-              }
-
-              if (toolArgs.passengers !== undefined) {
-                const proposed = Number(toolArgs.passengers);
-                // Only accept passenger updates if user likely said a number.
-                const userSaidNumber = !!lastUser && /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\b/i.test(lastUser);
-                if (!lastUser || userSaidNumber) {
-                  sessionState.booking.passengers = proposed;
-                } else {
-                  console.log(`[${callId}] 🛡️ Ignored tool passengers update (user didn't say a number): proposed=${proposed} user="${lastUser}"`);
-                }
-              }
-
-              if (toolArgs.pickup_time) {
-                const proposed = String(toolArgs.pickup_time);
-                if (shouldAcceptToolTextUpdate(proposed, lastUser) || /\b(asap|now)\b/i.test(lastUser || "")) {
-                  sessionState.booking.pickupTime = proposed;
-                } else {
-                  console.log(`[${callId}] 🛡️ Ignored tool time update (mismatch): proposed="${proposed}" user="${lastUser}"`);
-                }
-              }
+            // Update booking state from tool call - trust Ada's updates directly
+            if (toolArgs.pickup) sessionState.booking.pickup = String(toolArgs.pickup);
+            if (toolArgs.destination) sessionState.booking.destination = String(toolArgs.destination);
+            if (toolArgs.passengers !== undefined) sessionState.booking.passengers = Number(toolArgs.passengers);
+            if (toolArgs.pickup_time) sessionState.booking.pickupTime = String(toolArgs.pickup_time);
             if (toolArgs.nearest_pickup) sessionState.booking.nearestPickup = String(toolArgs.nearest_pickup);
             if (toolArgs.nearest_dropoff) sessionState.booking.nearestDropoff = String(toolArgs.nearest_dropoff);
             if (toolArgs.last_question_asked) {
