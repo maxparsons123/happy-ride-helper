@@ -1870,6 +1870,16 @@ interface SessionState {
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
+  
+  // === STRICT TURN-BASED PROTOCOL ===
+  // When true, Ada has asked a data-collection question and is WAITING for a user answer.
+  // All VAD-triggered responses are blocked until a user transcript is received.
+  // This prevents Ada from advancing to the next question before the user speaks.
+  awaitingUserAnswer: boolean;
+  // Timestamp when Ada started waiting for user answer - used for timeout handling
+  awaitingUserAnswerSince: number | null;
+  // The question type Ada is waiting for an answer to (for Q&A logging)
+  awaitingAnswerForStep: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null;
 }
 
 serve(async (req) => {
@@ -2617,6 +2627,27 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         if (sessionState.extractionInProgress && !sessionState.finalGoodbyePending) {
           safeCancel(sessionState, "extraction in progress");
           break;
+        }
+
+        // ✅ STRICT TURN-BASED GUARD: If Ada has asked a data-collection question and is
+        // waiting for a user answer, block ALL VAD-triggered responses until a user transcript arrives.
+        // This prevents Ada from advancing to the next question before the user speaks.
+        // Maximum wait time: 30 seconds (after which we allow timeout handling)
+        const TURN_BASED_TIMEOUT_MS = 30000;
+        if (sessionState.awaitingUserAnswer && sessionState.awaitingUserAnswerSince) {
+          const waitTime = Date.now() - sessionState.awaitingUserAnswerSince;
+          
+          // Allow response if timeout exceeded (user may have hung up or there's an issue)
+          if (waitTime < TURN_BASED_TIMEOUT_MS) {
+            console.log(`[${sessionState.callId}] ⏳ TURN-BASED BLOCK: Awaiting user answer for ${sessionState.awaitingAnswerForStep?.toUpperCase()} (${(waitTime / 1000).toFixed(1)}s)`);
+            safeCancel(sessionState, `turn-based: awaiting user answer for ${sessionState.awaitingAnswerForStep}`);
+            break;
+          } else {
+            console.log(`[${sessionState.callId}] ⏰ TURN-BASED TIMEOUT: No user response after ${(waitTime / 1000).toFixed(1)}s - allowing response`);
+            sessionState.awaitingUserAnswer = false;
+            sessionState.awaitingUserAnswerSince = null;
+            sessionState.awaitingAnswerForStep = null;
+          }
         }
 
         // NOTE: Greeting guard removed - was too aggressive and blocked legitimate responses.
@@ -3692,16 +3723,32 @@ Do NOT say 'booked' until the tool returns success.]`
         if (/\?\s*$/.test(lastAssistantText)) {
           sessionState.adaAskedQuestionAt = Date.now();
           
-          // ========================================
-          // 📤 ADA QUESTION ASKED - AWAITING ANSWER
-          // ========================================
-          console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
-          console.log(`[${sessionState.callId}] 📤 ADA ASKED A QUESTION - AWAITING USER RESPONSE`);
-          console.log(`[${sessionState.callId}] ├─ Question type: ${(sessionState.lastQuestionType || 'general').toUpperCase()}`);
-          console.log(`[${sessionState.callId}] ├─ Question: "${lastAssistantText.substring(0, 100)}${lastAssistantText.length > 100 ? '...' : ''}"`);
-          console.log(`[${sessionState.callId}] ├─ Booking so far: pickup=${sessionState.booking.pickup || '❌'}, dest=${sessionState.booking.destination || '❌'}, pax=${sessionState.booking.passengers ?? '❌'}, time=${sessionState.booking.pickup_time || '❌'}`);
-          console.log(`[${sessionState.callId}] └─ 🔊 Listening for user response...`);
-          console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+          // ✅ STRICT TURN-BASED: Lock response generation until user responds
+          // Only lock for data-collection questions (not summary/confirmed phases where quick back-and-forth is expected)
+          const isDataCollectionStep = ["pickup", "destination", "passengers", "time"].includes(sessionState.lastQuestionType || "");
+          if (isDataCollectionStep) {
+            sessionState.awaitingUserAnswer = true;
+            sessionState.awaitingUserAnswerSince = Date.now();
+            sessionState.awaitingAnswerForStep = sessionState.lastQuestionType as any;
+            
+            console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
+            console.log(`[${sessionState.callId}] ║  🔒 TURN-BASED LOCK ENGAGED                                    ║`);
+            console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
+            console.log(`[${sessionState.callId}] ║  Ada asked: ${(sessionState.lastQuestionType || 'general').toUpperCase().padEnd(47)}║`);
+            console.log(`[${sessionState.callId}] ║  Question: "${lastAssistantText.substring(0, 40).padEnd(42)}"║`);
+            console.log(`[${sessionState.callId}] ║  Booking: P=${(sessionState.booking.pickup || '❌').substring(0, 10).padEnd(10)} D=${(sessionState.booking.destination || '❌').substring(0, 10).padEnd(10)} X=${String(sessionState.booking.passengers ?? '❌').padEnd(3)}   ║`);
+            console.log(`[${sessionState.callId}] ║  → Blocking ALL responses until user transcript arrives        ║`);
+            console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+          } else {
+            // Non-data-collection question (confirmation, etc.) - log but don't lock
+            console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+            console.log(`[${sessionState.callId}] 📤 ADA ASKED A QUESTION - AWAITING USER RESPONSE`);
+            console.log(`[${sessionState.callId}] ├─ Question type: ${(sessionState.lastQuestionType || 'general').toUpperCase()}`);
+            console.log(`[${sessionState.callId}] ├─ Question: "${lastAssistantText.substring(0, 100)}${lastAssistantText.length > 100 ? '...' : ''}"`);
+            console.log(`[${sessionState.callId}] ├─ Booking so far: pickup=${sessionState.booking.pickup || '❌'}, dest=${sessionState.booking.destination || '❌'}, pax=${sessionState.booking.passengers ?? '❌'}, time=${sessionState.booking.pickup_time || '❌'}`);
+            console.log(`[${sessionState.callId}] └─ 🔊 Listening for user response... (NOT locked - confirmation/summary phase)`);
+            console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+          }
         }
         
         // === ADA SAID GOODBYE - TRIGGER HANGUP ===
@@ -4031,6 +4078,22 @@ Do NOT say 'booked' until the tool returns success.]`
       case "conversation.item.input_audio_transcription.completed": {
         // User transcript from Whisper
         const rawText = String(message.transcript || "").trim();
+
+        // ✅ CLEAR TURN-BASED LOCK: User has responded - unlock Ada for next question
+        if (sessionState.awaitingUserAnswer && rawText.length > 0) {
+          const waitTime = sessionState.awaitingUserAnswerSince ? Date.now() - sessionState.awaitingUserAnswerSince : 0;
+          console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
+          console.log(`[${sessionState.callId}] ║  ✅ USER RESPONDED - UNLOCKING TURN                           ║`);
+          console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
+          console.log(`[${sessionState.callId}] ║  Question was: ${(sessionState.awaitingAnswerForStep || "unknown").toUpperCase().padEnd(45)}║`);
+          console.log(`[${sessionState.callId}] ║  Wait time: ${(waitTime / 1000).toFixed(1)}s${"".padEnd(47)}║`);
+          console.log(`[${sessionState.callId}] ║  User said: "${rawText.substring(0, 40).padEnd(42)}"║`);
+          console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+          
+          sessionState.awaitingUserAnswer = false;
+          sessionState.awaitingUserAnswerSince = null;
+          sessionState.awaitingAnswerForStep = null;
+        }
 
         // === ADDRESS ECHO DETECTION (passengers step only) ===
         // Whisper sometimes hallucinates the destination address when user says a short word like "three".
@@ -7908,6 +7971,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           audioBufferedSinceSpeechStart: false,
           recentErrorCount: 0,
           lastErrorAt: null,
+          // Strict turn-based protocol
+          awaitingUserAnswer: false,
+          awaitingUserAnswerSince: null,
+          awaitingAnswerForStep: null,
         };
         
         preConnected = true;
@@ -8118,6 +8185,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             audioBufferedSinceSpeechStart: false,
             recentErrorCount: 0,
             lastErrorAt: null,
+            // Strict turn-based protocol
+            awaitingUserAnswer: false,
+            awaitingUserAnswerSince: null,
+            awaitingAnswerForStep: null,
           };
           
           // ═══════════════════════════════════════════════════════════════════
