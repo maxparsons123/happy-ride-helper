@@ -2274,9 +2274,27 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
         );
         
+        // CRITICAL: Also persist booking state so session restoration works correctly
+        // This ensures pickup/destination/passengers are available if disconnect happens before book_taxi call
+        const updatePayload: Record<string, any> = {
+          transcripts: mergedTranscripts,
+          updated_at: new Date().toISOString()
+        };
+        
+        // Only include booking fields if they have values (don't overwrite with nulls)
+        if (sessionState.booking.pickup) {
+          updatePayload.pickup = sessionState.booking.pickup;
+        }
+        if (sessionState.booking.destination) {
+          updatePayload.destination = sessionState.booking.destination;
+        }
+        if (sessionState.booking.passengers !== null && sessionState.booking.passengers > 0) {
+          updatePayload.passengers = sessionState.booking.passengers;
+        }
+        
         return supabase
           .from("live_calls")
-          .update({ transcripts: mergedTranscripts, updated_at: new Date().toISOString() })
+          .update(updatePayload)
           .eq("call_id", callId);
       })
       .then((result: any) => {
@@ -2284,8 +2302,8 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
       });
   };
 
-  // Aggressive batching - only flush every 5 seconds during conversation
-  const FLUSH_INTERVAL_MS = 5000;
+  // Faster batching for better session restoration (3 seconds instead of 5)
+  const FLUSH_INTERVAL_MS = 3000;
   
   const scheduleTranscriptFlush = (sessionState: SessionState) => {
     if (sessionState.transcriptFlushTimer) return; // Already scheduled
