@@ -14,6 +14,7 @@ import Billing from "./pages/Billing";
 import LiveKitTest from "./pages/LiveKitTest";
 import TtsTest from "./pages/TtsTest";
 import DualBrainTest from "./pages/DualBrainTest";
+import CallFlowDebugger from "./pages/CallFlowDebugger";
 
 const queryClient = new QueryClient();
 
@@ -34,6 +35,7 @@ const App = () => (
           <Route path="/livekit" element={<LiveKitTest />} />
           <Route path="/tts-test" element={<TtsTest />} />
           <Route path="/dual-brain" element={<DualBrainTest />} />
+          <Route path="/call-flow" element={<CallFlowDebugger />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
