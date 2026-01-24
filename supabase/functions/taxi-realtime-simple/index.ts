@@ -1870,6 +1870,10 @@ interface SessionState {
   // Milliseconds of audio buffered since last commit/clear - prevents commit_empty errors
   // OpenAI requires at least 100ms of audio before commit
   audioBufferedMs: number;
+  // Accumulated partial transcript from Whisper deltas - used for punctuation detection
+  partialTranscript: string;
+  // Whether we already committed due to punctuation detection (prevent double-commits)
+  punctuationCommitSent: boolean;
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
@@ -3938,12 +3942,48 @@ Do NOT say 'booked' until the tool returns success.]`
          break;
       }
 
+      // === EARLY SENTENCE-END DETECTION ===
+      // Whisper transcription deltas include punctuation. If we detect a sentence-ending
+      // punctuation mark (. ? !), we can commit the audio buffer early rather than waiting
+      // for VAD's 1-2 second silence timeout. This significantly reduces response latency.
+      case "conversation.item.input_audio_transcription.delta": {
+        const delta = String(message.delta || "");
+        
+        // Accumulate partial transcript
+        sessionState.partialTranscript += delta;
+        
+        // Check for sentence-ending punctuation at the end of accumulated transcript
+        const hasSentenceEnd = /[.!?]\s*$/.test(sessionState.partialTranscript);
+        
+        // Only trigger if we haven't already committed for this utterance
+        if (hasSentenceEnd && !sessionState.punctuationCommitSent && sessionState.audioBufferedMs >= 100) {
+          console.log(`[${sessionState.callId}] 📌 PUNCTUATION DETECTED: "${sessionState.partialTranscript.slice(-30)}" - triggering early commit (${sessionState.audioBufferedMs.toFixed(0)}ms buffered)`);
+          
+          sessionState.punctuationCommitSent = true; // Prevent multiple commits
+          
+          // Commit immediately to finalize transcription faster
+          if (openaiWs && openaiConnected && !sessionState.callEnded) {
+            try {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+              sessionState.audioBufferedSinceSpeechStart = false;
+              sessionState.audioBufferedMs = 0;
+            } catch (e) {
+              // Ignore - may be disconnected
+            }
+          }
+        }
+        break;
+      }
+
       case "input_audio_buffer.speech_started": {
         // Track when user started speaking for timing diagnostics
         sessionState.speechStartTime = Date.now();
         // Reset audio buffer tracking - will be set true/incremented when audio is appended
         sessionState.audioBufferedSinceSpeechStart = false;
         sessionState.audioBufferedMs = 0; // Reset ms counter for fresh utterance
+        // Reset partial transcript tracking for punctuation detection
+        sessionState.partialTranscript = "";
+        sessionState.punctuationCommitSent = false;
         
         // CRITICAL: Snapshot the question type at speech start to prevent race conditions
         // Without this, Ada advancing to "passengers" while user says destination causes the
@@ -8000,6 +8040,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // Audio buffer tracking (for safe commits)
           audioBufferedSinceSpeechStart: false,
           audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
+          partialTranscript: "", // Accumulated partial transcript for punctuation detection
+          punctuationCommitSent: false, // Prevent double-commits from punctuation detection
           recentErrorCount: 0,
           lastErrorAt: null,
           // Strict turn-based protocol
@@ -8215,6 +8257,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             // Audio buffer tracking (for safe commits)
             audioBufferedSinceSpeechStart: false,
             audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
+            partialTranscript: "", // Accumulated partial transcript for punctuation detection
+            punctuationCommitSent: false, // Prevent double-commits from punctuation detection
             recentErrorCount: 0,
             lastErrorAt: null,
             // Strict turn-based protocol
