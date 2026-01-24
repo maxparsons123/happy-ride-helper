@@ -9699,9 +9699,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         const formatToRate: Record<string, number> = { "pcm48": 48000, "slin16": 16000, "slin": 8000, "ulaw": 8000 };
         const newRate = message.inbound_sample_rate || formatToRate[newFormat] || 8000;
         
-        if (newFormat && newFormat !== state.inboundAudioFormat) {
+        // ALWAYS apply format updates - the bridge detected the actual format
+        const formatChanged = newFormat && newFormat !== state.inboundAudioFormat;
+        const rateChanged = newRate !== state.inboundSampleRate;
+        
+        if (formatChanged || rateChanged) {
           console.log(`[${state.callId}] 🔊 Audio format update: ${state.inboundAudioFormat}@${state.inboundSampleRate}Hz → ${newFormat}@${newRate}Hz`);
-          state.inboundAudioFormat = newFormat;
+          if (newFormat) state.inboundAudioFormat = newFormat;
           state.inboundSampleRate = newRate;
         }
         return;
