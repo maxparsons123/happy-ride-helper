@@ -42,9 +42,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _waitingForQuote = false;
     private bool _responseActive = false;
     
-    // Echo guard timing (ms)
-    private const int ECHO_GUARD_MS = 700;
+    // Echo guard timing - REDUCED for confirmation responsiveness
+    // 300ms is enough to filter Ada's echo but not block quick "Yes!" responses
+    private const int ECHO_GUARD_MS = 300;
     private long _lastAdaFinishedAt = 0;
+    
+    // Confirmation awareness - disable echo guard when waiting for yes/no
+    private bool _awaitingConfirmation = false;
 
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
@@ -125,8 +129,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_cts?.Token.IsCancellationRequested == true) return;
         
         // Echo guard - ignore audio right after Ada finishes speaking
-        if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-            return;
+        // BUT: Skip guard if awaiting confirmation (user saying "yes" is critical!)
+        if (!_awaitingConfirmation)
+        {
+            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+                return;
+        }
 
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
@@ -164,6 +172,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
+
+        // Echo guard for HD audio path (same logic as µ-law)
+        if (!_awaitingConfirmation)
+        {
+            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+                return;
+        }
 
         byte[] audioToSend;
 
@@ -557,9 +572,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         });
                     }
                     _waitingForQuote = false;
+                    
+                    // CRITICAL: Enable confirmation mode - bypass echo guard for "yes" responses
+                    _awaitingConfirmation = true;
+                    Log("🎯 Awaiting confirmation - echo guard disabled for quick 'yes' responses");
                 }
                 else if (action == "confirmed")
                 {
+                    // Confirmation received - reset the awaiting flag
+                    _awaitingConfirmation = false;
+                    Log("✅ Confirmation received - echo guard re-enabled");
                     if (!string.IsNullOrEmpty(_dispatchWebhookUrl))
                     {
                         var confirmResult = await CallDispatchWebhookAsync("confirmed");
