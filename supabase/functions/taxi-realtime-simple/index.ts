@@ -4089,22 +4089,7 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          // ═══════════════════════════════════════════════════════════════════════════
-          // FIELD RESET: Clear pickup when Ada asks about it
-          // This ensures stale data doesn't prevent the next answer from being captured
-          // ═══════════════════════════════════════════════════════════════════════════
-          if (sessionState.booking.pickup) {
-            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing pickup "${sessionState.booking.pickup}" - Ada is re-asking`);
-            sessionState.booking.pickup = null;
-            sessionState.transcriptExtractedPickup = null;
-            // Also update DB to clear stale data
-            supabase.from("live_calls").update({ 
-              pickup: null, 
-              updated_at: new Date().toISOString() 
-            }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ Pickup cleared in DB`);
-            });
-          }
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: PICKUP (overwrite allowed)`);
         } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "destination";
           sessionState.lastQuestionAt = Date.now();
@@ -4112,20 +4097,7 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          // ═══════════════════════════════════════════════════════════════════════════
-          // FIELD RESET: Clear destination when Ada asks about it
-          // ═══════════════════════════════════════════════════════════════════════════
-          if (sessionState.booking.destination) {
-            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing destination "${sessionState.booking.destination}" - Ada is re-asking`);
-            sessionState.booking.destination = null;
-            sessionState.transcriptExtractedDestination = null;
-            supabase.from("live_calls").update({ 
-              destination: null, 
-              updated_at: new Date().toISOString() 
-            }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ Destination cleared in DB`);
-            });
-          }
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: DESTINATION (overwrite allowed)`);
         } else if (/(?:how many|passengers|people|travell)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "passengers";
           sessionState.lastQuestionAt = Date.now();
@@ -4133,20 +4105,7 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          // ═══════════════════════════════════════════════════════════════════════════
-          // FIELD RESET: Clear passengers when Ada asks about it
-          // ═══════════════════════════════════════════════════════════════════════════
-          if (sessionState.booking.passengers !== null) {
-            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing passengers ${sessionState.booking.passengers} - Ada is re-asking`);
-            sessionState.booking.passengers = null;
-            sessionState.transcriptExtractedPassengers = null;
-            supabase.from("live_calls").update({ 
-              passengers: null, 
-              updated_at: new Date().toISOString() 
-            }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ Passengers cleared in DB`);
-            });
-          }
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: PASSENGERS (overwrite allowed)`);
         } else if (/(?:when|what time|timing|schedule)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "time";
           sessionState.lastQuestionAt = Date.now();
@@ -4154,20 +4113,7 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          // ═══════════════════════════════════════════════════════════════════════════
-          // FIELD RESET: Clear pickup_time when Ada asks about it
-          // ═══════════════════════════════════════════════════════════════════════════
-          if (sessionState.booking.pickup_time) {
-            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing pickup_time "${sessionState.booking.pickup_time}" - Ada is re-asking`);
-            sessionState.booking.pickup_time = null;
-            sessionState.transcriptExtractedTime = null;
-            supabase.from("live_calls").update({ 
-              pickup_time: null, 
-              updated_at: new Date().toISOString() 
-            }).eq("call_id", sessionState.callId).then(() => {
-              console.log(`[${sessionState.callId}] ✅ Pickup time cleared in DB`);
-            });
-          }
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: TIME (overwrite allowed)`);
         } else if (isForbiddenAddressConfirmation) {
           console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
         }
@@ -5060,9 +5006,15 @@ Do NOT say 'booked' until the tool returns success.]`
           if (isRecentQuestion && questionType && !sessionState.callEnded) {
             
             // === PICKUP EXTRACTION ===
-            if (questionType === "pickup" && isAddressLike && !sessionState.booking.pickup) {
+            // Allow overwrites when Ada is asking for pickup - prevents stale data from blocking updates
+            if (questionType === "pickup" && isAddressLike) {
               const extractedPickup = correctTranscript(userText);
-              console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE PICKUP: "${extractedPickup}" (from transcript, question was pickup)`);
+              const wasOverwrite = !!sessionState.booking.pickup;
+              if (wasOverwrite) {
+                console.log(`[${sessionState.callId}] 📍 OVERWRITING PICKUP: "${sessionState.booking.pickup}" → "${extractedPickup}"`);
+              } else {
+                console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE PICKUP: "${extractedPickup}" (from transcript, question was pickup)`);
+              }
               sessionState.booking.pickup = extractedPickup;
               sessionState.transcriptExtractedPickup = extractedPickup; // Track what transcript said
               
@@ -5090,7 +5042,8 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             
             // === DESTINATION EXTRACTION ===
-            else if (questionType === "destination" && isAddressLike && !sessionState.booking.destination) {
+            // Allow overwrites when Ada is asking for destination
+            else if (questionType === "destination" && isAddressLike) {
               const extractedDest = correctTranscript(userText);
               
               // === DUPLICATE ADDRESS GUARD ===
@@ -5117,7 +5070,12 @@ Do NOT say 'booked' until the tool returns success.]`
                   safeResponseCreate(sessionState, "duplicate-address-guard");
                 }
               } else {
-                console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE DESTINATION: "${extractedDest}" (from transcript, question was destination)`);
+                const wasOverwrite = !!sessionState.booking.destination;
+                if (wasOverwrite) {
+                  console.log(`[${sessionState.callId}] 📍 OVERWRITING DESTINATION: "${sessionState.booking.destination}" → "${extractedDest}"`);
+                } else {
+                  console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE DESTINATION: "${extractedDest}" (from transcript, question was destination)`);
+                }
                 sessionState.booking.destination = extractedDest;
                 sessionState.transcriptExtractedDestination = extractedDest; // Track what transcript said
                 
@@ -5212,7 +5170,8 @@ Do NOT say 'booked' until the tool returns success.]`
               const lowerText = userText.toLowerCase().trim();
               const isTimeResponse = /\b(now|asap|immediately|right away|straight away|in \d+|at \d+|\d+ ?o'clock|\d+ ?am|\d+ ?pm|morning|afternoon|evening|tonight|tomorrow)\b/i.test(lowerText);
               
-              if (isTimeResponse && !sessionState.booking.pickup_time) {
+              // Allow overwrites when Ada is asking for time
+              if (isTimeResponse) {
                 const extractedTime = lowerText.includes("now") || lowerText.includes("asap") || lowerText.includes("immediately") 
                   ? "ASAP" 
                   : userText;
