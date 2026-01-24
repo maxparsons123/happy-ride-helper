@@ -1867,6 +1867,9 @@ interface SessionState {
   // === AUDIO BUFFER TRACKING (for safe commits) ===
   // Set true when audio is actually appended, false on commit. Prevents empty buffer commit errors.
   audioBufferedSinceSpeechStart: boolean;
+  // Milliseconds of audio buffered since last commit/clear - prevents commit_empty errors
+  // OpenAI requires at least 100ms of audio before commit
+  audioBufferedMs: number;
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
@@ -3938,8 +3941,9 @@ Do NOT say 'booked' until the tool returns success.]`
       case "input_audio_buffer.speech_started": {
         // Track when user started speaking for timing diagnostics
         sessionState.speechStartTime = Date.now();
-        // Reset audio buffer tracking flag - will be set true when audio is appended
+        // Reset audio buffer tracking - will be set true/incremented when audio is appended
         sessionState.audioBufferedSinceSpeechStart = false;
+        sessionState.audioBufferedMs = 0; // Reset ms counter for fresh utterance
         
         // CRITICAL: Snapshot the question type at speech start to prevent race conditions
         // Without this, Ada advancing to "passengers" while user says destination causes the
@@ -3980,9 +3984,12 @@ Do NOT say 'booked' until the tool returns success.]`
         // they don't have enough acoustic energy to trigger transcription.
         // Force a manual commit after ANY speech to ensure short words are captured.
         // This is especially critical for confirmation responses and passenger counts.
-        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected && sessionState.audioBufferedSinceSpeechStart) {
+        // CRITICAL: Only commit if we have at least 100ms of audio buffered (OpenAI requirement)
+        const MIN_AUDIO_FOR_COMMIT_MS = 100;
+        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected && 
+            sessionState.audioBufferedSinceSpeechStart && sessionState.audioBufferedMs >= MIN_AUDIO_FOR_COMMIT_MS) {
           // Short speech detected - pad with silence and send manual commit to force transcription
-          console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Padding ${SILENCE_PADDING_MS}ms silence + forcing transcription for short speech (${speechDuration}ms)`);
+          console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Padding ${SILENCE_PADDING_MS}ms silence + forcing transcription for short speech (${speechDuration}ms, buffered=${sessionState.audioBufferedMs.toFixed(0)}ms)`);
           try {
             // Append silence padding to give decoder room for trailing phonemes
             openaiWs.send(JSON.stringify({
@@ -3992,9 +3999,12 @@ Do NOT say 'booked' until the tool returns success.]`
             // Now commit with the padded audio
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
             sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
+            sessionState.audioBufferedMs = 0; // Reset ms counter
           } catch (e) {
             console.error(`[${sessionState.callId}] Manual commit failed:`, e);
           }
+        } else if (speechDuration > 0 && sessionState.audioBufferedMs < MIN_AUDIO_FOR_COMMIT_MS) {
+          console.log(`[${sessionState.callId}] ⏭️ Skipping manual commit - insufficient audio (${sessionState.audioBufferedMs.toFixed(0)}ms < ${MIN_AUDIO_FOR_COMMIT_MS}ms)`);
         } else if (speechDuration > 0 && !sessionState.audioBufferedSinceSpeechStart) {
           console.log(`[${sessionState.callId}] ⏭️ Skipping manual commit - no audio buffered since speech start`);
         }
@@ -4056,10 +4066,11 @@ Do NOT say 'booked' until the tool returns success.]`
           const commitIntervals = [1500, 2500, 3500];
           commitIntervals.forEach((delay) => {
             setTimeout(() => {
-              // GUARD: Only commit if we have buffered audio AND connection is open
-              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed && sessionState.audioBufferedSinceSpeechStart) {
+              // GUARD: Only commit if we have >=100ms buffered audio AND connection is open
+              const hasEnoughAudio = sessionState.audioBufferedSinceSpeechStart && sessionState.audioBufferedMs >= 100;
+              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed && hasEnoughAudio) {
                 try {
-                  console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Padding silence + forcing transcription check (${delay}ms after speech_stopped)`);
+                  console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Padding silence + forcing transcription check (${delay}ms after speech_stopped, buffered=${sessionState.audioBufferedMs.toFixed(0)}ms)`);
                   // Append silence padding before commit to give decoder room for trailing phonemes
                   openaiWs.send(JSON.stringify({
                     type: "input_audio_buffer.append",
@@ -4067,9 +4078,12 @@ Do NOT say 'booked' until the tool returns success.]`
                   }));
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
                   sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
+                  sessionState.audioBufferedMs = 0; // Reset ms counter
                 } catch (e) {
                   // Ignore - connection may have closed
                 }
+              } else if (sessionState.audioBufferedMs < 100) {
+                console.log(`[${sessionState.callId}] ⏭️ Skipping periodic commit (${delay}ms) - insufficient audio (${sessionState.audioBufferedMs.toFixed(0)}ms < 100ms)`);
               } else if (!sessionState.audioBufferedSinceSpeechStart) {
                 console.log(`[${sessionState.callId}] ⏭️ Skipping periodic commit (${delay}ms) - no audio buffered`);
               }
@@ -7843,8 +7857,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           }));
           
           // Track that we have audio buffered (for safe commit logic)
+          // Also track milliseconds based on 24kHz sample rate (2 bytes per sample)
           if (state) {
             state.audioBufferedSinceSpeechStart = true;
+            // pcm16_24k at 24kHz: bytes / 2 = samples, samples / 24 = ms
+            const audioMs = pcm16_24k.length / 24;
+            state.audioBufferedMs += audioMs;
           }
         }
         return;
@@ -7981,6 +7999,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           transcriptExtractedTime: null,
           // Audio buffer tracking (for safe commits)
           audioBufferedSinceSpeechStart: false,
+          audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
           recentErrorCount: 0,
           lastErrorAt: null,
           // Strict turn-based protocol
@@ -8195,6 +8214,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             transcriptExtractedTime: null,
             // Audio buffer tracking (for safe commits)
             audioBufferedSinceSpeechStart: false,
+            audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
             recentErrorCount: 0,
             lastErrorAt: null,
             // Strict turn-based protocol
