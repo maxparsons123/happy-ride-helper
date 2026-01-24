@@ -603,25 +603,38 @@ class TaxiBridge:
                 }))
             return
         
-        # Force slin16 if LOCK_FORMAT_SLIN16 is enabled (treats 320-byte frames as 16kHz)
+        # Force slin16 ONLY when we actually see slin16-sized frames (20ms @ 16kHz = 640 bytes).
+        # If we "force" slin16 on top of 8kHz slin frames (320 bytes), outbound audio will play 2× slow.
         if LOCK_FORMAT_SLIN16:
-            self.state.ast_codec = "slin16"
-            self.state.ast_rate = RATE_SLIN16
-            self.state.ast_frame_bytes = frame_len
-            self.state.format_locked = True
-            self.state.format_lock_time = time.time()
-            logger.info("[%s] 🔊 Format LOCKED: slin16 @ %dHz (forced, %d bytes/frame)", 
-                       self.state.call_id, RATE_SLIN16, frame_len)
-            
-            # Notify edge function of format
-            if self.ws and self.state.ws_connected:
-                await self.ws.send(json.dumps({
-                    "type": "update_format",
-                    "call_id": self.state.call_id,
-                    "inbound_format": "slin16",
-                    "inbound_sample_rate": RATE_SLIN16,
-                }))
-            return
+            if frame_len != 640:
+                logger.warning(
+                    "[%s] ⚠️ LOCK_FORMAT_SLIN16 requested but got %d bytes/frame. "
+                    "Waiting for true slin16 (expected 640 bytes/20ms).",
+                    self.state.call_id,
+                    frame_len,
+                )
+            else:
+                self.state.ast_codec = "slin16"
+                self.state.ast_rate = RATE_SLIN16
+                self.state.ast_frame_bytes = frame_len
+                self.state.format_locked = True
+                self.state.format_lock_time = time.time()
+                logger.info(
+                    "[%s] 🔊 Format LOCKED: slin16 @ %dHz (forced, %d bytes/frame)",
+                    self.state.call_id,
+                    RATE_SLIN16,
+                    frame_len,
+                )
+
+                # Notify edge function of format
+                if self.ws and self.state.ws_connected:
+                    await self.ws.send(json.dumps({
+                        "type": "update_format",
+                        "call_id": self.state.call_id,
+                        "inbound_format": "slin16",
+                        "inbound_sample_rate": RATE_SLIN16,
+                    }))
+                return
         
         # Honor ulaw lock unless we see definitive PCM frame sizes
         if LOCK_FORMAT_ULAW and frame_len not in {320, 640}:
