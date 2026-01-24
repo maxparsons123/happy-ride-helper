@@ -3107,10 +3107,19 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           sessionState.ttsDiagnostics.chunksSent++;
         }
 
-        // === BOOKING CONFIRMATION GUARD ===
-        // If booking hasn't been confirmed this turn AND we haven't verified the transcript yet,
-        // buffer audio to prevent confirmation phrases from being heard
-        if (!sessionState.bookingConfirmedThisTurn && !sessionState.audioVerified) {
+        // === BOOKING CONFIRMATION GUARD (SCOPED) ===
+        // Buffer TTS ONLY during confirmation/summary phases (when we may need to cancel/replace speech
+        // after tool callbacks). Buffering during greeting/normal Q&A risks dead-air and Asterisk timeouts.
+        const shouldBufferTtsForConfirmation =
+          !sessionState.audioVerified &&
+          !sessionState.bookingConfirmedThisTurn &&
+          (
+            sessionState.confirmationResponsePending ||
+            sessionState.lastQuestionType === "confirmation" ||
+            sessionState.bookingStep === "summary"
+          );
+
+        if (shouldBufferTtsForConfirmation) {
           // Buffer audio - will be flushed after transcript verification
           if (!sessionState.pendingAudioBuffer) {
             sessionState.pendingAudioBuffer = [];
