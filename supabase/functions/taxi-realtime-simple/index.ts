@@ -2179,8 +2179,37 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
       const pendingQuote = sessionState.pendingQuote;
       
       // ✅ CRITICAL: Check if we have a pending fare quote - if so, resume from fare confirmation
+      // SILENT RESUME: If fare exists AND status is awaiting_confirmation, this is a dispatch-triggered
+      // reconnect where Ada was mid-speech with the fare quote. DON'T speak - just wait for user input.
       if (pendingQuote?.fare && pendingQuote?.eta) {
-        // Resume from fare confirmation stage - user was about to confirm/reject the fare
+        // Check if this is a very recent reconnect (within 10s of quote being set)
+        // If so, assume the fare was already spoken (or being spoken) and just wait silently
+        const quoteFreshness = Date.now() - (pendingQuote.timestamp || 0);
+        const isSilentResume = quoteFreshness < 10000; // Within 10 seconds of quote delivery
+        
+        if (isSilentResume) {
+          // === SILENT RESUME: Fare was just delivered, just wait for user's yes/no ===
+          console.log(`[${sessionState.callId}] 🔇 SILENT RESUME: Fare quote just delivered ${quoteFreshness}ms ago - waiting for user response`);
+          
+          // Inject context but don't trigger Ada to speak
+          const fareText = pendingQuote.fare.toString().startsWith("£") ? pendingQuote.fare : `£${pendingQuote.fare}`;
+          const etaText = pendingQuote.eta.toString().includes("minute") ? pendingQuote.eta : `${pendingQuote.eta} minutes`;
+          
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[SESSION RESUMED - SILENT MODE] You just quoted the fare: ${fareText}, driver will be ${etaText}. Wait silently for user to say "yes" or "no". Do NOT speak until they respond.` }]
+            }
+          }));
+          
+          // DON'T trigger response.create - just wait silently for user VAD input
+          console.log(`[${sessionState.callId}] 📝 Silent resume context injected - awaiting user response`);
+          return;
+        }
+        
+        // Normal fare resume (older quote, maybe connection dropped earlier)
         const fareText = pendingQuote.fare.toString().startsWith("£") ? pendingQuote.fare : `£${pendingQuote.fare}`;
         const etaText = pendingQuote.eta.toString().includes("minute") ? pendingQuote.eta : `${pendingQuote.eta} minutes`;
         
@@ -2384,6 +2413,21 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
         if (sessionState.lastQuestionType) {
           updatePayload.last_question_type = sessionState.lastQuestionType;
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CRITICAL: Save fare/eta for dispatch-triggered handoff resumption
+        // This ensures the reconnected session knows a fare was already delivered
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (sessionState.pendingQuote?.fare) {
+          updatePayload.fare = sessionState.pendingQuote.fare;
+        }
+        if (sessionState.pendingQuote?.eta) {
+          updatePayload.eta = sessionState.pendingQuote.eta;
+        }
+        // Set status to awaiting_confirmation when fare quote is pending
+        if (sessionState.pendingQuote?.fare && !sessionState.bookingConfirmedThisTurn) {
+          updatePayload.status = "awaiting_confirmation";
         }
         
         return supabase
