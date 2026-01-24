@@ -6645,696 +6645,97 @@ Do NOT say 'booked' until the tool returns success.]`
           let dispatchPostStatus: number | null = null;
           
           if (DISPATCH_WEBHOOK_URL) {
-            try {
-              console.log(`[${sessionState.callId}] 📡 Calling dispatch webhook: ${DISPATCH_WEBHOOK_URL}`);
-              console.log(`[${sessionState.callId}] ⏳ Sending booking to dispatch, will poll for callback response...`);
-              
-              // NOTE: Do NOT force Ada to say "Please wait" here.
-              // Dispatch typically returns `ask_confirm` quickly; forcing a response here can interrupt
-              // or duplicate the fare prompt (price → please-wait → price).
-              // If we need a waiting prompt, it should be a delayed fallback only when dispatch is slow.
-
-              // Get recent user transcripts as structured array for comparison
-              const userTranscripts = sessionState.transcripts
-                .filter(t => t.role === "user")
-                .slice(-6) // Last 6 user messages
-                .map(t => ({ text: t.text, timestamp: t.timestamp }));
-              
-              // Format phone number for WhatsApp: strip '+' prefix and leading '0'
-              let formattedPhone = sessionState.phone?.replace(/^\+/, '') || '';
-              if (formattedPhone.startsWith('0')) {
-                formattedPhone = formattedPhone.slice(1);
-              }
-              
-              // Normalize pickup time to YYYY-MM-DD HH:MM format
-              // Use finalPickupTime which includes Last-Word-Wins transcript extraction
-              const rawPickupTime = finalPickupTime || sessionState.booking.pickup_time || args.pickup_time || "now";
-              const normalizedPickupTime = await normalizePickupTime(rawPickupTime);
-              console.log(`[${sessionState.callId}] 🕐 Pickup time: raw="${rawPickupTime}" → normalized="${normalizedPickupTime}"`);
-              
-              // Update session state with normalized time for confirmation callback
-              sessionState.booking.pickup_time = normalizedPickupTime;
-              
-              const webhookPayload = {
-                action: "request_quote",  // Explicit action for C# routing
-                job_id: jobId,
-                call_id: sessionState.callId,
-                caller_phone: formattedPhone,
-                caller_name: sessionState.customerName,
-                // Normalized/validated addresses (after dual-source + modification guard)
-                ada_pickup: finalPickup,
-                ada_destination: finalDestination,
-                // Raw caller addresses (what they actually said)
-                callers_pickup: adaPickup !== finalPickup ? adaPickup : null,
-                callers_dropoff: adaDestination !== finalDestination ? adaDestination : null,
-                // Nearest place flags (if customer requested "nearest hospital", "closest tube station", etc.)
-                nearest_pickup: extractedBooking?.nearest_pickup || null,
-                nearest_dropoff: extractedBooking?.nearest_dropoff || null,
-                // Raw STT transcripts from this call - each turn separately
-                user_transcripts: userTranscripts,
-                // Booking details
-                passengers: finalPassengers,
-                bags: finalBags,
-                vehicle_type: finalVehicleType,
-                vehicle_request: args.vehicle_request || null,
-                pickup_time: normalizedPickupTime,
-                special_requests: args.special_requests || null,
-                timestamp: new Date().toISOString()
-              };
-              
-              // POST to dispatch webhook and require a 2xx ack.
-              // (If this fails, we must NOT let Ada confirm the booking.)
-
-              // Mark the latest quote request so we can ignore stale ask_confirm broadcasts
-              sessionState.quoteRequestedAt = Date.now();
-              sessionState.quoteTripKey = currentTripKey;
-
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for slow dispatch systems
-
-              const postResp = await fetch(DISPATCH_WEBHOOK_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(webhookPayload),
-                signal: controller.signal,
-              });
-
-              clearTimeout(timeoutId);
-              dispatchPostStatus = postResp.status;
-              dispatchPostOk = postResp.ok;
-
-              const respBody = await postResp.text().catch(() => "");
-              console.log(
-                `[${sessionState.callId}] 📬 Dispatch webhook response: ${postResp.status} ${postResp.statusText}` +
-                (respBody ? ` - ${respBody.slice(0, 300)}` : "")
-              );
-
-              if (!postResp.ok) {
-                throw new Error(`Dispatch webhook POST failed with status ${postResp.status}`);
-              }
-              
-              // DON'T tell Ada to say "please wait" here - the dispatch ask_confirm will come very quickly
-              // and we don't want to cause a "conversation_already_has_active_response" error
-              // The ask_confirm handler will make Ada speak the fare confirmation message directly
-              
-              // Now poll live_calls table for dispatch response (fare, eta, or say message)
-              // Dispatch will call taxi-dispatch-callback which updates live_calls
-              const pollTimeout = 45000; // 45 seconds max wait for dispatch callback
-              const pollInterval = 500; // Check every 500ms
-              const pollStart = Date.now();
-              let dispatchResult: any = null;
-              
-              // Block VAD responses while waiting for dispatch
-              sessionState.awaitingDispatchCallback = true;
-              
-              console.log(`[${sessionState.callId}] 🔄 Polling for dispatch callback response (${pollTimeout/1000}s timeout)...`);
-              
-              while (Date.now() - pollStart < pollTimeout) {
-                // Check live_calls for dispatch response
-                const { data: callData } = await supabase
-                  .from("live_calls")
-                  .select("fare, eta, status, transcripts, updated_at")
-                  .eq("call_id", sessionState.callId)
-                  .single();
-                
-                const updatedAtMs = callData?.updated_at ? new Date(callData.updated_at).getTime() : 0;
-                const hasFreshUpdate = updatedAtMs > pollStart;
-
-                // Check for dispatch_confirm transcript with the confirmation message
-                const transcripts = callData?.transcripts as any[] || [];
-                const dispatchConfirm = transcripts.find(t => 
-                  t.role === "dispatch_confirm" && 
-                  new Date(t.timestamp).getTime() > pollStart
-                );
-                
-                if (dispatchConfirm) {
-                  console.log(`[${sessionState.callId}] ✅ Dispatch confirmed with message: "${dispatchConfirm.text}"`);
-                  dispatchResult = {
-                    fare: dispatchConfirm.fare || callData?.fare || null,
-                    eta_minutes: parseInt(dispatchConfirm.eta) || parseInt(callData?.eta) || 8,
-                    confirmed: true,
-                    confirmation_message: dispatchConfirm.text,
-                    booking_ref: dispatchConfirm.booking_ref || null,
-                    status: dispatchConfirm.status
-                  };
-                  break;
-                }
-                
-                // Check for ask_confirm (fare confirmation) request FIRST.
-                // Dispatch typically sets fare/eta in DB at the same time, so we must not treat
-                // a fresh fare/eta update as a confirmed booking if ask_confirm exists.
-                const dispatchAskConfirm = transcripts.find(t =>
-                  t.role === "dispatch_ask_confirm" &&
-                  new Date(t.timestamp).getTime() > pollStart
-                );
-
-                 if (dispatchAskConfirm) {
-                   console.log(`[${sessionState.callId}] 💰 Dispatch ask_confirm: "${dispatchAskConfirm.text}" (fare=${dispatchAskConfirm.fare}, eta=${dispatchAskConfirm.eta})`);
-
-                   // Build a deterministic prompt so Ada repeats the *exact* fare/ETA (no hallucinated numbers)
-                   const fareNum = Number(String(dispatchAskConfirm.fare ?? "").replace(/[^0-9.]/g, ""));
-                   const fareText = Number.isFinite(fareNum) && fareNum > 0
-                     ? `£${fareNum.toFixed(2)}`
-                     : (dispatchAskConfirm.fare ? String(dispatchAskConfirm.fare) : "");
-
-                   const etaRaw = dispatchAskConfirm.eta ?? callData?.eta;
-                   const etaNum = Number(String(etaRaw ?? "").replace(/[^0-9]/g, ""));
-                   const etaText = etaRaw
-                     ? String(etaRaw)
-                     : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
-
-                    const recapText = (finalPickup && finalDestination)
-                      ? `Just to confirm, you're going from ${finalPickup} to ${finalDestination} for ${finalPassengers} passenger${finalPassengers === 1 ? "" : "s"}. `
-                      : "";
-
-                    const spokenMessage = (fareText && etaText)
-                      ? `${recapText}Hi, your price for the journey is ${fareText} and your driver will be ${etaText}. Do you want me to go ahead and book that?`
-                      : (dispatchAskConfirm.text || "");
-
-                   // Store pending quote state for confirmation_state flow
-                   sessionState.pendingQuote = {
-                     fare: dispatchAskConfirm.fare || null,
-                     eta: dispatchAskConfirm.eta || null,
-                     pickup: finalPickup,
-                     destination: finalDestination,
-                     pickup_time: sessionState.booking.pickup_time || null, // Preserve normalized pickup time
-                     callback_url: dispatchAskConfirm.callback_url || null,
-                     timestamp: Date.now(),
-                     lastPrompt: spokenMessage || null
-                   };
-
-                   // ⚠️ DO NOT set lastQuotePromptAt here! Let the broadcast handler set it AFTER
-                   // actually injecting the speech. Otherwise the broadcast handler will think
-                   // Ada already spoke and skip the actual speech.
-                   // sessionState.lastQuotePromptAt = Date.now();
-                   // sessionState.lastQuotePromptText = spokenMessage;
-                   
-                   // ✅ CRITICAL: Clear pendingModification when fare arrives - we've moved past the modification stage
-                   if (sessionState.pendingModification) {
-                     console.log(`[${sessionState.callId}] 🧹 Clearing pendingModification (polling) - fare quote received`);
-                     sessionState.pendingModification = null;
-                   }
-                   
-                   // ✅ SUMMARY PROTECTION: Block barge-in during fare quote (polling path)
-                   sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-                   console.log(`[${sessionState.callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (polling fare)`);
-
-
-                   dispatchResult = {
-                     needs_fare_confirm: true,
-                     ada_message: spokenMessage,
-                     fare: dispatchAskConfirm.fare || null,
-                     eta: dispatchAskConfirm.eta || null,
-                     quote_ready: true,
-                   };
-                   break;
-                 }
-                // Check for hangup instruction
-                const dispatchHangup = transcripts.find(t =>
-                  t.role === "dispatch_hangup" &&
-                  new Date(t.timestamp).getTime() > pollStart
-                );
-
-                if (dispatchHangup) {
-                  console.log(`[${sessionState.callId}] 📞 Dispatch hangup: ${dispatchHangup.text}`);
-                  dispatchResult = {
-                    hangup: true,
-                    ada_message: dispatchHangup.text
-                  };
-                  break;
-                }
-
-                // Check if dispatch sent a general message
-                const dispatchSay = transcripts.find(t =>
-                  t.role === "dispatch" &&
-                  new Date(t.timestamp).getTime() > pollStart
-                );
-
-                if (dispatchSay) {
-                  console.log(`[${sessionState.callId}] 💬 Dispatch says: ${dispatchSay.text}`);
-                  dispatchResult = {
-                    ada_message: dispatchSay.text,
-                    needs_clarification: true
-                  };
-                  break;
-                }
-
-                // --- REMOVED AUTO-CONFIRM FALLBACK ---
-                // Previously, a fresh fare/eta/status update was treated as an implicit confirm.
-                // But the C# dispatcher now sends explicit ask_confirm or dispatch_confirm messages
-                // via the broadcast channel — so we NO LONGER auto-confirm based on DB fields.
-                // This prevents double-fare-prompt races where both the broadcast and the poll
-                // independently triggered Ada to speak.
-                //
-                // If you still need an auto-confirm fallback for old dispatchers that don't
-                // broadcast, enable it only if dispatch_ask_confirm was NOT found in transcripts
-                // AND pendingQuote is null (no fare was ever sent).
-
-                // Wait before next poll
-                await new Promise(resolve => setTimeout(resolve, pollInterval));
-              }
-              
-              // Dispatch polling complete - allow VAD responses again
-              sessionState.awaitingDispatchCallback = false;
-              
-              if (dispatchResult) {
-                // Check if dispatch requested hangup - immediately end call
-                if (dispatchResult.hangup) {
-                  console.log(`[${sessionState.callId}] 📞 Dispatch requested hangup: ${dispatchResult.ada_message}`);
-                  
-                  // Cancel any active response before injecting system message
-                  if (sessionState.openAiResponseActive) {
-                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-                  }
-                  openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  
-                  // Send the goodbye message to Ada to speak
-                  openaiWs?.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{ type: "input_text", text: `[SYSTEM: Dispatch has ended this call. Say exactly: "${dispatchResult.ada_message}" then immediately hang up.]` }]
-                    }
-                  }));
-                  
-                  // Return hangup result and trigger end_call after speech
-                  result = {
-                    success: false,
-                    hangup: true,
-                    ada_message: dispatchResult.ada_message,
-                    message: "Dispatch requested call termination - ending call"
-                  };
-                  
-                  // Mark call as ending and schedule cleanup
-                  sessionState.callEnded = true;
-                  immediateFlush(sessionState);
-                  
-                  await supabase.from("live_calls")
-                    .update({ status: "completed", ended_at: new Date().toISOString() })
-                    .eq("call_id", sessionState.callId);
-                  
-                  // Close after goodbye plays
-                  setTimeout(() => {
-                    console.log(`[${sessionState.callId}] 🔌 Closing connection after dispatch hangup`);
-                    openaiWs?.close();
-                  }, 5000);
-                  
-                  // Cancel any active response before creating new one (race condition fix)
-                  if (sessionState.openAiResponseActive) {
-                    openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-                    sessionState.openAiResponseActive = false;
-                  }
-                  // Trigger response so Ada speaks the goodbye
-                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
-                  return; // Exit early - don't continue with booking
-                }
-                
-                // Check for fare confirmation request - DON'T confirm booking yet
-                if (dispatchResult.needs_fare_confirm) {
-                  console.log(`[${sessionState.callId}] 💰 Dispatch needs fare confirmation - NOT confirming booking yet`);
-                  result = {
-                    success: false,
-                    needs_fare_confirm: true,
-                    ada_message: dispatchResult.ada_message,
-                    message: "Dispatch awaiting fare confirmation from customer"
-                  };
-                  
-                  // === DISPATCH-TRIGGERED HANDOFF ===
-                  // After fare quote is delivered, trigger a reconnect so the user has fresh
-                  // session time to ask questions or confirm. The bridge will reconnect with
-                  // resume: true and restore state from live_calls.
-                  if (socket && socket.readyState === WebSocket.OPEN) {
-                    // Flush state to DB first so restoration works
-                    immediateFlush(sessionState);
-                    
-                    setTimeout(() => {
-                      console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after fare quote`);
-                      try {
-                        socket.send(JSON.stringify({
-                          type: "session.handoff",
-                          call_id: sessionState.callId,
-                          reason: "dispatch_fare_delivered",
-                          booking_step: sessionState.bookingStep
-                        }));
-                      } catch (e) {
-                        console.error(`[${sessionState.callId}] Handoff send error:`, e);
-                      }
-                    }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
-                  }
-                  
-                  // pendingFareConfirm was already set when we found the ask_confirm transcript
-                  break; // Exit switch - booking NOT confirmed
-                }
-                
-                if (dispatchResult.ada_message && !dispatchResult.confirmed) {
-                  console.log(`[${sessionState.callId}] 💬 Dispatch message for Ada: ${dispatchResult.ada_message}`);
-                  // Return early with the message - don't confirm booking yet
-                  result = {
-                    success: false,
-                    needs_clarification: true,
-                    ada_message: dispatchResult.ada_message,
-                    message: "Dispatch needs clarification from customer"
-                  };
-                  break; // Exit switch - booking NOT confirmed
-                }
-                
-                // Check if dispatch rejected the booking
-                if (dispatchResult.rejected || dispatchResult.success === false) {
-                  console.log(`[${sessionState.callId}] ❌ Dispatch rejected booking: ${dispatchResult.rejection_reason || 'Unknown reason'}`);
-                  result = {
-                    success: false,
-                    rejected: true,
-                    ada_message: dispatchResult.ada_message || dispatchResult.rejection_reason || "Sorry, we can't process this booking right now.",
-                    message: "Booking rejected by dispatch"
-                  };
-                  break;
-                }
-                
-                // Use confirmed fare/eta from dispatch
-                if (dispatchResult.confirmed) {
-                  fare = dispatchResult.fare || fare;
-                  etaMinutes = dispatchResult.eta_minutes || etaMinutes;
-                  if (dispatchResult.booking_ref) {
-                    bookingRef = dispatchResult.booking_ref;
-                  }
-                  
-                  // If dispatch provided a custom confirmation message, inject it for Ada to speak
-                  if (dispatchResult.confirmation_message) {
-                    console.log(`[${sessionState.callId}] 🎤 Injecting dispatch confirmation for Ada: "${dispatchResult.confirmation_message}"`);
-                    dispatchConfirmationSent = true;
-                    
-                    // Build the full message with fare and ETA details
-                    const fareText = fare ? `Fare is ${fare}` : "";
-                    const etaText = etaMinutes ? `arriving in about ${etaMinutes} minutes` : "";
-                    const detailsText = [fareText, etaText].filter(Boolean).join(", ");
-                    const bookingDetails = detailsText ? ` ${detailsText}.` : "";
-                    
-                    // ✅ SET discardCurrentResponseAudio BEFORE cancelling to drop any late audio deltas
-                    sessionState.discardCurrentResponseAudio = true;
-                    
-                    // Cancel any active response before injecting system message
-                    if (sessionState.openAiResponseActive) {
-                      openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-                    }
-                    openaiWs?.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                    
-                    // Send system message so Ada speaks the dispatch confirmation + details + follow-up question
-                    openaiWs?.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{ type: "input_text", text: `[SYSTEM: Booking confirmed by dispatch. Say this to the customer: "${dispatchResult.confirmation_message}${bookingDetails} Is there anything else I can help you with?"]` }]
-                      }
-                    }));
-                    
-                    // Cancel any active response before creating new one (race condition fix)
-                    if (sessionState.openAiResponseActive) {
-                      openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
-                      sessionState.openAiResponseActive = false;
-                    }
-                    // Trigger Ada to respond with the message
-                    openaiWs?.send(JSON.stringify({ type: "response.create" }));
-                  }
-                }
-              } else {
-              console.log(`[${sessionState.callId}] ⏰ Dispatch callback timeout - using fallback fare quote`);
-              
-              // === FALLBACK: Generate mock fare/ETA if dispatch doesn't respond ===
-              // This ensures Ada doesn't go silent if dispatch is slow/broken
-              const fallbackFare = "£15.00";
-              const fallbackEta = "8 minutes";
-              const fallbackMessage = `Your price for the journey is ${fallbackFare} and your driver will be ${fallbackEta}. Would you like me to go ahead and book that?`;
-              
-              console.log(`[${sessionState.callId}] 💰 Fallback fare quote: ${fallbackFare}, ETA: ${fallbackEta}`);
-              
-              // Store pending quote state for confirmation flow
-              sessionState.pendingQuote = {
-                fare: fallbackFare,
-                eta: fallbackEta,
-                pickup: finalPickup,
-                destination: finalDestination,
-                pickup_time: sessionState.booking.pickup_time || null,
-                callback_url: null, // No callback URL for fallback
-                timestamp: Date.now(),
-                lastPrompt: fallbackMessage
-              };
-              
-              // Inject fare quote for Ada to speak
-              if (openaiWs && openaiConnected) {
-                if (sessionState.openAiResponseActive) {
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                }
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_text",
-                      text: `[DISPATCH FARE QUOTE]: Say EXACTLY: "${fallbackMessage}" Then STOP and wait for yes/no. Do NOT add any other questions or repeat addresses.`
-                    }]
-                  }
-                }));
-                
-                // Cancel any active response before creating new one (race condition fix)
-                if (sessionState.openAiResponseActive) {
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                  sessionState.openAiResponseActive = false;
-                }
-                openaiWs.send(JSON.stringify({ type: "response.create" }));
-              }
-              
-              result = {
-                success: false,
-                needs_fare_confirm: true,
-                ada_message: fallbackMessage,
-                message: "Using fallback fare quote - dispatch did not respond"
-              };
-              
-              // === DISPATCH-TRIGGERED HANDOFF (Timeout Fallback) ===
-              if (socket && socket.readyState === WebSocket.OPEN) {
-                immediateFlush(sessionState);
-                setTimeout(() => {
-                  console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after fallback fare`);
-                  try {
-                    socket.send(JSON.stringify({
-                      type: "session.handoff",
-                      call_id: sessionState.callId,
-                      reason: "dispatch_fallback_fare",
-                      booking_step: sessionState.bookingStep
-                    }));
-                  } catch (e) {
-                    console.error(`[${sessionState.callId}] Handoff send error:`, e);
-                  }
-                }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
-              }
-              }
-            } catch (webhookErr) {
-              console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
-              
-              // Clear the dispatch guard on error
-              sessionState.awaitingDispatchCallback = false;
-
-              // === FALLBACK ON ERROR: Generate mock fare/ETA ===
-              const fallbackFare = "£15.00";
-              const fallbackEta = "8 minutes";
-              const fallbackMessage = `Your price for the journey is ${fallbackFare} and your driver will be ${fallbackEta}. Would you like me to go ahead and book that?`;
-              
-              console.log(`[${sessionState.callId}] 💰 Error fallback fare quote: ${fallbackFare}, ETA: ${fallbackEta}`);
-              
-              sessionState.pendingQuote = {
-                fare: fallbackFare,
-                eta: fallbackEta,
-                pickup: finalPickup,
-                destination: finalDestination,
-                pickup_time: sessionState.booking.pickup_time || null,
-                callback_url: null,
-                timestamp: Date.now(),
-                lastPrompt: fallbackMessage
-              };
-              
-              if (openaiWs && openaiConnected) {
-                if (sessionState.openAiResponseActive) {
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                }
-                openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                
-                // ✅ SUMMARY PROTECTION: Block barge-in during fallback fare quote
-                sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-                console.log(`[${sessionState.callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (fallback fare)`);
-                
-                
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_text",
-                      text: `[DISPATCH FARE QUOTE]: Say EXACTLY: "${fallbackMessage}" Then STOP and wait for yes/no.`
-                    }]
-                  }
-                }));
-                
-                // Cancel any active response before creating new one (race condition fix)
-                if (sessionState.openAiResponseActive) {
-                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                  sessionState.openAiResponseActive = false;
-                }
-                openaiWs.send(JSON.stringify({ type: "response.create" }));
-              }
-              
-              result = {
-                success: false,
-                needs_fare_confirm: true,
-                ada_message: fallbackMessage,
-                message: "Using fallback fare quote due to dispatch error"
-              };
-              
-              // === DISPATCH-TRIGGERED HANDOFF (Error Fallback) ===
-              if (socket && socket.readyState === WebSocket.OPEN) {
-                immediateFlush(sessionState);
-                setTimeout(() => {
-                  console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after error fallback fare`);
-                  try {
-                    socket.send(JSON.stringify({
-                      type: "session.handoff",
-                      call_id: sessionState.callId,
-                      reason: "dispatch_error_fallback",
-                      booking_step: sessionState.bookingStep
-                    }));
-                  } catch (e) {
-                    console.error(`[${sessionState.callId}] Handoff send error:`, e);
-                  }
-                }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
-              }
-            }
-          }
-          
-          // CRITICAL: Only create booking and mark confirmed if we didn't break early
-          // with a clarification/rejection/fare-confirm response
-          if (result && (result.needs_clarification || result.needs_fare_confirm || result.rejected || result.hangup)) {
-            console.log(`[${sessionState.callId}] ⏸️ NOT confirming booking - awaiting: clarification=${result.needs_clarification}, fare_confirm=${result.needs_fare_confirm}, rejected=${result.rejected}`);
-            // Don't create booking in DB yet, don't set bookingConfirmedThisTurn
-            break;
-          }
-          
-          // Create/update booking in DB (only if we got here - not rejected/clarification)
-          // First, mark any old confirmed/active bookings for this caller as 'completed'
-          const callerPhoneNorm = normalizePhone(sessionState.phone);
-          const { error: completeOldError } = await supabase
-            .from("bookings")
-            .update({ status: "completed", completed_at: new Date().toISOString() })
-            .eq("caller_phone", callerPhoneNorm)
-            .in("status", ["confirmed", "dispatched", "active", "pending"])
-            .neq("call_id", sessionState.callId);
-          
-          if (completeOldError) {
-            console.error(`[${sessionState.callId}] Failed to complete old bookings:`, completeOldError);
-          } else {
-            console.log(`[${sessionState.callId}] ✅ Marked old bookings as completed for ${callerPhoneNorm}`);
-          }
-          
-          // Now upsert the current booking (update if exists for this call_id, else insert)
-          const { error: bookingError } = await supabase.from("bookings").upsert({
-            call_id: sessionState.callId,
-            caller_phone: callerPhoneNorm,
-            caller_name: sessionState.customerName,
-            pickup: args.pickup,
-            destination: args.destination,
-            passengers: args.passengers ?? 1,
-            fare: fare,
-            eta: `${etaMinutes} minutes`,
-            status: "confirmed",
-            booking_details: { job_id: jobId, booking_ref: bookingRef, distance: distance },
-            updated_at: new Date().toISOString()
-          }, { onConflict: "call_id" });
-          
-          if (bookingError) {
-            console.error(`[${sessionState.callId}] Booking DB error:`, bookingError);
-          }
-          
-          // If we already injected dispatch message, return minimal result (Ada already speaking)
-          result = { 
-            success: true, 
-            eta_minutes: etaMinutes, 
-            fare: fare,
-            booking_ref: bookingRef,
-            message: dispatchConfirmationSent ? "Booking confirmed - dispatch message sent" : "Booking confirmed"
-          };
-          
-          // ✅ BOOKING ENFORCEMENT: Mark that book_taxi succeeded this turn
-          // This allows Ada to say "Booked!" without being cancelled
-          sessionState.bookingConfirmedThisTurn = true;
-          sessionState.bookingFullyConfirmed = true; // ✅ PERSISTENT: Booking is complete, Ada can speak freely now
-          sessionState.lastBookTaxiSuccessAt = Date.now();
-          sessionState.lastConfirmedTripKey = makeTripKey(args.pickup, args.destination);
-          console.log(`[${sessionState.callId}] ✅ Booking enforcement: book_taxi succeeded, Ada may now speak freely (bookingFullyConfirmed=true)`);
-          
-          // RELEASE BUFFERED AUDIO: Now that booking is confirmed, flush any pending audio
-          sessionState.audioVerified = true;
-          if (sessionState.pendingAudioBuffer.length > 0) {
-            console.log(`[${sessionState.callId}] 🔊 Releasing ${sessionState.pendingAudioBuffer.length} buffered audio chunks after book_taxi success`);
-            for (const audioChunk of sessionState.pendingAudioBuffer) {
-              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
-            }
-            sessionState.pendingAudioBuffer = [];
-          }
-          
-          // 🔧 FAILSAFE: If dispatch_confirm broadcast doesn't arrive within 3s, trigger confirmation directly
-          // This prevents Ada from going silent if the dispatch system doesn't send the broadcast
-          const confirmationTimeoutMs = 3000;
-          sessionState.confirmationFailsafeTimerId = setTimeout(() => {
-            // Only trigger if booking was confirmed and we haven't already spoken
-            if (sessionState.bookingFullyConfirmed && 
-                !sessionState.confirmationSpoken && 
-                openaiWs && 
-                openaiConnected) {
-              console.log(`[${sessionState.callId}] ⏰ FAILSAFE: dispatch_confirm not received in ${confirmationTimeoutMs}ms - triggering confirmation directly`);
-              sessionState.confirmationSpoken = true;
-              
-              const langCode = sessionState.language || "en";
-              const langName = langCode === "nl" ? "Dutch" : langCode === "de" ? "German" : langCode === "fr" ? "French" : langCode === "es" ? "Spanish" : langCode === "it" ? "Italian" : langCode === "pl" ? "Polish" : "English";
-              const confirmationScript = `That's on the way. Is there anything else I can help you with?`;
-              
-              // Cancel any stale response and clear buffers
-              sessionState.discardCurrentResponseAudio = true;
+            // ═══════════════════════════════════════════════════════════════════════════
+            // PRE-WEBHOOK HANDOFF: Reconnect BEFORE sending webhook for fresh 90s window
+            // This ensures we have ample time for fare delivery + user confirmation
+            // ═══════════════════════════════════════════════════════════════════════════
+            
+            // Normalize pickup time now (before handoff) so it's persisted correctly
+            const rawPickupTime = finalPickupTime || sessionState.booking.pickup_time || args.pickup_time || "now";
+            const normalizedPickupTime = await normalizePickupTime(rawPickupTime);
+            console.log(`[${sessionState.callId}] 🕐 Pickup time: raw="${rawPickupTime}" → normalized="${normalizedPickupTime}"`);
+            sessionState.booking.pickup_time = normalizedPickupTime;
+            
+            // Save state to DB with pre_webhook status
+            console.log(`[${sessionState.callId}] 🔄 PRE-WEBHOOK HANDOFF: Saving state and triggering reconnect`);
+            
+            await supabase.from("live_calls").update({
+              status: "pre_webhook",
+              pickup: finalPickup,
+              destination: finalDestination,
+              passengers: finalPassengers,
+              pickup_time: normalizedPickupTime,
+              booking_step: sessionState.bookingStep,
+              updated_at: new Date().toISOString()
+            }).eq("call_id", sessionState.callId);
+            
+            // Tell Ada to say "one moment" while we reconnect
+            if (openaiWs && openaiConnected) {
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
               
-              // Inject confirmation message
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
                   type: "message",
                   role: "user",
-                  content: [{ type: "input_text", text: `[DISPATCH CONFIRMATION]: The booking has been confirmed. Say this EXACTLY to the customer IN ${langName.toUpperCase()}: "${confirmationScript}" Be natural and brief. Do not add any extra details about fare, ETA, or booking reference.` }]
+                  content: [{
+                    type: "input_text",
+                    text: `[SYSTEM: Say EXACTLY: "One moment please while I check the price." Then STOP and wait.]`
+                  }]
                 }
               }));
               
-              // Reset discard flag before response
-              sessionState.discardCurrentResponseAudio = false;
-              
-              // Cancel any active response before creating new one (race condition fix)
-              if (sessionState.openAiResponseActive) {
-                openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                sessionState.openAiResponseActive = false;
-              }
-              // Trigger Ada to speak
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio", "text"],
-                  instructions: `IMPORTANT: The dispatch has confirmed the booking. Speak in ${langName}. Say EXACTLY: "${confirmationScript}" Do not add extra details.`
-                }
-              }));
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
             }
-          }, confirmationTimeoutMs);
+            
+            // Trigger handoff after brief delay for "one moment" to play
+            setTimeout(() => {
+              console.log(`[${sessionState.callId}] 🔀 PRE-WEBHOOK HANDOFF: Signaling bridge to reconnect`);
+              try {
+                socket.send(JSON.stringify({
+                  type: "session.handoff",
+                  call_id: sessionState.callId,
+                  reason: "pre_webhook_handoff",
+                  booking_step: sessionState.bookingStep
+                }));
+              } catch (e) {
+                console.error(`[${sessionState.callId}] Pre-webhook handoff send error:`, e);
+              }
+            }, 1500);
+            
+            // Return early - webhook will be sent after reconnection
+            result = {
+              success: true,
+              pending_webhook: true,
+              message: "Session handoff initiated - webhook will be sent after reconnection"
+            };
+            break;
+          }
           
+          // === NO DISPATCH WEBHOOK - USE FALLBACK ===
+          console.log(`[${sessionState.callId}] ⚠️ No DISPATCH_WEBHOOK_URL - using fallback fare`);
+          const fallbackFare = "£15.00";
+          const fallbackEta = "8 minutes";
+          
+          sessionState.pendingQuote = {
+            fare: fallbackFare,
+            eta: fallbackEta,
+            pickup: finalPickup,
+            destination: finalDestination,
+            pickup_time: sessionState.booking.pickup_time || null,
+            callback_url: null,
+            timestamp: Date.now(),
+            lastPrompt: null
+          };
+          
+          result = {
+            success: true,
+            fare: fallbackFare,
+            eta: fallbackEta,
+            message: `Taxi quote ready: ${fallbackFare}, ETA ${fallbackEta}`
+          };
+          break;
         }
 
         case "cancel_booking": {
@@ -8489,7 +7890,85 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               console.log(`[${callId}] 📋 Restored lastQuestionType: ${state.lastQuestionType}`);
             }
             
-            console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}, fare=${restoredSession.fare}`);
+            console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}, fare=${restoredSession.fare}, status=${restoredSession.status}`);
+            
+            // ═══════════════════════════════════════════════════════════════════════════
+            // PRE-WEBHOOK RESUME: If we reconnected with pre_webhook status, send the webhook now
+            // This happens after the handoff that occurred before the webhook was sent
+            // ═══════════════════════════════════════════════════════════════════════════
+            if (restoredSession.status === "pre_webhook") {
+              console.log(`[${callId}] 📡 PRE-WEBHOOK RESUME: Sending dispatch webhook now`);
+              
+              // Mark that we're processing the webhook
+              state.awaitingDispatchCallback = true;
+              state.quoteRequestedAt = Date.now();
+              
+              // Fire webhook asynchronously so it doesn't block session setup
+              const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+              if (DISPATCH_WEBHOOK_URL) {
+                // Format phone number
+                let formattedPhone = state.phone?.replace(/^\+/, '') || '';
+                if (formattedPhone.startsWith('0')) {
+                  formattedPhone = formattedPhone.slice(1);
+                }
+                
+                // Get recent user transcripts
+                const userTranscripts = state.transcripts
+                  .filter(t => t.role === "user")
+                  .slice(-6)
+                  .map(t => ({ text: t.text, timestamp: t.timestamp }));
+                
+                const webhookPayload = {
+                  action: "request_quote",
+                  job_id: crypto.randomUUID(),
+                  call_id: state.callId,
+                  caller_phone: formattedPhone,
+                  caller_name: state.customerName,
+                  ada_pickup: state.booking.pickup,
+                  ada_destination: state.booking.destination,
+                  user_transcripts: userTranscripts,
+                  passengers: state.booking.passengers,
+                  pickup_time: restoredSession.pickup_time || state.booking.pickup_time || "ASAP",
+                  timestamp: new Date().toISOString()
+                };
+                
+                console.log(`[${callId}] 📤 Sending webhook to ${DISPATCH_WEBHOOK_URL}`);
+                
+                fetch(DISPATCH_WEBHOOK_URL, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(webhookPayload)
+                })
+                  .then(async (resp) => {
+                    console.log(`[${callId}] 📬 Dispatch webhook response: ${resp.status} ${resp.statusText}`);
+                    if (!resp.ok) {
+                      console.error(`[${callId}] ⚠️ Webhook failed - will use fallback`);
+                    }
+                    // Update status to active (no longer pre_webhook)
+                    await supabase.from("live_calls").update({
+                      status: "active",
+                      updated_at: new Date().toISOString()
+                    }).eq("call_id", callId);
+                  })
+                  .catch((err) => {
+                    console.error(`[${callId}] ❌ Webhook error:`, err);
+                    // On error, generate fallback quote
+                    if (state) {
+                      state.awaitingDispatchCallback = false;
+                      state.pendingQuote = {
+                        fare: "£15.00",
+                        eta: "8 minutes",
+                        pickup: state.booking.pickup,
+                        destination: state.booking.destination,
+                        pickup_time: state.booking.pickup_time || null,
+                        callback_url: null,
+                        timestamp: Date.now(),
+                        lastPrompt: null
+                      };
+                    }
+                  });
+              }
+            }
           }
         }
         
