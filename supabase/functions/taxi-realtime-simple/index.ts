@@ -2847,10 +2847,25 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
          }
 
          // If we tried to speak while a response was in-flight, do it now.
-         if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
-           sessionState.deferredResponseCreate = false;
-           safeResponseCreate(sessionState, "deferred-after-response.done");
-         }
+          if (sessionState.deferredResponseCreate && !sessionState.callEnded) {
+            // IMPORTANT: Don't immediately replay a deferred response while we're still in the
+            // strict turn-based "awaiting user answer" state.
+            // Doing so causes a response.created → guard cancel loop, which sets discardCurrentResponseAudio
+            // and can result in callers seeing transcripts but hearing no audio.
+            const canFlushDeferred =
+              !sessionState.awaitingUserAnswer ||
+              sessionState.allowOneResponseWhileAwaitingUserAnswer ||
+              sessionState.pendingTurnResponseCreate;
+
+            if (canFlushDeferred) {
+              sessionState.deferredResponseCreate = false;
+              safeResponseCreate(sessionState, "deferred-after-response.done");
+            } else {
+              console.log(
+                `[${sessionState.callId}] ⏸️ Keeping deferred response.create queued (awaiting ${sessionState.awaitingAnswerForStep})`
+              );
+            }
+          }
          
          // ✅ IMMEDIATE HANGUP ON GOODBYE COMPLETE: If we're in closing grace period,
          // the goodbye has finished playing - trigger hangup immediately instead of waiting for timeout
