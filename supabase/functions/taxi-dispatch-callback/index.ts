@@ -332,6 +332,9 @@ serve(async (req) => {
     // ═══════════════════════════════════════════════════════════════════
     // ACTION: ASK_CONFIRM - Ask customer to confirm fare before dispatch
     // Customer response (yes/no) is monitored by taxi-realtime-simple
+    // Options:
+    //   bypass_ai: true  → Direct TTS synthesis, skips OpenAI completely
+    //   bypass_ai: false → Goes through OpenAI (default, may rephrase)
     // ═══════════════════════════════════════════════════════════════════
     if (action === "ask_confirm") {
       if (!message) {
@@ -343,7 +346,9 @@ serve(async (req) => {
         });
       }
 
-      console.log(`[${call_id}] 💰 Dispatch ask_confirm: "${message}"`);
+      // Check if bypass_ai is requested
+      const bypassAi = (callback as any).bypass_ai === true;
+      console.log(`[${call_id}] 💰 Dispatch ask_confirm: "${message}" (bypass_ai=${bypassAi})`);
       console.log(`[${call_id}] Fare: ${fare}, ETA: ${normalizedEta}, Callback: ${callback_url}`);
 
       // Get current transcripts
@@ -357,11 +362,12 @@ serve(async (req) => {
       
       // Add the fare confirmation request with special role
       transcripts.push({
-        role: "dispatch_ask_confirm",
+        role: bypassAi ? "dispatch_ask_confirm_direct" : "dispatch_ask_confirm",
         text: message,
         fare: fare || null,
         eta: normalizedEta || null,
         callback_url: callback_url || null,
+        bypass_ai: bypassAi,
         timestamp: new Date().toISOString()
       });
 
@@ -376,23 +382,29 @@ serve(async (req) => {
             pending_fare_confirm: true,
             fare_message: message,
             callback_url: callback_url || null,
+            bypass_ai: bypassAi,
             asked_at: new Date().toISOString()
           },
           updated_at: new Date().toISOString()
         })
         .eq("call_id", call_id);
 
+      // Choose event based on bypass_ai flag
+      const eventName = bypassAi ? "dispatch_ask_confirm_direct" : "dispatch_ask_confirm";
+
       // Broadcast to active WebSocket session
       await supabase.channel(`dispatch_${call_id}`).send({
         type: "broadcast",
-        event: "dispatch_ask_confirm",
+        event: eventName,
         payload: {
           call_id,
           action: "ask_confirm",
           message,
           fare: fare || null,
           eta: normalizedEta || null,
+          booking_ref: booking_ref || null,
           callback_url: callback_url || null,
+          bypass_ai: bypassAi,
           timestamp: new Date().toISOString()
         }
       });
@@ -401,7 +413,8 @@ serve(async (req) => {
         success: true,
         call_id,
         action: "ask_confirm",
-        message: "Fare confirmation question sent to Ada",
+        bypass_ai: bypassAi,
+        message: bypassAi ? "Fare confirmation sent directly to TTS (AI bypassed)" : "Fare confirmation question sent to Ada",
         awaiting_response: true
       }), {
         status: 201, // 201 = Accepted, waiting for customer response

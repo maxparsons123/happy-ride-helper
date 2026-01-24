@@ -8259,6 +8259,193 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           }));
         });
         
+        // === DIRECT TTS HANDLER FOR ASK_CONFIRM - Bypasses AI completely ===
+        // When bypass_ai: true is sent with ask_confirm, synthesize speech directly without OpenAI interpretation
+        // The message is spoken EXACTLY as provided, then we wait for yes/no response
+        dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm_direct" }, async (payload: any) => {
+          const { message: confirmMessage, fare, eta, eta_minutes, booking_ref, callback_url } = payload.payload || {};
+          console.log(`[${callId}] 📥 DISPATCH ask_confirm_direct (BYPASS AI): "${confirmMessage}"`);
+          
+          if (!confirmMessage || isConnectionClosed) {
+            console.log(`[${callId}] ⚠️ Cannot process direct ask_confirm - no message or connection closed`);
+            return;
+          }
+
+          // GUARD: If call is ending/ended, ignore
+          if (state?.callEnded) {
+            console.log(`[${callId}] ⚠️ Ignoring ask_confirm_direct - call is ended/ending`);
+            return;
+          }
+          
+          // Cancel any active AI response to prevent overlap
+          if (state?.openAiResponseActive && openaiWs && openaiConnected) {
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            state.discardCurrentResponseAudio = true;
+          }
+          
+          // Store pending quote state for yes/no handling
+          if (state) {
+            state.pendingQuote = {
+              fare: fare || null,
+              eta: eta || eta_minutes || null,
+              pickup: state.booking.pickup,
+              destination: state.booking.destination,
+              pickup_time: state.booking.pickup_time || null,
+              callback_url: callback_url || null,
+              timestamp: Date.now(),
+              lastPrompt: confirmMessage || null
+            };
+            state.lastQuotePromptAt = Date.now();
+            state.lastQuotePromptText = confirmMessage;
+            
+            // Persist fare/eta to DB for session restoration
+            supabase
+              .from("live_calls")
+              .update({
+                fare: fare || null,
+                eta: eta || eta_minutes || null,
+                status: "awaiting_confirmation",
+                updated_at: new Date().toISOString()
+              })
+              .eq("call_id", callId)
+              .then(({ error }) => {
+                if (error) console.error(`[${callId}] Failed to persist fare/eta:`, error);
+                else console.log(`[${callId}] 💾 Fare/ETA persisted (direct): fare=${fare}, eta=${eta || eta_minutes}`);
+              });
+            
+            // Clear any pending modification
+            if (state.pendingModification) {
+              console.log(`[${callId}] 🧹 Clearing pendingModification - fare quote received (direct)`);
+              state.pendingModification = null;
+            }
+            
+            // Summary protection during fare quote
+            state.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+            state.bookingConfirmedThisTurn = false;
+            state.audioVerified = false;
+            state.pendingAudioBuffer = [];
+          }
+          
+          // Mark Ada as speaking (echo guard)
+          if (state) {
+            state.isAdaSpeaking = true;
+            state.responseStartTime = Date.now();
+            state.bargeInIgnoreUntil = Date.now() + 500;
+          }
+          
+          try {
+            // Use OpenAI TTS API directly for PCM16 audio (matches bridge format)
+            const ttsResponse = await fetch("https://api.openai.com/v1/audio/speech", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                model: "tts-1", // Fast model for realtime
+                voice: state?.voice || "shimmer",
+                input: confirmMessage,
+                response_format: "pcm" // 24kHz 16-bit PCM - matches bridge format
+              })
+            });
+            
+            if (!ttsResponse.ok) {
+              console.error(`[${callId}] ❌ Direct TTS failed for ask_confirm: ${ttsResponse.status}`);
+              // Fallback to AI-based ask_confirm
+              if (openaiWs && openaiConnected) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: `[DISPATCH]: Say exactly: "${confirmMessage}" then wait for yes/no.` }]
+                  }
+                }));
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+              }
+              return;
+            }
+            
+            const audioBuffer = await ttsResponse.arrayBuffer();
+            const audioData = new Uint8Array(audioBuffer);
+            
+            console.log(`[${callId}] 🔊 Direct TTS (ask_confirm) generated: ${audioData.length} bytes`);
+            
+            // Stream audio chunks to client (4800 bytes ≈ 100ms at 24kHz PCM16)
+            const chunkSize = 4800;
+            for (let i = 0; i < audioData.length; i += chunkSize) {
+              if (isConnectionClosed) break;
+              
+              const chunk = audioData.slice(i, Math.min(i + chunkSize, audioData.length));
+              // Convert to base64 for WebSocket JSON transport
+              const base64Chunk = btoa(String.fromCharCode(...chunk));
+              
+              socket.send(JSON.stringify({
+                type: "audio",
+                audio: base64Chunk
+              }));
+            }
+            
+            // Signal audio complete
+            socket.send(JSON.stringify({ type: "audio.done" }));
+            
+            console.log(`[${callId}] ✅ Direct TTS (ask_confirm) playback complete - waiting for yes/no`);
+            
+            // Add to transcripts for logging
+            if (state) {
+              state.transcripts.push({
+                role: "assistant",
+                text: `[DIRECT TTS] ${confirmMessage}`,
+                timestamp: new Date().toISOString()
+              });
+              scheduleTranscriptFlush(state);
+            }
+            
+            // Inject context into OpenAI so it knows we're waiting for yes/no
+            // This allows the AI to properly handle the customer's response
+            if (openaiWs && openaiConnected) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "input_text", text: confirmMessage }]
+                }
+              }));
+              
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ 
+                    type: "input_text", 
+                    text: `[SYSTEM - DO NOT SPEAK]: The fare quote above was just spoken via direct TTS. 
+Now WAIT SILENTLY for the customer's yes/no response. DO NOT speak until they respond.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
+- If they say NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask: "Would you like me to book that?"
+
+DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "confirmed" returns success.`
+                  }]
+                }
+              }));
+            }
+            
+          } catch (ttsError) {
+            console.error(`[${callId}] ❌ Direct TTS error (ask_confirm):`, ttsError);
+          } finally {
+            // Reset speaking state
+            if (state) {
+              state.isAdaSpeaking = false;
+              state.echoGuardUntil = Date.now() + 400;
+            }
+          }
+        });
+        
         // === DIRECT TTS HANDLER - Bypasses AI completely ===
         // When bypass_ai: true is sent, synthesize speech directly without OpenAI interpretation
         dispatchChannel.on("broadcast", { event: "dispatch_say_direct" }, async (payload: any) => {
