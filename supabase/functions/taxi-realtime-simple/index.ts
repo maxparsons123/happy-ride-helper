@@ -3662,7 +3662,6 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          console.log(`[${sessionState.callId}] 🎯 Ada asked about: PICKUP`);
         } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "destination";
           sessionState.lastQuestionAt = Date.now();
@@ -3670,7 +3669,6 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          console.log(`[${sessionState.callId}] 🎯 Ada asked about: DESTINATION`);
         } else if (/(?:how many|passengers|people|travell)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "passengers";
           sessionState.lastQuestionAt = Date.now();
@@ -3678,7 +3676,6 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          console.log(`[${sessionState.callId}] 🎯 Ada asked about: PASSENGERS`);
         } else if (/(?:when|what time|timing|schedule)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "time";
           sessionState.lastQuestionAt = Date.now();
@@ -3686,7 +3683,6 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
-          console.log(`[${sessionState.callId}] 🎯 Ada asked about: TIME`);
         } else if (isForbiddenAddressConfirmation) {
           console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
         }
@@ -3695,7 +3691,17 @@ Do NOT say 'booked' until the tool returns success.]`
         // If Ada ends with a question mark, we MUST wait for user response before triggering goodbye
         if (/\?\s*$/.test(lastAssistantText)) {
           sessionState.adaAskedQuestionAt = Date.now();
-          console.log(`[${sessionState.callId}] ❓ Ada asked a question - waiting for user response before goodbye`);
+          
+          // ========================================
+          // 📤 ADA QUESTION ASKED - AWAITING ANSWER
+          // ========================================
+          console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+          console.log(`[${sessionState.callId}] 📤 ADA ASKED A QUESTION - AWAITING USER RESPONSE`);
+          console.log(`[${sessionState.callId}] ├─ Question type: ${(sessionState.lastQuestionType || 'general').toUpperCase()}`);
+          console.log(`[${sessionState.callId}] ├─ Question: "${lastAssistantText.substring(0, 100)}${lastAssistantText.length > 100 ? '...' : ''}"`);
+          console.log(`[${sessionState.callId}] ├─ Booking so far: pickup=${sessionState.booking.pickup || '❌'}, dest=${sessionState.booking.destination || '❌'}, pax=${sessionState.booking.passengers ?? '❌'}, time=${sessionState.booking.pickup_time || '❌'}`);
+          console.log(`[${sessionState.callId}] └─ 🔊 Listening for user response...`);
+          console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
         }
         
         // === ADA SAID GOODBYE - TRIGGER HANGUP ===
@@ -4173,11 +4179,23 @@ Do NOT say 'booked' until the tool returns success.]`
         // Track when we received this transcript (for guard bypass on quick replies)
         sessionState.lastUserTranscriptAt = Date.now();
         
-        // Enhanced logging with audio processing mode context
+        // ========================================
+        // 🎯 CLEAR Q&A FLOW LOGGING FOR DEBUGGING
+        // ========================================
+        const lastAdaQuestion = sessionState.lastSpokenQuestion || sessionState.transcripts.filter(t => t.role === "assistant").slice(-1)[0]?.text || "(no question)";
+        const questionContext = sessionState.lastQuestionType || "unknown";
         const audioMode = sessionState.useRasaAudioProcessing ? "RASA" : "STD";
         const correctionRate = ((sessionState.sttMetrics.correctedTranscripts / sessionState.sttMetrics.totalTranscripts) * 100).toFixed(1);
-        console.log(`[${sessionState.callId}] 👤 [${audioMode}] User: "${userText}"${wasCorreced ? ` (corrected from: "${rawText}")` : ""}`);
-        console.log(`[${sessionState.callId}] 📊 [${audioMode}] STT Stats: transcripts=${sessionState.sttMetrics.totalTranscripts}, words=${sessionState.sttMetrics.totalWords}, corrected=${correctionRate}%, avgDelay=${sessionState.sttMetrics.avgTranscriptDelayMs.toFixed(0)}ms`);
+        
+        console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+        console.log(`[${sessionState.callId}] 📥 USER RESPONSE RECEIVED`);
+        console.log(`[${sessionState.callId}] ├─ Question asked: "${lastAdaQuestion.substring(0, 80)}${lastAdaQuestion.length > 80 ? '...' : ''}"`);
+        console.log(`[${sessionState.callId}] ├─ Question type: ${questionContext.toUpperCase()}`);
+        console.log(`[${sessionState.callId}] ├─ Raw STT: "${rawText}"`);
+        console.log(`[${sessionState.callId}] ├─ Corrected: "${userText}"${wasCorreced ? ' ⚡CORRECTED' : ''}`);
+        console.log(`[${sessionState.callId}] ├─ Current state: pickup=${sessionState.booking.pickup || 'null'}, dest=${sessionState.booking.destination || 'null'}, pax=${sessionState.booking.passengers ?? 'null'}, time=${sessionState.booking.pickup_time || 'null'}`);
+        console.log(`[${sessionState.callId}] └─ STT Stats: [${audioMode}] total=${sessionState.sttMetrics.totalTranscripts}, corrected=${correctionRate}%`);
+        console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
 
         socket.send(
           JSON.stringify({
@@ -4329,7 +4347,12 @@ Do NOT say 'booked' until the tool returns success.]`
               
               // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
               // This prevents aggressive prompting where Ada asks next question before user finishes speaking
-              console.log(`[${sessionState.callId}] 📈 State advanced to destination - waiting for VAD to trigger response`);
+              console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+              console.log(`[${sessionState.callId}] ✅ ANSWER ACCEPTED: PICKUP`);
+              console.log(`[${sessionState.callId}] ├─ Value: "${extractedPickup}"`);
+              console.log(`[${sessionState.callId}] ├─ Next question: DESTINATION`);
+              console.log(`[${sessionState.callId}] └─ Waiting for VAD to trigger Ada's response...`);
+              console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
             }
             
             // === DESTINATION EXTRACTION ===
@@ -4380,7 +4403,12 @@ Do NOT say 'booked' until the tool returns success.]`
                 
                 // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
                 // This prevents aggressive prompting where Ada asks next question before user finishes speaking
-                console.log(`[${sessionState.callId}] 📈 State advanced to passengers - waiting for VAD to trigger response`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+                console.log(`[${sessionState.callId}] ✅ ANSWER ACCEPTED: DESTINATION`);
+                console.log(`[${sessionState.callId}] ├─ Value: "${extractedDest}"`);
+                console.log(`[${sessionState.callId}] ├─ Next question: PASSENGERS`);
+                console.log(`[${sessionState.callId}] └─ Waiting for VAD to trigger Ada's response...`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
               }
             }
             
@@ -4436,7 +4464,12 @@ Do NOT say 'booked' until the tool returns success.]`
                 
                 // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
                 // This prevents aggressive prompting where Ada asks next question before user finishes speaking
-                console.log(`[${sessionState.callId}] 📈 State advanced to time - waiting for VAD to trigger response`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+                console.log(`[${sessionState.callId}] ✅ ANSWER ACCEPTED: PASSENGERS`);
+                console.log(`[${sessionState.callId}] ├─ Value: ${extractedPax}`);
+                console.log(`[${sessionState.callId}] ├─ Next question: TIME`);
+                console.log(`[${sessionState.callId}] └─ Waiting for VAD to trigger Ada's response...`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
               }
             }
             
@@ -4460,7 +4493,16 @@ Do NOT say 'booked' until the tool returns success.]`
                 
                 // ✅ CRITICAL: Flush to DB immediately so session restoration works if disconnect happens
                 immediateFlush(sessionState);
-                console.log(`[${sessionState.callId}] 💾 SUMMARY STEP: Flushed state to DB for session restoration`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
+                console.log(`[${sessionState.callId}] ✅ ANSWER ACCEPTED: TIME`);
+                console.log(`[${sessionState.callId}] ├─ Value: "${extractedTime}"`);
+                console.log(`[${sessionState.callId}] ├─ 🎉 ALL FIELDS COLLECTED!`);
+                console.log(`[${sessionState.callId}] ├─ Pickup: ${sessionState.booking.pickup}`);
+                console.log(`[${sessionState.callId}] ├─ Destination: ${sessionState.booking.destination}`);
+                console.log(`[${sessionState.callId}] ├─ Passengers: ${sessionState.booking.passengers}`);
+                console.log(`[${sessionState.callId}] ├─ Time: ${extractedTime}`);
+                console.log(`[${sessionState.callId}] └─ Moving to SUMMARY...`);
+                console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
                 
                 // ✅ For summary, we DO trigger response since all fields are collected and we want to move forward
                 // This is different from pickup/destination/passengers where we let VAD handle timing
