@@ -4767,7 +4767,48 @@ Do NOT say 'booked' until the tool returns success.]`
           // This fixes issues like "Exmoor Road" (caller name) being used instead of what user actually said.
           // Use the SNAPSHOT from speech_started, not current lastQuestionType
           // This fixes race conditions where Ada advances to next step before transcript arrives
-          const questionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionType;
+          let questionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionType;
+          
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // 🛡️ LATE PICKUP ANSWER GUARD (Race Condition Fix)
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // When Ada asks pickup, then VAD triggers too quickly and Ada asks destination,
+          // the user's pickup answer arrives LATE with questionType="destination".
+          // But if pickup is STILL NULL and we get an address-like transcript,
+          // it's almost certainly the delayed pickup answer - not a destination.
+          // This prevents the "jumped a question" bug where pickup is never saved.
+          // ═══════════════════════════════════════════════════════════════════════════════
+          if (
+            questionType === "destination" && 
+            isAddressLike && 
+            !sessionState.booking.pickup && 
+            sessionState.bookingStep === "destination"
+          ) {
+            console.log(`[${sessionState.callId}] 🔄 LATE PICKUP DETECTED: Address "${userText}" arrived after Ada asked destination, but pickup is still null!`);
+            console.log(`[${sessionState.callId}] 🔄 Treating this as the PICKUP answer (race condition fix)`);
+            questionType = "pickup"; // Override to pickup
+          }
+          
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // 🛡️ LATE DESTINATION ANSWER GUARD (Race Condition Fix)
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // When Ada asks destination, then VAD triggers too quickly and Ada asks passengers,
+          // the user's destination answer arrives LATE with questionType="passengers".
+          // But if destination is STILL NULL and we get an address-like transcript,
+          // it's the delayed destination answer - not a passenger count.
+          // ═══════════════════════════════════════════════════════════════════════════════
+          if (
+            questionType === "passengers" && 
+            isAddressLike && 
+            !isPassengerCount &&
+            !sessionState.booking.destination && 
+            sessionState.booking.pickup && // Pickup must already be filled
+            sessionState.bookingStep === "passengers"
+          ) {
+            console.log(`[${sessionState.callId}] 🔄 LATE DESTINATION DETECTED: Address "${userText}" arrived after Ada asked passengers, but destination is still null!`);
+            console.log(`[${sessionState.callId}] 🔄 Treating this as the DESTINATION answer (race condition fix)`);
+            questionType = "destination"; // Override to destination
+          }
           
           if (isRecentQuestion && questionType && !sessionState.callEnded) {
             
