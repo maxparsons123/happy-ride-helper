@@ -2221,10 +2221,25 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         resumeInstruction = "The booking has already been confirmed. Ask if there's anything else you can help with.";
         resumeText = "Apologies for the brief interruption. Your booking is confirmed. Is there anything else I can help you with?";
       } else if (sessionState.bookingStep === "summary") {
-        // Validate we have all the data for summary - if not, fall back to asking for missing data
+        // ═══════════════════════════════════════════════════════════════════════════
+        // SILENT RECONNECT AT SUMMARY: User was already asked "Is that correct?"
+        // Instead of repeating the full summary, just verify details briefly
+        // ═══════════════════════════════════════════════════════════════════════════
         if (pickup && destination && passengers) {
-          resumeInstruction = `Continue with the booking summary. Pickup: "${pickup}", Destination: "${destination}", Passengers: ${passengers}. Ask if the details are correct.`;
-          resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. Is that correct?`;
+          // Check if confirmation was recently asked (within 60s)
+          const confirmationRecentlyAsked = sessionState.confirmationAskedAt && 
+            (Date.now() - sessionState.confirmationAskedAt < 60000);
+          
+          if (confirmationRecentlyAsked) {
+            // User already heard the full summary - just verify quickly
+            console.log(`[${sessionState.callId}] 🔇 SILENT RECONNECT at confirmation - user already heard summary`);
+            resumeInstruction = `CRITICAL: The booking summary was JUST given. Pickup: "${pickup}", Destination: "${destination}", Passengers: ${passengers}. User was asked "Is that correct?". Do NOT repeat the full summary - just verify quickly and wait for yes/no.`;
+            resumeText = `Sorry about that brief pause. Just to confirm - from ${pickup} to ${destination}. Is that correct?`;
+          } else {
+            // Confirmation wasn't recently asked - give the full summary
+            resumeInstruction = `Continue with the booking summary. Pickup: "${pickup}", Destination: "${destination}", Passengers: ${passengers}. Ask if the details are correct.`;
+            resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. Is that correct?`;
+          }
         } else {
           // Missing data - fall back to asking for it
           console.log(`[${sessionState.callId}] ⚠️ Summary step but missing data - falling back to collect missing fields`);
@@ -2413,6 +2428,14 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
         if (sessionState.lastQuestionType) {
           updatePayload.last_question_type = sessionState.lastQuestionType;
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CRITICAL: Save confirmationAskedAt for silent reconnect during summary phase
+        // This allows resume logic to know if user already heard "Is that correct?"
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (sessionState.confirmationAskedAt) {
+          updatePayload.confirmation_asked_at = new Date(sessionState.confirmationAskedAt).toISOString();
         }
         
         // ═══════════════════════════════════════════════════════════════════════════
@@ -7943,6 +7966,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             if (restoredSession.last_question_type) {
               state.lastQuestionType = restoredSession.last_question_type;
               console.log(`[${callId}] 📋 Restored lastQuestionType: ${state.lastQuestionType}`);
+            }
+            
+            // ═══════════════════════════════════════════════════════════════════════════
+            // CRITICAL: Restore confirmationAskedAt for silent reconnect during summary
+            // This tells resume logic if user already heard "Is that correct?"
+            // ═══════════════════════════════════════════════════════════════════════════
+            if (restoredSession.confirmation_asked_at) {
+              state.confirmationAskedAt = new Date(restoredSession.confirmation_asked_at).getTime();
+              console.log(`[${callId}] 📋 Restored confirmationAskedAt: ${restoredSession.confirmation_asked_at}`);
             }
             
             console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}, fare=${restoredSession.fare}, status=${restoredSession.status}`);
