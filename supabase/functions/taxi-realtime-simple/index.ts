@@ -10008,10 +10008,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
 
             // Create/update live call record (non-blocking)
             // ✅ REUSE existing active call card for same phone to avoid creating duplicate cards
+            // ═══════════════════════════════════════════════════════════════════════════
+            // CRITICAL FIX: Preserve existing booking data when reusing a card
+            // This prevents wiping out pickup/destination on reconnection
+            // ═══════════════════════════════════════════════════════════════════════════
             const phoneKey = normalizePhone(phone);
             const { data: existingCall } = await supabase
               .from("live_calls")
-              .select("id, call_id")
+              .select("id, call_id, pickup, destination, passengers, fare, eta, booking_step, booking_confirmed, transcripts")
               .eq("caller_phone", phoneKey)
               .eq("status", "active")
               .order("started_at", { ascending: false })
@@ -10019,8 +10023,21 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               .maybeSingle();
 
             if (existingCall) {
-              // Update existing active call card with new call_id and reset data
+              // ═══════════════════════════════════════════════════════════════════════════
+              // PRESERVE existing booking state from the card - don't overwrite with nulls!
+              // Only use activeBooking (from bookings table) if it has BETTER data
+              // ═══════════════════════════════════════════════════════════════════════════
+              const preservedPickup = existingCall.pickup || activeBooking?.pickup || null;
+              const preservedDestination = existingCall.destination || activeBooking?.destination || null;
+              const preservedPassengers = existingCall.passengers || activeBooking?.passengers || null;
+              const preservedFare = existingCall.fare || activeBooking?.fare || null;
+              const preservedEta = existingCall.eta || activeBooking?.eta || null;
+              const preservedBookingStep = existingCall.booking_step || "pickup";
+              const preservedTranscripts = existingCall.transcripts || [];
+              
               console.log(`[${callId}] ♻️ Reusing existing live_call card for ${phoneKey} (old call_id: ${existingCall.call_id})`);
+              console.log(`[${callId}] 🛡️ PRESERVING booking state: pickup="${preservedPickup}", dest="${preservedDestination}", pax=${preservedPassengers}`);
+              
               await supabase
                 .from("live_calls")
                 .update({
@@ -10028,15 +10045,18 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                   caller_name: state?.customerName,
                   status: "active",
                   source: "simple",
-                  transcripts: [],
+                  // ✅ PRESERVE transcripts and booking data instead of wiping them
+                  transcripts: preservedTranscripts,
                   started_at: new Date().toISOString(),
                   ended_at: null,
-                  pickup: activeBooking?.pickup ?? null,
-                  destination: activeBooking?.destination ?? null,
-                  passengers: activeBooking?.passengers ?? null,
-                  fare: activeBooking?.fare ?? null,
-                  eta: activeBooking?.eta ?? null,
+                  pickup: preservedPickup,
+                  destination: preservedDestination,
+                  passengers: preservedPassengers,
+                  fare: preservedFare,
+                  eta: preservedEta,
+                  booking_step: preservedBookingStep,
                   booking_confirmed:
+                    existingCall.booking_confirmed ||
                     activeBooking?.status === "confirmed" ||
                     activeBooking?.status === "dispatched" ||
                     activeBooking?.status === "active" ||
