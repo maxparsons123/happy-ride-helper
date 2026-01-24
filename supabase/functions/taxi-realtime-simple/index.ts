@@ -35,6 +35,10 @@ const SUMMARY_PROTECTION_MS = 8000;
 // Audio diagnostics logging interval (every N packets)
 const AUDIO_DIAGNOSTICS_LOG_INTERVAL = 200;
 
+// === DISPATCH-TRIGGERED HANDOFF ===
+// Delay after fare quote before triggering reconnect (allows Ada's fare speech to start)
+const HANDOFF_AFTER_DISPATCH_DELAY_MS = 2500;
+
 // Language code to name mapping (for prompt injection)
 const LANGUAGE_NAMES: Record<string, string> = {
   en: "English",
@@ -6904,6 +6908,30 @@ Do NOT say 'booked' until the tool returns success.]`
                     ada_message: dispatchResult.ada_message,
                     message: "Dispatch awaiting fare confirmation from customer"
                   };
+                  
+                  // === DISPATCH-TRIGGERED HANDOFF ===
+                  // After fare quote is delivered, trigger a reconnect so the user has fresh
+                  // session time to ask questions or confirm. The bridge will reconnect with
+                  // resume: true and restore state from live_calls.
+                  if (socket && socket.readyState === WebSocket.OPEN) {
+                    // Flush state to DB first so restoration works
+                    immediateFlush(sessionState);
+                    
+                    setTimeout(() => {
+                      console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after fare quote`);
+                      try {
+                        socket.send(JSON.stringify({
+                          type: "session.handoff",
+                          call_id: sessionState.callId,
+                          reason: "dispatch_fare_delivered",
+                          booking_step: sessionState.bookingStep
+                        }));
+                      } catch (e) {
+                        console.error(`[${sessionState.callId}] Handoff send error:`, e);
+                      }
+                    }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
+                  }
+                  
                   // pendingFareConfirm was already set when we found the ask_confirm transcript
                   break; // Exit switch - booking NOT confirmed
                 }
@@ -7035,6 +7063,24 @@ Do NOT say 'booked' until the tool returns success.]`
                 ada_message: fallbackMessage,
                 message: "Using fallback fare quote - dispatch did not respond"
               };
+              
+              // === DISPATCH-TRIGGERED HANDOFF (Timeout Fallback) ===
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                immediateFlush(sessionState);
+                setTimeout(() => {
+                  console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after fallback fare`);
+                  try {
+                    socket.send(JSON.stringify({
+                      type: "session.handoff",
+                      call_id: sessionState.callId,
+                      reason: "dispatch_fallback_fare",
+                      booking_step: sessionState.bookingStep
+                    }));
+                  } catch (e) {
+                    console.error(`[${sessionState.callId}] Handoff send error:`, e);
+                  }
+                }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
+              }
               }
             } catch (webhookErr) {
               console.error(`[${sessionState.callId}] ⚠️ Dispatch webhook error:`, webhookErr);
@@ -7097,6 +7143,24 @@ Do NOT say 'booked' until the tool returns success.]`
                 ada_message: fallbackMessage,
                 message: "Using fallback fare quote due to dispatch error"
               };
+              
+              // === DISPATCH-TRIGGERED HANDOFF (Error Fallback) ===
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                immediateFlush(sessionState);
+                setTimeout(() => {
+                  console.log(`[${sessionState.callId}] 🔄 DISPATCH-TRIGGERED HANDOFF: Signaling bridge to reconnect after error fallback fare`);
+                  try {
+                    socket.send(JSON.stringify({
+                      type: "session.handoff",
+                      call_id: sessionState.callId,
+                      reason: "dispatch_error_fallback",
+                      booking_step: sessionState.bookingStep
+                    }));
+                  } catch (e) {
+                    console.error(`[${sessionState.callId}] Handoff send error:`, e);
+                  }
+                }, HANDOFF_AFTER_DISPATCH_DELAY_MS);
+              }
             }
           }
           
