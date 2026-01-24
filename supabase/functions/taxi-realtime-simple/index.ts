@@ -8744,6 +8744,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               state.isAdaSpeaking = false;
               state.echoGuardUntil = Date.now() + 400;
               
+              // CRITICAL: Enable confirmation mode - bypass echo guard for "yes" responses
+              // User's "Yes please" must be captured even if spoken immediately after fare quote
+              state.confirmationResponsePending = true;
+              console.log(`[${callId}] 🎯 Awaiting confirmation - echo guard bypass enabled for quick 'yes' responses`);
+              
               // === PERIODIC COMMIT FOR POST-TTS CONFIRMATION ===
               // Since we used direct TTS and OpenAI is passively listening, VAD may miss short "yes" responses.
               // Schedule periodic forced commits to ensure transcription happens.
@@ -9312,8 +9317,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
       }
 
       if (message.type === "audio" && openaiConnected && openaiWs && state) {
-        // ECHO GUARD: Always ignore audio for a short window after Ada finishes speaking.
-        if (Date.now() < state.echoGuardUntil) {
+        // ECHO GUARD: Ignore audio for a short window after Ada finishes speaking.
+        // CRITICAL: Bypass when awaiting user confirmation ("yes please" after fare quote)
+        // This ensures "Yes please" is heard even if spoken immediately after Ada finishes.
+        if (Date.now() < state.echoGuardUntil && !state.confirmationResponsePending) {
           return;
         }
         
