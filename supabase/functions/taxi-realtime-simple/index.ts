@@ -2500,6 +2500,55 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
            sessionState.deferredResponseCreate = false;
            safeResponseCreate(sessionState, "deferred-after-response.done");
          }
+         
+         // ✅ IMMEDIATE HANGUP ON GOODBYE COMPLETE: If we're in closing grace period,
+         // the goodbye has finished playing - trigger hangup immediately instead of waiting for timeout
+         if (closingGracePeriodActive && sessionState.finalGoodbyePending) {
+           console.log(`[${sessionState.callId}] 👋 Goodbye audio finished (response.done) - triggering immediate hangup`);
+           
+           // Clear the timeout since we're hanging up now
+           if (closingGraceTimeoutId) {
+             clearTimeout(closingGraceTimeoutId);
+             closingGraceTimeoutId = null;
+           }
+           
+           closingGracePeriodActive = false;
+           sessionState.finalGoodbyePending = false;
+           
+           // Stop keep-alives
+           try {
+             stopKeepAlive();
+           } catch {
+             // ignore
+           }
+           
+           // Small delay (500ms) to ensure final audio packets are flushed to bridge
+           setTimeout(() => {
+             // Notify the bridge to hangup
+             try {
+               socket.send(JSON.stringify({ type: "hangup", reason: "goodbye_complete" }));
+               console.log(`[${sessionState.callId}] 📤 Sent hangup to bridge (goodbye complete)`);
+             } catch (e) {
+               console.warn(`[${sessionState.callId}] ⚠️ Failed to send hangup:`, e);
+             }
+             
+             // Close the bridge WebSocket gracefully
+             try {
+               isConnectionClosed = true;
+               socket.close(1000, "goodbye_complete");
+               console.log(`[${sessionState.callId}] 📴 Closed bridge WebSocket (goodbye complete)`);
+             } catch (e) {
+               console.warn(`[${sessionState.callId}] ⚠️ Failed to close bridge:`, e);
+             }
+             
+             // Close OpenAI WS
+             try {
+               openaiWs?.close();
+             } catch {
+               // ignore
+             }
+           }, 500);
+         }
          break;
 
       case "response.audio.delta": {
