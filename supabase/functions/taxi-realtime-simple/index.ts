@@ -4592,10 +4592,37 @@ Do NOT say 'booked' until the tool returns success.]`
             }
           }
           
-          // Detect if user just confirmed summary - start audio buffering.
-          // This catches "yes", "yeah", "that's correct" etc.
-          // Also catches time-related affirmatives like "straight away" when asked "Is that correct?"
-          const isConfirmationPhrase = /\b(yes|yeah|yep|correct|that's right|that's correct|right|go ahead|sure|ok|okay|please|straight ?away|right away|now|asap|immediately|ja|jawel|prima|goed|akkoord|doe maar|naturlich|klar|genau|oui|d'accord|sí|claro|correcto)\b/i.test(lowerUserText);
+          // ═══════════════════════════════════════════════════════════════════════════
+          // RECONCILIATION ENGINE: CONFIRMATION INTENT DETECTION
+          // Scans transcripts for confirmation keywords and forces action if detected
+          // ═══════════════════════════════════════════════════════════════════════════
+          
+          // Comprehensive confirmation phrases (including multi-word)
+          const confirmationPhrases = [
+            "correct", "that's correct", "that is correct", "thats correct",
+            "go ahead", "do it", "book it", "yes", "yeah", "yep", "yup",
+            "that's fine", "sounds good", "perfect", "confirm", "confirmed",
+            "right", "that's right", "sure", "ok", "okay", "please",
+            "straight away", "straightaway", "right away", "now", "asap", "immediately",
+            // Dutch
+            "ja", "jawel", "prima", "goed", "akkoord", "doe maar",
+            // German  
+            "naturlich", "klar", "genau",
+            // French
+            "oui", "d'accord",
+            // Spanish
+            "sí", "claro", "correcto"
+          ];
+          
+          // Check if user is confirming
+          const isConfirmationPhrase = confirmationPhrases.some(phrase => 
+            lowerUserText.includes(phrase)
+          );
+          
+          // Log confirmation detection for debugging
+          if (isConfirmationPhrase) {
+            console.log(`[${sessionState.callId}] 🔍 RECONCILIATION: Confirmation phrase detected in "${userText}"`);
+          }
 
           // If the user says "yes" in response to a CONFIRMATION question (summary confirm or fare confirm),
           // we may need to buffer bridge audio while we force tool calls.
@@ -4611,13 +4638,12 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.audioVerified = false;
             sessionState.pendingAudioBuffer = [];
 
-            // If all booking fields are present and no quote is in progress yet, treat this as a
-            // SUMMARY confirmation even if bookingStep is temporarily out of sync.
-            const hasFullChecklist =
+            // RELAXED CHECKLIST: Only require pickup, destination, passengers
+            // pickup_time defaults to ASAP if missing (most callers want immediate pickup)
+            const hasMinimalChecklist =
               !!sessionState.booking?.pickup &&
               !!sessionState.booking?.destination &&
-              sessionState.booking?.passengers !== null &&
-              !!sessionState.booking?.pickup_time;
+              sessionState.booking?.passengers !== null;
 
             const quoteAlreadyInProgress =
               !!sessionState.quoteRequestedAt ||
@@ -4625,12 +4651,18 @@ Do NOT say 'booked' until the tool returns success.]`
               !!sessionState.awaitingDispatchCallback;
 
             if (
-              hasFullChecklist &&
+              hasMinimalChecklist &&
               !quoteAlreadyInProgress &&
               openaiWs &&
               openaiConnected &&
               !sessionState.callEnded
             ) {
+              // Default pickup_time to ASAP if not set (relaxed checklist)
+              if (!sessionState.booking.pickup_time) {
+                console.log(`[${sessionState.callId}] ⏰ RECONCILIATION: No pickup_time set, defaulting to ASAP`);
+                sessionState.booking.pickup_time = "ASAP";
+              }
+              
               // Ensure state machine doesn't get stuck pre-summary due to extraction timing.
               if (sessionState.bookingStep !== "summary") {
                 console.log(`[${sessionState.callId}] 🧭 Step sync: ${sessionState.bookingStep} → summary (confirmed by user)`);
@@ -4638,7 +4670,8 @@ Do NOT say 'booked' until the tool returns success.]`
                 sessionState.bookingStepAdvancedAt = Date.now();
               }
 
-              console.log(`[${sessionState.callId}] 🔄 AUTO-HANDOFF: User confirmed summary but no quote in progress → forcing book_taxi(request_quote)`);
+              console.log(`[${sessionState.callId}] 🔄 AUTO-HANDOFF: User confirmed summary → forcing book_taxi(request_quote)`);
+              console.log(`[${sessionState.callId}] 📋 Booking: pickup="${sessionState.booking.pickup}", dest="${sessionState.booking.destination}", pax=${sessionState.booking.passengers}, time="${sessionState.booking.pickup_time}"`);
 
               // Ensure nothing else is speaking; keep the flow deterministic.
               sessionState.discardCurrentResponseAudio = true;
