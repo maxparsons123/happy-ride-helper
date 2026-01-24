@@ -1803,6 +1803,14 @@ interface SessionState {
     speechDurations: number[];
   };
   
+  // === AUTHORITATIVE TRANSCRIPT EXTRACTION ===
+  // These store what the USER ACTUALLY SAID (from transcripts) - OpenAI tool calls cannot override them.
+  // This prevents hallucinations like using caller_name instead of what user spoke.
+  transcriptExtractedPickup: string | null;
+  transcriptExtractedDestination: string | null;
+  transcriptExtractedPassengers: number | null;
+  transcriptExtractedTime: string | null;
+  
   // === CONFIRMATION FAILSAFE ===
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
@@ -3798,6 +3806,121 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             
             break; // Skip normal processing for this transcript
+          }
+
+          // === CONTEXT-AWARE STATE EXTRACTION (AUTHORITATIVE) ===
+          // When Ada asks a question, save the user's answer directly to state.
+          // This is the SOURCE OF TRUTH - OpenAI tool calls cannot override it.
+          // This fixes issues like "Exmoor Road" (caller name) being used instead of what user actually said.
+          if (isRecentQuestion && sessionState.lastQuestionType && !sessionState.callEnded) {
+            const questionType = sessionState.lastQuestionType;
+            
+            // === PICKUP EXTRACTION ===
+            if (questionType === "pickup" && isAddressLike && !sessionState.booking.pickup) {
+              const extractedPickup = correctTranscript(userText);
+              console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE PICKUP: "${extractedPickup}" (from transcript, question was pickup)`);
+              sessionState.booking.pickup = extractedPickup;
+              sessionState.transcriptExtractedPickup = extractedPickup; // Track what transcript said
+              
+              // Sync to DB immediately
+              supabase.from("live_calls").update({ 
+                pickup: extractedPickup, 
+                updated_at: new Date().toISOString() 
+              }).eq("call_id", sessionState.callId).then(() => {
+                console.log(`[${sessionState.callId}] ✅ Pickup saved to DB: "${extractedPickup}"`);
+              });
+              
+              // Advance to destination
+              sessionState.lastQuestionType = "destination";
+              sessionState.bookingStep = "destination";
+            }
+            
+            // === DESTINATION EXTRACTION ===
+            else if (questionType === "destination" && isAddressLike && !sessionState.booking.destination) {
+              const extractedDest = correctTranscript(userText);
+              console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE DESTINATION: "${extractedDest}" (from transcript, question was destination)`);
+              sessionState.booking.destination = extractedDest;
+              sessionState.transcriptExtractedDestination = extractedDest; // Track what transcript said
+              
+              // Sync to DB immediately
+              supabase.from("live_calls").update({ 
+                destination: extractedDest, 
+                updated_at: new Date().toISOString() 
+              }).eq("call_id", sessionState.callId).then(() => {
+                console.log(`[${sessionState.callId}] ✅ Destination saved to DB: "${extractedDest}"`);
+              });
+              
+              // Advance to passengers
+              sessionState.lastQuestionType = "passengers";
+              sessionState.bookingStep = "passengers";
+            }
+            
+            // === PASSENGER EXTRACTION ===
+            else if (questionType === "passengers" && isPassengerCount) {
+              // Parse passenger count from text
+              const passengerMap: Record<string, number> = {
+                "one": 1, "1": 1, "just me": 1, "myself": 1, "alone": 1, "one person": 1,
+                "two": 2, "2": 2, "two people": 2, "us": 2,
+                "three": 3, "3": 3, "three people": 3,
+                "four": 4, "4": 4, "four people": 4,
+                "five": 5, "5": 5, "five people": 5,
+                "six": 6, "6": 6, "six people": 6,
+                "seven": 7, "7": 7, "eight": 8, "8": 8
+              };
+              
+              const lowerText = userText.toLowerCase().trim();
+              let extractedPax: number | null = null;
+              
+              // Try exact match first
+              if (passengerMap[lowerText]) {
+                extractedPax = passengerMap[lowerText];
+              } else {
+                // Try to find any passenger keyword
+                for (const [key, val] of Object.entries(passengerMap)) {
+                  if (lowerText.includes(key)) {
+                    extractedPax = val;
+                    break;
+                  }
+                }
+              }
+              
+              if (extractedPax && !sessionState.booking.passengers) {
+                console.log(`[${sessionState.callId}] 👥 AUTHORITATIVE PASSENGERS: ${extractedPax} (from transcript)`);
+                sessionState.booking.passengers = extractedPax;
+                sessionState.transcriptExtractedPassengers = extractedPax;
+                
+                // Sync to DB
+                supabase.from("live_calls").update({ 
+                  passengers: extractedPax, 
+                  updated_at: new Date().toISOString() 
+                }).eq("call_id", sessionState.callId).then(() => {
+                  console.log(`[${sessionState.callId}] ✅ Passengers saved to DB: ${extractedPax}`);
+                });
+                
+                // Advance to time
+                sessionState.lastQuestionType = "time";
+                sessionState.bookingStep = "time";
+              }
+            }
+            
+            // === TIME EXTRACTION ===
+            else if (questionType === "time") {
+              const lowerText = userText.toLowerCase().trim();
+              const isTimeResponse = /\b(now|asap|immediately|right away|straight away|in \d+|at \d+|\d+ ?o'clock|\d+ ?am|\d+ ?pm|morning|afternoon|evening|tonight|tomorrow)\b/i.test(lowerText);
+              
+              if (isTimeResponse && !sessionState.booking.pickup_time) {
+                const extractedTime = lowerText.includes("now") || lowerText.includes("asap") || lowerText.includes("immediately") 
+                  ? "ASAP" 
+                  : userText;
+                console.log(`[${sessionState.callId}] 🕐 AUTHORITATIVE TIME: "${extractedTime}" (from transcript)`);
+                sessionState.booking.pickup_time = extractedTime;
+                sessionState.transcriptExtractedTime = extractedTime;
+                
+                // Advance to summary
+                sessionState.lastQuestionType = "confirmation";
+                sessionState.bookingStep = "summary";
+              }
+            }
           }
 
           // === SUMMARY NEGATION DETECTION (ported from paired mode) ===
@@ -7583,6 +7706,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
+          // Authoritative transcript extraction (prevents hallucinations)
+          transcriptExtractedPickup: null,
+          transcriptExtractedDestination: null,
+          transcriptExtractedPassengers: null,
+          transcriptExtractedTime: null,
         };
         
         preConnected = true;
@@ -7781,6 +7909,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
+            // Authoritative transcript extraction (prevents hallucinations)
+            transcriptExtractedPickup: null,
+            transcriptExtractedDestination: null,
+            transcriptExtractedPassengers: null,
+            transcriptExtractedTime: null,
           };
           
           // ═══════════════════════════════════════════════════════════════════
