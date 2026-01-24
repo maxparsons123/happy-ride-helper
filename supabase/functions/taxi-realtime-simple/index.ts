@@ -3489,6 +3489,21 @@ Do NOT say 'booked' until the tool returns success.]`
         console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait ${vadSilenceMs}ms before responding`);
         sessionState.speechStopTime = Date.now();
         
+        // === MANUAL COMMIT FALLBACK FOR SHORT WORDS ===
+        // Short utterances like "yes", "3", "ok" are often missed by server VAD because
+        // they don't have enough acoustic energy to trigger transcription.
+        // Force a manual commit after ANY speech to ensure short words are captured.
+        // This is especially critical for confirmation responses and passenger counts.
+        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected) {
+          // Short speech detected - send manual commit to force transcription
+          console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Forcing transcription for short speech (${speechDuration}ms)`);
+          try {
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+          } catch (e) {
+            console.error(`[${sessionState.callId}] Manual commit failed:`, e);
+          }
+        }
+        
         // Track speech duration for STT metrics (cap array to prevent memory leaks)
         if (speechDuration > 0) {
           sessionState.sttMetrics.speechDurations.push(speechDuration);
