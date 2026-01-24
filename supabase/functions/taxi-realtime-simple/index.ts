@@ -3974,8 +3974,9 @@ Do NOT say 'booked' until the tool returns success.]`
           const shortOnly = t.length <= 8 && /^[\w\s]+$/.test(t);
           if (shortOnly) {
             // "three" homophones - Whisper often mishears these on telephony
-            if (["free", "tree", "three", "fee", "fry", "frey", "fri", "frill", "freak"].includes(t)) sttText = "3";
-            else if (["for", "fore", "four", "foe", "floor", "fall", "full", "fault", "phone"].includes(t)) sttText = "4";
+            // NOTE: We intentionally map "fall" -> 3 because we've observed Whisper outputting "Fall" for a spoken "three".
+            if (["free", "tree", "three", "fee", "fry", "frey", "fri", "frill", "freak", "fall"].includes(t)) sttText = "3";
+            else if (["for", "fore", "four", "foe", "floor", "full", "fault", "phone"].includes(t)) sttText = "4";
             else if (["to", "too", "two", "tu", "true"].includes(t)) sttText = "2";
             else if (["won", "wan", "one", "wun", "want", "wine"].includes(t)) sttText = "1";
             else if (["five", "fife", "hive", "fine"].includes(t)) sttText = "5";
