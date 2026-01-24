@@ -1815,6 +1815,7 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
+  confirmationAskedAt: number | null; // When Ada asked "Is that correct?" - used for timeout fallback
   
   // === AUDIO BUFFER TRACKING (for safe commits) ===
   // Set true when audio is actually appended, false on commit. Prevents empty buffer commit errors.
@@ -3408,11 +3409,72 @@ Do NOT say 'booked' until the tool returns success.]`
         if (endsWithConfirmation && !isForbiddenAddressConfirmation) {
           sessionState.lastQuestionType = "confirmation";
           sessionState.lastQuestionAt = Date.now();
+          sessionState.confirmationAskedAt = Date.now(); // Track when we started confirmation phase
           if (isQuestion) {
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
           console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
+          
+          // === CONFIRMATION TIMEOUT FALLBACK ===
+          // If no user transcript arrives within 8 seconds AND we have a full checklist,
+          // automatically trigger book_taxi(request_quote) to prevent call stall.
+          const confirmationTimeoutMs = 8000;
+          const capturedConfirmationAt = sessionState.confirmationAskedAt;
+          
+          setTimeout(() => {
+            // Guard: Only proceed if confirmation state hasn't changed
+            if (
+              sessionState.confirmationAskedAt === capturedConfirmationAt &&
+              sessionState.lastQuestionType === "confirmation" &&
+              !sessionState.quoteRequestedAt &&
+              !sessionState.pendingQuote &&
+              !sessionState.awaitingDispatchCallback &&
+              !sessionState.callEnded &&
+              openaiWs &&
+              openaiConnected &&
+              !isConnectionClosed
+            ) {
+              const hasFullChecklist =
+                !!sessionState.booking?.pickup &&
+                !!sessionState.booking?.destination &&
+                sessionState.booking?.passengers !== null;
+              
+              if (hasFullChecklist) {
+                console.log(`[${sessionState.callId}] ⏰ CONFIRMATION TIMEOUT: No user response in ${confirmationTimeoutMs}ms - auto-triggering book_taxi(request_quote)`);
+                
+                // If pickup_time is null, default to ASAP
+                if (!sessionState.booking.pickup_time) {
+                  sessionState.booking.pickup_time = "ASAP";
+                }
+                
+                // Force the book_taxi call
+                sessionState.discardCurrentResponseAudio = true;
+                if (sessionState.openAiResponseActive) {
+                  try { openaiWs.send(JSON.stringify({ type: "response.cancel" })); } catch (e) {}
+                }
+                try { openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch (e) {}
+                
+                openaiWs.send(
+                  JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: `[SYSTEM: The customer has confirmed. Say "One moment please" then call book_taxi with action "request_quote".]`,
+                        },
+                      ],
+                    },
+                  })
+                );
+                
+                openaiWs.send(JSON.stringify({ type: "response.create" }));
+              }
+            }
+          }, confirmationTimeoutMs);
         } else if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "pickup";
           sessionState.lastQuestionAt = Date.now();
@@ -7979,6 +8041,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           bookingStepAdvancedAt: null,
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
+          confirmationAskedAt: null, // When Ada asked "Is that correct?" - for timeout fallback
           adaAskedQuestionAt: null, // Track when Ada last asked any question
           // Authoritative transcript extraction (prevents hallucinations)
           transcriptExtractedPickup: null,
@@ -8186,6 +8249,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             bookingStepAdvancedAt: null,
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
+            confirmationAskedAt: null, // When Ada asked "Is that correct?" - for timeout fallback
             adaAskedQuestionAt: null, // Track when Ada last asked any question
             // Authoritative transcript extraction (prevents hallucinations)
             transcriptExtractedPickup: null,
