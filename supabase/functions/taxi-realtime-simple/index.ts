@@ -4106,14 +4106,29 @@ Do NOT say 'booked' until the tool returns success.]`
           console.log(`[${sessionState.callId}] 🛡️ PRE-EMPTIVE GUARD: Blocking VAD response until transcript processed (active booking + ${speechDuration}ms speech)`);
           sessionState.extractionInProgress = true;
           
-          // Safety timeout: clear the guard after 5s if transcript never arrives
+          // Safety timeout: clear ALL blocking guards after 5s if transcript never arrives
           // This prevents Ada from getting stuck silent
           setTimeout(() => {
             if (sessionState.extractionInProgress && 
                 sessionState.speechStopTime && 
                 Date.now() - sessionState.speechStopTime > 4500) {
-              console.log(`[${sessionState.callId}] ⏰ Pre-emptive guard timeout - clearing extractionInProgress`);
+              console.log(`[${sessionState.callId}] ⏰ PRE-EMPTIVE GUARD TIMEOUT: Clearing all blocking flags`);
               sessionState.extractionInProgress = false;
+              
+              // CRITICAL FIX: Also clear turn-based lock if still engaged
+              if (sessionState.awaitingUserAnswer) {
+                console.log(`[${sessionState.callId}] ⏰ Also clearing awaitingUserAnswer (was waiting for ${sessionState.awaitingAnswerForStep})`);
+                sessionState.awaitingUserAnswer = false;
+                sessionState.awaitingUserAnswerSince = null;
+                sessionState.awaitingAnswerForStep = null;
+              }
+              
+              // Trigger a fallback response if no response is active
+              // User spoke but transcript was lost - Ada should re-prompt
+              if (!sessionState.openAiResponseActive && !sessionState.callEnded && openaiWs && openaiConnected) {
+                console.log(`[${sessionState.callId}] 🔄 GUARD TIMEOUT: Triggering fallback response - user spoke but no transcript arrived`);
+                safeResponseCreate(sessionState, "guard-timeout-fallback");
+              }
             }
           }, 5000);
         }
