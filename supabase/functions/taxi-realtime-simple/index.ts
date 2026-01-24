@@ -4089,12 +4089,13 @@ Do NOT say 'booked' until the tool returns success.]`
                 sessionState.booking.destination = extractedDest;
                 sessionState.transcriptExtractedDestination = extractedDest; // Track what transcript said
                 
-                // Sync to DB immediately
+                // Sync to DB immediately (including booking_step for session restoration)
                 supabase.from("live_calls").update({ 
-                  destination: extractedDest, 
+                  destination: extractedDest,
+                  booking_step: "passengers",
                   updated_at: new Date().toISOString() 
                 }).eq("call_id", sessionState.callId).then(() => {
-                  console.log(`[${sessionState.callId}] ✅ Destination saved to DB: "${extractedDest}"`);
+                  console.log(`[${sessionState.callId}] ✅ Destination + step saved to DB: "${extractedDest}", step=passengers`);
                 });
                 
                 // Advance to passengers - let OpenAI's natural VAD handle the response timing
@@ -4144,12 +4145,13 @@ Do NOT say 'booked' until the tool returns success.]`
                 sessionState.booking.passengers = extractedPax;
                 sessionState.transcriptExtractedPassengers = extractedPax;
                 
-                // Sync to DB
+                // Sync to DB (including booking_step for session restoration)
                 supabase.from("live_calls").update({ 
-                  passengers: extractedPax, 
+                  passengers: extractedPax,
+                  booking_step: "time",
                   updated_at: new Date().toISOString() 
                 }).eq("call_id", sessionState.callId).then(() => {
-                  console.log(`[${sessionState.callId}] ✅ Passengers saved to DB: ${extractedPax}`);
+                  console.log(`[${sessionState.callId}] ✅ Passengers + step saved to DB: ${extractedPax}, step=time`);
                 });
                 
                 // Advance to time - let OpenAI's natural VAD handle the response timing
@@ -4180,6 +4182,10 @@ Do NOT say 'booked' until the tool returns success.]`
                 sessionState.lastQuestionType = "confirmation";
                 sessionState.bookingStep = "summary";
                 sessionState.lastQuestionAt = Date.now();
+                
+                // ✅ CRITICAL: Flush to DB immediately so session restoration works if disconnect happens
+                immediateFlush(sessionState);
+                console.log(`[${sessionState.callId}] 💾 SUMMARY STEP: Flushed state to DB for session restoration`);
                 
                 // ✅ For summary, we DO trigger response since all fields are collected and we want to move forward
                 // This is different from pickup/destination/passengers where we let VAD handle timing
@@ -4939,14 +4945,15 @@ Do NOT say 'booked' until the tool returns success.]`
                 timestamp: Date.now()
               };
               
-              // Sync to live_calls
+              // Sync to live_calls (including booking_step for session restoration)
               supabase.from("live_calls").update({
                 pickup: extractedPickup,
                 destination: extractedDestination,
                 passengers: extractedPassengers,
+                booking_step: sessionState.bookingStep, // ✅ Include current step
                 updated_at: new Date().toISOString()
               }).eq("call_id", sessionState.callId).then(() => {
-                console.log(`[${sessionState.callId}] ✅ live_calls updated with new booking extraction`);
+                console.log(`[${sessionState.callId}] ✅ live_calls updated with new booking extraction, step=${sessionState.bookingStep}`);
               });
               
               // Cancel any in-flight response
