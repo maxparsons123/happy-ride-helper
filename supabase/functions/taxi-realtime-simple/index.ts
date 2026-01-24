@@ -3399,7 +3399,21 @@ Do NOT say 'booked' until the tool returns success.]`
         const isQuestion = /\?$/.test(lastAssistantText.trim()) || 
           /(?:where|how many|when|what|which|would you|do you|shall i|is that)/i.test(lowerAssistantText);
         
-        if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lowerAssistantText)) {
+        // === CRITICAL: Check for CONFIRMATION first! ===
+        // Summary text often contains words like "passengers" or "destination" which would
+        // trigger other branches. "Is that correct?" at the END takes priority.
+        const endsWithConfirmation = /(?:is that correct|shall i book|book that|go ahead|would you like me to (?:book|confirm))\s*\??\s*$/i.test(lowerAssistantText);
+        const isForbiddenAddressConfirmation = /(?:confirm the pickup|confirm the destination|confirm.*pickup address|confirm.*destination address|please confirm the)/i.test(lowerAssistantText);
+        
+        if (endsWithConfirmation && !isForbiddenAddressConfirmation) {
+          sessionState.lastQuestionType = "confirmation";
+          sessionState.lastQuestionAt = Date.now();
+          if (isQuestion) {
+            sessionState.lastSpokenQuestion = lastAssistantText;
+            sessionState.lastSpokenQuestionAt = Date.now();
+          }
+          console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
+        } else if (/where.*(?:pick\s*(?:ed\s*)?up|from|pickup)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "pickup";
           sessionState.lastQuestionAt = Date.now();
           if (isQuestion) {
@@ -3431,21 +3445,8 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestionAt = Date.now();
           }
           console.log(`[${sessionState.callId}] 🎯 Ada asked about: TIME`);
-        } else if (/(?:is that correct|shall i book|book that|go ahead|would you like me to (?:book|confirm))/i.test(lowerAssistantText)) {
-          // IMPORTANT: Exclude forbidden address confirmation phrases from triggering "confirmation" state
-          const isForbiddenAddressConfirmation = /(?:confirm the pickup|confirm the destination|confirm.*pickup address|confirm.*destination address|please confirm the)/i.test(lowerAssistantText);
-          
-          if (!isForbiddenAddressConfirmation) {
-            sessionState.lastQuestionType = "confirmation";
-            sessionState.lastQuestionAt = Date.now();
-            if (isQuestion) {
-              sessionState.lastSpokenQuestion = lastAssistantText;
-              sessionState.lastSpokenQuestionAt = Date.now();
-            }
-            console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
-          } else {
-            console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
-          }
+        } else if (isForbiddenAddressConfirmation) {
+          console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
         }
 
         // === TRACK ANY QUESTION (for post-booking response wait) ===
