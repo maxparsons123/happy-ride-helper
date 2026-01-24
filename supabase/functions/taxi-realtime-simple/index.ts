@@ -2371,6 +2371,17 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           updatePayload.passengers = sessionState.booking.passengers;
         }
         
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CRITICAL: Save bookingStep and pickup_time for accurate session restoration
+        // ═══════════════════════════════════════════════════════════════════════════
+        updatePayload.booking_step = sessionState.bookingStep;
+        if (sessionState.booking.pickup_time) {
+          updatePayload.pickup_time = sessionState.booking.pickup_time;
+        }
+        if (sessionState.lastQuestionType) {
+          updatePayload.last_question_type = sessionState.lastQuestionType;
+        }
+        
         return supabase
           .from("live_calls")
           .update(updatePayload)
@@ -2381,8 +2392,8 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
       });
   };
 
-  // Faster batching for better session restoration (3 seconds instead of 5)
-  const FLUSH_INTERVAL_MS = 3000;
+  // Faster batching for better session restoration (2 seconds for aggressive persistence)
+  const FLUSH_INTERVAL_MS = 2000;
   
   const scheduleTranscriptFlush = (sessionState: SessionState) => {
     if (sessionState.transcriptFlushTimer) return; // Already scheduled
@@ -8334,9 +8345,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             }
             
             // Compute what step we're on based on restored state
-            // CRITICAL: If fare/eta exists, we're at "awaiting_confirmation" stage (after summary, waiting for fare confirmation)
+            // PRIORITY ORDER: booking_step from DB > fare/eta > status > field presence
             if (state.bookingFullyConfirmed) {
               state.bookingStep = "confirmed";
+            } else if (restoredSession.booking_step) {
+              // ✅ Use saved booking_step from database if available
+              state.bookingStep = restoredSession.booking_step as typeof state.bookingStep;
+              console.log(`[${callId}] 📋 Restored bookingStep from DB: ${state.bookingStep}`);
             } else if (restoredSession.fare && restoredSession.eta) {
               // Fare was already quoted - resume at summary step (awaiting fare confirmation)
               state.bookingStep = "summary";
@@ -8351,6 +8366,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               state.bookingStep = "destination";
             } else {
               state.bookingStep = "pickup";
+            }
+            
+            // Also restore lastQuestionType if available
+            if (restoredSession.last_question_type) {
+              state.lastQuestionType = restoredSession.last_question_type;
+              console.log(`[${callId}] 📋 Restored lastQuestionType: ${state.lastQuestionType}`);
             }
             
             console.log(`[${callId}] 📋 Restored step: ${state.bookingStep}, pickup=${state.booking.pickup}, dest=${state.booking.destination}, pax=${state.booking.passengers}, fare=${restoredSession.fare}`);
@@ -8456,6 +8477,33 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // Connect to OpenAI IMMEDIATELY - don't wait for DB lookup
           pendingGreeting = true;
           connectToOpenAI(state!);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CRITICAL: Create live_calls record SYNCHRONOUSLY before greeting
+        // This ensures session restoration works even if WebSocket times out quickly
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (!restoredSession && phone && phone !== "unknown") {
+          const phoneKey = normalizePhone(phone);
+          try {
+            console.log(`[${callId}] 📝 Creating live_calls record synchronously...`);
+            await supabase.from("live_calls").upsert({
+              call_id: callId,
+              caller_phone: phoneKey,
+              caller_name: state!.customerName || null,
+              status: "active",
+              source: "simple",
+              transcripts: [],
+              pickup: state!.booking.pickup || null,
+              destination: state!.booking.destination || null,
+              passengers: state!.booking.passengers || null,
+              booking_step: state!.bookingStep || "pickup",
+              updated_at: new Date().toISOString(),
+            }, { onConflict: "call_id" });
+            console.log(`[${callId}] ✅ live_calls record created (sync)`);
+          } catch (e) {
+            console.error(`[${callId}] ⚠️ Failed to create live_calls (sync):`, e);
+          }
         }
 
         socket.send(JSON.stringify({ 
