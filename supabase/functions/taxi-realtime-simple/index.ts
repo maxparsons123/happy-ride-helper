@@ -8259,8 +8259,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
           // Include booking recap so the caller hears the route before deciding on price/ETA
-          const recapPickup = state?.booking?.pickup || "";
-          const recapDest = state?.booking?.destination || "";
+          // TTS-FRIENDLY ADDRESS FORMAT: Add hyphen before letter suffix so "52A" is spoken as "52-A"
+          const formatForTTS = (addr: string): string => {
+            if (!addr) return "";
+            // Match house numbers with letter suffixes like "52A", "1214B" and format as "52-A", "1214-B"
+            return addr.replace(/^(\d+)([A-Za-z])\b/, '$1-$2');
+          };
+          
+          const recapPickup = formatForTTS(state?.booking?.pickup || "");
+          const recapDest = formatForTTS(state?.booking?.destination || "");
           const recapPassengers = state?.booking?.passengers || 1;
 
           const recapText = (recapPickup && recapDest)
@@ -8450,6 +8457,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             state.bookingConfirmedThisTurn = false;
             state.audioVerified = false;
             state.pendingAudioBuffer = [];
+            // ✅ CRITICAL: Clear awaitingDispatchCallback so Ada can speak the fare
+            // Without this, the guard in response.created will cancel the fare speech
+            state.awaitingDispatchCallback = false;
+            console.log(`[${callId}] ✅ Cleared awaitingDispatchCallback - fare received, Ada can speak`);
             // ✅ SUMMARY PROTECTION: Block barge-in during fare quote speech
             state.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
             console.log(`[${callId}] 🛡️ Summary protection activated for ${SUMMARY_PROTECTION_MS}ms (fare quote)`);
