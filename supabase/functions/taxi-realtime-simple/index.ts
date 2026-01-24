@@ -7471,52 +7471,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             state.audioDiagnostics.packetsSkippedSummary++;
             // Still forward audio for STT but don't allow barge-in cancellation
           } else {
-            // FULL-DUPLEX echo suppression + barge-in:
-            // - If Ada is speaking and we detect REAL user energy, cancel the AI response (barge-in) and then forward audio.
-            // - Otherwise, drop audio while Ada is speaking to prevent VAD/Whisper echo hallucinations.
-            const pendingQuoteActive = state.pendingQuote && Date.now() - state.pendingQuote.timestamp < 15000;
-
-            if (state.isAdaSpeaking && !state.halfDuplex) {
-              if (pendingQuoteActive) {
-                // User should answer after the fare is read; dropping during this window prevents echo loops.
-                state.audioDiagnostics.packetsSkippedBotSpeaking++;
-                return;
-              }
-
-              // Skip barge-in checks briefly at the start of Ada speech (startup echo), but still drop audio.
-              const inStartupEchoGuard = Date.now() < (state.bargeInIgnoreUntil || 0);
-              if (inStartupEchoGuard || !state.openAiResponseActive) {
-                state.audioDiagnostics.packetsSkippedEcho++;
-                return;
-              }
-
-              // Real barge-in: moderate RMS (not clipped echo which is >20000, not quiet noise which is <1000)
-              // Raised threshold from 650 to 1000 to reduce false barge-ins from phone line noise
-              const isRealBargeIn = rms >= 1000 && rms < 20000;
-
-              if (isRealBargeIn) {
-                console.log(`[${state.callId}] 🛑 Barge-in detected (rms=${rms.toFixed(0)}) - cancelling AI speech`);
-                try {
-                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-                  // Use safeCancel to avoid response_cancel_not_active errors
-                  if (state.openAiResponseActive) {
-                    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-                    state.openAiResponseActive = false;
-                    state.discardCurrentResponseAudio = true;
-                  }
-                } catch (e) {
-                  console.error(`[${state.callId}] ❌ Failed to cancel on barge-in:`, e);
-                }
-
-                // Allow audio to flow immediately after cancelling.
-                state.isAdaSpeaking = false;
-                state.echoGuardUntil = Date.now() + 200;
-                socket.send(JSON.stringify({ type: "ai_interrupted" }));
-              } else {
-                // Not a real barge-in → drop to prevent echo.
-                state.audioDiagnostics.packetsSkippedNoise++;
-                return;
-              }
+            // === NO BARGE-IN: Drop all audio while Ada is speaking ===
+            // This prevents user interruptions and echo issues completely.
+            // Audio will only flow when Ada finishes speaking.
+            if (state.isAdaSpeaking) {
+              state.audioDiagnostics.packetsSkippedBotSpeaking++;
+              return; // Drop audio entirely - no barge-in allowed
             }
           }
 
