@@ -110,7 +110,7 @@ OPUS_APPLICATION = "voip"     # Optimized for speech
 
 # Format Detection
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)   # Force 8kHz ulaw
-LOCK_FORMAT_SLIN16 = _env_bool("LOCK_FORMAT_SLIN16", True)  # Force 16kHz slin16 (default ON)
+LOCK_FORMAT_SLIN16 = _env_bool("LOCK_FORMAT_SLIN16", False)  # Force 16kHz slin16 (only if Asterisk uses slin16)
 # Prefer Opus ONLY when the Opus codec is actually available in this runtime.
 # (Prevents false positives + "Opus frame but no decoder" loops.)
 PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE) and not LOCK_FORMAT_SLIN16
