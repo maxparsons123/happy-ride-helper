@@ -4131,14 +4131,19 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastPassengerMismatchAt = Date.now();
             
             // Prevent any auto-VAD response from leaking partial speech while we force the mismatch prompt.
-            sessionState.discardCurrentResponseAudio = true;
+            // IMPORTANT: Only discard audio if we actually cancelled an in-flight response. Otherwise,
+            // discardCurrentResponseAudio could stay stuck "true" (no response.done to reset), causing silence.
+            if (sessionState.openAiResponseActive) {
+              safeCancel(sessionState, "address-vs-passenger-mismatch");
+            } else {
+              sessionState.discardCurrentResponseAudio = false;
+            }
+
             sessionState.audioVerified = false;
             sessionState.pendingAudioBuffer = [];
 
-            // Cancel anything already in-flight and clear audio to avoid competing responses.
-            // (Even if no response is active yet, cancel is safe and keeps the flow deterministic.)
+            // Clear audio buffer so the next turn starts cleanly.
             if (openaiWs && openaiConnected) {
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             }
             
