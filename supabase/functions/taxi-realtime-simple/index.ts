@@ -9132,13 +9132,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                 }
 
                 // Check for active bookings if not already loaded
+                // Only consider bookings from the last 2 hours as "active"
                 if (!activeBooking) {
+                  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
                   // Try both phone formats (normalized digits-only + legacy no-plus)
                   const { data: bookingData } = await supabase
                     .from("bookings")
                     .select("call_id, pickup, destination, passengers, fare, eta, status, booked_at, updated_at, caller_name")
                     .or(`caller_phone.eq.${phoneKey},caller_phone.eq.${altPhone}`)
                     .in("status", ["confirmed", "dispatched", "active", "pending"])
+                    .gte("updated_at", twoHoursAgo)
                     .order("updated_at", { ascending: false })
                     .order("booked_at", { ascending: false })
                     .limit(1)
