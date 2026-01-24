@@ -3940,43 +3940,6 @@ Do NOT say 'booked' until the tool returns success.]`
         // User transcript from Whisper
         const rawText = String(message.transcript || "").trim();
 
-        // === ECHO/HALLUCINATION DETECTION ===
-        // OpenAI Whisper sometimes "echoes" previously-confirmed addresses when the user says something short.
-        // If we're collecting passengers and the transcript matches a known address, DISCARD it as hallucination.
-        if (sessionState.lastQuestionType === "passengers") {
-          const lowerRaw = rawText.toLowerCase().trim();
-          const knownPickup = (sessionState.booking.pickup || "").toLowerCase().trim();
-          const knownDest = (sessionState.booking.destination || "").toLowerCase().trim();
-          
-          // Check for exact or partial match with known addresses
-          const isEchoOfPickup = knownPickup && (
-            lowerRaw === knownPickup ||
-            lowerRaw.includes(knownPickup) ||
-            knownPickup.includes(lowerRaw) ||
-            // Fuzzy: check if major parts match (e.g., "7 Russell Street" vs "Russell Street")
-            (knownPickup.split(/\s+/).filter(w => w.length > 2).some(word => lowerRaw.includes(word.toLowerCase())) && 
-             /\b(street|road|avenue|lane|drive|rd|st|ave|ln)\b/i.test(lowerRaw))
-          );
-          const isEchoOfDest = knownDest && (
-            lowerRaw === knownDest ||
-            lowerRaw.includes(knownDest) ||
-            knownDest.includes(lowerRaw) ||
-            // Fuzzy: check if major parts match
-            (knownDest.split(/\s+/).filter(w => w.length > 2).some(word => lowerRaw.includes(word.toLowerCase())) &&
-             /\b(street|road|avenue|lane|drive|rd|st|ave|ln)\b/i.test(lowerRaw))
-          );
-          
-          if (isEchoOfPickup || isEchoOfDest) {
-            console.log(`[${sessionState.callId}] 🔇 ECHO DISCARD: Whisper echoed "${rawText}" (matches ${isEchoOfPickup ? 'pickup' : 'destination'}) - waiting for real passenger count`);
-            // Don't process this transcript at all - wait for the real passenger count
-            // Clear the audio buffer to force a fresh listen
-            if (openaiWs && openaiConnected) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            }
-            break; // Skip ALL processing for this echo
-          }
-        }
-
         // If Ada just asked for passengers, very short replies are common ("four", "3", etc.).
         // Whisper often returns ambiguous homophones ("for", "to", "tree") for these short utterances.
         // Apply a VERY narrow, context-aware correction before we run the general correction layer.
