@@ -508,10 +508,21 @@ If caller says their name → CALL save_customer_name
 ❌ NEVER re-ask a question that has already been answered - check the booking state first.
 ❌ NEVER ask "Could you please confirm the pickup address as..." or any variation - this is strictly forbidden.
 ❌ NEVER say "confirm the pickup" or "confirm the destination" - only confirm the FULL summary, never individual addresses.
+❌ NEVER say "Sorry, I didn't catch that" if the booking state shows a ✅ next to the field you were asking about.
 ✅ Accept business names, landmarks, and place names as valid pickup/destination (e.g., "Sweet Spot", "Tesco", "The Hospital", "Train Station").
 ✅ Only ask for a house number if it's clearly a residential street address missing a number.
 ✅ If the user gives a place name or business, accept it immediately and move to the next question.
-✅ ALWAYS check the "CURRENT BOOKING STATE" section to see what's already captured before asking questions.
+✅ ALWAYS check the "CURRENT BOOKING STATE" section FIRST to see what's already captured before asking questions.
+✅ If a transcript contains a street name or address, IMMEDIATELY save it to the appropriate field (pickup if empty, else destination).
+
+# SMART STATE CHECK (CRITICAL)
+Before EVERY response, check the CURRENT BOOKING STATE section:
+- If Pickup shows ✅, DO NOT ask for pickup again - move to destination.
+- If Destination shows ✅, DO NOT ask for destination again - move to passengers.
+- If the user provides an address and you're unsure if it's pickup or destination:
+  → If Pickup is empty → assign to Pickup
+  → If Pickup is full and Destination is empty → assign to Destination
+  → NEVER say "I didn't catch that" if the transcript contains an address
 
 # NEAREST/CLOSEST PLACES
 When user says "nearest X" or "closest X" (e.g., "nearest hospital", "closest train station", "nearest tube"):
@@ -2230,6 +2241,9 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           silence_duration_ms: sessionState.useRasaAudioProcessing ? 1200 : 1800,
         },
         temperature: 0.6, // OpenAI Realtime API minimum is 0.6
+        // ✅ LATENCY FIX: Cap output tokens for faster response generation
+        // Shorter responses = faster TTS = snappier conversation
+        max_response_output_tokens: 150,
         tools: TOOLS,
         tool_choice: "auto"
       }
@@ -2759,6 +2773,14 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // ✅ MISSING STEP DATA GUARD: Prevent Ada from advancing if current step's field is empty.
         // This catches cases where VAD triggered a response but no user speech was detected,
         // or when the user's answer wasn't transcribed. Forces Ada to re-ask the current question.
+        // 
+        // ⚠️ CRITICAL RACE FIX: Don't trigger if user JUST spoke (transcript may still be processing).
+        // The "Sorry, I didn't catch that" loop happens when:
+        // 1. User says "52A David Road"
+        // 2. VAD commits audio, OpenAI starts response before our transcript handler runs
+        // 3. This guard fires, cancelling response and saying "Sorry"
+        // 
+        // Solution: Check if user spoke recently (within 3 seconds) - if so, wait for transcript.
         const currentStep = sessionState.bookingStep;
         const isDataStep = ["pickup", "destination", "passengers", "time"].includes(currentStep || "");
         
@@ -2770,21 +2792,29 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             (currentStep === "time" && !sessionState.booking.pickup_time)
           );
           
-          if (stepFieldEmpty) {
-            console.log(`[${sessionState.callId}] 🛡️ MISSING STEP DATA GUARD: ${currentStep} field is empty - injecting reprompt`);
+          // ✅ RACE CONDITION FIX: If user spoke in the last 3 seconds, DON'T say "Sorry".
+          // The transcript is likely still in flight from OpenAI.
+          const TRANSCRIPT_GRACE_MS = 3000;
+          const userSpokeRecently = sessionState.speechStopTime && 
+            (Date.now() - sessionState.speechStopTime) < TRANSCRIPT_GRACE_MS;
+          const transcriptJustReceived = sessionState.lastUserTranscriptAt &&
+            (Date.now() - sessionState.lastUserTranscriptAt) < 1000;
+          
+          if (stepFieldEmpty && !userSpokeRecently && !transcriptJustReceived) {
+            console.log(`[${sessionState.callId}] 🛡️ MISSING STEP DATA GUARD: ${currentStep} field is empty (no recent speech) - injecting reprompt`);
             
             // Cancel the current response (which would advance to next question)
             safeCancel(sessionState, `step ${currentStep} incomplete`);
             
-            // Inject a reprompt for the current step
+            // Inject a reprompt for the current step - WITHOUT "Sorry" if it's a timeout vs failed STT
             const repromptMap: Record<string, string> = {
-              pickup: "Sorry, I didn't catch that. Where would you like to be picked up?",
-              destination: "Sorry, I didn't catch that. Where would you like to go?",
-              passengers: "Sorry, I didn't catch that. How many people will be travelling?",
-              time: "Sorry, I didn't catch that. When do you need the taxi?"
+              pickup: "Where would you like to be picked up?",
+              destination: "And where would you like to go?",
+              passengers: "How many people will be travelling?",
+              time: "When do you need the taxi?"
             };
             
-            const repromptText = repromptMap[currentStep] || "Sorry, I didn't catch that. Could you please repeat?";
+            const repromptText = repromptMap[currentStep] || "Could you please repeat that?";
             
             openaiWs?.send(JSON.stringify({
               type: "conversation.item.create",
@@ -2793,7 +2823,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
                 role: "user",
                 content: [{
                   type: "input_text",
-                  text: `[SYSTEM: User's response was not detected. Ask ONLY: "${repromptText}" - NOTHING ELSE. Do not advance to the next question.]`
+                  text: `[SYSTEM: No response detected. Ask ONLY: "${repromptText}" - Do not say "Sorry, I didn't catch that". Just ask the question directly.]`
                 }]
               }
             }));
@@ -2809,6 +2839,10 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             // Trigger the reprompt (safely; avoids conversation_already_has_active_response)
             safeResponseCreate(sessionState, "missing-step-reprompt");
             break;
+          } else if (stepFieldEmpty && (userSpokeRecently || transcriptJustReceived)) {
+            // User JUST spoke - don't reprompt, let the transcript handler update the state
+            console.log(`[${sessionState.callId}] ⏳ MISSING STEP DATA GUARD: ${currentStep} empty BUT user spoke ${userSpokeRecently ? ((Date.now() - (sessionState.speechStopTime || 0)) / 1000).toFixed(1) + 's ago' : 'just now'} - waiting for transcript`);
+            // Don't break - let the response proceed; the state will be updated by transcript handler
           }
         }
         
