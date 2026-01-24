@@ -372,7 +372,7 @@ class AudioProcessor:
         
         return self.opus_codec.encode_with_resample(pcm_bytes, from_rate)
     
-    def process_inbound(self, pcm_bytes: bytes) -> bytes:
+    def process_inbound(self, pcm_bytes: bytes, call_id: str = "") -> bytes:
         """
         Full DSP pipeline for audio going TO the AI (Asterisk → Edge Function).
         
@@ -384,6 +384,9 @@ class AudioProcessor:
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
         if samples.size == 0:
             return pcm_bytes
+        
+        # DEBUG: Track input RMS before any processing
+        input_rms = float(np.sqrt(np.mean(samples ** 2)))
         
         # Step 1: Volume boost for quiet telephony lines
         if ENABLE_VOLUME_BOOST:
@@ -400,7 +403,18 @@ class AudioProcessor:
         # Step 3: Pre-emphasis for consonant clarity
         samples = self.pre_emphasis(samples, PRE_EMPHASIS_COEFF)
         
-        return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        output_samples = np.clip(samples, -32768, 32767).astype(np.int16)
+        output_rms = float(np.sqrt(np.mean(output_samples.astype(np.float32) ** 2)))
+        
+        # Log RMS periodically (every ~2 seconds = 100 frames at 20ms each)
+        if not hasattr(self, '_rms_log_counter'):
+            self._rms_log_counter = 0
+        self._rms_log_counter += 1
+        if self._rms_log_counter % 100 == 0 and input_rms > 5:
+            logger.info("[%s] 📈 DSP: in_rms=%.0f → out_rms=%.0f (gain=%.1fx)", 
+                       call_id, input_rms, output_rms, self.last_gain)
+        
+        return output_samples.tobytes()
     
     def process_outbound(self, ai_audio: bytes, from_rate: int, to_rate: int, 
                          to_codec: str) -> bytes:
@@ -1039,7 +1053,7 @@ class TaxiBridge:
                             linear = payload
                         
                         # Apply DSP pipeline (volume boost → AGC → pre-emphasis)
-                        processed = self.audio_processor.process_inbound(linear)
+                        processed = self.audio_processor.process_inbound(linear, self.state.call_id)
                         
                         # Send to AI (always as PCM16 - edge function expects this)
                         if self.ws and self.state.ws_connected:
