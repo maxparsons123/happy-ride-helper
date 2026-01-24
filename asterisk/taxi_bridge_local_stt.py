@@ -300,9 +300,9 @@ class TaxiBridgeLocalSTT:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 800,
+                    "threshold": 0.4,            # Lower = more sensitive to quiet speech
+                    "prefix_padding_ms": 500,    # Capture more audio before speech starts
+                    "silence_duration_ms": 1000, # Wait longer for complete sentences
                 },
                 # No tools - we're just transcribing
                 "tools": [],
