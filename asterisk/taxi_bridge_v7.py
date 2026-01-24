@@ -835,9 +835,11 @@ class TaxiBridge:
                         break
                     
                     # Send eager init on first connection
+                    # IMPORTANT: Default to 8kHz slin - the edge function will resample
+                    # The actual format will be sent via update_format once detected
                     if not self.state.init_sent and self.ws:
-                        # Send actual codec name for correct edge function handling
-                        inbound_fmt = self.state.ast_codec
+                        # Always start with 8kHz assumption - update_format will correct
+                        # This ensures edge function resamples properly even before detection
                         payload = {
                             "type": "init",
                             "call_id": self.state.call_id,
@@ -845,13 +847,13 @@ class TaxiBridge:
                             "user_phone": "unknown",
                             "addressTtsSplicing": True,
                             "eager_init": True,
-                            "inbound_format": inbound_fmt,
-                            "inbound_sample_rate": self.state.ast_rate,
+                            "inbound_format": "slin",  # Safe default - edge will resample 8k→24k
+                            "inbound_sample_rate": RATE_ULAW,  # 8000Hz - edge will 3x upsample
                         }
                         await self.ws.send(json.dumps(payload))
                         self.state.init_sent = True
-                        logger.info("[%s] 🚀 Eager init (%s @ %dHz)", 
-                                   self.state.call_id, inbound_fmt, self.state.ast_rate)
+                        logger.info("[%s] 🚀 Eager init (slin @ %dHz, waiting for format detection)", 
+                                   self.state.call_id, RATE_ULAW)
                 
                 # Create bidirectional audio tasks
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
