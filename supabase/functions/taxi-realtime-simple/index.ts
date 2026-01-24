@@ -3588,10 +3588,16 @@ Do NOT say 'booked' until the tool returns success.]`
         
         // === TRACK WHAT ADA JUST ASKED ===
         // Detect question type from Ada's completed transcript for question-answer alignment
+        // Also try to get the transcript from the OpenAI message itself as fallback
+        const openaiTranscript = message.transcript || "";
         const lastAssistantText = sessionState.transcripts
           .filter(t => t.role === "assistant")
-          .slice(-1)[0]?.text || "";
+          .slice(-1)[0]?.text || openaiTranscript || "";
         const lowerAssistantText = lastAssistantText.toLowerCase();
+        
+        // 🔍 DIAGNOSTIC: Log what we're checking for turn-based lock
+        console.log(`[${sessionState.callId}] 📜 TRANSCRIPT.DONE: "${lastAssistantText.substring(0, 80)}${lastAssistantText.length > 80 ? '...' : ''}"`);
+        console.log(`[${sessionState.callId}] 📜 OpenAI transcript: "${openaiTranscript.substring(0, 80)}${openaiTranscript.length > 80 ? '...' : ''}"`);
         
         // Check if this is a question (ends with ? or is a known question pattern)
         const isQuestion = /\?$/.test(lastAssistantText.trim()) || 
