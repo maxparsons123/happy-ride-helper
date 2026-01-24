@@ -7592,10 +7592,13 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           state.audioDiagnostics.packetsForwarded++;
 
           // Step 2: Upsample to 24kHz (OpenAI Realtime API requirement)
-          // Handle different input sample rates: 8kHz (ulaw/slin) or 16kHz (slin16)
+          // Handle different input sample rates: 8kHz (ulaw/slin), 16kHz (slin16), or 24kHz (pre-resampled)
           let pcm16_24k: Int16Array;
           
-          if (inputSampleRate === 16000) {
+          if (inputSampleRate === 24000) {
+            // 24kHz → 24kHz (passthrough - bridge already resampled)
+            pcm16_24k = pcmInput;
+          } else if (inputSampleRate === 16000) {
             // 16kHz → 24kHz (1.5x using 3:2 ratio)
             const outLen = Math.floor(pcmInput.length * 3 / 2);
             pcm16_24k = new Int16Array(outLen);
@@ -9402,7 +9405,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
         const format = state.inboundAudioFormat;
         const sampleRate = state.inboundSampleRate;
         
-        if (format === "pcm48" || sampleRate === 48000) {
+        if (sampleRate === 24000) {
+          // === 24kHz PCM (passthrough - bridge already resampled) ===
+          pcm16_24k = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.byteLength / 2);
+        } else if (format === "pcm48" || sampleRate === 48000) {
           // === 48kHz PCM (from Opus decode) → 24kHz (2:1 downsample) ===
           // This is the HIGHEST QUALITY path - Opus provides 48kHz wideband audio
           // Simple 2:1 decimation with averaging for anti-aliasing

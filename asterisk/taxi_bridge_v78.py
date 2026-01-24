@@ -436,12 +436,15 @@ class TaxiBridge:
         if old_codec != self.state.ast_codec:
             logger.info("[%s] 🔊 Format: %s @ %dHz (%d bytes/frame)",
                         self.state.call_id, self.state.ast_codec, self.state.ast_rate, frame_len)
+            # IMPORTANT: We resample to 24kHz BEFORE sending to the edge function,
+            # so we report RATE_AI (24000) as the inbound_sample_rate, NOT the Asterisk rate.
+            # This prevents the edge function from re-resampling and corrupting the audio.
             if self.ws and self.state.ws_connected:
                 await self.ws.send(json.dumps({
                     "type": "update_format",
                     "call_id": self.state.call_id,
-                    "inbound_format": self.state.ast_codec,
-                    "inbound_sample_rate": self.state.ast_rate,
+                    "inbound_format": "slin16",  # We send 16-bit PCM
+                    "inbound_sample_rate": RATE_AI,  # Already resampled to 24kHz
                 }))
 
     async def connect_websocket(self, url: Optional[str] = None, init_data: Optional[dict] = None) -> bool:
@@ -469,14 +472,14 @@ class TaxiBridge:
                     await self.ws.send(json.dumps(payload))
                     logger.info("[%s] 🔀 Sent %s init", self.state.call_id, "resume" if init_data.get("resume") else "redirect")
                 elif self.state.reconnect_attempts > 0 and self.state.init_sent:
-                    inbound_fmt = self.state.ast_codec
+                    # We resample to 24kHz before sending, so report that to edge function
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
                         "phone": self.state.phone if self.state.phone != "Unknown" else None,
                         "reconnect": True,
-                        "inbound_format": inbound_fmt,
-                        "inbound_sample_rate": self.state.ast_rate,
+                        "inbound_format": "slin16",  # 16-bit PCM
+                        "inbound_sample_rate": RATE_AI,  # Already resampled to 24kHz
                     }
                     await self.ws.send(json.dumps(payload))
                     logger.info("[%s] 🔁 Sent reconnect init", self.state.call_id)
@@ -554,7 +557,7 @@ class TaxiBridge:
                         await self.stop_call("WebSocket connection failed")
                         break
                 if not self.state.init_sent and self.ws:
-                    inbound_fmt = self.state.ast_codec
+                    # We resample all audio to 24kHz before sending, so report that
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
@@ -562,12 +565,12 @@ class TaxiBridge:
                         "user_phone": "unknown",
                         "addressTtsSplicing": True,
                         "eager_init": True,
-                        "inbound_format": inbound_fmt,
-                        "inbound_sample_rate": self.state.ast_rate,
+                        "inbound_format": "slin16",  # 16-bit PCM
+                        "inbound_sample_rate": RATE_AI,  # Already resampled to 24kHz
                     }
                     await self.ws.send(json.dumps(payload))
                     self.state.init_sent = True
-                    logger.info("[%s] 🚀 Eager init (%s @ %dHz)", self.state.call_id, inbound_fmt, self.state.ast_rate)
+                    logger.info("[%s] 🚀 Eager init (slin16 @ %dHz)", self.state.call_id, RATE_AI)
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
                 ai_task = asyncio.create_task(self.ai_to_queue())
                 done, pending = await asyncio.wait({ast_task, ai_task}, return_when=asyncio.FIRST_COMPLETED)
