@@ -3984,12 +3984,31 @@ Do NOT say 'booked' until the tool returns success.]`
             // Phrases like "just me", "only me" = 1 passenger
             else if (t === "just me" || t === "only me" || t === "me") sttText = "1";
             // "three people", "four passengers" etc
-            else if (/^(one|two|three|four|five|six|seven|eight)\s*(people|passengers?)?$/i.test(t)) {
+            else if (/^(one|two|three|four|five|six|seven|eight)\s*(people|passengers?|traveling|travelling)?$/i.test(t)) {
               const numMatch = t.match(/^(one|two|three|four|five|six|seven|eight)/i);
               if (numMatch) {
                 const wordToNum: Record<string, string> = { one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8" };
                 sttText = wordToNum[numMatch[1].toLowerCase()] || t;
               }
+            }
+          }
+          
+          // Extended passenger phrase corrections (longer than 8 chars, so outside shortOnly)
+          // "Poor people traveling" = Whisper mishearing "four people traveling"
+          if (sessionState.lastQuestionType === "passengers") {
+            const tLong = rawText.toLowerCase().replace(/[.,!?]/g, "").trim();
+            if (/^poor\s+(people|passengers?|traveling|travelling)/i.test(tLong)) {
+              sttText = "4";
+              console.log(`[${sessionState.callId}] 🔄 Passenger homophone fix: "${rawText}" → 4`);
+            } else if (/^free\s+(people|passengers?|traveling|travelling)/i.test(tLong)) {
+              sttText = "3";
+              console.log(`[${sessionState.callId}] 🔄 Passenger homophone fix: "${rawText}" → 3`);
+            } else if (/^tree\s+(people|passengers?|traveling|travelling)/i.test(tLong)) {
+              sttText = "3";
+              console.log(`[${sessionState.callId}] 🔄 Passenger homophone fix: "${rawText}" → 3`);
+            } else if (/^too?\s+(people|passengers?|traveling|travelling)/i.test(tLong)) {
+              sttText = "2";
+              console.log(`[${sessionState.callId}] 🔄 Passenger homophone fix: "${rawText}" → 2`);
             }
           }
         }
