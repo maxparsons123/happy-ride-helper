@@ -4178,18 +4178,34 @@ Do NOT say 'booked' until the tool returns success.]`
           // When user answers the TIME question and we have all 4 fields, inject verbatim summary
           // This prevents OpenAI from hallucinating addresses during the recap
           const lowerUserText = userText.toLowerCase();
-          const isTimeResponse = sessionState.lastQuestionType === "time" && 
-            (/\b(now|asap|straight ?away|right ?away|immediately|as soon as|minutes?|hours?|morning|afternoon|evening|tonight|tomorrow|today|\d{1,2}[:.:]?\d{0,2}\s*(?:am|pm)?)\b/i.test(lowerUserText) ||
-             lowerUserText.length < 30); // Short responses like "now", "ASAP"
           
-          if (isTimeResponse && 
-              sessionState.booking?.pickup && 
-              sessionState.booking?.destination && 
-              sessionState.booking?.passengers !== null &&
-              !sessionState.codeDrivenSummaryInjectedAt &&
-              !sessionState.quoteRequestedAt &&
-              !sessionState.pendingQuote &&
-              openaiWs && openaiConnected && !sessionState.callEnded) {
+          // Check if this looks like a time response (regardless of lastQuestionType)
+          const looksLikeTimeResponse = /\b(now|asap|straight ?away|right ?away|immediately|as soon as|minutes?|hours?|morning|afternoon|evening|tonight|tomorrow|today|book|taxi|\d{1,2}[:.:]?\d{0,2}\s*(?:am|pm)?)\b/i.test(lowerUserText);
+          
+          // Check if we have all booking fields
+          const hasAllFields = sessionState.booking?.pickup && 
+                              sessionState.booking?.destination && 
+                              sessionState.booking?.passengers !== null;
+          
+          // Debug logging for code-driven summary
+          if (looksLikeTimeResponse || hasAllFields) {
+            console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN CHECK: lastQ=${sessionState.lastQuestionType}, pickup=${sessionState.booking?.pickup || 'null'}, dest=${sessionState.booking?.destination || 'null'}, pax=${sessionState.booking?.passengers}, timeMatch=${looksLikeTimeResponse}, step=${sessionState.bookingStep}`);
+          }
+          
+          const isTimeResponse = sessionState.lastQuestionType === "time" && looksLikeTimeResponse;
+          
+          // ALSO trigger code-driven summary if:
+          // 1. We have all 4 fields (pickup, dest, passengers) 
+          // 2. User mentions "book", "taxi", "straight away", "now", "ASAP"
+          // 3. We haven't already injected a summary
+          const shouldTriggerSummary = (isTimeResponse || 
+            (hasAllFields && looksLikeTimeResponse && sessionState.bookingStep !== "confirmed")) &&
+            !sessionState.codeDrivenSummaryInjectedAt &&
+            !sessionState.quoteRequestedAt &&
+            !sessionState.pendingQuote &&
+            openaiWs && openaiConnected && !sessionState.callEnded;
+          
+          if (shouldTriggerSummary) {
             
             // Extract time from user response
             let extractedTime = "as soon as possible";
@@ -4217,8 +4233,8 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] 📋 All 4 fields complete - injecting CODE-DRIVEN SUMMARY`);
             
             // Build the verbatim summary from verified server-side data
-            const pickup = sessionState.booking.pickup;
-            const destination = sessionState.booking.destination;
+            const pickup = sessionState.booking.pickup || "";
+            const destination = sessionState.booking.destination || "";
             const passengers = sessionState.booking.passengers || 1;
             const pickupTime = extractedTime;
             
@@ -4233,20 +4249,21 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
             
             // Cancel any in-flight response
-            if (sessionState.openAiResponseActive) {
+            if (sessionState.openAiResponseActive && openaiWs) {
               openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             }
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            if (openaiWs) {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
             
-            // Inject the verbatim summary
-            openaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "message",
-                role: "user",
-                content: [{
-                  type: "input_text",
-                  text: `[CODE-DRIVEN SUMMARY - VERBATIM SPEECH REQUIRED]:
+              // Inject the verbatim summary
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{
+                    type: "input_text",
+                    text: `[CODE-DRIVEN SUMMARY - VERBATIM SPEECH REQUIRED]:
 SAY THIS EXACT SENTENCE WORD-FOR-WORD (do NOT rephrase, do NOT change any addresses or numbers):
 
 "${verbatimSummary}"
@@ -4257,20 +4274,21 @@ RULES:
 3. Do NOT confirm the booking yet - wait for their answer
 4. If they say YES → say "One moment please" then call book_taxi with action: "request_quote"
 5. If they say NO → ask "What would you like me to change?"`
-                }]
-              }
-            }));
-            
-            // Trigger the response
-            openaiWs.send(JSON.stringify({
-              type: "response.create",
-              response: {
-                modalities: ["audio", "text"],
-                instructions: `SAY VERBATIM (no changes): "${verbatimSummary}" Then STOP and wait silently.`
-              }
-            }));
-            
-            console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN SUMMARY INJECTED: "${verbatimSummary}"`);
+                  }]
+                }
+              }));
+              
+              // Trigger the response
+              openaiWs.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio", "text"],
+                  instructions: `SAY VERBATIM (no changes): "${verbatimSummary}" Then STOP and wait silently.`
+                }
+              }));
+              
+              console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN SUMMARY INJECTED: "${verbatimSummary}"`);
+            }
             
             break; // Skip normal processing - we handled this transcript
           }
