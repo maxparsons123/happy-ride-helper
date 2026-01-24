@@ -3968,17 +3968,18 @@ Do NOT say 'booked' until the tool returns success.]`
         // Apply a VERY narrow, context-aware correction before we run the general correction layer.
         let sttText = rawText;
         if (sessionState.lastQuestionType === "passengers") {
-          const t = rawText.toLowerCase().trim();
+          // Strip punctuation and lowercase for matching
+          const t = rawText.toLowerCase().replace(/[.,!?]/g, "").trim();
           // Only rewrite when the entire transcript is the ambiguous token (avoid changing phrases/addresses).
           const shortOnly = t.length <= 8 && /^[\w\s]+$/.test(t);
           if (shortOnly) {
             // "three" homophones - Whisper often mishears these on telephony
-            if (["free", "tree", "three", "fee", "fry", "frey", "fri"].includes(t)) sttText = "3";
-            else if (["for", "fore", "four", "foe", "floor"].includes(t)) sttText = "4";
-            else if (["to", "too", "two", "tu"].includes(t)) sttText = "2";
-            else if (["won", "wan", "one", "wun"].includes(t)) sttText = "1";
-            else if (["five", "fife", "hive"].includes(t)) sttText = "5";
-            else if (["six", "sick", "sex"].includes(t)) sttText = "6";
+            if (["free", "tree", "three", "fee", "fry", "frey", "fri", "frill", "freak"].includes(t)) sttText = "3";
+            else if (["for", "fore", "four", "foe", "floor", "fall", "full", "fault", "phone"].includes(t)) sttText = "4";
+            else if (["to", "too", "two", "tu", "true"].includes(t)) sttText = "2";
+            else if (["won", "wan", "one", "wun", "want", "wine"].includes(t)) sttText = "1";
+            else if (["five", "fife", "hive", "fine"].includes(t)) sttText = "5";
+            else if (["six", "sick", "sex", "fix"].includes(t)) sttText = "6";
             // Phrases like "just me", "only me" = 1 passenger
             else if (t === "just me" || t === "only me" || t === "me") sttText = "1";
             // "three people", "four passengers" etc
