@@ -1774,6 +1774,11 @@ interface SessionState {
   lastQuestionAt: number | null;
   lastPassengerMismatchAt: number | null; // Prevent double-asking passengers due to mismatch loop
   
+  // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
+  // This ensures we map the transcript to the correct question even if Ada advances state
+  // before the transcript arrives (e.g., user says destination but Ada already asked passengers)
+  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | null;
+  
   // DUPLICATE QUESTION PREVENTION: Track the exact text of the last question spoken
   // Used to cancel if Ada tries to ask the same question twice in a row (within 10s)
   lastSpokenQuestion: string | null;
@@ -3800,7 +3805,12 @@ Do NOT say 'booked' until the tool returns success.]`
         sessionState.speechStartTime = Date.now();
         // Reset audio buffer tracking flag - will be set true when audio is appended
         sessionState.audioBufferedSinceSpeechStart = false;
-        console.log(`[${sessionState.callId}] 🎙️ Speech started`);
+        
+        // CRITICAL: Snapshot the question type at speech start to prevent race conditions
+        // Without this, Ada advancing to "passengers" while user says destination causes the
+        // transcript to be misclassified (destination not saved, treated as address-vs-passenger mismatch)
+        sessionState.questionTypeAtSpeechStart = sessionState.lastQuestionType;
+        console.log(`[${sessionState.callId}] 🎙️ Speech started (context: ${sessionState.lastQuestionType})`);
         break;
       }
 
@@ -4192,8 +4202,11 @@ Do NOT say 'booked' until the tool returns success.]`
           // When Ada asks a question, save the user's answer directly to state.
           // This is the SOURCE OF TRUTH - OpenAI tool calls cannot override it.
           // This fixes issues like "Exmoor Road" (caller name) being used instead of what user actually said.
-          if (isRecentQuestion && sessionState.lastQuestionType && !sessionState.callEnded) {
-            const questionType = sessionState.lastQuestionType;
+          // Use the SNAPSHOT from speech_started, not current lastQuestionType
+          // This fixes race conditions where Ada advances to next step before transcript arrives
+          const questionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionType;
+          
+          if (isRecentQuestion && questionType && !sessionState.callEnded) {
             
             // === PICKUP EXTRACTION ===
             if (questionType === "pickup" && isAddressLike && !sessionState.booking.pickup) {
@@ -7720,6 +7733,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           lastQuestionType: null,
           lastQuestionAt: null,
           lastPassengerMismatchAt: null,
+          questionTypeAtSpeechStart: null, // Snapshot for race condition fix
           lastSpokenQuestion: null,
           lastSpokenQuestionAt: null,
           lastMultiQuestionFixAt: null,
@@ -7928,6 +7942,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             lastQuestionType: null,
             lastQuestionAt: null,
             lastPassengerMismatchAt: null,
+            questionTypeAtSpeechStart: null, // Snapshot for race condition fix
             lastSpokenQuestion: null,
             lastSpokenQuestionAt: null,
             lastMultiQuestionFixAt: null,
