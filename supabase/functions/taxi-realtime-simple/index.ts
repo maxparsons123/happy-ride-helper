@@ -7736,23 +7736,29 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             console.log(`[${state.callId}] 📊 Audio: rx=${d.packetsReceived}, fwd=${d.packetsForwarded}, noise=${d.packetsSkippedNoise}, echo=${d.packetsSkippedEcho}, bot=${d.packetsSkippedBotSpeaking}, greet=${d.packetsSkippedGreeting}, summary=${d.packetsSkippedSummary}, avgRMS=${d.avgRms.toFixed(0)}`);
           }
 
+          // === AUDIO FORWARDING POLICY ===
+          // CRITICAL FIX: Always forward audio to OpenAI for buffering/STT.
+          // Previously we dropped audio when Ada was speaking, causing user responses
+          // to be lost if they spoke during or immediately after Ada's questions.
+          // Now we ALWAYS forward audio, but track protection states for barge-in decisions.
+          
+          let skipBargeIn = false;
+          
           // === GREETING PROTECTION: Block barge-in during Ada's intro (12 seconds) ===
           if (Date.now() < state.greetingProtectionUntil) {
             state.audioDiagnostics.packetsSkippedGreeting++;
-            // Still forward audio for STT but don't allow barge-in cancellation
-            // Skip to audio forwarding without barge-in processing
+            skipBargeIn = true;
           } else if (Date.now() < state.summaryProtectionUntil) {
             // === SUMMARY PROTECTION: Block barge-in during fare quotes/summaries (8 seconds) ===
             state.audioDiagnostics.packetsSkippedSummary++;
-            // Still forward audio for STT but don't allow barge-in cancellation
-          } else {
-            // === NO BARGE-IN: Drop all audio while Ada is speaking ===
-            // This prevents user interruptions and echo issues completely.
-            // Audio will only flow when Ada finishes speaking.
-            if (state.isAdaSpeaking) {
-              state.audioDiagnostics.packetsSkippedBotSpeaking++;
-              return; // Drop audio entirely - no barge-in allowed
-            }
+            skipBargeIn = true;
+          } else if (state.isAdaSpeaking) {
+            // === ADA SPEAKING: Still forward audio but don't allow barge-in ===
+            // This is crucial - user may start speaking their answer before Ada finishes.
+            // We buffer their audio for STT but don't interrupt Ada.
+            state.audioDiagnostics.packetsSkippedBotSpeaking++;
+            skipBargeIn = true;
+            // NOTE: Do NOT return here - continue to forward audio to OpenAI
           }
 
           // Track forwarded packets
