@@ -8961,28 +8961,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               console.log(`[${callId}] 👤 Fast lookup found: ${callerResult.data.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
             }
             
-            // Process active booking - BUT ONLY IF WE DIDN'T ALREADY RESTORE FROM SESSION
-            // CRITICAL FIX: If we restored session from live_calls, DO NOT overwrite with old booking history!
-            // The restoredSession already has the current booking state from the active call.
-            if (bookingResult.data && !restoredSession) {
-              state!.hasActiveBooking = true;
-              state!.activeBookingCallId = bookingResult.data.call_id;
-              state!.booking.pickup = bookingResult.data.pickup;
-              state!.booking.destination = bookingResult.data.destination;
-              state!.booking.passengers = bookingResult.data.passengers;
-              state!.booking.version = Math.max(state!.booking.version || 0, 1);
-              
-              if (!state!.customerName && bookingResult.data.caller_name) {
-                state!.customerName = bookingResult.data.caller_name;
-              }
-              
-              console.log(`[${callId}] 📦 ACTIVE BOOKING FOUND (before greeting): ${bookingResult.data.pickup} → ${bookingResult.data.destination}`);
-            } else if (bookingResult.data && restoredSession) {
-              // We have an active booking but already restored from session - just mark flag, don't overwrite
-              state!.hasActiveBooking = true;
-              state!.activeBookingCallId = bookingResult.data.call_id;
-              console.log(`[${callId}] 📦 Active booking exists but PRESERVED session state: ${state!.booking.pickup} → ${state!.booking.destination}`);
-            }
+            // ═══════════════════════════════════════════════════════════════════════════
+            // DEMO MODE: Skip active booking detection - every call is completely fresh
+            // ═══════════════════════════════════════════════════════════════════════════
+            console.log(`[${callId}] 🆕 DEMO MODE: Ignoring any active bookings - fresh call`);
+            state!.hasActiveBooking = false;
+            state!.activeBookingCallId = null;
           } catch (e) {
             console.error(`[${callId}] Fast caller/booking lookup failed:`, e);
             // Continue without - will ask for info
