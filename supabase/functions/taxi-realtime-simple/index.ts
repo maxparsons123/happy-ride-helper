@@ -3697,6 +3697,39 @@ Do NOT say 'booked' until the tool returns success.]`
           sessionState.adaAskedQuestionAt = Date.now();
           console.log(`[${sessionState.callId}] ❓ Ada asked a question - waiting for user response before goodbye`);
         }
+        
+        // === ADA SAID GOODBYE - TRIGGER HANGUP ===
+        // When Ada says "safe journey" (the final closing script), we need to end the call
+        // This handles the case where Ada finishes booking confirmation and says goodbye
+        const adaSaidGoodbye = /safe journey|have a great journey|goodbye|safe travels/i.test(lowerAssistantText);
+        const isClosingScript = /thank you for trying|taxibot demo/i.test(lowerAssistantText);
+        
+        if ((adaSaidGoodbye || isClosingScript) && sessionState.bookingFullyConfirmed && !sessionState.callEnded) {
+          console.log(`[${sessionState.callId}] 👋 ADA SAID GOODBYE: Detected closing phrase - triggering call end`);
+          
+          // Mark call as ending to prevent any further responses
+          sessionState.callEnded = true;
+          closingGracePeriodActive = true;
+          sessionState.finalGoodbyePending = true;
+          
+          // Schedule hangup after audio finishes (will be accelerated by response.done handler)
+          closingGraceTimeoutId = setTimeout(() => {
+            if (!isConnectionClosed) {
+              console.log(`[${sessionState.callId}] ⏰ Grace period timeout - sending hangup`);
+              try {
+                socket.send(JSON.stringify({ type: "hangup", reason: "goodbye_complete" }));
+              } catch {
+                // Ignore
+              }
+              try {
+                isConnectionClosed = true;
+                socket.close(1000, "goodbye_complete");
+              } catch {
+                // Ignore
+              }
+            }
+          }, 10000); // 10s grace for audio to finish
+        }
 
         // === TRUST ADA'S FIRST ECHO ===
         // Extract addresses from Ada's immediate acknowledgments (e.g., "Got it, 18 Exmoor Road")
