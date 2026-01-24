@@ -87,10 +87,13 @@ EXTRACTION RULES (NEW BOOKING)
    - 'nearest X' or 'closest X' for DROPOFF → set nearest_dropoff = place type, leave dropoff_location EMPTY
    - If no destination given → leave dropoff_location EMPTY (agent will ask)
 
-4. **Address Preservation - CRITICAL**:
-   - Return EXACT text the user typed
-   - DO NOT guess, correct spelling, add/remove postcodes, or change punctuation
-   - Preserve house numbers with letters: "52A", "1214B", "7b"
+4. **Address Preservation - CRITICAL (STRICTEST RULE)**:
+   - Return the EXACT text for addresses.
+   - NEVER truncate, normalize, or "correct" house numbers.
+   - If a user says "52A", the value MUST be "52A".
+   - "28" and "28A" are DIFFERENT addresses. Do not assume the letter is noise.
+   - If the user provides a house number with a letter (e.g., 7b, 1214B, 52A), you MUST include that letter.
+   - DO NOT guess, correct spelling, add/remove postcodes, or change punctuation.
 
 5. **Time Handling**:
    - Convert to 'YYYY-MM-DD HH:MM' (24-hour)
@@ -308,11 +311,11 @@ const BOOKING_EXTRACTION_TOOL = {
       properties: {
         pickup_location: { 
           type: "string", 
-          description: "Pickup address. For updates: return existing value if not changed by user." 
+          description: "Pickup address. STRICT: Preserve house numbers EXACTLY as spoken (e.g., if user says '52A', DO NOT return '52'). For updates: return existing value if not changed." 
         },
         dropoff_location: { 
           type: "string", 
-          description: "Destination address. For updates: return existing value if not changed." 
+          description: "Destination address. STRICT: Preserve house numbers with letters (e.g., 10B, 52A, 7b). NEVER strip the letter suffix. For updates: return existing value if not changed." 
         },
         pickup_time: { 
           type: "string", 
@@ -614,6 +617,39 @@ serve(async (req) => {
       extraction_notes: extracted.extraction_notes || null,
       is_modification: is_modification,
     };
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // ADDRESS NUMBER PROTECTION - "Last Line of Defense"
+    // Search the LAST user message for [Number][Letter] patterns (like 52A, 7b, 1214B)
+    // If AI dropped the letter, restore it from the raw transcript
+    // ═══════════════════════════════════════════════════════════════════════════════
+    const lastUserMsg = conversation.filter(m => m.role === 'user').slice(-1)[0]?.text || "";
+    
+    // Match house numbers with letters, allowing for word boundaries and common separators
+    const houseNumberWithLetterMatches = lastUserMsg.match(/\b(\d+[A-Za-z])\b/g);
+    
+    if (houseNumberWithLetterMatches && houseNumberWithLetterMatches.length > 0) {
+      for (const literalAddress of houseNumberWithLetterMatches) {
+        const numericOnly = literalAddress.replace(/[A-Za-z]/g, ''); // e.g., "52A" → "52"
+        
+        // Check pickup: if AI extracted '52' but user said '52A', restore the letter
+        if (finalResult.pickup && 
+            finalResult.pickup.includes(numericOnly) && 
+            !finalResult.pickup.toLowerCase().includes(literalAddress.toLowerCase())) {
+          console.log(`[taxi-extract-unified] 🛡️ ADDRESS PROTECTION (pickup): Restoring "${numericOnly}" → "${literalAddress}"`);
+          // Use regex to replace only the standalone number, not numbers that are part of other sequences
+          finalResult.pickup = finalResult.pickup.replace(new RegExp(`\\b${numericOnly}\\b`), literalAddress);
+        }
+        
+        // Check destination: same logic
+        if (finalResult.destination && 
+            finalResult.destination.includes(numericOnly) && 
+            !finalResult.destination.toLowerCase().includes(literalAddress.toLowerCase())) {
+          console.log(`[taxi-extract-unified] 🛡️ ADDRESS PROTECTION (destination): Restoring "${numericOnly}" → "${literalAddress}"`);
+          finalResult.destination = finalResult.destination.replace(new RegExp(`\\b${numericOnly}\\b`), literalAddress);
+        }
+      }
+    }
 
     if (is_modification) {
       console.log(`[taxi-extract-unified] Modification result - fields_changed: ${JSON.stringify(extracted.fields_changed || [])}`);
