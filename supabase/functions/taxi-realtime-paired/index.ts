@@ -715,6 +715,10 @@ interface SessionState {
     pickupTime: string | null;
   };
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
+  // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
+  // This prevents the state machine from skipping steps when Ada's next question
+  // arrives before the user's answer to the previous question
+  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none" | null;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -1698,6 +1702,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       pickupTime: null
     },
     lastQuestionAsked: "none",
+    questionTypeAtSpeechStart: null, // RACE CONDITION FIX: Snapshot question when user starts speaking
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -2998,7 +3003,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "input_audio_buffer.speech_started":
-          console.log(`[${callId}] 🎤 User started speaking`);
+          // RACE CONDITION FIX: Snapshot the current question type when user STARTS speaking
+          // This ensures their answer is mapped to the question that was active when they began,
+          // not the next question Ada may have already moved to by the time the transcript arrives
+          sessionState.questionTypeAtSpeechStart = sessionState.lastQuestionAsked;
+          console.log(`[${callId}] 🎤 User started speaking (snapshotted question: ${sessionState.questionTypeAtSpeechStart})`);
           break;
 
         case "conversation.item.input_audio_transcription.completed":
@@ -3054,7 +3063,13 @@ Otherwise, say goodbye warmly and call end_call().`
               }
             }
             
-            console.log(`[${callId}] 👤 User (after "${sessionState.lastQuestionAsked}" question): "${userText}"`);
+            // RACE CONDITION FIX: Use the snapshotted question type instead of current state
+            // This handles cases where Ada has already asked the next question before user's answer arrived
+            const effectiveQuestionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionAsked;
+            console.log(`[${callId}] 👤 User (effective question: "${effectiveQuestionType}", current: "${sessionState.lastQuestionAsked}"): "${userText}"`);
+            
+            // Clear the snapshot after using it
+            sessionState.questionTypeAtSpeechStart = null;
             
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
@@ -3246,7 +3261,8 @@ Ask clearly: "Would you like me to book that taxi for you?"`
             }
 
             // PASSENGER CLARIFICATION GUARD: Detect address-like response to passenger question
-            if (sessionState.lastQuestionAsked === "passengers") {
+            // Use effectiveQuestionType (snapshotted at speech start) for accurate context
+            if (effectiveQuestionType === "passengers") {
               // Check if response looks like an address rather than a number
               const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
               const hasNumber = /\b(one|two|three|four|five|six|seven|eight|nine|ten|[1-9]|1[0-9]|20)\s*(passenger|people|person|of us)?s?\b/i.test(userText);
@@ -3307,15 +3323,85 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
               }
             }
             
+            // RACE CONDITION RECOVERY: If user answered a PREVIOUS question (e.g., destination) but
+            // Ada has already moved to the next question (e.g., passengers), route the answer correctly
+            if (effectiveQuestionType !== sessionState.lastQuestionAsked) {
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|mall|centre|center|square|park|building|house|flat|apartment|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              const isJustNumber = /^[1-9]$|^1[0-9]$|^20$|^(one|two|three|four|five|six|seven|eight|nine|ten)$/i.test(userText.trim());
+              
+              // If we expected destination and got an address, route it correctly
+              if (effectiveQuestionType === "destination" && looksLikeAddress) {
+                console.log(`[${callId}] 🔄 RACE RECOVERY: User answered destination ("${userText}") but current question is "${sessionState.lastQuestionAsked}" - routing to destination`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: Ada asked about destination] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                // Update destination directly and ask Ada to continue to passengers
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[LATE DESTINATION ANSWER] The user just said "${userText}" which is their DESTINATION (they were answering your previous question).
+
+Call sync_booking_data with destination="${userText}" to save it.
+Then ask: "How many passengers will be traveling?" (since we now need passengers).
+
+Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userText}", passengers=NOT SET`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+              
+              // If we expected pickup and got an address, route it correctly  
+              if (effectiveQuestionType === "pickup" && looksLikeAddress) {
+                console.log(`[${callId}] 🔄 RACE RECOVERY: User answered pickup ("${userText}") but current question is "${sessionState.lastQuestionAsked}" - routing to pickup`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[CONTEXT: Ada asked about pickup] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[LATE PICKUP ANSWER] The user just said "${userText}" which is their PICKUP address.
+
+Call sync_booking_data with pickup="${userText}" to save it.
+Then continue with the next question based on what's missing.
+
+Current state: pickup=NOW "${userText}"`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
+            }
+            
             // Add to history with context annotation (normal flow)
+            // Use effectiveQuestionType for accurate context
             sessionState.conversationHistory.push({
               role: "user",
-              content: `[CONTEXT: Ada asked about ${sessionState.lastQuestionAsked}] ${userText}`,
+              content: `[CONTEXT: Ada asked about ${effectiveQuestionType}] ${userText}`,
               timestamp: Date.now()
             });
             
             // Send STRICT context-aware prompt to OpenAI with explicit field mapping
-            const expectedField = sessionState.lastQuestionAsked;
+            // Use effectiveQuestionType (snapshotted) for accurate field mapping
+            const expectedField = effectiveQuestionType;
             const fieldMapping: Record<string, string> = {
               pickup: "pickup",
               destination: "destination", 
