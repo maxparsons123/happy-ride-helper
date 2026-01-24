@@ -4104,9 +4104,12 @@ Do NOT say 'booked' until the tool returns success.]`
             const lockStep = sessionState.lastQuestionType;
             setTimeout(() => {
               // Only clear if still awaiting and time matches (prevents stale timeout from prior question)
+              // CRITICAL: Also skip if still in greeting protection window - the greeting already asked for pickup
+              const stillInGreetingProtection = Date.now() < sessionState.greetingProtectionUntil;
               if (sessionState.awaitingUserAnswer && 
                   sessionState.awaitingUserAnswerSince === lockEngagedAt &&
-                  !sessionState.callEnded) {
+                  !sessionState.callEnded &&
+                  !stillInGreetingProtection) {
                 
                 console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
                 console.log(`[${sessionState.callId}] ║  ⏰ TURN-LOCK SAFETY TIMEOUT (8s)                              ║`);
