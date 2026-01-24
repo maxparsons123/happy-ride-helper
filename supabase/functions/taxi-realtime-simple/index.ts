@@ -2769,30 +2769,32 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             console.log(`[${sessionState.callId}] ✅ TURN-BASED BYPASS: allowing one response while awaiting ${sessionState.awaitingAnswerForStep}`);
             sessionState.allowOneResponseWhileAwaitingUserAnswer = false;
           } else {
-          const waitTime = Date.now() - sessionState.awaitingUserAnswerSince;
-          
-          // Allow response if timeout exceeded (user may have hung up or there's an issue)
-          if (waitTime < TURN_BASED_TIMEOUT_MS) {
-            console.log(`[${sessionState.callId}] ⏳ TURN-BASED BLOCK: Awaiting user answer for ${sessionState.awaitingAnswerForStep?.toUpperCase()} (${(waitTime / 1000).toFixed(1)}s)`);
-            // IMPORTANT: This response was VAD-triggered before we had the finalized user transcript.
-            // Cancel it, then explicitly re-trigger once the transcript arrives.
-            sessionState.pendingTurnResponseCreate = true;
-            safeCancel(sessionState, `turn-based: awaiting user answer for ${sessionState.awaitingAnswerForStep}`);
-            break;
-          } else {
-            // CRITICAL: Don't allow response during greeting protection even if timeout passed
-            // The greeting already includes the pickup question - avoid double-asking
-            const stillInGreetingProtection = Date.now() < sessionState.greetingProtectionUntil;
-            if (stillInGreetingProtection) {
-              console.log(`[${sessionState.callId}] 🛡️ GREETING PROTECTION: Turn timeout exceeded but still in greeting window - blocking response`);
-              safeCancel(sessionState, "greeting protection active");
-              break;
-            }
-            console.log(`[${sessionState.callId}] ⏰ TURN-BASED TIMEOUT: No user response after ${(waitTime / 1000).toFixed(1)}s - allowing response`);
-            sessionState.awaitingUserAnswer = false;
-            sessionState.awaitingUserAnswerSince = null;
-            sessionState.awaitingAnswerForStep = null;
-          }
+           const waitTime = Date.now() - sessionState.awaitingUserAnswerSince;
+
+           // CRITICAL: While awaiting a user answer, NEVER allow a VAD-triggered assistant response
+           // to proceed. Otherwise Ada can advance (DESTINATION/PASSENGERS) while the caller is still
+           // speaking and before the transcript arrives.
+           //
+           // Silence is handled separately by the 8s safety-timeout reprompt.
+           const stillInGreetingProtection = Date.now() < sessionState.greetingProtectionUntil;
+           if (stillInGreetingProtection) {
+             console.log(
+               `[${sessionState.callId}] 🛡️ GREETING PROTECTION: blocking VAD response while awaiting ${sessionState.awaitingAnswerForStep}`,
+             );
+           } else if (waitTime >= TURN_BASED_TIMEOUT_MS) {
+             console.log(
+               `[${sessionState.callId}] 🕒 TURN-BASED LATE ANSWER: ${(waitTime / 1000).toFixed(1)}s while awaiting ${sessionState.awaitingAnswerForStep?.toUpperCase()} - blocking until transcript`,
+             );
+           } else {
+             console.log(
+               `[${sessionState.callId}] ⏳ TURN-BASED BLOCK: Awaiting user answer for ${sessionState.awaitingAnswerForStep?.toUpperCase()} (${(waitTime / 1000).toFixed(1)}s)`,
+             );
+           }
+
+           // Cancel it, then explicitly re-trigger once the transcript arrives.
+           sessionState.pendingTurnResponseCreate = true;
+           safeCancel(sessionState, `turn-based: awaiting user transcript for ${sessionState.awaitingAnswerForStep}`);
+           break;
           }
         }
 
