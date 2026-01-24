@@ -2310,13 +2310,14 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         },
         turn_detection: {
           type: "server_vad",
-          // PHONE LINE ULTRA-SENSITIVE:
-          // - Threshold 0.3: Very sensitive for quiet "yes please" on phone lines
-          // - Prefix 600ms: Extra capture of word beginnings for short utterances
-          // - Silence 1800ms: Waits even longer for complete phrases, critical for confirmations
-          threshold: sessionState.useRasaAudioProcessing ? 0.5 : 0.3,
-          prefix_padding_ms: sessionState.useRasaAudioProcessing ? 400 : 600,
-          silence_duration_ms: sessionState.useRasaAudioProcessing ? 1200 : 1800,
+          // TELEPHONY-OPTIMIZED VAD (relaxed to reduce jitter/echo sensitivity):
+          // - Threshold 0.6: Higher to ignore background hiss and line noise
+          // - Prefix 300ms: Capture word beginnings without picking up echo
+          // - Silence 1000ms: Full second of silence before responding (prevents cut-offs)
+          // These settings reduce false barge-ins from Ada's own echo on 8kHz lines
+          threshold: 0.6,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 1000,
         },
         temperature: 0.6, // OpenAI Realtime API minimum is 0.6
         // Avoid truncating spoken prompts mid-sentence (which sounds like “cutting out”).
