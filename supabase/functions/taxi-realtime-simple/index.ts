@@ -2962,7 +2962,9 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
         
         // ✅ MISSING STEP DATA GUARD (Original - for current step empty)
-        if (isDataStep && sessionState.greetingDelivered) {
+        // CRITICAL: Skip this guard during greeting protection window - the greeting ALREADY asks for pickup
+        const stillInGreetingProtection = Date.now() < sessionState.greetingProtectionUntil;
+        if (isDataStep && sessionState.greetingDelivered && !stillInGreetingProtection) {
           const stepFieldEmpty = (
             (currentStep === "pickup" && !sessionState.booking.pickup) ||
             (currentStep === "destination" && !sessionState.booking.destination) ||
