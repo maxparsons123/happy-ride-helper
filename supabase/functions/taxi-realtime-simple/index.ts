@@ -998,6 +998,180 @@ function correctTranscript(text: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PARALLEL GEMINI EXTRACTION (DUAL-BRAIN ARCHITECTURE)
+// Runs Brain 1 (Gemini via taxi-extract-unified) in parallel with OpenAI responses
+// to improve field accuracy and detect corrections
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface ParallelExtractionResult {
+  pickup: string | null;
+  destination: string | null;
+  passengers: number | null;
+  pickup_time: string | null;
+  is_correction: boolean;
+  corrected_field: string | null;
+  fields_changed: string[];
+  processing_time_ms: number;
+}
+
+/**
+ * Run parallel Gemini extraction on the conversation.
+ * This is NON-BLOCKING - fires in background and updates session state when complete.
+ * 
+ * @param sessionState - Current session state
+ * @param userTranscript - The user's latest transcript
+ * @param supabaseUrl - Supabase URL for edge function call
+ * @param supabaseKey - Service role key
+ * @param onComplete - Optional callback when extraction completes
+ */
+async function runParallelExtraction(
+  sessionState: SessionState,
+  userTranscript: string,
+  supabaseUrl: string,
+  supabaseKey: string,
+  onComplete?: (result: ParallelExtractionResult | null) => void
+): Promise<void> {
+  if (!sessionState.parallelExtraction.enabled) {
+    return;
+  }
+  
+  const startTime = Date.now();
+  const callId = sessionState.callId;
+  
+  console.log(`[${callId}] 🧠 DUAL-BRAIN: Starting parallel Gemini extraction...`);
+  
+  try {
+    // Build conversation context for extraction
+    // Include Ada's last question for context-aware field mapping
+    const lastAdaText = sessionState.transcripts
+      .filter(t => t.role === "assistant")
+      .slice(-1)[0]?.text || "";
+    
+    // Format conversation for extraction
+    const conversation: Array<{ role: "user" | "assistant"; text: string; timestamp?: string }> = [];
+    
+    // Add context about what Ada asked
+    if (lastAdaText && sessionState.lastQuestionType) {
+      conversation.push({
+        role: "assistant",
+        text: `[CONTEXT: Ada asked: "${lastAdaText.substring(0, 200)}"]`,
+      });
+    }
+    
+    // Add the user's response
+    conversation.push({
+      role: "user",
+      text: userTranscript,
+      timestamp: new Date().toISOString(),
+    });
+    
+    // Call taxi-extract-unified edge function
+    const response = await fetch(`${supabaseUrl}/functions/v1/taxi-extract-unified`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${supabaseKey}`,
+      },
+      body: JSON.stringify({
+        conversation,
+        current_booking: {
+          pickup: sessionState.booking.pickup,
+          destination: sessionState.booking.destination,
+          passengers: sessionState.booking.passengers,
+          pickup_time: sessionState.booking.pickup_time,
+        },
+        caller_phone: sessionState.phone,
+        is_modification: sessionState.booking.version > 0 || sessionState.hasActiveBooking,
+      }),
+    });
+    
+    const processingTime = Date.now() - startTime;
+    
+    if (!response.ok) {
+      console.error(`[${callId}] 🧠 DUAL-BRAIN: Extraction failed (${response.status})`);
+      return;
+    }
+    
+    const data = await response.json();
+    
+    // Parse the extraction result
+    const result: ParallelExtractionResult = {
+      pickup: data.pickup_location || data.pickup || null,
+      destination: data.dropoff_location || data.destination || null,
+      passengers: data.number_of_passengers ?? data.passengers ?? null,
+      pickup_time: data.pickup_time || null,
+      is_correction: data.is_correction || false,
+      corrected_field: data.corrected_field || null,
+      fields_changed: data.fields_changed || data.fields_extracted || [],
+      processing_time_ms: processingTime,
+    };
+    
+    // Store result in session state
+    sessionState.parallelExtraction.lastExtractionAt = Date.now();
+    sessionState.parallelExtraction.lastExtractionResult = result;
+    
+    // Log the extraction
+    console.log(`[${callId}] 🧠 DUAL-BRAIN: Extraction complete in ${processingTime}ms`);
+    console.log(`[${callId}] 🧠 Result: pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, time="${result.pickup_time}"`);
+    console.log(`[${callId}] 🧠 Correction: ${result.is_correction ? `YES (${result.corrected_field})` : "NO"}, Fields: [${result.fields_changed.join(", ")}]`);
+    
+    // Compare with current session state to detect mismatches
+    const currentPickup = sessionState.booking.pickup;
+    const currentDestination = sessionState.booking.destination;
+    const currentPassengers = sessionState.booking.passengers;
+    
+    let hasMismatch = false;
+    const mismatches: string[] = [];
+    
+    // Check pickup mismatch (if Gemini extracted something different)
+    if (result.pickup && currentPickup && 
+        result.pickup.toLowerCase() !== currentPickup.toLowerCase()) {
+      mismatches.push(`pickup: Gemini="${result.pickup}" vs Current="${currentPickup}"`);
+      hasMismatch = true;
+    }
+    
+    // Check destination mismatch
+    if (result.destination && currentDestination && 
+        result.destination.toLowerCase() !== currentDestination.toLowerCase()) {
+      mismatches.push(`destination: Gemini="${result.destination}" vs Current="${currentDestination}"`);
+      hasMismatch = true;
+    }
+    
+    // Check passengers mismatch
+    if (result.passengers !== null && currentPassengers !== null && 
+        result.passengers !== currentPassengers) {
+      mismatches.push(`passengers: Gemini=${result.passengers} vs Current=${currentPassengers}`);
+      hasMismatch = true;
+    }
+    
+    if (hasMismatch) {
+      sessionState.parallelExtraction.mismatches++;
+      console.log(`[${callId}] ⚠️ DUAL-BRAIN MISMATCH #${sessionState.parallelExtraction.mismatches}: ${mismatches.join(", ")}`);
+    }
+    
+    // Detect correction
+    if (result.is_correction) {
+      sessionState.parallelExtraction.corrections++;
+      console.log(`[${callId}] 🔄 DUAL-BRAIN CORRECTION #${sessionState.parallelExtraction.corrections}: User correcting ${result.corrected_field}`);
+      
+      // Phase 2: If autoCorrect is enabled, inject the correction
+      if (sessionState.parallelExtraction.autoCorrect) {
+        console.log(`[${callId}] 🔧 DUAL-BRAIN: Auto-correction would be applied here (not yet implemented)`);
+        // TODO: Implement auto-correction injection
+      }
+    }
+    
+    // Call the completion callback if provided
+    if (onComplete) {
+      onComplete(result);
+    }
+    
+  } catch (err) {
+    console.error(`[${callId}] 🧠 DUAL-BRAIN: Extraction error:`, err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ADA MODULE - Modular AI Assistant Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1807,6 +1981,27 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
+  
+  // === PARALLEL GEMINI EXTRACTION (DUAL-BRAIN) ===
+  // Runs Brain 1 (Gemini via taxi-extract-unified) in parallel with OpenAI responses
+  // Compares extractions to catch mistakes and detect corrections
+  parallelExtraction: {
+    enabled: boolean;
+    autoCorrect: boolean; // If true, inject corrections; if false, just log
+    lastExtractionAt: number | null;
+    lastExtractionResult: {
+      pickup: string | null;
+      destination: string | null;
+      passengers: number | null;
+      pickup_time: string | null;
+      is_correction: boolean;
+      corrected_field: string | null;
+      fields_changed: string[];
+      processing_time_ms: number;
+    } | null;
+    mismatches: number; // Count of mismatches between Gemini and OpenAI
+    corrections: number; // Count of corrections detected
+  };
 }
 
 serve(async (req) => {
@@ -3729,6 +3924,29 @@ Do NOT say 'booked' until the tool returns success.]`
 
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
+
+          // === PARALLEL GEMINI EXTRACTION (DUAL-BRAIN) ===
+          // Fire off Brain 1 extraction in parallel with OpenAI's response
+          // This runs non-blocking and updates session state when complete
+          if (sessionState.parallelExtraction.enabled && 
+              sessionState.bookingStep !== "confirmed" &&
+              !sessionState.callEnded) {
+            // Run extraction in background - don't await
+            runParallelExtraction(
+              sessionState,
+              userText,
+              SUPABASE_URL,
+              SUPABASE_SERVICE_ROLE_KEY,
+              (result) => {
+                // Log extraction summary when complete
+                if (result) {
+                  console.log(`[${sessionState.callId}] 🧠 DUAL-BRAIN COMPLETE: ${result.fields_changed.length} fields extracted in ${result.processing_time_ms}ms`);
+                }
+              }
+            ).catch(err => {
+              console.error(`[${sessionState.callId}] 🧠 DUAL-BRAIN ERROR:`, err);
+            });
+          }
 
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
@@ -7583,6 +7801,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
+          parallelExtraction: {
+            enabled: true,
+            autoCorrect: false, // Phase 1: logging only
+            lastExtractionAt: null,
+            lastExtractionResult: null,
+            mismatches: 0,
+            corrections: 0,
+          },
         };
         
         preConnected = true;
@@ -7781,6 +8007,14 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
+            parallelExtraction: {
+              enabled: true,
+              autoCorrect: false, // Phase 1: logging only
+              lastExtractionAt: null,
+              lastExtractionResult: null,
+              mismatches: 0,
+              corrections: 0,
+            },
           };
           
           // ═══════════════════════════════════════════════════════════════════
