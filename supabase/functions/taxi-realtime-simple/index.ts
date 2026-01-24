@@ -2537,7 +2537,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     // Inject the exact welcome greeting as a conversation item to force OpenAI to speak it
     // This prevents OpenAI from skipping or paraphrasing the greeting
     const greetingText = sessionState.hasActiveBooking
-      ? `Hi ${sessionState.customerName || "there"}, welcome back! I can see you have a booking from ${sessionState.booking.pickup || "your pickup"} to ${sessionState.booking.destination || "your destination"}. Would you like to keep it, change it, or cancel it?`
+      ? `Hi ${sessionState.customerName || "there"}, welcome back! I can see you have a booking from ${sessionState.booking.pickup || "your pickup"} to ${sessionState.booking.destination || "your destination"}. Would you like to keep it or change it?`
       : `Hello, and welcome to the Taxibot demo! I'm ${sessionState.agentName || "Ada"}, your taxi booking assistant. I'm here to make booking a taxi quick and easy. Where would you like to be picked up?`;
 
     openaiWs?.send(JSON.stringify({
@@ -7129,7 +7129,7 @@ Do NOT say 'booked' until the tool returns success.]`
               .join(" ");
             
             const userWantsToKeep = /\b(keep|yes|yeah|book|same|rebook|confirm|that'?s? ?(right|correct|fine|good))\b/i.test(recentUserTranscripts);
-            const userWantsToChange = /\b(change|modify|update|different|new|cancel)\b/i.test(recentUserTranscripts);
+            const userWantsToChange = /\b(change|modify|update|different|new)\b/i.test(recentUserTranscripts);
             
             if (!userWantsToKeep && !userWantsToChange) {
               console.log(`[${sessionState.callId}] ⛔ BLOCKING request_quote - active booking not yet addressed by user`);
@@ -7137,7 +7137,7 @@ Do NOT say 'booked' until the tool returns success.]`
                 success: false,
                 error: "active_booking_not_addressed",
                 needs_clarification: true,
-                ada_message: "You have an active booking. Do you want to keep it, change it, or cancel it?",
+                ada_message: "You have an active booking. Do you want to keep it or change it?",
               };
               break;
             }
@@ -9974,7 +9974,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                           role: "user",
                           content: [{
                             type: "input_text",
-                            text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask ONLY if they want to keep it, change it, or cancel it. Do NOT suggest a new pickup/destination yourself. If they choose change, ask what they want to change and wait for their answer.]`
+                            text: `[SYSTEM: ${customerGreeting} This caller has an ACTIVE BOOKING. Details: Pickup: "${bookingData.pickup}", Destination: "${bookingData.destination}", Passengers: ${bookingData.passengers}. Greet them by name if known, mention they have an existing booking, and ask ONLY if they want to keep it or change it. Do NOT suggest a new pickup/destination yourself. If they choose change, ask what they want to change and wait for their answer.]`
                           }]
                         }
                       }));
