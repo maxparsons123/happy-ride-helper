@@ -57,7 +57,7 @@ ALIAS RULES:
 
   return `You are an expert taxi booking assistant extracting details from conversation.
 Current time (London): ${now}
-${callerName ? `Caller: ${callerName}` : ""}
+${callerName ? `Caller name: ${callerName} (NOTE: This is the CALLER'S NAME for greeting purposes ONLY - it is NOT an address. NEVER use this as pickup_location or dropoff_location.)` : ""}
 ${callerCity ? `Default city: ${callerCity}` : ""}
 ${aliasInstruction}
 

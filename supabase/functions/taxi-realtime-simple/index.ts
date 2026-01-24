@@ -4955,13 +4955,44 @@ Do NOT say 'booked' until the tool returns success.]`
               // Apply STT corrections to extracted addresses as safeguard
               const rawNewPickup = extracted.pickup || oldPickup;
               const rawNewDestination = extracted.destination || oldDestination;
-              const newPickup = correctTranscript(rawNewPickup);
-              const newDestination = correctTranscript(rawNewDestination);
+              let newPickup = correctTranscript(rawNewPickup);
+              let newDestination = correctTranscript(rawNewDestination);
               const newPassengers = extracted.passengers || oldPassengers;
               const newBags = extracted.luggage ? parseInt(extracted.luggage) || 0 : oldBags;
               
               if (rawNewPickup !== newPickup || rawNewDestination !== newDestination) {
                 console.log(`[${sessionState.callId}] 🔧 Corrected modification: pickup="${rawNewPickup}"→"${newPickup}", dest="${rawNewDestination}"→"${newDestination}"`);
+              }
+              
+              // ⚠️ METADATA POLLUTION GUARD: If extraction matches caller_name, it's corrupted
+              // Fall back to old values to prevent customer name from being used as address
+              const customerName = sessionState.customerName || "";
+              const normalizeForPollutionCheck = (s: string) => s.toLowerCase().replace(/[.,\s]+/g, " ").trim();
+              const nameNorm = normalizeForPollutionCheck(customerName);
+              
+              if (customerName && newPickup) {
+                const pickupNorm = normalizeForPollutionCheck(newPickup);
+                // Check if significant overlap with customer name
+                const pickupWords = pickupNorm.split(" ").filter(w => w.length > 2);
+                const nameWords = nameNorm.split(" ").filter(w => w.length > 2);
+                const commonWords = pickupWords.filter(w => nameWords.includes(w)).length;
+                const overlap = nameWords.length > 0 ? commonWords / nameWords.length : 0;
+                if (overlap > 0.6) {
+                  console.log(`[${sessionState.callId}] ⚠️ METADATA POLLUTION: Extracted pickup "${newPickup}" matches caller_name "${customerName}" - IGNORING`);
+                  newPickup = oldPickup; // Revert to old value
+                }
+              }
+              
+              if (customerName && newDestination) {
+                const destNorm = normalizeForPollutionCheck(newDestination);
+                const destWords = destNorm.split(" ").filter(w => w.length > 2);
+                const nameWords = nameNorm.split(" ").filter(w => w.length > 2);
+                const commonWords = destWords.filter(w => nameWords.includes(w)).length;
+                const overlap = nameWords.length > 0 ? commonWords / nameWords.length : 0;
+                if (overlap > 0.6) {
+                  console.log(`[${sessionState.callId}] ⚠️ METADATA POLLUTION: Extracted destination "${newDestination}" matches caller_name "${customerName}" - IGNORING`);
+                  newDestination = oldDestination; // Revert to old value
+                }
               }
               
               // Normalize for comparison - also treat placeholder values as empty
@@ -6166,29 +6197,58 @@ Do NOT say 'booked' until the tool returns success.]`
           // 4. Determine final addresses - PREFER AI EXTRACTION as primary source
           // AI extraction (Gemini) analyzes the full conversation including Ada's spoken corrections,
           // making it more accurate than Ada's raw tool arguments which may contain STT errors.
+          // 
+          // ⚠️ METADATA POLLUTION GUARD: If AI extraction matches the caller_name, it's likely
+          // confused the customer's stored name (which may be an old address) with the pickup.
+          // In this case, TRUST ADA'S interpretation over the extraction.
           let finalPickup: string;
           let finalDestination: string;
           let sourceDiscrepancy = false;
           
-          // Use extraction as primary source if available, fall back to Ada's corrected args
-          if (extractedPickup && extractedPickup.length > 2) {
+          // Helper to detect if extraction is polluted by caller metadata (name stored as address)
+          const isMetadataPollution = (extracted: string, callerName: string | null): boolean => {
+            if (!callerName || !extracted) return false;
+            const extractedNorm = normalizeForComparison(extracted);
+            const nameNorm = normalizeForComparison(callerName);
+            // If they match significantly, extraction was likely polluted by metadata
+            const overlap = similarity(extractedNorm, nameNorm);
+            if (overlap > 0.6) {
+              console.log(`[${sessionState.callId}] ⚠️ METADATA POLLUTION DETECTED: Extracted "${extracted}" matches caller_name "${callerName}" (${Math.round(overlap * 100)}% overlap) - IGNORING extraction`);
+              return true;
+            }
+            return false;
+          };
+          
+          // Use extraction as primary source if available and NOT polluted by metadata
+          const pickupIsMetadataPollution = isMetadataPollution(extractedPickup, sessionState.customerName);
+          const destIsMetadataPollution = isMetadataPollution(extractedDestination, sessionState.customerName);
+          
+          if (extractedPickup && extractedPickup.length > 2 && !pickupIsMetadataPollution) {
             finalPickup = extractedPickup;
             if (extractedPickup !== adaPickup) {
               console.log(`[${sessionState.callId}] 🧠 Using AI-extracted pickup: "${extractedPickup}" (Ada had: "${adaPickup}")`);
             }
           } else {
             finalPickup = adaPickup;
-            console.log(`[${sessionState.callId}] 📝 Using Ada's pickup (no extraction): "${adaPickup}"`);
+            if (pickupIsMetadataPollution) {
+              console.log(`[${sessionState.callId}] 📝 Using Ada's pickup (extraction was metadata pollution): "${adaPickup}"`);
+            } else {
+              console.log(`[${sessionState.callId}] 📝 Using Ada's pickup (no extraction): "${adaPickup}"`);
+            }
           }
           
-          if (extractedDestination && extractedDestination.length > 2) {
+          if (extractedDestination && extractedDestination.length > 2 && !destIsMetadataPollution) {
             finalDestination = extractedDestination;
             if (extractedDestination !== adaDestination) {
               console.log(`[${sessionState.callId}] 🧠 Using AI-extracted destination: "${extractedDestination}" (Ada had: "${adaDestination}")`);
             }
           } else {
             finalDestination = adaDestination;
-            console.log(`[${sessionState.callId}] 📝 Using Ada's destination (no extraction): "${adaDestination}"`);
+            if (destIsMetadataPollution) {
+              console.log(`[${sessionState.callId}] 📝 Using Ada's destination (extraction was metadata pollution): "${adaDestination}"`);
+            } else {
+              console.log(`[${sessionState.callId}] 📝 Using Ada's destination (no extraction): "${adaDestination}"`);
+            }
           }
           
           // Check for same pickup/destination error
