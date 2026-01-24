@@ -8321,18 +8321,29 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             ? String(etaRaw)
             : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
-          // Include booking recap so the caller hears the route before deciding on price/ETA
-          const recapPickup = state?.booking?.pickup || "";
-          const recapDest = state?.booking?.destination || "";
-          const recapPassengers = state?.booking?.passengers || 1;
+          // ✅ CRITICAL FIX: Use the EXACT message from dispatch if provided - NO hallucination allowed!
+          // If dispatch sends a message, Ada MUST speak it verbatim. Only fall back to generated text if no message.
+          let spokenMessage: string;
+          
+          if (message && String(message).trim()) {
+            // Dispatch provided exact message - use it VERBATIM (no AI rephrasing)
+            spokenMessage = String(message).trim();
+            console.log(`[${callId}] 📢 Using EXACT dispatch message (no AI generation): "${spokenMessage}"`);
+          } else {
+            // No message provided - fall back to generated recap (legacy behavior)
+            const recapPickup = state?.booking?.pickup || "";
+            const recapDest = state?.booking?.destination || "";
+            const recapPassengers = state?.booking?.passengers || 1;
 
-          const recapText = (recapPickup && recapDest)
-            ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
-            : "";
+            const recapText = (recapPickup && recapDest)
+              ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
+              : "";
 
-          const spokenMessage = (fareText && etaText)
-            ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
-            : (message ? String(message) : "");
+            spokenMessage = (fareText && etaText)
+              ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
+              : "";
+            console.log(`[${callId}] 📝 Generated fare message (no dispatch message): "${spokenMessage}"`);
+          }
 
           console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
 
@@ -8531,15 +8542,21 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           await new Promise(resolve => setTimeout(resolve, 300));
 
           // Inject the fare question into Ada's conversation with explicit YES/NO handling
-          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION]: You MUST repeat the following sentence EXACTLY, including all numbers and currency, IN ${langName.toUpperCase()}:
+          // ✅ VERBATIM SPEECH: The instruction emphasizes exact repetition with NO changes
+          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION - VERBATIM SPEECH REQUIRED]:
+SAY THIS EXACT SENTENCE WORD-FOR-WORD (do NOT rephrase, do NOT add anything, do NOT change numbers):
+
 "${spokenMessage}"
 
-After saying it, WAIT SILENTLY for their response. Do NOT confirm the booking yet.
+RULES:
+1. Say the EXACT words above - no paraphrasing, no adding "great" or "lovely" or any filler
+2. After speaking, WAIT SILENTLY for customer response
+3. Do NOT confirm the booking yet - wait for their yes/no
 
 WHEN CUSTOMER RESPONDS:
-- If they say YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
-- If they say NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
-- If unclear, ask: "Would you like me to book that?"
+- YES / correct / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
+- NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
+- Unclear → ask: "Would you like me to book that?"
 
 DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "confirmed" returns success.`;
 
@@ -8560,12 +8577,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             if (state) state.openAiResponseActive = false;
           }
-          // Trigger Ada to speak
+          // Trigger Ada to speak - VERBATIM, no rephrasing
           openaiWs.send(JSON.stringify({
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
+              instructions: `SAY VERBATIM (no changes, no filler words, exact repetition): "${spokenMessage}" Then STOP and wait silently. Do NOT add greetings or confirmations.`
             }
           }));
         });
