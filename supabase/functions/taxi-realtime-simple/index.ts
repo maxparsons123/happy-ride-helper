@@ -5694,6 +5694,10 @@ Do NOT say 'booked' until the tool returns success.]`
           // Tried to cancel a response that wasn't active - reset our tracking flag
           console.log(`[${sessionState.callId}] ℹ️ Cancel on inactive response (benign) - resetting openAiResponseActive`);
           sessionState.openAiResponseActive = false;
+          // CRITICAL: safeCancel() sets discardCurrentResponseAudio=true. If the cancel fails because
+          // there was no active response, we must UN-discard or we'll drop all subsequent TTS audio
+          // (looks like "Ada is silent" after reconnect/ask_confirm).
+          sessionState.discardCurrentResponseAudio = false;
         }
         
         // STUCK DETECTION: If we get 3+ errors in 10 seconds and no response is active,
