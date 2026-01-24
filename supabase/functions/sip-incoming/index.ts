@@ -58,13 +58,14 @@ serve(async (req) => {
     socket.onopen = () => {
       console.log(`[${callId}] WebSocket opened`);
       
-      // Create live call record
-      supabase.from("live_calls").insert({
+      // Create live call record (use upsert to handle reconnects)
+      supabase.from("live_calls").upsert({
         call_id: callId,
         source: `sip:${trunk.name}`,
         status: "active",
         transcripts: [],
-      }).then(({ error }) => {
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "call_id" }).then(({ error }) => {
         if (error) console.error(`[${callId}] Error creating live call:`, error);
       });
 
