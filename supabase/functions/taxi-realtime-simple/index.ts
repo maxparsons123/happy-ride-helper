@@ -1668,6 +1668,7 @@ interface SessionState {
   bargeInIgnoreUntil: number; // timestamp until which we ignore barge-in checks (startup echo)
   openAiResponseActive: boolean; // true between response.created and response.done
   deferredResponseCreate: boolean; // if true, send response.create right after response.done
+  deferredResponseCreatePayload: any | null; // optional payload for deferred response.create
   // Speech timing diagnostics
   speechStartTime: number | null;
   speechStopTime: number | null;
@@ -1700,6 +1701,9 @@ interface SessionState {
     avgRms: number;
     peakRms: number;
   };
+
+  // Debug: set true after we see the first response.audio.delta for this call.
+  loggedFirstTtsDelta: boolean;
 
   // Call ended flag - prevents further processing after end_call
   callEnded: boolean;
@@ -2410,13 +2414,13 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         }
       }));
       
-      openaiWs?.send(JSON.stringify({
+      safeResponseCreate(sessionState, "resume-prompt", {
         type: "response.create",
         response: {
           modalities: ["text", "audio"],
           instructions: `Say this EXACTLY (brief reconnection acknowledgment): "${resumeText}" - STOP after asking. Do NOT re-introduce yourself.`
         }
-      }));
+      });
       
       console.log(`[${sessionState.callId}] 📝 Resume prompt injected (step: ${sessionState.bookingStep}, hasFare: ${!!pendingQuote?.fare})`);
       return;
@@ -2438,13 +2442,13 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
       }
     }));
 
-    openaiWs?.send(JSON.stringify({
+    safeResponseCreate(sessionState, "greeting", {
       type: "response.create",
       response: {
         modalities: ["text", "audio"],
         instructions: `Say this EXACTLY (do not change, shorten, or ADD to it): "${greetingText}" - STOP IMMEDIATELY after the question mark. Do NOT add any more questions. Do NOT continue speaking. Wait for the user's response.`
       }
-    }));
+    });
     console.log(`[${sessionState.callId}] 📝 Session updated + greeting triggered`);
   };
 
@@ -2590,19 +2594,20 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
   };
 
   // Helper: avoid conversation_already_has_active_response by deferring response.create
-  const safeResponseCreate = (sessionState: SessionState, reason?: string) => {
+  const safeResponseCreate = (sessionState: SessionState, reason?: string, payload?: any) => {
     if (!openaiWs || !openaiConnected) return;
     if (sessionState.callEnded) return;
 
     if (sessionState.openAiResponseActive) {
       sessionState.deferredResponseCreate = true;
+      if (payload) sessionState.deferredResponseCreatePayload = payload;
       console.log(
         `[${sessionState.callId}] ⏳ Deferring response.create` + (reason ? ` (${reason})` : "")
       );
       return;
     }
 
-    openaiWs.send(JSON.stringify({ type: "response.create" }));
+    openaiWs.send(JSON.stringify(payload ?? { type: "response.create" }));
   };
 
   // Helper: safely cancel response only if one is active (prevents response_cancel_not_active errors)
@@ -2858,8 +2863,10 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
               sessionState.pendingTurnResponseCreate;
 
             if (canFlushDeferred) {
+              const payload = sessionState.deferredResponseCreatePayload;
               sessionState.deferredResponseCreate = false;
-              safeResponseCreate(sessionState, "deferred-after-response.done");
+              sessionState.deferredResponseCreatePayload = null;
+              safeResponseCreate(sessionState, "deferred-after-response.done", payload ?? undefined);
             } else {
               console.log(
                 `[${sessionState.callId}] ⏸️ Keeping deferred response.create queued (awaiting ${sessionState.awaitingAnswerForStep})`
@@ -2918,6 +2925,16 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
          break;
 
       case "response.audio.delta": {
+        if (!sessionState.loggedFirstTtsDelta) {
+          sessionState.loggedFirstTtsDelta = true;
+          try {
+            const approxBytes = typeof message.delta === "string" ? Math.floor((message.delta.length * 3) / 4) : 0;
+            console.log(`[${sessionState.callId}] 🔊 First TTS audio chunk received (base64≈${approxBytes} bytes)`);
+          } catch {
+            console.log(`[${sessionState.callId}] 🔊 First TTS audio chunk received`);
+          }
+        }
+
         // Mark Ada as speaking (echo guard)
         if (!sessionState.isAdaSpeaking) {
           // First audio delta of this response
@@ -6186,6 +6203,7 @@ Do NOT say 'booked' until the tool returns success.]`
           console.log(`[${sessionState.callId}] ℹ️ Active-response error - deferring next response.create until response.done`);
           sessionState.openAiResponseActive = true;
           sessionState.deferredResponseCreate = true;
+          // Keep any previously queued payload (if present). If none exists, fall back to plain response.create.
           // Don't let this benign-sync issue trigger the stuck-recovery spam.
           sessionState.recentErrorCount = 0;
           break;
@@ -8103,6 +8121,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           bargeInIgnoreUntil: 0,
           openAiResponseActive: false,
           deferredResponseCreate: false,
+          deferredResponseCreatePayload: null,
           speechStartTime: null,
           speechStopTime: null,
           lastUserTranscriptAt: null,
@@ -8126,6 +8145,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             avgRms: 0,
             peakRms: 0,
           },
+          loggedFirstTtsDelta: false,
           callEnded: false,
           callStartedAt: Date.now(),
           finalGoodbyePending: false,
@@ -8323,6 +8343,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             bargeInIgnoreUntil: 0,
             openAiResponseActive: false,
             deferredResponseCreate: false,
+             deferredResponseCreatePayload: null,
              speechStartTime: null,
              speechStopTime: null,
              lastUserTranscriptAt: null,
@@ -8346,6 +8367,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
                avgRms: 0,
                peakRms: 0,
              },
+             loggedFirstTtsDelta: false,
              callEnded: false,
              callStartedAt: Date.now(),
              finalGoodbyePending: false,
