@@ -35,6 +35,21 @@ const SUMMARY_PROTECTION_MS = 8000;
 // Audio diagnostics logging interval (every N packets)
 const AUDIO_DIAGNOSTICS_LOG_INTERVAL = 200;
 
+// --- Binary Audio Helper ---
+// Sends audio as raw binary instead of base64 JSON (33% smaller, faster)
+function sendBinaryAudio(socket: WebSocket, base64Audio: string): void {
+  try {
+    const binaryStr = atob(base64Audio);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    socket.send(bytes.buffer);
+  } catch (e) {
+    console.error("❌ Failed to decode audio for binary send:", e);
+  }
+}
+
 // === DISPATCH-TRIGGERED HANDOFF ===
 // Delay after fare quote before triggering reconnect (allows Ada's fare speech to start)
 const HANDOFF_AFTER_DISPATCH_DELAY_MS = 2500;
@@ -2840,17 +2855,14 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           if (sessionState.pendingAudioBuffer.length > 50) {
             console.log(`[${sessionState.callId}] ⚠️ Audio buffer safety flush (${sessionState.pendingAudioBuffer.length} chunks)`);
             for (const audioChunk of sessionState.pendingAudioBuffer) {
-              socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+              sendBinaryAudio(socket, audioChunk);
             }
             sessionState.pendingAudioBuffer = [];
             sessionState.audioVerified = true; // Stop buffering
           }
         } else {
-          // Forward audio to bridge immediately
-          socket.send(JSON.stringify({
-            type: "audio",
-            audio: message.delta
-          }));
+          // Forward audio to bridge immediately as binary (33% smaller, faster)
+          sendBinaryAudio(socket, message.delta);
         }
         break;
       }
@@ -3523,7 +3535,7 @@ Do NOT say 'booked' until the tool returns success.]`
               // Safe to flush buffered audio
               const chunksToFlush = sessionState.pendingAudioBuffer.splice(0, sessionState.pendingAudioBuffer.length);
               for (const audioChunk of chunksToFlush) {
-                socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+                sendBinaryAudio(socket, audioChunk);
               }
               sessionState.audioVerified = true; // Mark verified for rest of this response
             }
@@ -3817,7 +3829,7 @@ Do NOT say 'booked' until the tool returns success.]`
 
            console.log(`[${sessionState.callId}] 🔊 Final flush: ${sessionState.pendingAudioBuffer.length} buffered audio chunks on transcript.done`);
            for (const audioChunk of sessionState.pendingAudioBuffer) {
-             socket.send(JSON.stringify({ type: "audio", audio: audioChunk }));
+             sendBinaryAudio(socket, audioChunk);
            }
            sessionState.pendingAudioBuffer = [];
            sessionState.audioVerified = true;
