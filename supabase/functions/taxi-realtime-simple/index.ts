@@ -2319,15 +2319,19 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           silence_duration_ms: sessionState.useRasaAudioProcessing ? 1200 : 1800,
         },
         temperature: 0.6, // OpenAI Realtime API minimum is 0.6
-        // ✅ LATENCY FIX: Cap output tokens for faster response generation
-        // Shorter responses = faster TTS = snappier conversation
-        max_response_output_tokens: 150,
+        // Avoid truncating spoken prompts mid-sentence (which sounds like “cutting out”).
+        // Keep reasonably bounded to protect latency.
+        max_response_output_tokens: 400,
         tools: TOOLS,
         tool_choice: "auto"
       }
     };
 
     openaiWs?.send(JSON.stringify(sessionUpdate));
+
+    console.log(
+      `[${sessionState.callId}] ⚙️ Sent session.update (max_response_output_tokens=${sessionUpdate.session.max_response_output_tokens})`,
+    );
 
     // ═══════════════════════════════════════════════════════════════════
     // GREETING / RESUME HANDLING
