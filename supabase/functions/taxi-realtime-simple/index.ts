@@ -3757,10 +3757,10 @@ Do NOT say 'booked' until the tool returns success.]`
         // === SILENCE PADDING BEFORE COMMIT ===
         // When streaming audio to OpenAI Realtime, if VAD triggers on a very small final chunk,
         // the decoder can hang or drop the last word/phoneme. By padding the audio buffer with 
-        // ~100ms of silence BEFORE committing, we give the transcription engine "room to breathe"
+        // ~250ms of silence BEFORE committing, we give the transcription engine "room to breathe"
         // and process trailing audio data that was sitting in a buffer waiting for more input.
-        // This fixes the "52A" → "52" problem where the final phoneme gets cut off.
-        const SILENCE_PADDING_MS = 100; // 100ms of silence padding
+        // This fixes the "52A" → "52" problem and "three" → "" where the final phoneme gets cut off.
+        const SILENCE_PADDING_MS = 250; // 250ms of silence padding (increased from 100ms for better short word capture)
         const SILENCE_SAMPLE_RATE = 24000; // OpenAI expects 24kHz
         const SILENCE_SAMPLES = Math.floor(SILENCE_SAMPLE_RATE * SILENCE_PADDING_MS / 1000);
         const silenceBuffer = new Int16Array(SILENCE_SAMPLES); // Already zeros = silence
@@ -3888,12 +3888,25 @@ Do NOT say 'booked' until the tool returns success.]`
         if (sessionState.lastQuestionType === "passengers") {
           const t = rawText.toLowerCase().trim();
           // Only rewrite when the entire transcript is the ambiguous token (avoid changing phrases/addresses).
-          const shortOnly = t.length <= 5 && /^\w+$/.test(t);
+          const shortOnly = t.length <= 8 && /^[\w\s]+$/.test(t);
           if (shortOnly) {
-            if (["for", "fore"].includes(t)) sttText = "4";
-            else if (["free", "tree"].includes(t)) sttText = "3";
-            else if (["to", "too"].includes(t)) sttText = "2";
-            else if (["won", "wan"].includes(t)) sttText = "1";
+            // "three" homophones - Whisper often mishears these on telephony
+            if (["free", "tree", "three", "fee", "fry", "frey", "fri"].includes(t)) sttText = "3";
+            else if (["for", "fore", "four", "foe", "floor"].includes(t)) sttText = "4";
+            else if (["to", "too", "two", "tu"].includes(t)) sttText = "2";
+            else if (["won", "wan", "one", "wun"].includes(t)) sttText = "1";
+            else if (["five", "fife", "hive"].includes(t)) sttText = "5";
+            else if (["six", "sick", "sex"].includes(t)) sttText = "6";
+            // Phrases like "just me", "only me" = 1 passenger
+            else if (t === "just me" || t === "only me" || t === "me") sttText = "1";
+            // "three people", "four passengers" etc
+            else if (/^(one|two|three|four|five|six|seven|eight)\s*(people|passengers?)?$/i.test(t)) {
+              const numMatch = t.match(/^(one|two|three|four|five|six|seven|eight)/i);
+              if (numMatch) {
+                const wordToNum: Record<string, string> = { one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8" };
+                sttText = wordToNum[numMatch[1].toLowerCase()] || t;
+              }
+            }
           }
         }
         
