@@ -1017,11 +1017,13 @@ interface ParallelExtractionResult {
 /**
  * Run parallel Gemini extraction on the conversation.
  * This is NON-BLOCKING - fires in background and updates session state when complete.
+ * When autoCorrect is enabled, will cancel and correct OpenAI responses on mismatches.
  * 
  * @param sessionState - Current session state
  * @param userTranscript - The user's latest transcript
  * @param supabaseUrl - Supabase URL for edge function call
  * @param supabaseKey - Service role key
+ * @param openaiWs - OpenAI WebSocket for auto-correction injection (null if not available)
  * @param onComplete - Optional callback when extraction completes
  */
 async function runParallelExtraction(
@@ -1029,6 +1031,7 @@ async function runParallelExtraction(
   userTranscript: string,
   supabaseUrl: string,
   supabaseKey: string,
+  openaiWs: WebSocket | null,
   onComplete?: (result: ParallelExtractionResult | null) => void
 ): Promise<void> {
   if (!sessionState.parallelExtraction.enabled) {
@@ -1122,26 +1125,61 @@ async function runParallelExtraction(
     
     let hasMismatch = false;
     const mismatches: string[] = [];
+    const correctedState: { pickup?: string; destination?: string; passengers?: number } = {};
     
-    // Check pickup mismatch (if Gemini extracted something different)
-    if (result.pickup && currentPickup && 
-        result.pickup.toLowerCase() !== currentPickup.toLowerCase()) {
-      mismatches.push(`pickup: Gemini="${result.pickup}" vs Current="${currentPickup}"`);
-      hasMismatch = true;
+    // Helper to normalize addresses for comparison
+    const normalizeForComparison = (addr: string) => 
+      addr.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+    
+    // Check pickup mismatch (if Gemini extracted something different AND more complete)
+    if (result.pickup && currentPickup) {
+      const geminiNorm = normalizeForComparison(result.pickup);
+      const currentNorm = normalizeForComparison(currentPickup);
+      // Consider it a mismatch if they're substantially different (not just formatting)
+      if (geminiNorm !== currentNorm && 
+          !geminiNorm.includes(currentNorm) && 
+          !currentNorm.includes(geminiNorm)) {
+        mismatches.push(`pickup: Gemini="${result.pickup}" vs OpenAI="${currentPickup}"`);
+        hasMismatch = true;
+        // Prefer the longer/more complete address
+        if (result.pickup.length > currentPickup.length) {
+          correctedState.pickup = result.pickup;
+        }
+      }
+    } else if (result.pickup && !currentPickup) {
+      // Gemini found pickup but OpenAI didn't save it
+      correctedState.pickup = result.pickup;
+      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found pickup not in state: "${result.pickup}"`);
     }
     
     // Check destination mismatch
-    if (result.destination && currentDestination && 
-        result.destination.toLowerCase() !== currentDestination.toLowerCase()) {
-      mismatches.push(`destination: Gemini="${result.destination}" vs Current="${currentDestination}"`);
-      hasMismatch = true;
+    if (result.destination && currentDestination) {
+      const geminiNorm = normalizeForComparison(result.destination);
+      const currentNorm = normalizeForComparison(currentDestination);
+      if (geminiNorm !== currentNorm && 
+          !geminiNorm.includes(currentNorm) && 
+          !currentNorm.includes(geminiNorm)) {
+        mismatches.push(`destination: Gemini="${result.destination}" vs OpenAI="${currentDestination}"`);
+        hasMismatch = true;
+        if (result.destination.length > currentDestination.length) {
+          correctedState.destination = result.destination;
+        }
+      }
+    } else if (result.destination && !currentDestination) {
+      correctedState.destination = result.destination;
+      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found destination not in state: "${result.destination}"`);
     }
     
     // Check passengers mismatch
     if (result.passengers !== null && currentPassengers !== null && 
         result.passengers !== currentPassengers) {
-      mismatches.push(`passengers: Gemini=${result.passengers} vs Current=${currentPassengers}`);
+      mismatches.push(`passengers: Gemini=${result.passengers} vs OpenAI=${currentPassengers}`);
       hasMismatch = true;
+      // Trust Gemini for passenger count (it has question context)
+      correctedState.passengers = result.passengers;
+    } else if (result.passengers !== null && currentPassengers === null) {
+      correctedState.passengers = result.passengers;
+      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found passengers not in state: ${result.passengers}`);
     }
     
     if (hasMismatch) {
@@ -1149,15 +1187,84 @@ async function runParallelExtraction(
       console.log(`[${callId}] ⚠️ DUAL-BRAIN MISMATCH #${sessionState.parallelExtraction.mismatches}: ${mismatches.join(", ")}`);
     }
     
-    // Detect correction
-    if (result.is_correction) {
+    // Detect user correction
+    const isUserCorrection = result.is_correction || 
+      (result.fields_changed.length > 0 && hasMismatch);
+    
+    if (isUserCorrection) {
       sessionState.parallelExtraction.corrections++;
-      console.log(`[${callId}] 🔄 DUAL-BRAIN CORRECTION #${sessionState.parallelExtraction.corrections}: User correcting ${result.corrected_field}`);
+      console.log(`[${callId}] 🔄 DUAL-BRAIN CORRECTION #${sessionState.parallelExtraction.corrections}: User correcting ${result.corrected_field || result.fields_changed.join(", ")}`);
+    }
+    
+    // === AUTO-CORRECTION INJECTION ===
+    const shouldAutoCorrect = sessionState.parallelExtraction.autoCorrect && 
+        openaiWs && 
+        openaiWs.readyState === WebSocket.OPEN &&
+        (hasMismatch || isUserCorrection || Object.keys(correctedState).length > 0);
+    
+    if (shouldAutoCorrect) {
+      console.log(`[${callId}] 🔧 DUAL-BRAIN AUTO-CORRECT: Injecting verified state...`);
       
-      // Phase 2: If autoCorrect is enabled, inject the correction
-      if (sessionState.parallelExtraction.autoCorrect) {
-        console.log(`[${callId}] 🔧 DUAL-BRAIN: Auto-correction would be applied here (not yet implemented)`);
-        // TODO: Implement auto-correction injection
+      // Apply corrections to session state
+      if (correctedState.pickup) {
+        console.log(`[${callId}] 🔧 Correcting pickup: "${sessionState.booking.pickup}" → "${correctedState.pickup}"`);
+        sessionState.booking.pickup = correctedState.pickup;
+      }
+      if (correctedState.destination) {
+        console.log(`[${callId}] 🔧 Correcting destination: "${sessionState.booking.destination}" → "${correctedState.destination}"`);
+        sessionState.booking.destination = correctedState.destination;
+      }
+      if (correctedState.passengers !== undefined) {
+        console.log(`[${callId}] 🔧 Correcting passengers: ${sessionState.booking.passengers} → ${correctedState.passengers}`);
+        sessionState.booking.passengers = correctedState.passengers;
+      }
+      
+      // Cancel current OpenAI response (if generating with wrong data)
+      try {
+        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        console.log(`[${callId}] 🔧 Cancelled OpenAI response for correction`);
+      } catch (e) {
+        console.error(`[${callId}] Failed to cancel response:`, e);
+      }
+      
+      // Build verified state message for injection
+      const verifiedStateMessage = `[VERIFIED BOOKING STATE - USE EXACTLY]:
+Pickup: ${sessionState.booking.pickup || "not yet provided"}
+Destination: ${sessionState.booking.destination || "not yet provided"}
+Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
+Time: ${sessionState.booking.pickup_time || "ASAP"}
+
+${isUserCorrection ? `The customer just CORRECTED their ${result.corrected_field || "booking details"}. Acknowledge this update naturally and continue.` : ""}
+CRITICAL: Use ONLY these verified addresses. Do NOT use any other addresses from memory.`;
+      
+      // Inject the verified state as a system message
+      try {
+        openaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{
+              type: "input_text",
+              text: verifiedStateMessage
+            }]
+          }
+        }));
+        
+        // Trigger a new response with corrected state
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions: isUserCorrection 
+              ? "Acknowledge the customer's correction briefly and continue with the booking. Use the VERIFIED addresses above."
+              : "Continue the booking conversation naturally. Use the VERIFIED addresses above."
+          }
+        }));
+        
+        console.log(`[${callId}] 🔧 DUAL-BRAIN: Injected verified state and triggered corrected response`);
+      } catch (e) {
+        console.error(`[${callId}] Failed to inject correction:`, e);
       }
     }
     
@@ -3937,7 +4044,8 @@ Do NOT say 'booked' until the tool returns success.]`
               userText,
               SUPABASE_URL,
               SUPABASE_SERVICE_ROLE_KEY,
-              (result) => {
+              openaiWs,  // Pass OpenAI WebSocket for auto-correction
+              (result: ParallelExtractionResult | null) => {
                 // Log extraction summary when complete
                 if (result) {
                   console.log(`[${sessionState.callId}] 🧠 DUAL-BRAIN COMPLETE: ${result.fields_changed.length} fields extracted in ${result.processing_time_ms}ms`);
@@ -7803,7 +7911,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           adaAskedQuestionAt: null, // Track when Ada last asked any question
           parallelExtraction: {
             enabled: true,
-            autoCorrect: false, // Phase 1: logging only
+            autoCorrect: true, // Phase 2: Auto-correction enabled
             lastExtractionAt: null,
             lastExtractionResult: null,
             mismatches: 0,
@@ -8009,7 +8117,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             adaAskedQuestionAt: null, // Track when Ada last asked any question
             parallelExtraction: {
               enabled: true,
-              autoCorrect: false, // Phase 1: logging only
+              autoCorrect: true, // Phase 2: Auto-correction enabled
               lastExtractionAt: null,
               lastExtractionResult: null,
               mismatches: 0,
