@@ -362,6 +362,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_ws?.State != WebSocketState.Open) return;
 
+        // HD AUDIO OPTIMIZED SESSION CONFIG
+        // With 48kHz Opus from C# SIP Bridge, we can use more aggressive STT settings
         var sessionUpdate = new
         {
             type = "session.update",
@@ -376,9 +378,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.5,
-                    prefix_padding_ms = 300,
-                    silence_duration_ms = 1200
+                    // Lower threshold catches quiet speech and short words like "3", "4"
+                    threshold = 0.4,
+                    // 500ms prefix captures the "prep breath" before words
+                    prefix_padding_ms = 500,
+                    // 1000ms silence = end of turn (responsive but not premature)
+                    silence_duration_ms = 1000
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -386,6 +391,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
+        Log("🎧 HD Audio: VAD threshold=0.4, prefix=500ms (optimized for wideband)");
+        
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
             new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
