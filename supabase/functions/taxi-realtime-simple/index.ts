@@ -1874,6 +1874,12 @@ interface SessionState {
   partialTranscript: string;
   // Whether we already committed due to punctuation detection (prevent double-commits)
   punctuationCommitSent: boolean;
+  // True once OpenAI has accepted a commit for the current utterance.
+  // Prevents double-commit (which causes input_audio_buffer_commit_empty).
+  didCommitThisUtterance: boolean;
+  // If we had to cancel a VAD-triggered response because we're still waiting for the user transcript,
+  // we set this flag so we can explicitly trigger response.create as soon as the transcript arrives.
+  pendingTurnResponseCreate: boolean;
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
@@ -2647,6 +2653,9 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           // Allow response if timeout exceeded (user may have hung up or there's an issue)
           if (waitTime < TURN_BASED_TIMEOUT_MS) {
             console.log(`[${sessionState.callId}] ⏳ TURN-BASED BLOCK: Awaiting user answer for ${sessionState.awaitingAnswerForStep?.toUpperCase()} (${(waitTime / 1000).toFixed(1)}s)`);
+            // IMPORTANT: This response was VAD-triggered before we had the finalized user transcript.
+            // Cancel it, then explicitly re-trigger once the transcript arrives.
+            sessionState.pendingTurnResponseCreate = true;
             safeCancel(sessionState, `turn-based: awaiting user answer for ${sessionState.awaitingAnswerForStep}`);
             break;
           } else {
@@ -3955,8 +3964,14 @@ Do NOT say 'booked' until the tool returns success.]`
         // Check for sentence-ending punctuation at the end of accumulated transcript
         const hasSentenceEnd = /[.!?]\s*$/.test(sessionState.partialTranscript);
         
-        // Only trigger if we haven't already committed for this utterance
-        if (hasSentenceEnd && !sessionState.punctuationCommitSent && sessionState.audioBufferedMs >= 100) {
+        // Only trigger if we haven't already committed for this utterance.
+        // (Deltas can arrive AFTER OpenAI already committed the buffer; double-commits cause commit_empty.)
+        if (
+          hasSentenceEnd &&
+          !sessionState.punctuationCommitSent &&
+          !sessionState.didCommitThisUtterance &&
+          sessionState.audioBufferedMs >= 100
+        ) {
           console.log(`[${sessionState.callId}] 📌 PUNCTUATION DETECTED: "${sessionState.partialTranscript.slice(-30)}" - triggering early commit (${sessionState.audioBufferedMs.toFixed(0)}ms buffered)`);
           
           sessionState.punctuationCommitSent = true; // Prevent multiple commits
@@ -3965,6 +3980,7 @@ Do NOT say 'booked' until the tool returns success.]`
           if (openaiWs && openaiConnected && !sessionState.callEnded) {
             try {
               openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+              sessionState.didCommitThisUtterance = true;
               sessionState.audioBufferedSinceSpeechStart = false;
               sessionState.audioBufferedMs = 0;
             } catch (e) {
@@ -3981,6 +3997,8 @@ Do NOT say 'booked' until the tool returns success.]`
         // Reset audio buffer tracking - will be set true/incremented when audio is appended
         sessionState.audioBufferedSinceSpeechStart = false;
         sessionState.audioBufferedMs = 0; // Reset ms counter for fresh utterance
+        sessionState.didCommitThisUtterance = false;
+        sessionState.pendingTurnResponseCreate = false;
         // Reset partial transcript tracking for punctuation detection
         sessionState.partialTranscript = "";
         sessionState.punctuationCommitSent = false;
@@ -4026,8 +4044,15 @@ Do NOT say 'booked' until the tool returns success.]`
         // This is especially critical for confirmation responses and passenger counts.
         // CRITICAL: Only commit if we have at least 100ms of audio buffered (OpenAI requirement)
         const MIN_AUDIO_FOR_COMMIT_MS = 100;
-        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected && 
-            sessionState.audioBufferedSinceSpeechStart && sessionState.audioBufferedMs >= MIN_AUDIO_FOR_COMMIT_MS) {
+        if (
+          speechDuration > 0 &&
+          speechDuration < 3000 &&
+          openaiWs &&
+          openaiConnected &&
+          sessionState.audioBufferedSinceSpeechStart &&
+          sessionState.audioBufferedMs >= MIN_AUDIO_FOR_COMMIT_MS &&
+          !sessionState.didCommitThisUtterance
+        ) {
           // Short speech detected - pad with silence and send manual commit to force transcription
           console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Padding ${SILENCE_PADDING_MS}ms silence + forcing transcription for short speech (${speechDuration}ms, buffered=${sessionState.audioBufferedMs.toFixed(0)}ms)`);
           try {
@@ -4038,6 +4063,7 @@ Do NOT say 'booked' until the tool returns success.]`
             }));
             // Now commit with the padded audio
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            sessionState.didCommitThisUtterance = true;
             sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
             sessionState.audioBufferedMs = 0; // Reset ms counter
           } catch (e) {
@@ -4107,7 +4133,10 @@ Do NOT say 'booked' until the tool returns success.]`
           commitIntervals.forEach((delay) => {
             setTimeout(() => {
               // GUARD: Only commit if we have >=100ms buffered audio AND connection is open
-              const hasEnoughAudio = sessionState.audioBufferedSinceSpeechStart && sessionState.audioBufferedMs >= 100;
+              const hasEnoughAudio =
+                sessionState.audioBufferedSinceSpeechStart &&
+                sessionState.audioBufferedMs >= 100 &&
+                !sessionState.didCommitThisUtterance;
               if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed && hasEnoughAudio) {
                 try {
                   console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Padding silence + forcing transcription check (${delay}ms after speech_stopped, buffered=${sessionState.audioBufferedMs.toFixed(0)}ms)`);
@@ -4117,6 +4146,7 @@ Do NOT say 'booked' until the tool returns success.]`
                     audio: silenceBase64
                   }));
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                  sessionState.didCommitThisUtterance = true;
                   sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
                   sessionState.audioBufferedMs = 0; // Reset ms counter
                 } catch (e) {
@@ -4132,6 +4162,15 @@ Do NOT say 'booked' until the tool returns success.]`
         }
         
         // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
+        break;
+      }
+
+      case "input_audio_buffer.committed": {
+        // OpenAI server-side VAD has committed the buffer.
+        // Mark as committed so we don't attempt a second commit via punctuation/manual fallbacks.
+        sessionState.didCommitThisUtterance = true;
+        sessionState.audioBufferedSinceSpeechStart = false;
+        sessionState.audioBufferedMs = 0;
         break;
       }
 
@@ -4153,6 +4192,14 @@ Do NOT say 'booked' until the tool returns success.]`
           sessionState.awaitingUserAnswer = false;
           sessionState.awaitingUserAnswerSince = null;
           sessionState.awaitingAnswerForStep = null;
+        }
+
+        // If we had to cancel a VAD-triggered response while waiting for this transcript,
+        // explicitly trigger the assistant turn now.
+        if (sessionState.pendingTurnResponseCreate && rawText.length > 0) {
+          console.log(`[${sessionState.callId}] ⚡ TURN-BASED: triggering response.create immediately after user transcript`);
+          sessionState.pendingTurnResponseCreate = false;
+          safeResponseCreate(sessionState, "turn-based-after-transcript");
         }
 
         // === ADDRESS ECHO DETECTION (passengers step only) ===
@@ -8042,6 +8089,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
           partialTranscript: "", // Accumulated partial transcript for punctuation detection
           punctuationCommitSent: false, // Prevent double-commits from punctuation detection
+          didCommitThisUtterance: false,
+          pendingTurnResponseCreate: false,
           recentErrorCount: 0,
           lastErrorAt: null,
           // Strict turn-based protocol
@@ -8259,6 +8308,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             audioBufferedMs: 0, // Milliseconds of audio buffered since last commit/clear
             partialTranscript: "", // Accumulated partial transcript for punctuation detection
             punctuationCommitSent: false, // Prevent double-commits from punctuation detection
+            didCommitThisUtterance: false,
+            pendingTurnResponseCreate: false,
             recentErrorCount: 0,
             lastErrorAt: null,
             // Strict turn-based protocol
@@ -8270,7 +8321,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // ═══════════════════════════════════════════════════════════════════
           // APPLY RESTORED SESSION DATA (if available)
           // ═══════════════════════════════════════════════════════════════════
-          if (restoredSession) {
+          if (state && restoredSession) {
             // Restore booking state
             state.booking.pickup = restoredSession.pickup || null;
             state.booking.destination = restoredSession.destination || null;
