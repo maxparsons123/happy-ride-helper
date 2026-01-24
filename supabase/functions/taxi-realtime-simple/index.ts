@@ -2863,20 +2863,105 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           }
         }
         
-        // ✅ MISSING STEP DATA GUARD: Prevent Ada from advancing if current step's field is empty.
-        // This catches cases where VAD triggered a response but no user speech was detected,
-        // or when the user's answer wasn't transcribed. Forces Ada to re-ask the current question.
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // 🛡️ PRIOR STEPS COMPLETE GUARD (Critical Fix for Skipped Questions)
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // PROBLEM: Ada can ask about TIME when DESTINATION/PASSENGERS are still empty because:
+        // - bookingStep gets advanced when Ada asks a question (from transcript.done handler)
+        // - But the old MISSING STEP guard only checks if currentStep's field is empty
         // 
-        // ⚠️ CRITICAL RACE FIX: Don't trigger if user JUST spoke (transcript may still be processing).
-        // The "Sorry, I didn't catch that" loop happens when:
-        // 1. User says "52A David Road"
-        // 2. VAD commits audio, OpenAI starts response before our transcript handler runs
-        // 3. This guard fires, cancelling response and saying "Sorry"
-        // 
-        // Solution: Check if user spoke recently (within 3 seconds) - if so, wait for transcript.
-        const currentStep = sessionState.bookingStep;
-        const isDataStep = ["pickup", "destination", "passengers", "time"].includes(currentStep || "");
+        // FIX: Before allowing ANY response, check if ALL prior steps have data filled.
+        // If prior steps are incomplete, reset bookingStep to the FIRST incomplete step.
+        // ═══════════════════════════════════════════════════════════════════════════════
+        const priorStepsCheck = () => {
+          const hasPickup = !!sessionState.booking.pickup && sessionState.booking.pickup.length > 2;
+          const hasDestination = !!sessionState.booking.destination && sessionState.booking.destination.length > 2;
+          const hasPassengers = sessionState.booking.passengers !== null && sessionState.booking.passengers > 0;
+          const hasTime = !!sessionState.booking.pickup_time;
+          
+          // Find the first incomplete step
+          if (!hasPickup) return { firstIncomplete: "pickup" as const, fields: { P: "❌", D: hasDestination ? "✅" : "❌", X: hasPassengers ? "✅" : "❌", T: hasTime ? "✅" : "❌" } };
+          if (!hasDestination) return { firstIncomplete: "destination" as const, fields: { P: "✅", D: "❌", X: hasPassengers ? "✅" : "❌", T: hasTime ? "✅" : "❌" } };
+          if (!hasPassengers) return { firstIncomplete: "passengers" as const, fields: { P: "✅", D: "✅", X: "❌", T: hasTime ? "✅" : "❌" } };
+          if (!hasTime) return { firstIncomplete: "time" as const, fields: { P: "✅", D: "✅", X: "✅", T: "❌" } };
+          return { firstIncomplete: null, fields: { P: "✅", D: "✅", X: "✅", T: "✅" } };
+        };
         
+        const priorCheck = priorStepsCheck();
+        const currentStep = sessionState.bookingStep;
+        const stepOrder = ["pickup", "destination", "passengers", "time", "summary", "confirmed"];
+        const currentStepIndex = stepOrder.indexOf(currentStep || "pickup");
+        const firstIncompleteIndex = priorCheck.firstIncomplete ? stepOrder.indexOf(priorCheck.firstIncomplete) : currentStepIndex;
+        
+        // ✅ RACE CONDITION FIX: If user spoke in the last 3 seconds, DON'T intervene.
+        const TRANSCRIPT_GRACE_MS = 3000;
+        const userSpokeRecently = sessionState.speechStopTime && 
+          (Date.now() - sessionState.speechStopTime) < TRANSCRIPT_GRACE_MS;
+        const transcriptJustReceived = sessionState.lastUserTranscriptAt &&
+          (Date.now() - sessionState.lastUserTranscriptAt) < 1000;
+        
+        // REPROMPT COOLDOWN: Prevent guard from firing in a loop (min 3s between reprompts)
+        const REPROMPT_COOLDOWN_MS = 3000;
+        const repromptOnCooldown = sessionState.lastMissingStepRepromptAt && 
+          (Date.now() - sessionState.lastMissingStepRepromptAt) < REPROMPT_COOLDOWN_MS;
+        
+        // If current step is AHEAD of the first incomplete step, we have skipped questions!
+        const isDataStep = ["pickup", "destination", "passengers", "time"].includes(currentStep || "");
+        if (isDataStep && sessionState.greetingDelivered && priorCheck.firstIncomplete && currentStepIndex > firstIncompleteIndex) {
+          
+          // Skipped steps detected - this is the critical bug!
+          console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
+          console.log(`[${sessionState.callId}] ║  🚨 PRIOR STEPS INCOMPLETE - RESETTING STATE                   ║`);
+          console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
+          console.log(`[${sessionState.callId}] ║  Current step: ${currentStep?.toUpperCase().padEnd(46)}║`);
+          console.log(`[${sessionState.callId}] ║  First incomplete: ${priorCheck.firstIncomplete.toUpperCase().padEnd(42)}║`);
+          console.log(`[${sessionState.callId}] ║  Checklist: P=${priorCheck.fields.P} D=${priorCheck.fields.D} X=${priorCheck.fields.X} T=${priorCheck.fields.T}                                    ║`);
+          console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+          
+          // Reset bookingStep to the first incomplete step
+          sessionState.bookingStep = priorCheck.firstIncomplete;
+          sessionState.lastQuestionType = priorCheck.firstIncomplete === "time" ? "time" : priorCheck.firstIncomplete;
+          
+          if (!userSpokeRecently && !transcriptJustReceived && !repromptOnCooldown) {
+            sessionState.lastMissingStepRepromptAt = Date.now();
+            
+            // Cancel the current response (which would ask the wrong question)
+            safeCancel(sessionState, `prior step ${priorCheck.firstIncomplete} incomplete`);
+            
+            // Inject a reprompt for the FIRST incomplete step
+            const repromptMap: Record<string, string> = {
+              pickup: "Where would you like to be picked up?",
+              destination: "And where would you like to go?",
+              passengers: "How many people will be travelling?",
+              time: "When do you need the taxi?"
+            };
+            
+            const repromptText = repromptMap[priorCheck.firstIncomplete] || "Could you please repeat that?";
+            
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: Required data missing. Ask ONLY: "${repromptText}" - Just ask the question directly, no apologies.]`
+                }]
+              }
+            }));
+            
+            // Re-engage the turn-based lock for this step
+            sessionState.awaitingUserAnswer = true;
+            sessionState.awaitingUserAnswerSince = Date.now();
+            sessionState.awaitingAnswerForStep = priorCheck.firstIncomplete as any;
+            sessionState.allowOneResponseWhileAwaitingUserAnswer = true;
+            
+            safeResponseCreate(sessionState, "prior-steps-incomplete-reprompt");
+            break;
+          }
+        }
+        
+        // ✅ MISSING STEP DATA GUARD (Original - for current step empty)
         if (isDataStep && sessionState.greetingDelivered) {
           const stepFieldEmpty = (
             (currentStep === "pickup" && !sessionState.booking.pickup) ||
@@ -2885,34 +2970,18 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             (currentStep === "time" && !sessionState.booking.pickup_time)
           );
           
-          // ✅ RACE CONDITION FIX: If user spoke in the last 3 seconds, DON'T say "Sorry".
-          // The transcript is likely still in flight from OpenAI.
-          const TRANSCRIPT_GRACE_MS = 3000;
-          const userSpokeRecently = sessionState.speechStopTime && 
-            (Date.now() - sessionState.speechStopTime) < TRANSCRIPT_GRACE_MS;
-          const transcriptJustReceived = sessionState.lastUserTranscriptAt &&
-            (Date.now() - sessionState.lastUserTranscriptAt) < 1000;
-          
-          // REPROMPT COOLDOWN: Prevent guard from firing in a loop (min 3s between reprompts)
-          const REPROMPT_COOLDOWN_MS = 3000;
-          const repromptOnCooldown = sessionState.lastMissingStepRepromptAt && 
-            (Date.now() - sessionState.lastMissingStepRepromptAt) < REPROMPT_COOLDOWN_MS;
-          
           if (stepFieldEmpty && !userSpokeRecently && !transcriptJustReceived && !repromptOnCooldown) {
             console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
             console.log(`[${sessionState.callId}] ║  🛡️ MISSING STEP DATA GUARD TRIGGERED                          ║`);
             console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
             console.log(`[${sessionState.callId}] ║  Step: ${currentStep?.toUpperCase().padEnd(54)}║`);
+            console.log(`[${sessionState.callId}] ║  Checklist: P=${priorCheck.fields.P} D=${priorCheck.fields.D} X=${priorCheck.fields.X} T=${priorCheck.fields.T}                                    ║`);
             console.log(`[${sessionState.callId}] ║  Field is empty - injecting reprompt                           ║`);
             console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
             
-            // Mark the reprompt timestamp to prevent loop
             sessionState.lastMissingStepRepromptAt = Date.now();
-            
-            // Cancel the current response (which would advance to next question)
             safeCancel(sessionState, `step ${currentStep} incomplete`);
             
-            // Inject a reprompt for the current step - WITHOUT "Sorry" if it's a timeout vs failed STT
             const repromptMap: Record<string, string> = {
               pickup: "Where would you like to be picked up?",
               destination: "And where would you like to go?",
@@ -2934,24 +3003,17 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
               }
             }));
             
-            // Re-engage the turn-based lock for this step
             sessionState.awaitingUserAnswer = true;
             sessionState.awaitingUserAnswerSince = Date.now();
             sessionState.awaitingAnswerForStep = currentStep as any;
-
-            // Allow the reprompt response through the turn-based guard.
             sessionState.allowOneResponseWhileAwaitingUserAnswer = true;
             
-            // Trigger the reprompt (safely; avoids conversation_already_has_active_response)
             safeResponseCreate(sessionState, "missing-step-reprompt");
             break;
           } else if (stepFieldEmpty && repromptOnCooldown) {
-            // Skip - already reprompted recently
             console.log(`[${sessionState.callId}] ⏳ MISSING STEP GUARD: on cooldown (${((Date.now() - (sessionState.lastMissingStepRepromptAt || 0)) / 1000).toFixed(1)}s ago) - skipping`);
           } else if (stepFieldEmpty && (userSpokeRecently || transcriptJustReceived)) {
-            // User JUST spoke - don't reprompt, let the transcript handler update the state
             console.log(`[${sessionState.callId}] ⏳ MISSING STEP DATA GUARD: ${currentStep} empty BUT user spoke ${userSpokeRecently ? ((Date.now() - (sessionState.speechStopTime || 0)) / 1000).toFixed(1) + 's ago' : 'just now'} - waiting for transcript`);
-            // Don't break - let the response proceed; the state will be updated by transcript handler
           }
         }
         
