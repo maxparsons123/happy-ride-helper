@@ -3475,6 +3475,20 @@ Do NOT say 'booked' until the tool returns success.]`
           }
           console.log(`[${sessionState.callId}] 🎯 Ada asked for: CONFIRMATION`);
           
+          // === CRITICAL: Advance to summary step and FLUSH to DB immediately ===
+          // If Ada just asked "Is that correct?", we are definitely at the summary step.
+          // Flush to database NOW so that if WebSocket times out while waiting for user's
+          // "yes", session restoration will correctly resume from confirmation phase.
+          if (sessionState.bookingStep !== "summary" && sessionState.bookingStep !== "confirmed") {
+            console.log(`[${sessionState.callId}] 📈 CONFIRMATION DETECTED: Advancing step from ${sessionState.bookingStep} → summary`);
+            sessionState.bookingStep = "summary";
+            sessionState.bookingStepAdvancedAt = Date.now();
+          }
+          
+          // ✅ CRITICAL: Flush to DB immediately so session restoration works if disconnect happens
+          immediateFlush(sessionState);
+          console.log(`[${sessionState.callId}] 💾 CONFIRMATION PHASE: Flushed state to DB for session restoration`);
+
           // === CONFIRMATION TIMEOUT FALLBACK ===
           // If no user transcript arrives within 8 seconds AND we have a full checklist,
           // automatically trigger book_taxi(request_quote) to prevent call stall.
