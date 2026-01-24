@@ -88,7 +88,8 @@ OPUS_APPLICATION = "voip"
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)
 PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE)
 PREFER_SLIN16 = True
-FORMAT_LOCK_DURATION_S = 0.75
+FORMAT_LOCK_DURATION_S = 60.0  # Lock format for entire call duration
+FORMAT_LOCK_FRAME_COUNT = 10   # Number of consistent frames before locking
 
 # DSP Pipeline — **ENHANCED**
 ENABLE_VOLUME_BOOST = True
@@ -404,10 +405,17 @@ class TaxiBridge:
             self.state.ast_frame_bytes = frame_len
             return
 
+        # FORMAT LOCK: Once locked, ignore ALL frame size changes (prevents oscillation)
         if self.state.format_locked:
             elapsed = time.time() - self.state.format_lock_time
-            if elapsed < FORMAT_LOCK_DURATION_S and frame_len not in CANONICAL_SIZES:
-                self.state.ast_frame_bytes = frame_len
+            if elapsed < FORMAT_LOCK_DURATION_S:
+                # Ignore any frame size changes - stick with locked format
+                if frame_len != self.state.ast_frame_bytes:
+                    # Log but don't change format
+                    if not hasattr(self.state, '_format_mismatch_logged'):
+                        logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (format locked to %s)",
+                                     self.state.call_id, self.state.ast_frame_bytes, frame_len, self.state.ast_codec)
+                        self.state._format_mismatch_logged = True
                 return
 
         old_codec = self.state.ast_codec
@@ -430,6 +438,8 @@ class TaxiBridge:
             logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s", self.state.call_id, frame_len, self.state.ast_codec)
 
         self.state.ast_frame_bytes = frame_len
+        
+        # Lock format after detection (permanent for this call)
         self.state.format_locked = True
         self.state.format_lock_time = time.time()
 
