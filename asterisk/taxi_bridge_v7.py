@@ -553,8 +553,27 @@ class TaxiBridge:
           • slin 8kHz:    320 bytes (2 bytes/sample × 8000 × 0.02)
           • slin16 16kHz: 640 bytes (2 bytes/sample × 16000 × 0.02)
           • Opus 48kHz:   variable (typically 80-200 bytes for speech @ 32kbps)
+          
+        STABILITY: Once format is locked, we IGNORE frame size changes and process
+        audio using the locked format. This prevents connection drops caused by
+        Asterisk frame size oscillation (320↔640 bytes).
         """
         CANONICAL_SIZES = {160, 320, 640}
+        
+        # =====================================================================
+        # PERMANENT LOCK: Once locked, ignore ALL frame size changes
+        # This is the key fix for connection stability
+        # =====================================================================
+        if self.state.format_locked:
+            if frame_len != self.state.ast_frame_bytes:
+                # Only log occasionally to avoid spam
+                if not hasattr(self, '_last_size_warning') or time.time() - self._last_size_warning > 10:
+                    logger.debug("[%s] 📊 Frame size %d→%d (ignoring, locked to %s@%dHz)",
+                               self.state.call_id, self.state.ast_frame_bytes, frame_len,
+                               self.state.ast_codec, self.state.ast_rate)
+                    self._last_size_warning = time.time()
+            # DON'T update ast_frame_bytes - keep it stable for processing
+            return
         
         # Check for Opus first (variable size, special detection)
         # Only do this if Opus is enabled AND we have a decoder.
@@ -565,45 +584,36 @@ class TaxiBridge:
             and frame_len not in CANONICAL_SIZES
             and self._is_opus_frame(payload)
         ):
-            if self.state.ast_codec != "opus":
-                self.state.ast_codec = "opus"
-                self.state.ast_rate = RATE_OPUS
-                self.state.format_locked = True
-                self.state.format_lock_time = time.time()
-                logger.info("[%s] 🎵 Format: Opus @ %dHz (variable frames)",
-                           self.state.call_id, RATE_OPUS)
-                
-                # Notify edge function
-                if self.ws and self.state.ws_connected:
-                    await self.ws.send(json.dumps({
-                        "type": "update_format",
-                        "call_id": self.state.call_id,
-                        "inbound_format": "opus",
-                        "inbound_sample_rate": RATE_OPUS,
-                    }))
+            self.state.ast_codec = "opus"
+            self.state.ast_rate = RATE_OPUS
             self.state.ast_frame_bytes = frame_len
+            self.state.format_locked = True
+            self.state.format_lock_time = time.time()
+            logger.info("[%s] 🎵 Format LOCKED: Opus @ %dHz (variable frames)",
+                       self.state.call_id, RATE_OPUS)
+            
+            # Notify edge function
+            if self.ws and self.state.ws_connected:
+                await self.ws.send(json.dumps({
+                    "type": "update_format",
+                    "call_id": self.state.call_id,
+                    "inbound_format": "opus",
+                    "inbound_sample_rate": RATE_OPUS,
+                }))
             return
         
         # Honor ulaw lock unless we see definitive PCM frame sizes
         if LOCK_FORMAT_ULAW and frame_len not in {320, 640}:
-            if frame_len != self.state.ast_frame_bytes:
-                logger.warning("[%s] ⚠️ Frame size %d (locked to ulaw)", 
-                              self.state.call_id, frame_len)
+            self.state.ast_codec = "ulaw"
+            self.state.ast_rate = RATE_ULAW
             self.state.ast_frame_bytes = frame_len
+            self.state.format_locked = True
+            self.state.format_lock_time = time.time()
+            logger.info("[%s] 🔊 Format LOCKED: ulaw @ %dHz (forced)", 
+                       self.state.call_id, RATE_ULAW)
             return
         
-        # Debounce unless we see canonical sizes
-        if self.state.format_locked:
-            elapsed = time.time() - self.state.format_lock_time
-            if elapsed < FORMAT_LOCK_DURATION_S and frame_len not in CANONICAL_SIZES:
-                self.state.ast_frame_bytes = frame_len
-                return
-            self.state.format_locked = False
-        
-        old_codec = self.state.ast_codec
-        old_rate = self.state.ast_rate
-        
-        # Detect format from frame size
+        # Detect format from frame size (first detection only)
         if frame_len == 640:
             self.state.ast_codec = "slin16"
             self.state.ast_rate = RATE_SLIN16
@@ -614,36 +624,30 @@ class TaxiBridge:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = RATE_ULAW
         else:
-            # Heuristic for unusual sizes
-            if frame_len > 400:
-                self.state.ast_codec = "slin16"
-                self.state.ast_rate = RATE_SLIN16
-            else:
-                self.state.ast_codec = "slin"
-                self.state.ast_rate = RATE_ULAW
-            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s", 
-                          self.state.call_id, frame_len, self.state.ast_codec)
+            # Heuristic for unusual sizes - default to slin (8kHz) for stability
+            self.state.ast_codec = "slin"
+            self.state.ast_rate = RATE_ULAW
+            logger.warning("[%s] ⚠️ Unusual frame size %d, defaulting to slin@8kHz", 
+                          self.state.call_id, frame_len)
         
         self.state.ast_frame_bytes = frame_len
         self.state.format_locked = True
         self.state.format_lock_time = time.time()
         
         # Log format detection
-        if old_codec != self.state.ast_codec:
-            logger.info("[%s] 🔊 Format: %s @ %dHz (%d bytes/frame)", 
-                       self.state.call_id, self.state.ast_codec, 
-                       self.state.ast_rate, frame_len)
-            
-            # Notify edge function of format change
-            if self.ws and self.state.ws_connected:
-                # Send actual codec name (slin16/slin/ulaw/opus) for correct edge function handling
-                inbound_fmt = self.state.ast_codec
-                await self.ws.send(json.dumps({
-                    "type": "update_format",
-                    "call_id": self.state.call_id,
-                    "inbound_format": inbound_fmt,
-                    "inbound_sample_rate": self.state.ast_rate,
-                }))
+        logger.info("[%s] 🔊 Format LOCKED: %s @ %dHz (%d bytes/frame)", 
+                   self.state.call_id, self.state.ast_codec, 
+                   self.state.ast_rate, frame_len)
+        
+        # Notify edge function of format
+        if self.ws and self.state.ws_connected:
+            inbound_fmt = self.state.ast_codec
+            await self.ws.send(json.dumps({
+                "type": "update_format",
+                "call_id": self.state.call_id,
+                "inbound_format": inbound_fmt,
+                "inbound_sample_rate": self.state.ast_rate,
+            }))
     
     # -------------------------------------------------------------------------
     # WEBSOCKET CONNECTION
