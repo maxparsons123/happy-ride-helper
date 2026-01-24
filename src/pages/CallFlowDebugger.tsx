@@ -1,11 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { supabase } from "@/integrations/supabase/client";
-import { ArrowLeft, Phone, Mic, Bot, CheckCircle2, XCircle, RefreshCw, Search } from "lucide-react";
+import { ArrowLeft, Phone, Mic, Bot, CheckCircle2, XCircle, RefreshCw, Search, Radio, Wifi } from "lucide-react";
 import { Link } from "react-router-dom";
 
 interface QAPair {
@@ -34,6 +34,10 @@ export default function CallFlowDebugger() {
   const [selectedCall, setSelectedCall] = useState<CallFlow | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [loading, setLoading] = useState(true);
+  const [isLive, setIsLive] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [flashCallId, setFlashCallId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const fetchCalls = async () => {
     setLoading(true);
@@ -100,6 +104,7 @@ export default function CallFlowDebugger() {
 
     setCalls(flowData);
     setLoading(false);
+    setLastUpdate(new Date());
   };
 
   const getExtractedValue = (questionType: string, call: any): string | null => {
@@ -116,17 +121,40 @@ export default function CallFlowDebugger() {
   useEffect(() => {
     fetchCalls();
 
-    // Subscribe to live updates
+    // Subscribe to live updates with enhanced handling
     const channel = supabase
       .channel("call-flow-updates")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "live_calls" },
-        () => {
-          fetchCalls();
+        (payload) => {
+          console.log("[CallFlow] 🔄 Realtime update:", payload.eventType, payload.new);
+          setLastUpdate(new Date());
+          
+          // Flash the updated call
+          const updatedCallId = (payload.new as any)?.call_id;
+          if (updatedCallId) {
+            setFlashCallId(updatedCallId);
+            setTimeout(() => setFlashCallId(null), 1500);
+          }
+          
+          // Refetch to update the list
+          fetchCalls().then(() => {
+            // Auto-update selected call if it's the one that changed
+            if (selectedCall && updatedCallId === selectedCall.callId) {
+              setCalls(prev => {
+                const updated = prev.find(c => c.callId === updatedCallId);
+                if (updated) setSelectedCall(updated);
+                return prev;
+              });
+            }
+          });
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("[CallFlow] 📡 Subscription status:", status);
+        setIsLive(status === "SUBSCRIBED");
+      });
 
     return () => {
       supabase.removeChannel(channel);
@@ -168,10 +196,35 @@ export default function CallFlowDebugger() {
               </p>
             </div>
           </div>
-          <Button onClick={fetchCalls} variant="outline" size="sm">
-            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-3">
+            {/* Live indicator */}
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
+              isLive 
+                ? "bg-green-500/20 text-green-400 border border-green-500/30" 
+                : "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+            }`}>
+              {isLive ? (
+                <>
+                  <Wifi className="h-3 w-3 animate-pulse" />
+                  Live
+                </>
+              ) : (
+                <>
+                  <Radio className="h-3 w-3" />
+                  Connecting...
+                </>
+              )}
+            </div>
+            {lastUpdate && (
+              <span className="text-xs text-muted-foreground">
+                Updated {lastUpdate.toLocaleTimeString()}
+              </span>
+            )}
+            <Button onClick={fetchCalls} variant="outline" size="sm">
+              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -181,6 +234,11 @@ export default function CallFlowDebugger() {
               <CardTitle className="text-lg flex items-center gap-2">
                 <Phone className="h-4 w-4" />
                 Recent Calls
+                {calls.filter(c => c.status === "active").length > 0 && (
+                  <Badge className="bg-green-500/20 text-green-400 text-xs animate-pulse">
+                    {calls.filter(c => c.status === "active").length} active
+                  </Badge>
+                )}
               </CardTitle>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -199,10 +257,14 @@ export default function CallFlowDebugger() {
                     <button
                       key={call.callId}
                       onClick={() => setSelectedCall(call)}
-                      className={`w-full text-left p-3 rounded-lg transition-colors ${
+                      className={`w-full text-left p-3 rounded-lg transition-all duration-300 ${
                         selectedCall?.callId === call.callId
                           ? "bg-primary/10 border border-primary/30"
                           : "hover:bg-muted/50"
+                      } ${
+                        flashCallId === call.callId
+                          ? "ring-2 ring-green-500 bg-green-500/10"
+                          : ""
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1">
