@@ -3993,11 +3993,41 @@ Do NOT say 'booked' until the tool returns success.]`
           immediateFlush(sessionState);
           console.log(`[${sessionState.callId}] 💾 CONFIRMATION PHASE: Flushed state to DB for session restoration`);
 
+          // === FORCED AUDIO COMMITS FOR CONFIRMATION ===
+          // Short responses like "yes", "that's correct" often don't trigger VAD.
+          // Schedule periodic audio buffer commits at 2s, 4s, 6s to force transcription.
+          const capturedConfirmationAt = sessionState.confirmationAskedAt;
+          const commitIntervals = [2000, 4000, 6000];
+          
+          for (const delayMs of commitIntervals) {
+            setTimeout(() => {
+              // Guard: Only commit if still waiting for confirmation
+              if (
+                sessionState.confirmationAskedAt === capturedConfirmationAt &&
+                sessionState.lastQuestionType === "confirmation" &&
+                !sessionState.quoteRequestedAt &&
+                !sessionState.pendingQuote &&
+                !sessionState.awaitingDispatchCallback &&
+                !sessionState.callEnded &&
+                openaiWs &&
+                openaiConnected &&
+                !isConnectionClosed &&
+                sessionState.audioBufferedMs >= 100 // Only commit if we have audio
+              ) {
+                console.log(`[${sessionState.callId}] 📤 FORCED CONFIRMATION COMMIT: Scheduling commit at ${delayMs}ms (buffered=${sessionState.audioBufferedMs.toFixed(0)}ms)`);
+                try {
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                } catch (e) {
+                  // Ignore - may be disconnected
+                }
+              }
+            }, delayMs);
+          }
+
           // === CONFIRMATION TIMEOUT FALLBACK ===
           // If no user transcript arrives within 8 seconds AND we have a full checklist,
           // automatically trigger book_taxi(request_quote) to prevent call stall.
           const confirmationTimeoutMs = 8000;
-          const capturedConfirmationAt = sessionState.confirmationAskedAt;
           
           setTimeout(() => {
             // Guard: Only proceed if confirmation state hasn't changed
