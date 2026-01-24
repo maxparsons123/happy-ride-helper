@@ -985,114 +985,6 @@ function isSummaryNegation(text: string): boolean {
   return /^(no\.?|nope\.?|not correct|wrong|incorrect|that'?s not right|that'?s wrong)$/i.test(lower);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CODE-DRIVEN SUMMARY - Prevents OpenAI from hallucinating addresses during recap
-// This builds the summary server-side from verified sessionState.booking data
-// ═══════════════════════════════════════════════════════════════════════════════
-function buildCodeDrivenSummary(
-  pickup: string,
-  destination: string, 
-  passengers: number,
-  pickupTime: string
-): string {
-  const passengerText = passengers === 1 ? "1 passenger" : `${passengers} passengers`;
-  const timeText = pickupTime.toLowerCase() === "asap" || pickupTime.toLowerCase() === "now" 
-    ? "as soon as possible" 
-    : pickupTime;
-  
-  return `Alright, let me quickly summarize your booking. You'd like to be picked up at ${pickup}, and travel to ${destination}. There will be ${passengerText}, and you'd like the taxi ${timeText}. Is that correct?`;
-}
-
-// Inject code-driven summary into OpenAI conversation
-// Returns true if injection was performed, false otherwise
-function injectCodeDrivenSummary(
-  sessionState: any,
-  openaiWs: WebSocket | null,
-  openaiConnected: boolean
-): boolean {
-  // Guard: Only inject if we have all required fields
-  if (!sessionState.booking?.pickup || 
-      !sessionState.booking?.destination || 
-      sessionState.booking?.passengers === null ||
-      sessionState.booking?.passengers === undefined) {
-    return false;
-  }
-  
-  // Guard: Don't inject if already done recently (prevent duplicates)
-  if (sessionState.codeDrivenSummaryInjectedAt && 
-      Date.now() - sessionState.codeDrivenSummaryInjectedAt < 30000) {
-    return false;
-  }
-  
-  // Guard: Don't inject if quote already in progress
-  if (sessionState.quoteRequestedAt || 
-      sessionState.pendingQuote || 
-      sessionState.awaitingDispatchCallback) {
-    return false;
-  }
-  
-  // Guard: WebSocket must be ready
-  if (!openaiWs || !openaiConnected) {
-    return false;
-  }
-  
-  const pickup = sessionState.booking.pickup;
-  const destination = sessionState.booking.destination;
-  const passengers = sessionState.booking.passengers || 1;
-  const pickupTime = sessionState.booking.pickup_time || "ASAP";
-  
-  // Build the verbatim summary
-  const verbatimSummary = buildCodeDrivenSummary(pickup, destination, passengers, pickupTime);
-  
-  console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN SUMMARY: Injecting verbatim recap (no AI generation)`);
-  console.log(`[${sessionState.callId}] 📋 Summary: "${verbatimSummary}"`);
-  
-  // Mark as injected to prevent duplicates
-  sessionState.codeDrivenSummaryInjectedAt = Date.now();
-  sessionState.lastSpokenConfirmation = verbatimSummary;
-  sessionState.lastSpokenConfirmationAt = Date.now();
-  
-  // Cancel any in-flight response
-  if (sessionState.openAiResponseActive) {
-    openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-  }
-  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-  
-  // Inject the verbatim summary as a system instruction
-  openaiWs.send(JSON.stringify({
-    type: "conversation.item.create",
-    item: {
-      type: "message",
-      role: "user",
-      content: [{
-        type: "input_text",
-        text: `[CODE-DRIVEN SUMMARY - VERBATIM SPEECH REQUIRED]:
-SAY THIS EXACT SENTENCE WORD-FOR-WORD (do NOT rephrase, do NOT change any addresses or numbers):
-
-"${verbatimSummary}"
-
-RULES:
-1. Say the EXACT words above - no paraphrasing, no adding filler words
-2. After speaking, WAIT SILENTLY for customer response (yes/no)
-3. Do NOT confirm the booking yet - wait for their answer
-4. If they say YES → say "One moment please" then call book_taxi with action: "request_quote"
-5. If they say NO → ask "What would you like me to change?"`
-      }]
-    }
-  }));
-  
-  // Trigger the response
-  openaiWs.send(JSON.stringify({
-    type: "response.create",
-    response: {
-      modalities: ["audio", "text"],
-      instructions: `SAY VERBATIM (no changes): "${verbatimSummary}" Then STOP and wait silently.`
-    }
-  }));
-  
-  return true;
-}
-
 function correctTranscript(text: string): string {
   if (!text || text.length === 0) return "";
   
@@ -1103,290 +995,6 @@ function correctTranscript(text: string): string {
   
   // Capitalize first letter and return
   return corrected.charAt(0).toUpperCase() + corrected.slice(1);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PARALLEL GEMINI EXTRACTION (DUAL-BRAIN ARCHITECTURE)
-// Runs Brain 1 (Gemini via taxi-extract-unified) in parallel with OpenAI responses
-// to improve field accuracy and detect corrections
-// ═══════════════════════════════════════════════════════════════════════════════
-
-interface ParallelExtractionResult {
-  pickup: string | null;
-  destination: string | null;
-  passengers: number | null;
-  pickup_time: string | null;
-  is_correction: boolean;
-  corrected_field: string | null;
-  fields_changed: string[];
-  processing_time_ms: number;
-}
-
-/**
- * Run parallel Gemini extraction on the conversation.
- * This is NON-BLOCKING - fires in background and updates session state when complete.
- * When autoCorrect is enabled, will cancel and correct OpenAI responses on mismatches.
- * 
- * @param sessionState - Current session state
- * @param userTranscript - The user's latest transcript
- * @param supabaseUrl - Supabase URL for edge function call
- * @param supabaseKey - Service role key
- * @param openaiWs - OpenAI WebSocket for auto-correction injection (null if not available)
- * @param onComplete - Optional callback when extraction completes
- */
-async function runParallelExtraction(
-  sessionState: SessionState,
-  userTranscript: string,
-  supabaseUrl: string,
-  supabaseKey: string,
-  openaiWs: WebSocket | null,
-  onComplete?: (result: ParallelExtractionResult | null) => void
-): Promise<void> {
-  if (!sessionState.parallelExtraction.enabled) {
-    return;
-  }
-  
-  const startTime = Date.now();
-  const callId = sessionState.callId;
-  
-  console.log(`[${callId}] 🧠 DUAL-BRAIN: Starting parallel Gemini extraction...`);
-  
-  try {
-    // Build conversation context for extraction
-    // Include Ada's last question for context-aware field mapping
-    const lastAdaText = sessionState.transcripts
-      .filter(t => t.role === "assistant")
-      .slice(-1)[0]?.text || "";
-    
-    // Format conversation for extraction
-    const conversation: Array<{ role: "user" | "assistant"; text: string; timestamp?: string }> = [];
-    
-    // Add context about what Ada asked
-    if (lastAdaText && sessionState.lastQuestionType) {
-      conversation.push({
-        role: "assistant",
-        text: `[CONTEXT: Ada asked: "${lastAdaText.substring(0, 200)}"]`,
-      });
-    }
-    
-    // Add the user's response
-    conversation.push({
-      role: "user",
-      text: userTranscript,
-      timestamp: new Date().toISOString(),
-    });
-    
-    // Call taxi-extract-unified edge function
-    const response = await fetch(`${supabaseUrl}/functions/v1/taxi-extract-unified`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${supabaseKey}`,
-      },
-      body: JSON.stringify({
-        conversation,
-        current_booking: {
-          pickup: sessionState.booking.pickup,
-          destination: sessionState.booking.destination,
-          passengers: sessionState.booking.passengers,
-          pickup_time: sessionState.booking.pickup_time,
-        },
-        caller_phone: sessionState.phone,
-        is_modification: sessionState.booking.version > 0 || sessionState.hasActiveBooking,
-      }),
-    });
-    
-    const processingTime = Date.now() - startTime;
-    
-    if (!response.ok) {
-      console.error(`[${callId}] 🧠 DUAL-BRAIN: Extraction failed (${response.status})`);
-      return;
-    }
-    
-    const data = await response.json();
-    
-    // Parse the extraction result
-    const result: ParallelExtractionResult = {
-      pickup: data.pickup_location || data.pickup || null,
-      destination: data.dropoff_location || data.destination || null,
-      passengers: data.number_of_passengers ?? data.passengers ?? null,
-      pickup_time: data.pickup_time || null,
-      is_correction: data.is_correction || false,
-      corrected_field: data.corrected_field || null,
-      fields_changed: data.fields_changed || data.fields_extracted || [],
-      processing_time_ms: processingTime,
-    };
-    
-    // Store result in session state
-    sessionState.parallelExtraction.lastExtractionAt = Date.now();
-    sessionState.parallelExtraction.lastExtractionResult = result;
-    
-    // Log the extraction
-    console.log(`[${callId}] 🧠 DUAL-BRAIN: Extraction complete in ${processingTime}ms`);
-    console.log(`[${callId}] 🧠 Result: pickup="${result.pickup}", dest="${result.destination}", pax=${result.passengers}, time="${result.pickup_time}"`);
-    console.log(`[${callId}] 🧠 Correction: ${result.is_correction ? `YES (${result.corrected_field})` : "NO"}, Fields: [${result.fields_changed.join(", ")}]`);
-    
-    // Compare with current session state to detect mismatches
-    const currentPickup = sessionState.booking.pickup;
-    const currentDestination = sessionState.booking.destination;
-    const currentPassengers = sessionState.booking.passengers;
-    
-    let hasMismatch = false;
-    const mismatches: string[] = [];
-    const correctedState: { pickup?: string; destination?: string; passengers?: number } = {};
-    
-    // Helper to normalize addresses for comparison
-    const normalizeForComparison = (addr: string) => 
-      addr.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
-    
-    // Helper to check if addresses are substantially different
-    const areAddressesDifferent = (a: string, b: string): boolean => {
-      const normA = normalizeForComparison(a);
-      const normB = normalizeForComparison(b);
-      // If one contains the other, they're similar (e.g., "52A" vs "52A David Road")
-      if (normA.includes(normB) || normB.includes(normA)) return false;
-      // If very different normalized forms, they're different
-      if (normA !== normB) return true;
-      return false;
-    };
-    
-    // Check pickup mismatch (if Gemini extracted something different)
-    if (result.pickup && currentPickup) {
-      if (areAddressesDifferent(result.pickup, currentPickup)) {
-        mismatches.push(`pickup: Gemini="${result.pickup}" vs OpenAI="${currentPickup}"`);
-        hasMismatch = true;
-        // ALWAYS trust Gemini when addresses are substantially different
-        // because Gemini has the context of what Ada asked
-        correctedState.pickup = result.pickup;
-        console.log(`[${callId}] 🧠 DUAL-BRAIN: Trusting Gemini pickup over OpenAI (different addresses)`);
-      }
-    } else if (result.pickup && !currentPickup) {
-      // Gemini found pickup but OpenAI didn't save it
-      correctedState.pickup = result.pickup;
-      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found pickup not in state: "${result.pickup}"`);
-    }
-    
-    // Check destination mismatch
-    if (result.destination && currentDestination) {
-      if (areAddressesDifferent(result.destination, currentDestination)) {
-        mismatches.push(`destination: Gemini="${result.destination}" vs OpenAI="${currentDestination}"`);
-        hasMismatch = true;
-        // ALWAYS trust Gemini for destination too
-        correctedState.destination = result.destination;
-        console.log(`[${callId}] 🧠 DUAL-BRAIN: Trusting Gemini destination over OpenAI (different addresses)`);
-      }
-    } else if (result.destination && !currentDestination) {
-      correctedState.destination = result.destination;
-      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found destination not in state: "${result.destination}"`);
-    }
-    
-    // Check passengers mismatch
-    if (result.passengers !== null && result.passengers > 0 && 
-        currentPassengers !== null && result.passengers !== currentPassengers) {
-      mismatches.push(`passengers: Gemini=${result.passengers} vs OpenAI=${currentPassengers}`);
-      hasMismatch = true;
-      // Trust Gemini for passenger count (it has question context)
-      correctedState.passengers = result.passengers;
-    } else if (result.passengers !== null && result.passengers > 0 && 
-               (currentPassengers === null || currentPassengers === 0)) {
-      correctedState.passengers = result.passengers;
-      console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found passengers not in state: ${result.passengers}`);
-    }
-    
-    if (hasMismatch) {
-      sessionState.parallelExtraction.mismatches++;
-      console.log(`[${callId}] ⚠️ DUAL-BRAIN MISMATCH #${sessionState.parallelExtraction.mismatches}: ${mismatches.join(", ")}`);
-    }
-    
-    // Detect user correction
-    const isUserCorrection = result.is_correction || 
-      (result.fields_changed.length > 0 && hasMismatch);
-    
-    if (isUserCorrection) {
-      sessionState.parallelExtraction.corrections++;
-      console.log(`[${callId}] 🔄 DUAL-BRAIN CORRECTION #${sessionState.parallelExtraction.corrections}: User correcting ${result.corrected_field || result.fields_changed.join(", ")}`);
-    }
-    
-    // === AUTO-CORRECTION INJECTION ===
-    const shouldAutoCorrect = sessionState.parallelExtraction.autoCorrect && 
-        openaiWs && 
-        openaiWs.readyState === WebSocket.OPEN &&
-        (hasMismatch || isUserCorrection || Object.keys(correctedState).length > 0);
-    
-    if (shouldAutoCorrect) {
-      console.log(`[${callId}] 🔧 DUAL-BRAIN AUTO-CORRECT: Injecting verified state...`);
-      
-      // Apply corrections to session state
-      if (correctedState.pickup) {
-        console.log(`[${callId}] 🔧 Correcting pickup: "${sessionState.booking.pickup}" → "${correctedState.pickup}"`);
-        sessionState.booking.pickup = correctedState.pickup;
-      }
-      if (correctedState.destination) {
-        console.log(`[${callId}] 🔧 Correcting destination: "${sessionState.booking.destination}" → "${correctedState.destination}"`);
-        sessionState.booking.destination = correctedState.destination;
-      }
-      if (correctedState.passengers !== undefined) {
-        console.log(`[${callId}] 🔧 Correcting passengers: ${sessionState.booking.passengers} → ${correctedState.passengers}`);
-        sessionState.booking.passengers = correctedState.passengers;
-      }
-      
-      // Cancel current OpenAI response (if generating with wrong data)
-      try {
-        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-        console.log(`[${callId}] 🔧 Cancelled OpenAI response for correction`);
-      } catch (e) {
-        console.error(`[${callId}] Failed to cancel response:`, e);
-      }
-      
-      // Build verified state message for injection
-      const verifiedStateMessage = `[VERIFIED BOOKING STATE - USE EXACTLY]:
-Pickup: ${sessionState.booking.pickup || "not yet provided"}
-Destination: ${sessionState.booking.destination || "not yet provided"}
-Passengers: ${sessionState.booking.passengers ?? "not yet provided"}
-Time: ${sessionState.booking.pickup_time || "ASAP"}
-
-${isUserCorrection ? `The customer just CORRECTED their ${result.corrected_field || "booking details"}. Acknowledge this update naturally and continue.` : ""}
-CRITICAL: Use ONLY these verified addresses. Do NOT use any other addresses from memory.`;
-      
-      // Inject the verified state as a system message
-      try {
-        openaiWs.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{
-              type: "input_text",
-              text: verifiedStateMessage
-            }]
-          }
-        }));
-        
-        // Trigger a new response with corrected state
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: isUserCorrection 
-              ? "Acknowledge the customer's correction briefly and continue with the booking. Use the VERIFIED addresses above."
-              : "Continue the booking conversation naturally. Use the VERIFIED addresses above."
-          }
-        }));
-        
-        console.log(`[${callId}] 🔧 DUAL-BRAIN: Injected verified state and triggered corrected response`);
-      } catch (e) {
-        console.error(`[${callId}] Failed to inject correction:`, e);
-      }
-    }
-    
-    // Call the completion callback if provided
-    if (onComplete) {
-      onComplete(result);
-    }
-    
-  } catch (err) {
-    console.error(`[${callId}] 🧠 DUAL-BRAIN: Extraction error:`, err);
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2125,9 +1733,6 @@ interface SessionState {
   // Track last spoken confirmation to detect and prevent repetition
   lastSpokenConfirmation: string | null;
   lastSpokenConfirmationAt: number | null;
-  
-  // Code-driven summary injection timestamp (prevents duplicate summaries)
-  codeDrivenSummaryInjectedAt: number | null;
 
   // Track when Ada last asked ANY question (for post-booking response wait)
   // If Ada asks "Would you like to book a taxi to one of these events?" we must wait for response
@@ -2202,27 +1807,6 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
-  
-  // === PARALLEL GEMINI EXTRACTION (DUAL-BRAIN) ===
-  // Runs Brain 1 (Gemini via taxi-extract-unified) in parallel with OpenAI responses
-  // Compares extractions to catch mistakes and detect corrections
-  parallelExtraction: {
-    enabled: boolean;
-    autoCorrect: boolean; // If true, inject corrections; if false, just log
-    lastExtractionAt: number | null;
-    lastExtractionResult: {
-      pickup: string | null;
-      destination: string | null;
-      passengers: number | null;
-      pickup_time: string | null;
-      is_correction: boolean;
-      corrected_field: string | null;
-      fields_changed: string[];
-      processing_time_ms: number;
-    } | null;
-    mismatches: number; // Count of mismatches between Gemini and OpenAI
-    corrections: number; // Count of corrections detected
-  };
 }
 
 serve(async (req) => {
@@ -4146,152 +3730,11 @@ Do NOT say 'booked' until the tool returns success.]`
           // Schedule batched flush - don't block voice flow
           scheduleTranscriptFlush(sessionState);
 
-          // === PARALLEL GEMINI EXTRACTION (DUAL-BRAIN) ===
-          // Fire off Brain 1 extraction in parallel with OpenAI's response
-          // This runs non-blocking and updates session state when complete
-          if (sessionState.parallelExtraction.enabled && 
-              sessionState.bookingStep !== "confirmed" &&
-              !sessionState.callEnded) {
-            // Run extraction in background - don't await
-            runParallelExtraction(
-              sessionState,
-              userText,
-              SUPABASE_URL,
-              SUPABASE_SERVICE_ROLE_KEY,
-              openaiWs,  // Pass OpenAI WebSocket for auto-correction
-              (result: ParallelExtractionResult | null) => {
-                // Log extraction summary when complete
-                if (result) {
-                  console.log(`[${sessionState.callId}] 🧠 DUAL-BRAIN COMPLETE: ${result.fields_changed.length} fields extracted in ${result.processing_time_ms}ms`);
-                }
-              }
-            ).catch(err => {
-              console.error(`[${sessionState.callId}] 🧠 DUAL-BRAIN ERROR:`, err);
-            });
-          }
-
           // Reset booking confirmation flag on new user turn
           // (Ada must call book_taxi again to be allowed to say "Booked!")
           sessionState.bookingConfirmedThisTurn = false;
-          
-          // === CODE-DRIVEN SUMMARY INJECTION ===
-          // When user answers the TIME question and we have all 4 fields, inject verbatim summary
-          // This prevents OpenAI from hallucinating addresses during the recap
+
           const lowerUserText = userText.toLowerCase();
-          
-          // Check if this looks like a time response (regardless of lastQuestionType)
-          const looksLikeTimeResponse = /\b(now|asap|straight ?away|right ?away|immediately|as soon as|minutes?|hours?|morning|afternoon|evening|tonight|tomorrow|today|book|taxi|\d{1,2}[:.:]?\d{0,2}\s*(?:am|pm)?)\b/i.test(lowerUserText);
-          
-          // Check if we have all booking fields
-          const hasAllFields = sessionState.booking?.pickup && 
-                              sessionState.booking?.destination && 
-                              sessionState.booking?.passengers !== null;
-          
-          // Debug logging for code-driven summary
-          if (looksLikeTimeResponse || hasAllFields) {
-            console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN CHECK: lastQ=${sessionState.lastQuestionType}, pickup=${sessionState.booking?.pickup || 'null'}, dest=${sessionState.booking?.destination || 'null'}, pax=${sessionState.booking?.passengers}, timeMatch=${looksLikeTimeResponse}, step=${sessionState.bookingStep}`);
-          }
-          
-          const isTimeResponse = sessionState.lastQuestionType === "time" && looksLikeTimeResponse;
-          
-          // ALSO trigger code-driven summary if:
-          // 1. We have all 4 fields (pickup, dest, passengers) 
-          // 2. User mentions "book", "taxi", "straight away", "now", "ASAP"
-          // 3. We haven't already injected a summary
-          const shouldTriggerSummary = (isTimeResponse || 
-            (hasAllFields && looksLikeTimeResponse && sessionState.bookingStep !== "confirmed")) &&
-            !sessionState.codeDrivenSummaryInjectedAt &&
-            !sessionState.quoteRequestedAt &&
-            !sessionState.pendingQuote &&
-            openaiWs && openaiConnected && !sessionState.callEnded;
-          
-          if (shouldTriggerSummary) {
-            
-            // Extract time from user response
-            let extractedTime = "as soon as possible";
-            if (/\b(now|asap|straight ?away|right ?away|immediately|as soon as)\b/i.test(lowerUserText)) {
-              extractedTime = "as soon as possible";
-            } else if (/tomorrow/i.test(lowerUserText)) {
-              extractedTime = lowerUserText.includes("at") || /\d/.test(lowerUserText) 
-                ? lowerUserText.trim() 
-                : "tomorrow";
-            } else if (/\b(morning|afternoon|evening|tonight)\b/i.test(lowerUserText)) {
-              extractedTime = lowerUserText.trim();
-            } else if (/\d{1,2}[:.:]?\d{0,2}\s*(?:am|pm|hours?)?/i.test(lowerUserText)) {
-              const timeMatch = lowerUserText.match(/\d{1,2}[:.:]?\d{0,2}\s*(?:am|pm|hours?)?/i);
-              extractedTime = timeMatch ? `at ${timeMatch[0]}` : lowerUserText.trim();
-            }
-            
-            // Update booking time
-            sessionState.booking.pickup_time = extractedTime;
-            
-            // Advance to summary step
-            sessionState.bookingStep = "summary";
-            sessionState.bookingStepAdvancedAt = Date.now();
-            
-            console.log(`[${sessionState.callId}] 📋 TIME ANSWER DETECTED: "${userText}" → "${extractedTime}"`);
-            console.log(`[${sessionState.callId}] 📋 All 4 fields complete - injecting CODE-DRIVEN SUMMARY`);
-            
-            // Build the verbatim summary from verified server-side data
-            const pickup = sessionState.booking.pickup || "";
-            const destination = sessionState.booking.destination || "";
-            const passengers = sessionState.booking.passengers || 1;
-            const pickupTime = extractedTime;
-            
-            const verbatimSummary = buildCodeDrivenSummary(pickup, destination, passengers, pickupTime);
-            
-            // Mark as injected to prevent duplicates
-            sessionState.codeDrivenSummaryInjectedAt = Date.now();
-            sessionState.lastSpokenConfirmation = verbatimSummary;
-            sessionState.lastSpokenConfirmationAt = Date.now();
-            
-            // Enable summary protection to prevent barge-in
-            sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
-            
-            // Cancel any in-flight response
-            if (sessionState.openAiResponseActive && openaiWs) {
-              openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            }
-            if (openaiWs) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            
-              // Inject the verbatim summary
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{
-                    type: "input_text",
-                    text: `[CODE-DRIVEN SUMMARY - VERBATIM SPEECH REQUIRED]:
-SAY THIS EXACT SENTENCE WORD-FOR-WORD (do NOT rephrase, do NOT change any addresses or numbers):
-
-"${verbatimSummary}"
-
-RULES:
-1. Say the EXACT words above - no paraphrasing, no adding filler words
-2. After speaking, WAIT SILENTLY for customer response (yes/no)
-3. Do NOT confirm the booking yet - wait for their answer
-4. If they say YES → say "One moment please" then call book_taxi with action: "request_quote"
-5. If they say NO → ask "What would you like me to change?"`
-                  }]
-                }
-              }));
-              
-              // Trigger the response
-              openaiWs.send(JSON.stringify({
-                type: "response.create",
-                response: {
-                  modalities: ["audio", "text"],
-                  instructions: `SAY VERBATIM (no changes): "${verbatimSummary}" Then STOP and wait silently.`
-                }
-              }));
-              
-              console.log(`[${sessionState.callId}] 📋 CODE-DRIVEN SUMMARY INJECTED: "${verbatimSummary}"`);
-            }
-            
-            break; // Skip normal processing - we handled this transcript
-          }
 
           // === ADDRESS VS PASSENGER DETECTION ===
           // Detect when user gives an address when Ada asked about passengers
@@ -8140,15 +7583,6 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
-          codeDrivenSummaryInjectedAt: null, // Track when code-driven summary was injected
-          parallelExtraction: {
-            enabled: true,
-            autoCorrect: false, // DISABLED - was causing flip-flop chaos
-            lastExtractionAt: null,
-            lastExtractionResult: null,
-            mismatches: 0,
-            corrections: 0,
-          },
         };
         
         preConnected = true;
@@ -8347,21 +7781,12 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
-            codeDrivenSummaryInjectedAt: null, // Track when code-driven summary was injected
-            parallelExtraction: {
-              enabled: true,
-              autoCorrect: false, // DISABLED - was causing flip-flop chaos
-              lastExtractionAt: null,
-              lastExtractionResult: null,
-              mismatches: 0,
-              corrections: 0,
-            },
           };
           
           // ═══════════════════════════════════════════════════════════════════
           // APPLY RESTORED SESSION DATA (if available)
           // ═══════════════════════════════════════════════════════════════════
-          if (restoredSession && state) {
+          if (restoredSession) {
             // Restore booking state
             state.booking.pickup = restoredSession.pickup || null;
             state.booking.destination = restoredSession.destination || null;
@@ -8551,29 +7976,18 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             ? String(etaRaw)
             : (Number.isFinite(etaNum) && etaNum > 0 ? `${etaNum} minutes` : "");
 
-          // ✅ CRITICAL FIX: Use the EXACT message from dispatch if provided - NO hallucination allowed!
-          // If dispatch sends a message, Ada MUST speak it verbatim. Only fall back to generated text if no message.
-          let spokenMessage: string;
-          
-          if (message && String(message).trim()) {
-            // Dispatch provided exact message - use it VERBATIM (no AI rephrasing)
-            spokenMessage = String(message).trim();
-            console.log(`[${callId}] 📢 Using EXACT dispatch message (no AI generation): "${spokenMessage}"`);
-          } else {
-            // No message provided - fall back to generated recap (legacy behavior)
-            const recapPickup = state?.booking?.pickup || "";
-            const recapDest = state?.booking?.destination || "";
-            const recapPassengers = state?.booking?.passengers || 1;
+          // Include booking recap so the caller hears the route before deciding on price/ETA
+          const recapPickup = state?.booking?.pickup || "";
+          const recapDest = state?.booking?.destination || "";
+          const recapPassengers = state?.booking?.passengers || 1;
 
-            const recapText = (recapPickup && recapDest)
-              ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
-              : "";
+          const recapText = (recapPickup && recapDest)
+            ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
+            : "";
 
-            spokenMessage = (fareText && etaText)
-              ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
-              : "";
-            console.log(`[${callId}] 📝 Generated fare message (no dispatch message): "${spokenMessage}"`);
-          }
+          const spokenMessage = (fareText && etaText)
+            ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
+            : (message ? String(message) : "");
 
           console.log(`[${callId}] 📥 DISPATCH ask_confirm received: "${message}" → spoken="${spokenMessage}"`);
 
@@ -8772,21 +8186,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           await new Promise(resolve => setTimeout(resolve, 300));
 
           // Inject the fare question into Ada's conversation with explicit YES/NO handling
-          // ✅ VERBATIM SPEECH: The instruction emphasizes exact repetition with NO changes
-          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION - VERBATIM SPEECH REQUIRED]:
-SAY THIS EXACT SENTENCE WORD-FOR-WORD (do NOT rephrase, do NOT add anything, do NOT change numbers):
-
+          const farePromptWithInstructions = `[DISPATCH FARE CONFIRMATION]: You MUST repeat the following sentence EXACTLY, including all numbers and currency, IN ${langName.toUpperCase()}:
 "${spokenMessage}"
 
-RULES:
-1. Say the EXACT words above - no paraphrasing, no adding "great" or "lovely" or any filler
-2. After speaking, WAIT SILENTLY for customer response
-3. Do NOT confirm the booking yet - wait for their yes/no
+After saying it, WAIT SILENTLY for their response. Do NOT confirm the booking yet.
 
 WHEN CUSTOMER RESPONDS:
-- YES / correct / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
-- NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
-- Unclear → ask: "Would you like me to book that?"
+- If they say YES / correct / confirm / go ahead / book it → CALL book_taxi with confirmation_state: "confirmed", pickup: "${state?.booking?.pickup || ''}", destination: "${state?.booking?.destination || ''}"
+- If they say NO / cancel / too expensive → CALL book_taxi with confirmation_state: "rejected"
+- If unclear, ask: "Would you like me to book that?"
 
 DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "confirmed" returns success.`;
 
@@ -8807,12 +8215,12 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             if (state) state.openAiResponseActive = false;
           }
-          // Trigger Ada to speak - VERBATIM, no rephrasing
+          // Trigger Ada to speak
           openaiWs.send(JSON.stringify({
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `SAY VERBATIM (no changes, no filler words, exact repetition): "${spokenMessage}" Then STOP and wait silently. Do NOT add greetings or confirmations.`
+              instructions: `Repeat EXACTLY: "${spokenMessage}" Then STOP and wait silently for yes/no. Do not change any numbers.`
             }
           }));
         });

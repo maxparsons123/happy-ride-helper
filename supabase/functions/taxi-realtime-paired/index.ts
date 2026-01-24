@@ -2180,32 +2180,6 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
     sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
     console.log(`[${callId}] 🛡️ Fare quote protection activated for ${SUMMARY_PROTECTION_MS}ms`);
     
-    // BUILD CODE-DRIVEN RECAP from verified session state (prevents OpenAI hallucinating addresses)
-    const recapPickup = sessionState.booking.pickup || "";
-    const recapDest = sessionState.booking.destination || "";
-    const recapPassengers = sessionState.booking.passengers || 1;
-    
-    // Parse fare and ETA for consistent formatting
-    const fareNum = Number(String(fare ?? "").replace(/[^0-9.]/g, ""));
-    const fareText = Number.isFinite(fareNum) && fareNum > 0
-      ? `£${fareNum.toFixed(2)}`
-      : (fare ? String(fare) : "");
-    
-    const etaRaw = eta_minutes || eta;
-    const etaText = etaRaw ? String(etaRaw) : "";
-    
-    // Build the EXACT script Ada must speak (no room for hallucination)
-    const recapText = (recapPickup && recapDest)
-      ? `Just to confirm, you're going from ${recapPickup} to ${recapDest} for ${recapPassengers} passenger${recapPassengers === 1 ? "" : "s"}. `
-      : "";
-    
-    const spokenMessage = (fareText && etaText)
-      ? `${recapText}The price is ${fareText} and your driver will be ${etaText}. Shall I book that?`
-      : (message ? String(message) : "");
-    
-    console.log(`[${callId}] 📢 CODE-DRIVEN QUOTE: pickup="${recapPickup}", dest="${recapDest}", pax=${recapPassengers}`);
-    console.log(`[${callId}] 📢 EXACT SCRIPT: "${spokenMessage}"`);
-    
     // Inject the fare/ETA message for Ada to speak - with explicit YES/NO handling instructions
     openaiWs.send(JSON.stringify({
       type: "conversation.item.create",
@@ -2214,9 +2188,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
         role: "user",
         content: [{
           type: "input_text",
-          text: `[DISPATCH QUOTE RECEIVED - SPEAK EXACTLY]: "${spokenMessage}"
-
-CRITICAL: Say the EXACT text above word-for-word. Do NOT change addresses. Do NOT add anything.
+          text: `[DISPATCH QUOTE RECEIVED]: Tell the customer EXACTLY: "${message}". IMPORTANT: do NOT repeat pickup/destination/passengers again. Only say the fare/ETA and ask if they want to proceed.
 
 WHEN CUSTOMER RESPONDS:
 - If they say YES / yeah / correct / confirm / go ahead / book it / please → IMMEDIATELY CALL book_taxi with action: "confirmed"
@@ -2232,7 +2204,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `Say EXACTLY this: "${spokenMessage}". Do NOT modify, rephrase, or add any words. When they confirm, call book_taxi with action="confirmed".`
+        instructions: `Say EXACTLY this quote: "${message}". Do NOT recap the journey details. Ask if they want to proceed. When they say yes, call book_taxi with action="confirmed". When they say no, ask if there's anything else you can help with.`
       }
     }));
     
