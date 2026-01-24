@@ -838,7 +838,12 @@ const PHANTOM_PHRASES = [
 
 function isHallucination(text: string): boolean {
   const trimmed = text.trim();
-  if (trimmed.length < 2) return true;
+  // IMPORTANT: Do NOT filter single-digit transcripts ("4", "3", etc.).
+  // Whisper often returns passenger counts as a single digit, and filtering them breaks booking.
+  if (trimmed.length < 2) {
+    if (/^[0-9]$/.test(trimmed)) return false;
+    return true;
+  }
   
   // Check regex patterns first
   if (HALLUCINATION_PATTERNS.some(pattern => pattern.test(trimmed))) {
@@ -3507,6 +3512,22 @@ Do NOT say 'booked' until the tool returns success.]`
       case "conversation.item.input_audio_transcription.completed": {
         // User transcript from Whisper
         const rawText = String(message.transcript || "").trim();
+
+        // If Ada just asked for passengers, very short replies are common ("four", "3", etc.).
+        // Whisper often returns ambiguous homophones ("for", "to", "tree") for these short utterances.
+        // Apply a VERY narrow, context-aware correction before we run the general correction layer.
+        let sttText = rawText;
+        if (sessionState.lastQuestionType === "passengers") {
+          const t = rawText.toLowerCase().trim();
+          // Only rewrite when the entire transcript is the ambiguous token (avoid changing phrases/addresses).
+          const shortOnly = t.length <= 5 && /^\w+$/.test(t);
+          if (shortOnly) {
+            if (["for", "fore"].includes(t)) sttText = "4";
+            else if (["free", "tree"].includes(t)) sttText = "3";
+            else if (["to", "too"].includes(t)) sttText = "2";
+            else if (["won", "wan"].includes(t)) sttText = "1";
+          }
+        }
         
         // Log timing: how long after speech stopped did we get the transcript?
         const transcriptDelay = sessionState.speechStopTime 
@@ -3527,15 +3548,15 @@ Do NOT say 'booked' until the tool returns success.]`
         console.log(`[${sessionState.callId}] 📝 Transcript received ${transcriptDelay}ms after speech stopped`);
         
         // Filter out hallucinations/noise
-        if (!rawText || isHallucination(rawText)) {
+        if (!sttText || isHallucination(sttText)) {
           sessionState.sttMetrics.filteredHallucinations++;
-          console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${rawText}" (total filtered: ${sessionState.sttMetrics.filteredHallucinations})`);
+          console.log(`[${sessionState.callId}] 🔇 Filtered hallucination: "${sttText}" (total filtered: ${sessionState.sttMetrics.filteredHallucinations})`);
           break;
         }
         
         // Echo guard: Filter transcripts that are echoes of dispatch TTS fare scripts
         // These happen when Whisper transcribes Ada's voice playing the fare prompt
-        const lowerRaw = rawText.toLowerCase();
+        const lowerRaw = sttText.toLowerCase();
         const isDispatchFareEcho = (
           // Partial fare script echoes
           /\band your driver will be\b/i.test(lowerRaw) ||
@@ -3556,7 +3577,7 @@ Do NOT say 'booked' until the tool returns success.]`
           break;
         }
         
-        const userText = correctTranscript(rawText);
+        const userText = correctTranscript(sttText);
         const wasCorreced = rawText !== userText;
         
         // Update STT metrics
