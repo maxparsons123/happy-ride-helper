@@ -3118,18 +3118,16 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           if (sessionState.pendingAudioBuffer.length > 50) {
             console.log(`[${sessionState.callId}] ⚠️ Audio buffer safety flush (${sessionState.pendingAudioBuffer.length} chunks)`);
             for (const audioChunk of sessionState.pendingAudioBuffer) {
-              // Resample TTS from 24kHz to bridge's expected rate
-              sendResampledAudio(socket, audioChunk, sessionState.outboundSampleRate, sessionState.callId, !sessionState.loggedFirstTtsResample);
-              sessionState.loggedFirstTtsResample = true;
+              // Send raw 24kHz audio - Python bridge handles resampling to telephony rate
+              sendBinaryAudio(socket, audioChunk);
             }
             sessionState.pendingAudioBuffer = [];
             sessionState.audioVerified = true; // Stop buffering
           }
         } else {
-          // Forward audio to bridge with resampling to match expected rate
-          // OpenAI sends 24kHz PCM16, bridge may expect 8kHz or 16kHz
-          sendResampledAudio(socket, message.delta, sessionState.outboundSampleRate, sessionState.callId, !sessionState.loggedFirstTtsResample);
-          sessionState.loggedFirstTtsResample = true;
+          // Forward raw 24kHz audio to bridge - Python bridge handles resampling
+          // DO NOT resample here: causes double-conversion and timing corruption
+          sendBinaryAudio(socket, message.delta);
         }
         break;
       }
