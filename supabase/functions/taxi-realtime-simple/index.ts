@@ -2206,6 +2206,42 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           
           // DON'T trigger response.create - just wait silently for user VAD input
           console.log(`[${sessionState.callId}] 📝 Silent resume context injected - awaiting user response`);
+          
+          // === PERIODIC COMMIT FOR SILENT RESUME ===
+          // Since we're in silent mode (no Ada speech), VAD may miss short "yes" responses.
+          // Schedule periodic forced commits to ensure transcription happens.
+          console.log(`[${sessionState.callId}] ⏰ SILENT RESUME: Scheduling periodic commits to catch confirmation response`);
+          
+          const SILENCE_SAMPLE_RATE = 24000;
+          const SILENCE_PADDING_MS = 250;
+          const SILENCE_SAMPLES = Math.floor(SILENCE_SAMPLE_RATE * SILENCE_PADDING_MS / 1000);
+          const silenceBuffer = new Int16Array(SILENCE_SAMPLES);
+          const silenceBytes = new Uint8Array(silenceBuffer.buffer);
+          let silenceBinary = "";
+          for (let i = 0; i < silenceBytes.length; i++) {
+            silenceBinary += String.fromCharCode(silenceBytes[i]);
+          }
+          const silenceBase64 = btoa(silenceBinary);
+          
+          // Schedule commits at 2s, 4s, 6s, 8s to catch "yes please" after reconnection
+          const commitDelays = [2000, 4000, 6000, 8000];
+          commitDelays.forEach((delay) => {
+            setTimeout(() => {
+              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed) {
+                try {
+                  console.log(`[${sessionState.callId}] 📤 SILENT RESUME COMMIT: Forcing transcription check (${delay}ms after resume)`);
+                  openaiWs.send(JSON.stringify({
+                    type: "input_audio_buffer.append",
+                    audio: silenceBase64
+                  }));
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                } catch (e) {
+                  // Connection may have closed
+                }
+              }
+            }, delay);
+          });
+          
           return;
         }
         
@@ -8695,6 +8731,42 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
             if (state) {
               state.isAdaSpeaking = false;
               state.echoGuardUntil = Date.now() + 400;
+              
+              // === PERIODIC COMMIT FOR POST-TTS CONFIRMATION ===
+              // Since we used direct TTS and OpenAI is passively listening, VAD may miss short "yes" responses.
+              // Schedule periodic forced commits to ensure transcription happens.
+              console.log(`[${callId}] ⏰ POST-TTS: Scheduling periodic commits to catch confirmation response`);
+              
+              const SILENCE_SAMPLE_RATE = 24000;
+              const SILENCE_PADDING_MS = 250;
+              const SILENCE_SAMPLES = Math.floor(SILENCE_SAMPLE_RATE * SILENCE_PADDING_MS / 1000);
+              const silenceBuffer = new Int16Array(SILENCE_SAMPLES);
+              const silenceBytes = new Uint8Array(silenceBuffer.buffer);
+              let silenceBinary = "";
+              for (let i = 0; i < silenceBytes.length; i++) {
+                silenceBinary += String.fromCharCode(silenceBytes[i]);
+              }
+              const silenceBase64 = btoa(silenceBinary);
+              
+              // Schedule commits at 2s, 4s, 6s to catch "yes please" after fare quote
+              const commitDelays = [2000, 4000, 6000];
+              const capturedState = state; // Capture state for closure
+              commitDelays.forEach((delay) => {
+                setTimeout(() => {
+                  if (openaiWs && openaiConnected && !capturedState.callEnded && !isConnectionClosed) {
+                    try {
+                      console.log(`[${callId}] 📤 POST-TTS COMMIT: Forcing transcription check (${delay}ms after TTS)`);
+                      openaiWs.send(JSON.stringify({
+                        type: "input_audio_buffer.append",
+                        audio: silenceBase64
+                      }));
+                      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                    } catch (e) {
+                      // Connection may have closed
+                    }
+                  }
+                }, delay);
+              });
             }
           }
         });
