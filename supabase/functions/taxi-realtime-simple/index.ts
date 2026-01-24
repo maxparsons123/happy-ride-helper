@@ -7914,7 +7914,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           adaAskedQuestionAt: null, // Track when Ada last asked any question
           parallelExtraction: {
             enabled: true,
-            autoCorrect: true, // Phase 2: Auto-correction enabled
+            autoCorrect: false, // DISABLED - was causing flip-flop chaos
             lastExtractionAt: null,
             lastExtractionResult: null,
             mismatches: 0,
@@ -8120,7 +8120,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             adaAskedQuestionAt: null, // Track when Ada last asked any question
             parallelExtraction: {
               enabled: true,
-              autoCorrect: true, // Phase 2: Auto-correction enabled
+              autoCorrect: false, // DISABLED - was causing flip-flop chaos
               lastExtractionAt: null,
               lastExtractionResult: null,
               mismatches: 0,
