@@ -1671,6 +1671,7 @@ interface SessionState {
   // Speech timing diagnostics
   speechStartTime: number | null;
   speechStopTime: number | null;
+  lastUserTranscriptAt: number | null; // When last user transcript was received (for guard bypass)
 
   // === PROTECTION WINDOWS (ported from paired mode) ===
   // Greeting protection: ignore inbound audio right after connect
@@ -2681,7 +2682,12 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
               !isStillInGreetingProtection && // Don't count speech during greeting protection
               speechAfterGreetingProtection;
             
-            if (!userRespondedAfterQuestion) {
+            // FIX: Don't cancel if we already have a recent user transcript (OpenAI may skip speech_started on quick replies)
+            // This prevents Ada from going silent after user says "three people" and OpenAI's VAD doesn't emit proper events
+            const hasRecentTranscript = sessionState.lastUserTranscriptAt && 
+              (now - sessionState.lastUserTranscriptAt) < 5000;
+            
+            if (!userRespondedAfterQuestion && !hasRecentTranscript) {
               safeCancel(sessionState, `waiting for user answer (${msSinceQuestion}ms / ${QUESTION_COOLDOWN_MS}ms, greetProt=${isStillInGreetingProtection})`);
               break;
             }
@@ -4130,6 +4136,9 @@ Do NOT say 'booked' until the tool returns success.]`
         if (wasCorreced) {
           sessionState.sttMetrics.correctedTranscripts++;
         }
+        
+        // Track when we received this transcript (for guard bypass on quick replies)
+        sessionState.lastUserTranscriptAt = Date.now();
         
         // Enhanced logging with audio processing mode context
         const audioMode = sessionState.useRasaAudioProcessing ? "RASA" : "STD";
@@ -7723,6 +7732,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           deferredResponseCreate: false,
           speechStartTime: null,
           speechStopTime: null,
+          lastUserTranscriptAt: null,
           greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
           summaryProtectionUntil: 0,
           audioDiagnostics: {
@@ -7932,6 +7942,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             deferredResponseCreate: false,
              speechStartTime: null,
              speechStopTime: null,
+             lastUserTranscriptAt: null,
              greetingProtectionUntil: Date.now() + GREETING_PROTECTION_MS,
              summaryProtectionUntil: 0,
              audioDiagnostics: {
