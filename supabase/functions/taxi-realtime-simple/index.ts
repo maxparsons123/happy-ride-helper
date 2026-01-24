@@ -2103,12 +2103,13 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         },
         turn_detection: {
           type: "server_vad",
-          // Threshold 0.5 balances sensitivity vs false triggers
-          // Silence 1200ms prevents jumping to next question while user thinks
-          // Prefix 300ms captures speech start without clipping
-          threshold: sessionState.useRasaAudioProcessing ? 0.7 : 0.5,
-          prefix_padding_ms: sessionState.useRasaAudioProcessing ? 250 : 300,
-          silence_duration_ms: sessionState.useRasaAudioProcessing ? 800 : 1200,
+          // PHONE LINE OPTIMIZED:
+          // - Threshold 0.4: More sensitive to quiet/distant speech on phone lines
+          // - Prefix 500ms: Captures word beginnings that get clipped on short utterances
+          // - Silence 1500ms: Waits longer for complete phrases, prevents cutting off "yes", "no", numbers
+          threshold: sessionState.useRasaAudioProcessing ? 0.6 : 0.4,
+          prefix_padding_ms: sessionState.useRasaAudioProcessing ? 350 : 500,
+          silence_duration_ms: sessionState.useRasaAudioProcessing ? 1000 : 1500,
         },
         temperature: 0.6, // OpenAI Realtime API minimum is 0.6
         tools: TOOLS,
