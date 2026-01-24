@@ -20,7 +20,8 @@ if (!OPENAI_API_KEY) {
 }
 
 // DEMO MODE: force the simple demo script every call (ignore caller history, active bookings, and modifications)
-const DEMO_SIMPLE_MODE = true;
+// Set to false for production: enables database sync, session restoration, and caller history lookup
+const DEMO_SIMPLE_MODE = false;
 
 const DEFAULT_COMPANY = "247 Radio Carz";
 const DEFAULT_AGENT = "Ada";
