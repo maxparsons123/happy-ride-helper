@@ -3156,15 +3156,11 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         sessionState.echoGuardUntil = Date.now() + echoGuardMs;
         console.log(`[${sessionState.callId}] 🔇 Echo guard active for ${echoGuardMs}ms`);
 
-        // FRESH INPUT: Clear audio buffer when Ada finishes to prevent stale audio
-        // Audio that accumulated while Ada was speaking is mostly echo/noise - discard it
-        // so the caller's next reply starts from a clean slate
-        if (!sessionState.halfDuplex && openaiWs && openaiConnected) {
-          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-          sessionState.audioBufferedMs = 0;
-          sessionState.audioBufferedSinceSpeechStart = false;
-          console.log(`[${sessionState.callId}] 🧹 Cleared audio buffer for fresh input`);
-        }
+        // NOTE: We do NOT clear the audio buffer here anymore.
+        // Clearing caused legitimate early user speech to be lost.
+        // Instead, we rely on echo guard (250-400ms) to filter out Ada's echo,
+        // while preserving any real user speech that started during Ada's turn.
+        // The skipBargeIn flag already prevents interruption during Ada's speech.
 
 
         // HALF-DUPLEX: Flush buffered audio now that Ada stopped speaking
@@ -3998,27 +3994,57 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] ║  → Blocking ALL responses until user transcript arrives        ║`);
             console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
             
-            // ✅ UNCONDITIONAL SAFETY TIMEOUT: Clear turn-based lock after 6s if no transcript arrives.
+            // ✅ UNCONDITIONAL SAFETY TIMEOUT: Clear turn-based lock after 8s if no transcript arrives.
             // Prevents Ada from going silent and Asterisk dropping the call (~10s silence limit).
             // This fires regardless of extractionInProgress state.
+            // INCREASED from 6s to 8s to give user more time to respond
             const lockEngagedAt = Date.now();
+            const lockStep = sessionState.lastQuestionType;
             setTimeout(() => {
               // Only clear if still awaiting and time matches (prevents stale timeout from prior question)
               if (sessionState.awaitingUserAnswer && 
                   sessionState.awaitingUserAnswerSince === lockEngagedAt &&
                   !sessionState.callEnded) {
-                console.log(`[${sessionState.callId}] ⏰ TURN-LOCK SAFETY TIMEOUT (6s): Clearing lock and re-prompting`);
+                
+                console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
+                console.log(`[${sessionState.callId}] ║  ⏰ TURN-LOCK SAFETY TIMEOUT (8s)                              ║`);
+                console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
+                console.log(`[${sessionState.callId}] ║  Question was: ${(lockStep || 'unknown').toUpperCase().padEnd(45)}║`);
+                console.log(`[${sessionState.callId}] ║  No user transcript received in 8 seconds                      ║`);
+                console.log(`[${sessionState.callId}] ║  Booking: P=${(sessionState.booking.pickup || '❌').substring(0, 10).padEnd(10)} D=${(sessionState.booking.destination || '❌').substring(0, 10).padEnd(10)} X=${String(sessionState.booking.passengers ?? '❌').padEnd(3)}   ║`);
+                console.log(`[${sessionState.callId}] ║  → Triggering reprompt...                                      ║`);
+                console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+                
                 sessionState.awaitingUserAnswer = false;
                 sessionState.awaitingUserAnswerSince = null;
                 sessionState.awaitingAnswerForStep = null;
                 
-                // Trigger a reprompt if no response is active
+                // IMPORTANT: Inject a system message to ask the SAME question again
+                // Without this, Ada may advance to the next question incorrectly
                 if (!sessionState.openAiResponseActive && openaiWs && openaiConnected) {
+                  const questionPrompts: Record<string, string> = {
+                    pickup: "[SYSTEM: User didn't respond. Ask again: 'Where would you like to be picked up from?' - ONE question only, wait for response]",
+                    destination: "[SYSTEM: User didn't respond. Ask again: 'And where would you like to go?' - ONE question only, wait for response]",
+                    passengers: "[SYSTEM: User didn't respond. Ask again: 'How many people will be travelling?' - ONE question only, wait for response]",
+                    time: "[SYSTEM: User didn't respond. Ask again: 'When would you like the taxi?' - ONE question only, wait for response]",
+                  };
+                  
+                  const repromptText = questionPrompts[lockStep || ""] || "[SYSTEM: User didn't respond. Please repeat your last question.]";
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: repromptText }],
+                    },
+                  }));
+                  
                   sessionState.allowOneResponseWhileAwaitingUserAnswer = true;
-                  safeResponseCreate(sessionState, "turn-lock-safety-timeout");
+                  safeResponseCreate(sessionState, "turn-lock-safety-timeout-reprompt");
                 }
               }
-            }, 6000);
+            }, 8000);
           } else {
             // Non-data-collection question (confirmation, etc.) - log but don't lock
             console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
