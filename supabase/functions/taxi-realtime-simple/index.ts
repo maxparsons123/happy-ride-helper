@@ -2549,7 +2549,10 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
     }
     console.log(`[${sessionState.callId}] 🛑 Cancelling response` + (reason ? ` (${reason})` : ""));
     openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-    sessionState.openAiResponseActive = false;
+    // IMPORTANT: Do NOT set openAiResponseActive=false here.
+    // OpenAI can continue streaming events briefly after cancel; clearing the flag early can cause us to
+    // send a new response.create while a response is still active -> conversation_already_has_active_response
+    // which manifests as TTS being cut off mid-sentence.
     sessionState.discardCurrentResponseAudio = true;
   };
 
@@ -5759,6 +5762,15 @@ Do NOT say 'booked' until the tool returns success.]`
           // there was no active response, we must UN-discard or we'll drop all subsequent TTS audio
           // (looks like "Ada is silent" after reconnect/ask_confirm).
           sessionState.discardCurrentResponseAudio = false;
+        } else if (errorCode === "conversation_already_has_active_response") {
+          // We got out of sync with OpenAI's internal response lifecycle.
+          // Treat as: a response IS active; defer any further response.create until response.done.
+          console.log(`[${sessionState.callId}] ℹ️ Active-response error - deferring next response.create until response.done`);
+          sessionState.openAiResponseActive = true;
+          sessionState.deferredResponseCreate = true;
+          // Don't let this benign-sync issue trigger the stuck-recovery spam.
+          sessionState.recentErrorCount = 0;
+          break;
         }
         
         // STUCK DETECTION: If we get 3+ errors in 10 seconds and no response is active,
@@ -5790,7 +5802,8 @@ Do NOT say 'booked' until the tool returns success.]`
               }
             }));
             
-            openaiWs.send(JSON.stringify({ type: "response.create" }));
+            // Use safeResponseCreate to avoid creating a response while one is still active.
+            safeResponseCreate(sessionState, "stuck-recovery");
           }
         }
         break;
