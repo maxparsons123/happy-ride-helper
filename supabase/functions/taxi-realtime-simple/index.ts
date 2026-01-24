@@ -7832,8 +7832,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               console.log(`[${callId}] 👤 Fast lookup found: ${callerResult.data.name || 'no name'}, ${state!.callerTotalBookings} bookings`);
             }
             
-            // Process active booking - THIS MUST HAPPEN BEFORE GREETING
-            if (bookingResult.data) {
+            // Process active booking - BUT ONLY IF WE DIDN'T ALREADY RESTORE FROM SESSION
+            // CRITICAL FIX: If we restored session from live_calls, DO NOT overwrite with old booking history!
+            // The restoredSession already has the current booking state from the active call.
+            if (bookingResult.data && !restoredSession) {
               state!.hasActiveBooking = true;
               state!.activeBookingCallId = bookingResult.data.call_id;
               state!.booking.pickup = bookingResult.data.pickup;
@@ -7846,6 +7848,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
               }
               
               console.log(`[${callId}] 📦 ACTIVE BOOKING FOUND (before greeting): ${bookingResult.data.pickup} → ${bookingResult.data.destination}`);
+            } else if (bookingResult.data && restoredSession) {
+              // We have an active booking but already restored from session - just mark flag, don't overwrite
+              state!.hasActiveBooking = true;
+              state!.activeBookingCallId = bookingResult.data.call_id;
+              console.log(`[${callId}] 📦 Active booking exists but PRESERVED session state: ${state!.booking.pickup} → ${state!.booking.destination}`);
             }
           } catch (e) {
             console.error(`[${callId}] Fast caller/booking lookup failed:`, e);
@@ -8406,16 +8413,23 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               } else if (bookingData && state) {
                 activeBooking = bookingData;
 
-                // Keep a copy in session state for context
-                state.booking.pickup = bookingData.pickup;
-                state.booking.destination = bookingData.destination;
-                state.booking.passengers = bookingData.passengers;
-                // Mark as modifiable (this came from an existing booking)
-                state.booking.version = Math.max(state.booking.version || 0, 1);
-
-                console.log(
-                  `[${callId}] ✅ Active booking loaded: ${bookingData.pickup} -> ${bookingData.destination} (${bookingData.passengers})`
-                );
+                // CRITICAL: Only overwrite booking state if we did NOT restore from session
+                // The skipGreeting flag indicates we restored from live_calls - preserve that state!
+                if (!skipGreeting) {
+                  // Keep a copy in session state for context
+                  state.booking.pickup = bookingData.pickup;
+                  state.booking.destination = bookingData.destination;
+                  state.booking.passengers = bookingData.passengers;
+                  // Mark as modifiable (this came from an existing booking)
+                  state.booking.version = Math.max(state.booking.version || 0, 1);
+                  console.log(
+                    `[${callId}] ✅ Active booking loaded: ${bookingData.pickup} -> ${bookingData.destination} (${bookingData.passengers})`
+                  );
+                } else {
+                  console.log(
+                    `[${callId}] 🛡️ PRESERVED session state (skipGreeting=true): ${state.booking.pickup} -> ${state.booking.destination}`
+                  );
+                }
 
                 // Inject a short, explicit context note for Ada
                 // (Do NOT create a response here; let normal turn-taking handle it.)
@@ -8481,18 +8495,28 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     activeBooking = bookingData;
                     state.hasActiveBooking = true;
                     state.activeBookingCallId = bookingData.call_id; // Store original booking's call_id for updates
-                    state.booking.pickup = bookingData.pickup;
-                    state.booking.destination = bookingData.destination;
-                    state.booking.passengers = bookingData.passengers;
-                    // Mark as modifiable (this came from an existing booking)
-                    state.booking.version = Math.max(state.booking.version || 0, 1);
+                    
+                    // CRITICAL: Only overwrite booking state if we did NOT restore from session
+                    if (!skipGreeting) {
+                      state.booking.pickup = bookingData.pickup;
+                      state.booking.destination = bookingData.destination;
+                      state.booking.passengers = bookingData.passengers;
+                      // Mark as modifiable (this came from an existing booking)
+                      state.booking.version = Math.max(state.booking.version || 0, 1);
 
-                    // Update name from booking if not set
-                    if (!state.customerName && bookingData.caller_name) {
-                      state.customerName = bookingData.caller_name;
+                      // Update name from booking if not set
+                      if (!state.customerName && bookingData.caller_name) {
+                        state.customerName = bookingData.caller_name;
+                      }
+
+                      console.log(`[${callId}] 📦 Found active booking (${bookingData.call_id}): ${bookingData.pickup} → ${bookingData.destination}`);
+                    } else {
+                      // Update name from booking if not set (safe to do even when restoring)
+                      if (!state.customerName && bookingData.caller_name) {
+                        state.customerName = bookingData.caller_name;
+                      }
+                      console.log(`[${callId}] 🛡️ PRESERVED session (skipGreeting=true), booking exists but not overwriting: ${state.booking.pickup} → ${state.booking.destination}`);
                     }
-
-                    console.log(`[${callId}] 📦 Found active booking (${bookingData.call_id}): ${bookingData.pickup} → ${bookingData.destination}`);
 
                     // Inject booking context for Ada
                     if (openaiWs && openaiConnected) {
