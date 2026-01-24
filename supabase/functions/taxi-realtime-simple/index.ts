@@ -4201,6 +4201,20 @@ Do NOT say 'booked' until the tool returns success.]`
           sessionState.pendingTurnResponseCreate = false;
           safeResponseCreate(sessionState, "turn-based-after-transcript");
         }
+        
+        // === FALLBACK RESPONSE TRIGGER ===
+        // If OpenAI's VAD committed the buffer but no response was created (e.g., due to race conditions
+        // or commit_empty errors from our punctuation/manual commit logic), ensure Ada responds.
+        // Only trigger if: (1) we have a real transcript, (2) no response is active, (3) not already awaiting
+        else if (
+          rawText.length > 0 &&
+          !sessionState.openAiResponseActive &&
+          !sessionState.awaitingUserAnswer &&
+          !sessionState.pendingTurnResponseCreate
+        ) {
+          console.log(`[${sessionState.callId}] 🔄 FALLBACK RESPONSE: Transcript ready but no response pending - triggering Ada`);
+          safeResponseCreate(sessionState, "fallback-after-transcript");
+        }
 
         // === ADDRESS ECHO DETECTION (passengers step only) ===
         // Whisper sometimes hallucinates the destination address when user says a short word like "three".
