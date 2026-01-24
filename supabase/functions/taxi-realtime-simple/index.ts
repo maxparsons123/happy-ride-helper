@@ -1880,6 +1880,10 @@ interface SessionState {
   // If we had to cancel a VAD-triggered response because we're still waiting for the user transcript,
   // we set this flag so we can explicitly trigger response.create as soon as the transcript arrives.
   pendingTurnResponseCreate: boolean;
+
+  // One-shot bypass: allow a single assistant turn through the turn-based guard.
+  // Used for system-driven reprompts (e.g., missing step data guard) so we don't cancel our own reprompt.
+  allowOneResponseWhileAwaitingUserAnswer: boolean;
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
@@ -2648,6 +2652,11 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // Maximum wait time: 30 seconds (after which we allow timeout handling)
         const TURN_BASED_TIMEOUT_MS = 30000;
         if (sessionState.awaitingUserAnswer && sessionState.awaitingUserAnswerSince) {
+          // Allow one forced/system reprompt (prevents infinite cancel loops).
+          if (sessionState.allowOneResponseWhileAwaitingUserAnswer) {
+            console.log(`[${sessionState.callId}] ✅ TURN-BASED BYPASS: allowing one response while awaiting ${sessionState.awaitingAnswerForStep}`);
+            sessionState.allowOneResponseWhileAwaitingUserAnswer = false;
+          } else {
           const waitTime = Date.now() - sessionState.awaitingUserAnswerSince;
           
           // Allow response if timeout exceeded (user may have hung up or there's an issue)
@@ -2663,6 +2672,7 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             sessionState.awaitingUserAnswer = false;
             sessionState.awaitingUserAnswerSince = null;
             sessionState.awaitingAnswerForStep = null;
+          }
           }
         }
 
@@ -2787,9 +2797,12 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             sessionState.awaitingUserAnswer = true;
             sessionState.awaitingUserAnswerSince = Date.now();
             sessionState.awaitingAnswerForStep = currentStep as any;
+
+            // Allow the reprompt response through the turn-based guard.
+            sessionState.allowOneResponseWhileAwaitingUserAnswer = true;
             
-            // Trigger the reprompt
-            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            // Trigger the reprompt (safely; avoids conversation_already_has_active_response)
+            safeResponseCreate(sessionState, "missing-step-reprompt");
             break;
           }
         }
@@ -8173,6 +8186,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           punctuationCommitSent: false, // Prevent double-commits from punctuation detection
           didCommitThisUtterance: false,
           pendingTurnResponseCreate: false,
+          allowOneResponseWhileAwaitingUserAnswer: false,
           recentErrorCount: 0,
           lastErrorAt: null,
           // Strict turn-based protocol
@@ -8392,6 +8406,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             punctuationCommitSent: false, // Prevent double-commits from punctuation detection
             didCommitThisUtterance: false,
             pendingTurnResponseCreate: false,
+             allowOneResponseWhileAwaitingUserAnswer: false,
             recentErrorCount: 0,
             lastErrorAt: null,
             // Strict turn-based protocol
