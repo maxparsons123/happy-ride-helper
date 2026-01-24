@@ -4447,7 +4447,18 @@ Do NOT say 'booked' until the tool returns success.]`
         // Without this, Ada advancing to "passengers" while user says destination causes the
         // transcript to be misclassified (destination not saved, treated as address-vs-passenger mismatch)
         sessionState.questionTypeAtSpeechStart = sessionState.lastQuestionType;
-        console.log(`[${sessionState.callId}] 🎙️ Speech started (context: ${sessionState.lastQuestionType})`);
+        
+        // ✅ AGGRESSIVE TURN-LOCK: Engage lock immediately when user starts speaking
+        // This prevents Ada from asking the next question before we process the current answer
+        const isDataCollectionStep = ["pickup", "destination", "passengers", "time"].includes(sessionState.lastQuestionType || "");
+        if (isDataCollectionStep && !sessionState.awaitingUserAnswer) {
+          sessionState.awaitingUserAnswer = true;
+          sessionState.awaitingUserAnswerSince = Date.now();
+          sessionState.awaitingAnswerForStep = sessionState.lastQuestionType as any;
+          console.log(`[${sessionState.callId}] 🎙️🔒 Speech started + LOCK ENGAGED (context: ${sessionState.lastQuestionType})`);
+        } else {
+          console.log(`[${sessionState.callId}] 🎙️ Speech started (context: ${sessionState.lastQuestionType})${sessionState.awaitingUserAnswer ? ' [already locked]' : ''}`);
+        }
         break;
       }
 
@@ -4697,36 +4708,60 @@ Do NOT say 'booked' until the tool returns success.]`
         // If Ada just asked for passengers, very short replies are common ("four", "3", etc.).
         // Whisper often returns ambiguous homophones ("for", "to", "tree") for these short utterances.
         // Apply a VERY narrow, context-aware correction before we run the general correction layer.
+        // ✅ CRITICAL: Use the snapshot (what Ada was asking when user started speaking), NOT current lastQuestionType
         let sttText = rawText;
-        if (sessionState.lastQuestionType === "passengers") {
+        const passengerContext = sessionState.questionTypeAtSpeechStart === "passengers" || sessionState.lastQuestionType === "passengers";
+        if (passengerContext) {
           // Strip punctuation and lowercase for matching
           const t = rawText.toLowerCase().replace(/[.,!?]/g, "").trim();
           // Only rewrite when the entire transcript is the ambiguous token (avoid changing phrases/addresses).
-          const shortOnly = t.length <= 8 && /^[\w\s]+$/.test(t);
+          const shortOnly = t.length <= 12 && /^[\w\s]+$/.test(t); // Increased from 8 to 12 to catch "three people"
           if (shortOnly) {
             // "three" homophones - Whisper often mishears these on telephony
             // NOTE: We intentionally map "fall" -> 3 because we've observed Whisper outputting "Fall" for a spoken "three".
-            if (["free", "tree", "three", "fee", "fry", "frey", "fri", "frill", "freak", "fall"].includes(t)) sttText = "3";
-            else if (["for", "fore", "four", "foe", "floor", "full", "fault", "phone"].includes(t)) sttText = "4";
-            else if (["to", "too", "two", "tu", "true"].includes(t)) sttText = "2";
-            else if (["won", "wan", "one", "wun", "want", "wine"].includes(t)) sttText = "1";
-            else if (["five", "fife", "hive", "fine"].includes(t)) sttText = "5";
-            else if (["six", "sick", "sex", "fix"].includes(t)) sttText = "6";
+            if (["free", "tree", "three", "fee", "fry", "frey", "fri", "frill", "freak", "fall"].includes(t)) {
+              sttText = "3";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 3 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
+            else if (["for", "fore", "four", "foe", "floor", "full", "fault", "phone"].includes(t)) {
+              sttText = "4";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 4 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
+            else if (["to", "too", "two", "tu", "true"].includes(t)) {
+              sttText = "2";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 2 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
+            else if (["won", "wan", "one", "wun", "want", "wine"].includes(t)) {
+              sttText = "1";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 1 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
+            else if (["five", "fife", "hive", "fine"].includes(t)) {
+              sttText = "5";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 5 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
+            else if (["six", "sick", "sex", "fix"].includes(t)) {
+              sttText = "6";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER HOMOPHONE: "${rawText}" → 6 (snapshot=${sessionState.questionTypeAtSpeechStart})`);
+            }
             // Phrases like "just me", "only me" = 1 passenger
-            else if (t === "just me" || t === "only me" || t === "me") sttText = "1";
+            else if (t === "just me" || t === "only me" || t === "me") {
+              sttText = "1";
+              console.log(`[${sessionState.callId}] 🔄 PASSENGER PHRASE: "${rawText}" → 1`);
+            }
             // "three people", "four passengers" etc
             else if (/^(one|two|three|four|five|six|seven|eight)\s*(people|passengers?|traveling|travelling)?$/i.test(t)) {
               const numMatch = t.match(/^(one|two|three|four|five|six|seven|eight)/i);
               if (numMatch) {
                 const wordToNum: Record<string, string> = { one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8" };
                 sttText = wordToNum[numMatch[1].toLowerCase()] || t;
+                console.log(`[${sessionState.callId}] 🔄 PASSENGER PHRASE: "${rawText}" → ${sttText}`);
               }
             }
           }
           
-          // Extended passenger phrase corrections (longer than 8 chars, so outside shortOnly)
+          // Extended passenger phrase corrections (longer than 12 chars, so outside shortOnly)
           // "Poor people traveling" = Whisper mishearing "four people traveling"
-          if (sessionState.lastQuestionType === "passengers") {
+          if (passengerContext) {
             const tLong = rawText.toLowerCase().replace(/[.,!?]/g, "").trim();
             if (/^poor\s+(people|passengers?|traveling|travelling)/i.test(tLong)) {
               sttText = "4";
@@ -4958,49 +4993,73 @@ Do NOT say 'booked' until the tool returns success.]`
           // When Ada asks a question, save the user's answer directly to state.
           // This is the SOURCE OF TRUTH - OpenAI tool calls cannot override it.
           // This fixes issues like "Exmoor Road" (caller name) being used instead of what user actually said.
-          // Use the SNAPSHOT from speech_started, not current lastQuestionType
-          // This fixes race conditions where Ada advances to next step before transcript arrives
-          let questionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionType;
           
           // ═══════════════════════════════════════════════════════════════════════════════
-          // 🛡️ LATE PICKUP ANSWER GUARD (Race Condition Fix)
+          // 🛡️ STRICT SNAPSHOT PRIORITIZATION (v2.0)
           // ═══════════════════════════════════════════════════════════════════════════════
-          // When Ada asks pickup, then VAD triggers too quickly and Ada asks destination,
-          // the user's pickup answer arrives LATE with questionType="destination".
-          // But if pickup is STILL NULL and we get an address-like transcript,
-          // it's almost certainly the delayed pickup answer - not a destination.
-          // This prevents the "jumped a question" bug where pickup is never saved.
+          // 1. ALWAYS trust questionTypeAtSpeechStart if set - this is what Ada was asking when user STARTED speaking
+          // 2. Only fall back to lastQuestionType if snapshot is null (edge case)
+          // 3. Late Answer Guards are SECONDARY and only trigger when snapshot already matches the expected field
+          // This prevents the "52A David Road" bug where pickup gets saved as destination due to race conditions
+          // ═══════════════════════════════════════════════════════════════════════════════
+          const snapshotType = sessionState.questionTypeAtSpeechStart;
+          const currentType = sessionState.lastQuestionType;
+          let questionType = snapshotType || currentType;
+          
+          console.log(`[${sessionState.callId}] 🔍 QUESTION TYPE RESOLUTION: snapshot=${snapshotType || 'null'}, current=${currentType || 'null'}, resolved=${questionType || 'null'}`);
+          
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // 🛡️ LATE PICKUP ANSWER GUARD (Race Condition Fix) - ONLY when snapshot is null
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // This guard only activates if we don't have a snapshot (very rare edge case).
+          // If we HAVE a snapshot, trust it completely - don't second-guess.
           // ═══════════════════════════════════════════════════════════════════════════════
           if (
+            !snapshotType && // CRITICAL: Only if no snapshot exists
             questionType === "destination" && 
             isAddressLike && 
             !sessionState.booking.pickup && 
             sessionState.bookingStep === "destination"
           ) {
-            console.log(`[${sessionState.callId}] 🔄 LATE PICKUP DETECTED: Address "${userText}" arrived after Ada asked destination, but pickup is still null!`);
+            console.log(`[${sessionState.callId}] 🔄 LATE PICKUP DETECTED (no snapshot): Address "${userText}" arrived after Ada asked destination, but pickup is still null!`);
             console.log(`[${sessionState.callId}] 🔄 Treating this as the PICKUP answer (race condition fix)`);
-            questionType = "pickup"; // Override to pickup
+            questionType = "pickup";
           }
           
           // ═══════════════════════════════════════════════════════════════════════════════
-          // 🛡️ LATE DESTINATION ANSWER GUARD (Race Condition Fix)
-          // ═══════════════════════════════════════════════════════════════════════════════
-          // When Ada asks destination, then VAD triggers too quickly and Ada asks passengers,
-          // the user's destination answer arrives LATE with questionType="passengers".
-          // But if destination is STILL NULL and we get an address-like transcript,
-          // it's the delayed destination answer - not a passenger count.
+          // 🛡️ LATE DESTINATION ANSWER GUARD - ONLY when snapshot is null
           // ═══════════════════════════════════════════════════════════════════════════════
           if (
+            !snapshotType && // CRITICAL: Only if no snapshot exists
             questionType === "passengers" && 
             isAddressLike && 
             !isPassengerCount &&
             !sessionState.booking.destination && 
-            sessionState.booking.pickup && // Pickup must already be filled
+            sessionState.booking.pickup &&
             sessionState.bookingStep === "passengers"
           ) {
-            console.log(`[${sessionState.callId}] 🔄 LATE DESTINATION DETECTED: Address "${userText}" arrived after Ada asked passengers, but destination is still null!`);
+            console.log(`[${sessionState.callId}] 🔄 LATE DESTINATION DETECTED (no snapshot): Address "${userText}" arrived after Ada asked passengers, but destination is still null!`);
             console.log(`[${sessionState.callId}] 🔄 Treating this as the DESTINATION answer (race condition fix)`);
-            questionType = "destination"; // Override to destination
+            questionType = "destination";
+          }
+          
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // 🛡️ ANSWER TYPE VALIDATION - Sanity check that answer matches expected field type
+          // ═══════════════════════════════════════════════════════════════════════════════
+          // If snapshot says "passengers" but user gave an address, something went wrong.
+          // Log a warning but still trust the snapshot - Ada asked for passengers, user gave address.
+          // The ADDRESS-VS-PASSENGER handler above will catch this and re-prompt.
+          // ═══════════════════════════════════════════════════════════════════════════════
+          if (snapshotType === "passengers" && isAddressLike && !isPassengerCount) {
+            console.log(`[${sessionState.callId}] ⚠️ ANSWER TYPE MISMATCH: Expected passengers, got address "${userText}" - will trigger re-prompt`);
+          }
+          if (snapshotType === "pickup" && isPassengerCount && !isAddressLike) {
+            console.log(`[${sessionState.callId}] ⚠️ ANSWER TYPE MISMATCH: Expected pickup address, got passenger count "${userText}" - ignoring`);
+            questionType = null; // Don't save passenger count as pickup
+          }
+          if (snapshotType === "destination" && isPassengerCount && !isAddressLike) {
+            console.log(`[${sessionState.callId}] ⚠️ ANSWER TYPE MISMATCH: Expected destination address, got passenger count "${userText}" - ignoring`);
+            questionType = null; // Don't save passenger count as destination
           }
           
           if (isRecentQuestion && questionType && !sessionState.callEnded) {
