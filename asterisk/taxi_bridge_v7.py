@@ -109,10 +109,11 @@ OPUS_COMPLEXITY = 5           # 0-10, higher = better quality but more CPU
 OPUS_APPLICATION = "voip"     # Optimized for speech
 
 # Format Detection
-LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)  # False = auto-detect
+LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)   # Force 8kHz ulaw
+LOCK_FORMAT_SLIN16 = _env_bool("LOCK_FORMAT_SLIN16", True)  # Force 16kHz slin16 (default ON)
 # Prefer Opus ONLY when the Opus codec is actually available in this runtime.
 # (Prevents false positives + "Opus frame but no decoder" loops.)
-PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE)
+PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE) and not LOCK_FORMAT_SLIN16
 PREFER_SLIN16 = True  # Prefer wideband when available
 FORMAT_LOCK_DURATION_S = 0.75  # Debounce format switching
 
@@ -599,6 +600,26 @@ class TaxiBridge:
                     "call_id": self.state.call_id,
                     "inbound_format": "opus",
                     "inbound_sample_rate": RATE_OPUS,
+                }))
+            return
+        
+        # Force slin16 if LOCK_FORMAT_SLIN16 is enabled (treats 320-byte frames as 16kHz)
+        if LOCK_FORMAT_SLIN16:
+            self.state.ast_codec = "slin16"
+            self.state.ast_rate = RATE_SLIN16
+            self.state.ast_frame_bytes = frame_len
+            self.state.format_locked = True
+            self.state.format_lock_time = time.time()
+            logger.info("[%s] 🔊 Format LOCKED: slin16 @ %dHz (forced, %d bytes/frame)", 
+                       self.state.call_id, RATE_SLIN16, frame_len)
+            
+            # Notify edge function of format
+            if self.ws and self.state.ws_connected:
+                await self.ws.send(json.dumps({
+                    "type": "update_format",
+                    "call_id": self.state.call_id,
+                    "inbound_format": "slin16",
+                    "inbound_sample_rate": RATE_SLIN16,
                 }))
             return
         
@@ -1255,7 +1276,7 @@ async def main() -> None:
         f"   Listening: {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Endpoint:  {WS_URL.split('/')[-1]}",
         f"   Opus:      {opus_status}",
-        f"   Format:    {'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect (ulaw/slin/slin16/opus)'}",
+        f"   Format:    {'slin16 locked (16kHz)' if LOCK_FORMAT_SLIN16 else 'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect (ulaw/slin/slin16/opus)'}",
         f"   DSP:       boost={VOLUME_BOOST_FACTOR}x AGC={AGC_MAX_GAIN}x pre-emph={PRE_EMPHASIS_COEFF}",
         f"   Reconnect: {MAX_RECONNECT_ATTEMPTS} attempts, {RECONNECT_BASE_DELAY_S}s base delay",
     ]
