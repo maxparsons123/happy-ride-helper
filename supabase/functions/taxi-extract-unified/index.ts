@@ -543,9 +543,63 @@ serve(async (req) => {
 
     // AI now returns COMPLETE booking for modifications (unchanged fields preserved)
     // Only need fallback merge if AI returns null for fields that should be preserved
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // HOUSE NUMBER RECONCILIATION: Extract exact house numbers from user transcripts
+    // Fixes issues where Gemini misreads "52A" as "28", "1214B" as "1214", etc.
+    // ═══════════════════════════════════════════════════════════════════════════════
+    const extractHouseNumberFromTranscript = (transcripts: string[], aiAddress: string | null): string | null => {
+      if (!aiAddress) return null;
+      
+      // Extract street name from AI address (remove any house number prefix)
+      const aiStreetMatch = aiAddress.match(/\d+[A-Za-z]?\s+(.+)/);
+      const aiStreetName = aiStreetMatch ? aiStreetMatch[1].toLowerCase() : aiAddress.toLowerCase();
+      
+      // Search transcripts for matching street name with a house number
+      for (const transcript of transcripts.reverse()) { // Most recent first
+        const lowerTranscript = transcript.toLowerCase();
+        
+        // Check if this transcript mentions the same street
+        if (aiStreetName && lowerTranscript.includes(aiStreetName.split(/[,\s]+/)[0])) {
+          // Extract the alphanumeric house number from transcript (e.g., "52A", "1214B", "7b")
+          const houseNumberMatch = transcript.match(/\b(\d+[A-Za-z]?)\s+/);
+          if (houseNumberMatch) {
+            const transcriptHouseNumber = houseNumberMatch[1];
+            const aiHouseNumberMatch = aiAddress.match(/^(\d+[A-Za-z]?)/);
+            const aiHouseNumber = aiHouseNumberMatch ? aiHouseNumberMatch[1] : null;
+            
+            // If house numbers differ, trust the transcript
+            if (transcriptHouseNumber.toLowerCase() !== aiHouseNumber?.toLowerCase()) {
+              const correctedAddress = aiAddress.replace(/^\d+[A-Za-z]?\s*/, transcriptHouseNumber + ' ');
+              console.log(`[taxi-extract-unified] 🔧 HOUSE NUMBER FIX: "${aiHouseNumber}" → "${transcriptHouseNumber}" (from transcript: "${transcript}")`);
+              return correctedAddress;
+            }
+          }
+        }
+      }
+      
+      return aiAddress; // No fix needed
+    };
+    
+    // Get all user transcripts for house number reconciliation
+    const userTranscripts = conversation
+      .filter(m => m.role === 'user')
+      .map(m => m.text);
+    
+    // Apply house number reconciliation to extracted addresses
+    const reconciledPickup = extractHouseNumberFromTranscript(userTranscripts, extracted.pickup_location) 
+      || extracted.pickup_location 
+      || (is_modification && current_booking?.pickup) 
+      || null;
+      
+    const reconciledDestination = extractHouseNumberFromTranscript(userTranscripts, extracted.dropoff_location) 
+      || extracted.dropoff_location 
+      || (is_modification && current_booking?.destination) 
+      || null;
+    
     let finalResult = {
-      pickup: extracted.pickup_location || (is_modification && current_booking?.pickup) || null,
-      destination: extracted.dropoff_location || (is_modification && current_booking?.destination) || null,
+      pickup: reconciledPickup,
+      destination: reconciledDestination,
       // Keep passengers as null if not explicitly provided - don't default to 1
       passengers: extracted.number_of_passengers ?? (is_modification ? current_booking?.passengers : null) ?? null,
       luggage: extracted.luggage === "CLEAR" ? null : (extracted.luggage || (is_modification && current_booking?.luggage) || null),
