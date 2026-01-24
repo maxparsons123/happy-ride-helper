@@ -412,6 +412,7 @@ export type Database = {
       live_calls: {
         Row: {
           booking_confirmed: boolean
+          booking_step: string | null
           call_id: string
           caller_last_booking_at: string | null
           caller_last_destination: string | null
@@ -429,8 +430,10 @@ export type Database = {
           gps_lon: number | null
           gps_updated_at: string | null
           id: string
+          last_question_type: string | null
           passengers: number | null
           pickup: string | null
+          pickup_time: string | null
           source: string
           started_at: string
           status: string
@@ -439,6 +442,7 @@ export type Database = {
         }
         Insert: {
           booking_confirmed?: boolean
+          booking_step?: string | null
           call_id: string
           caller_last_booking_at?: string | null
           caller_last_destination?: string | null
@@ -456,8 +460,10 @@ export type Database = {
           gps_lon?: number | null
           gps_updated_at?: string | null
           id?: string
+          last_question_type?: string | null
           passengers?: number | null
           pickup?: string | null
+          pickup_time?: string | null
           source?: string
           started_at?: string
           status?: string
@@ -466,6 +472,7 @@ export type Database = {
         }
         Update: {
           booking_confirmed?: boolean
+          booking_step?: string | null
           call_id?: string
           caller_last_booking_at?: string | null
           caller_last_destination?: string | null
@@ -483,8 +490,10 @@ export type Database = {
           gps_lon?: number | null
           gps_updated_at?: string | null
           id?: string
+          last_question_type?: string | null
           passengers?: number | null
           pickup?: string | null
+          pickup_time?: string | null
           source?: string
           started_at?: string
           status?: string
