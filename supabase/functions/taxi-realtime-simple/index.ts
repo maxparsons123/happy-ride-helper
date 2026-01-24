@@ -3940,6 +3940,29 @@ Do NOT say 'booked' until the tool returns success.]`
         // User transcript from Whisper
         const rawText = String(message.transcript || "").trim();
 
+        // === ADDRESS ECHO DETECTION (passengers step only) ===
+        // Whisper sometimes hallucinates the destination address when user says a short word like "three".
+        // If collecting passengers and transcript matches a known address, discard it.
+        if (sessionState.lastQuestionType === "passengers") {
+          // Normalize: lowercase, remove punctuation, trim
+          const normalize = (s: string) => s.toLowerCase().replace(/[.,!?]/g, "").trim();
+          const lowerRaw = normalize(rawText);
+          const knownPickup = normalize(sessionState.booking.pickup || "");
+          const knownDest = normalize(sessionState.booking.destination || "");
+          
+          // Discard if it matches a known address (exact or contained)
+          const matchesPickup = knownPickup && (lowerRaw === knownPickup || lowerRaw.includes(knownPickup) || knownPickup.includes(lowerRaw));
+          const matchesDest = knownDest && (lowerRaw === knownDest || lowerRaw.includes(knownDest) || knownDest.includes(lowerRaw));
+          
+          if (matchesPickup || matchesDest) {
+            console.log(`[${sessionState.callId}] 🔇 ADDRESS ECHO: Whisper echoed "${rawText}" during passenger step - discarding`);
+            if (openaiWs && openaiConnected) {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+            }
+            break;
+          }
+        }
+
         // If Ada just asked for passengers, very short replies are common ("four", "3", etc.).
         // Whisper often returns ambiguous homophones ("for", "to", "tree") for these short utterances.
         // Apply a VERY narrow, context-aware correction before we run the general correction layer.
