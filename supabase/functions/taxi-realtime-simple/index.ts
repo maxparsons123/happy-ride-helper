@@ -1131,20 +1131,26 @@ async function runParallelExtraction(
     const normalizeForComparison = (addr: string) => 
       addr.toLowerCase().replace(/[^a-z0-9]/g, "").trim();
     
-    // Check pickup mismatch (if Gemini extracted something different AND more complete)
+    // Helper to check if addresses are substantially different
+    const areAddressesDifferent = (a: string, b: string): boolean => {
+      const normA = normalizeForComparison(a);
+      const normB = normalizeForComparison(b);
+      // If one contains the other, they're similar (e.g., "52A" vs "52A David Road")
+      if (normA.includes(normB) || normB.includes(normA)) return false;
+      // If very different normalized forms, they're different
+      if (normA !== normB) return true;
+      return false;
+    };
+    
+    // Check pickup mismatch (if Gemini extracted something different)
     if (result.pickup && currentPickup) {
-      const geminiNorm = normalizeForComparison(result.pickup);
-      const currentNorm = normalizeForComparison(currentPickup);
-      // Consider it a mismatch if they're substantially different (not just formatting)
-      if (geminiNorm !== currentNorm && 
-          !geminiNorm.includes(currentNorm) && 
-          !currentNorm.includes(geminiNorm)) {
+      if (areAddressesDifferent(result.pickup, currentPickup)) {
         mismatches.push(`pickup: Gemini="${result.pickup}" vs OpenAI="${currentPickup}"`);
         hasMismatch = true;
-        // Prefer the longer/more complete address
-        if (result.pickup.length > currentPickup.length) {
-          correctedState.pickup = result.pickup;
-        }
+        // ALWAYS trust Gemini when addresses are substantially different
+        // because Gemini has the context of what Ada asked
+        correctedState.pickup = result.pickup;
+        console.log(`[${callId}] 🧠 DUAL-BRAIN: Trusting Gemini pickup over OpenAI (different addresses)`);
       }
     } else if (result.pickup && !currentPickup) {
       // Gemini found pickup but OpenAI didn't save it
@@ -1154,16 +1160,12 @@ async function runParallelExtraction(
     
     // Check destination mismatch
     if (result.destination && currentDestination) {
-      const geminiNorm = normalizeForComparison(result.destination);
-      const currentNorm = normalizeForComparison(currentDestination);
-      if (geminiNorm !== currentNorm && 
-          !geminiNorm.includes(currentNorm) && 
-          !currentNorm.includes(geminiNorm)) {
+      if (areAddressesDifferent(result.destination, currentDestination)) {
         mismatches.push(`destination: Gemini="${result.destination}" vs OpenAI="${currentDestination}"`);
         hasMismatch = true;
-        if (result.destination.length > currentDestination.length) {
-          correctedState.destination = result.destination;
-        }
+        // ALWAYS trust Gemini for destination too
+        correctedState.destination = result.destination;
+        console.log(`[${callId}] 🧠 DUAL-BRAIN: Trusting Gemini destination over OpenAI (different addresses)`);
       }
     } else if (result.destination && !currentDestination) {
       correctedState.destination = result.destination;
@@ -1171,13 +1173,14 @@ async function runParallelExtraction(
     }
     
     // Check passengers mismatch
-    if (result.passengers !== null && currentPassengers !== null && 
-        result.passengers !== currentPassengers) {
+    if (result.passengers !== null && result.passengers > 0 && 
+        currentPassengers !== null && result.passengers !== currentPassengers) {
       mismatches.push(`passengers: Gemini=${result.passengers} vs OpenAI=${currentPassengers}`);
       hasMismatch = true;
       // Trust Gemini for passenger count (it has question context)
       correctedState.passengers = result.passengers;
-    } else if (result.passengers !== null && currentPassengers === null) {
+    } else if (result.passengers !== null && result.passengers > 0 && 
+               (currentPassengers === null || currentPassengers === 0)) {
       correctedState.passengers = result.passengers;
       console.log(`[${callId}] 🧠 DUAL-BRAIN: Gemini found passengers not in state: ${result.passengers}`);
     }
