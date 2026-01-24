@@ -88,6 +88,10 @@ OPUS_APPLICATION = "voip"
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)
 PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE)
 PREFER_SLIN16 = True
+# FORCE_SLIN16: When true, treat ALL 320-byte frames as 16kHz (not 8kHz)
+# Use this when Asterisk dialplan sets CHANNEL(audioformat)=slin16 but AudioSocket
+# still sends 320-byte frames (which normally indicate 8kHz).
+FORCE_SLIN16 = _env_bool("FORCE_SLIN16", True)  # Enabled by default for new dialplan
 FORMAT_LOCK_DURATION_S = 60.0  # Lock format for entire call duration
 FORMAT_LOCK_FRAME_COUNT = 10   # Number of consistent frames before locking
 
@@ -423,12 +427,15 @@ class TaxiBridge:
             self.state.ast_codec = "slin16"
             self.state.ast_rate = RATE_SLIN16
         elif frame_len == 320:
-            # IMPORTANT: In practice (AudioSocket), 320 bytes almost always means:
-            # - slin (PCM16 @ 8kHz) with 20ms frames (160 samples * 2 bytes)
-            # Treating this as slin16 (16kHz) will cause wrong resampling and can make
-            # outbound audio effectively unplayable / silent on some channels.
-            self.state.ast_codec = "slin"
-            self.state.ast_rate = RATE_SLIN
+            # FORCE_SLIN16: Treat 320-byte frames as 16kHz when dialplan forces slin16
+            # AudioSocket may send smaller frames even when slin16 is set
+            if FORCE_SLIN16:
+                self.state.ast_codec = "slin16"
+                self.state.ast_rate = RATE_SLIN16
+            else:
+                # Legacy: 320 bytes = slin (PCM16 @ 8kHz) with 20ms frames
+                self.state.ast_codec = "slin"
+                self.state.ast_rate = RATE_SLIN
         elif frame_len == 160:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = RATE_ULAW
