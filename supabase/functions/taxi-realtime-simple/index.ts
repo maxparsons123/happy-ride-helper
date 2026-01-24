@@ -773,6 +773,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "this is qa david rhoades": "52A David Road",
   "52 qa david": "52A David Road",
   "qa david": "52A David",
+  // New "call two action" garbling pattern (observed 2026-01-24)
+  "this is a call two action": "52A",
+  "call two action": "52A",
+  "call to action": "52A",
+  "this is a way david": "52A David Road",
+  "way david road": "52A David Road",
+  "way david ro": "52A David Road",
   "high street": "High Street",
   "hi street": "High Street",
   "church road": "Church Road",
@@ -1980,6 +1987,9 @@ interface SessionState {
   // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
   recentErrorCount: number;
   lastErrorAt: number | null;
+  // === REPROMPT LOOP PREVENTION ===
+  // Timestamp of last missing-step-guard reprompt - prevents firing in a loop
+  lastMissingStepRepromptAt: number | null;
   
   // === STRICT TURN-BASED PROTOCOL ===
   // When true, Ada has asked a data-collection question and is WAITING for a user answer.
@@ -2883,8 +2893,21 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           const transcriptJustReceived = sessionState.lastUserTranscriptAt &&
             (Date.now() - sessionState.lastUserTranscriptAt) < 1000;
           
-          if (stepFieldEmpty && !userSpokeRecently && !transcriptJustReceived) {
-            console.log(`[${sessionState.callId}] 🛡️ MISSING STEP DATA GUARD: ${currentStep} field is empty (no recent speech) - injecting reprompt`);
+          // REPROMPT COOLDOWN: Prevent guard from firing in a loop (min 3s between reprompts)
+          const REPROMPT_COOLDOWN_MS = 3000;
+          const repromptOnCooldown = sessionState.lastMissingStepRepromptAt && 
+            (Date.now() - sessionState.lastMissingStepRepromptAt) < REPROMPT_COOLDOWN_MS;
+          
+          if (stepFieldEmpty && !userSpokeRecently && !transcriptJustReceived && !repromptOnCooldown) {
+            console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
+            console.log(`[${sessionState.callId}] ║  🛡️ MISSING STEP DATA GUARD TRIGGERED                          ║`);
+            console.log(`[${sessionState.callId}] ╠════════════════════════════════════════════════════════════════╣`);
+            console.log(`[${sessionState.callId}] ║  Step: ${currentStep?.toUpperCase().padEnd(54)}║`);
+            console.log(`[${sessionState.callId}] ║  Field is empty - injecting reprompt                           ║`);
+            console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+            
+            // Mark the reprompt timestamp to prevent loop
+            sessionState.lastMissingStepRepromptAt = Date.now();
             
             // Cancel the current response (which would advance to next question)
             safeCancel(sessionState, `step ${currentStep} incomplete`);
@@ -2922,6 +2945,9 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             // Trigger the reprompt (safely; avoids conversation_already_has_active_response)
             safeResponseCreate(sessionState, "missing-step-reprompt");
             break;
+          } else if (stepFieldEmpty && repromptOnCooldown) {
+            // Skip - already reprompted recently
+            console.log(`[${sessionState.callId}] ⏳ MISSING STEP GUARD: on cooldown (${((Date.now() - (sessionState.lastMissingStepRepromptAt || 0)) / 1000).toFixed(1)}s ago) - skipping`);
           } else if (stepFieldEmpty && (userSpokeRecently || transcriptJustReceived)) {
             // User JUST spoke - don't reprompt, let the transcript handler update the state
             console.log(`[${sessionState.callId}] ⏳ MISSING STEP DATA GUARD: ${currentStep} empty BUT user spoke ${userSpokeRecently ? ((Date.now() - (sessionState.speechStopTime || 0)) / 1000).toFixed(1) + 's ago' : 'just now'} - waiting for transcript`);
@@ -8459,6 +8485,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           awaitingUserAnswer: false,
           awaitingUserAnswerSince: null,
           awaitingAnswerForStep: null,
+          lastMissingStepRepromptAt: null,
         };
         
         preConnected = true;
@@ -8683,6 +8710,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             awaitingUserAnswer: false,
             awaitingUserAnswerSince: null,
             awaitingAnswerForStep: null,
+            lastMissingStepRepromptAt: null,
           };
           
           // ═══════════════════════════════════════════════════════════════════
