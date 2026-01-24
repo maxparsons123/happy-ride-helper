@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Taxi AI Asterisk Bridge v7.7 - OPUS SUPPORT
 
 Architecture:
-  Asterisk AudioSocket ←→ Bridge ←→ Edge Function (taxi-realtime-paired)
+  Asterisk AudioSocket <-> Bridge <-> Edge Function (taxi-realtime-paired)
 
 Key Features:
-  • Opus codec support for WhatsApp native 48kHz audio (no transcoding loss)
-  • Context-pairing architecture with eager init (phone sent later via update_phone)
-  • Dynamic format detection with smart locking (ulaw/slin/slin16/opus)
-  • High-quality DSP pipeline: Volume Boost → AGC → Pre-emphasis
-  • resample_poly for all audio paths (preserves consonant transients)
-  • Session handoff support for 90s edge function limits
-  • Bounded queues to prevent OOM under network stalls
-  • Comprehensive diagnostics with WS/Asterisk heartbeat tracking
+  - Opus codec support for WhatsApp native 48kHz audio (no transcoding loss)
+  - Context-pairing architecture with eager init (phone sent later via update_phone)
+  - Dynamic format detection with smart locking (ulaw/slin/slin16/opus)
+  - High-quality DSP pipeline: Volume Boost -> AGC -> Pre-emphasis
+  - resample_poly for all audio paths (preserves consonant transients)
+  - Session handoff support for 90s edge function limits
+  - Bounded queues to prevent OOM under network stalls
+  - Comprehensive diagnostics with WS/Asterisk heartbeat tracking
 
 Changelog:
   v7.7: Added Opus codec support via opuslib for WhatsApp native 48kHz audio
