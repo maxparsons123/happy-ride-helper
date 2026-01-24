@@ -73,6 +73,7 @@ AUDIOSOCKET_PORT = int(os.environ.get("AUDIOSOCKET_PORT", 9092))
 
 # Audio Rates (Hz)
 RATE_ULAW = 8000
+RATE_SLIN = 8000
 RATE_SLIN16 = 16000
 RATE_AI = 24000
 RATE_OPUS = 48000
@@ -414,10 +415,12 @@ class TaxiBridge:
             self.state.ast_codec = "slin16"
             self.state.ast_rate = RATE_SLIN16
         elif frame_len == 320:
-            # 320 bytes @ 16kHz = 10ms of slin16, OR 320 bytes @ 8kHz = 20ms of slin16
-            # For safety, assume slin16 at 16kHz
-            self.state.ast_codec = "slin16"
-            self.state.ast_rate = RATE_SLIN16
+            # IMPORTANT: In practice (AudioSocket), 320 bytes almost always means:
+            # - slin (PCM16 @ 8kHz) with 20ms frames (160 samples * 2 bytes)
+            # Treating this as slin16 (16kHz) will cause wrong resampling and can make
+            # outbound audio effectively unplayable / silent on some channels.
+            self.state.ast_codec = "slin"
+            self.state.ast_rate = RATE_SLIN
         elif frame_len == 160:
             self.state.ast_codec = "ulaw"
             self.state.ast_rate = RATE_ULAW
@@ -670,6 +673,9 @@ class TaxiBridge:
                         linear = self.audio_processor.ulaw_to_linear(payload)
                         # Resample 8kHz → 24kHz for AI
                         linear = self.audio_processor.resample(linear, RATE_ULAW, RATE_AI)
+                    elif self.state.ast_codec == "slin":
+                        # slin (PCM16 @ 8kHz) → resample to 24kHz
+                        linear = self.audio_processor.resample(payload, RATE_SLIN, RATE_AI)
                     else:
                         # slin16 @ 16kHz → resample to 24kHz
                         linear = self.audio_processor.resample(payload, RATE_SLIN16, RATE_AI)
