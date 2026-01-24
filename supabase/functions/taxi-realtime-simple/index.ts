@@ -50,6 +50,79 @@ function sendBinaryAudio(socket: WebSocket, base64Audio: string): void {
   }
 }
 
+// --- Outbound Audio Resampling ---
+// Downsamples 24kHz PCM16 from OpenAI TTS to bridge's expected sample rate (8kHz or 16kHz)
+// This prevents audio cutouts caused by sample rate mismatch on telephony lines
+function resampleOutboundAudio(base64Audio: string, targetRate: number): Uint8Array {
+  // Decode base64 to PCM16
+  const binaryStr = atob(base64Audio);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  
+  // If target is 24kHz, passthrough (OpenAI already sends 24kHz)
+  if (targetRate === 24000) {
+    return bytes;
+  }
+  
+  // Convert to Int16Array for processing
+  const pcm24k = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  
+  let outputSamples: Int16Array;
+  
+  if (targetRate === 8000) {
+    // 24kHz → 8kHz (3:1 downsample with averaging for anti-aliasing)
+    const outputLen = Math.floor(pcm24k.length / 3);
+    outputSamples = new Int16Array(outputLen);
+    for (let i = 0; i < outputLen; i++) {
+      const idx = i * 3;
+      // Average 3 samples for anti-aliasing
+      const s0 = pcm24k[idx] ?? 0;
+      const s1 = pcm24k[idx + 1] ?? s0;
+      const s2 = pcm24k[idx + 2] ?? s1;
+      outputSamples[i] = Math.round((s0 + s1 + s2) / 3);
+    }
+  } else if (targetRate === 16000) {
+    // 24kHz → 16kHz (3:2 downsample with linear interpolation)
+    const outputLen = Math.floor((pcm24k.length * 2) / 3);
+    outputSamples = new Int16Array(outputLen);
+    for (let i = 0; i < outputLen; i++) {
+      // Map output index to input position
+      const srcPos = (i * 3) / 2;
+      const srcIdx = Math.floor(srcPos);
+      const frac = srcPos - srcIdx;
+      
+      const s0 = pcm24k[srcIdx] ?? 0;
+      const s1 = pcm24k[srcIdx + 1] ?? s0;
+      
+      // Linear interpolation
+      outputSamples[i] = Math.round(s0 + (s1 - s0) * frac);
+    }
+  } else {
+    // Unknown rate - passthrough
+    return bytes;
+  }
+  
+  // Convert back to Uint8Array (little-endian PCM16)
+  return new Uint8Array(outputSamples.buffer);
+}
+
+// Sends audio with resampling to bridge's expected rate
+function sendResampledAudio(socket: WebSocket, base64Audio: string, targetRate: number, callId: string, logFirstChunk: boolean): void {
+  try {
+    const resampledBytes = resampleOutboundAudio(base64Audio, targetRate);
+    socket.send(resampledBytes.buffer);
+    
+    if (logFirstChunk) {
+      const inputBytes = Math.floor((base64Audio.length * 3) / 4);
+      console.log(`[${callId}] 🔊 TTS resampling: 24kHz (${inputBytes}B) → ${targetRate}Hz (${resampledBytes.length}B)`);
+    }
+  } catch (e) {
+    console.error("❌ Failed to resample/send audio:", e);
+  }
+}
+
 // === DISPATCH-TRIGGERED HANDOFF ===
 // Delay after fare quote before triggering reconnect (allows Ada's fare speech to start)
 const HANDOFF_AFTER_DISPATCH_DELAY_MS = 2500;
@@ -1657,6 +1730,11 @@ interface SessionState {
   // Inbound audio format from bridge: "ulaw" (8kHz), "slin" (8kHz), "slin16" (16kHz), or "pcm48" (48kHz from Opus decode)
   inboundAudioFormat: "ulaw" | "slin" | "slin16" | "pcm48";
   inboundSampleRate: number; // 8000, 16000, or 48000
+  
+  // Outbound sample rate for TTS audio - bridge expects this rate for playback
+  // If bridge upsamples inbound to 24k but expects 8k/16k outbound, this handles it
+  outboundSampleRate: number; // 8000, 16000, or 24000 (passthrough)
+  loggedFirstTtsResample: boolean; // Track first resample log
 
   // Rasa-style audio processing toggle
   useRasaAudioProcessing: boolean;
@@ -3040,14 +3118,18 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           if (sessionState.pendingAudioBuffer.length > 50) {
             console.log(`[${sessionState.callId}] ⚠️ Audio buffer safety flush (${sessionState.pendingAudioBuffer.length} chunks)`);
             for (const audioChunk of sessionState.pendingAudioBuffer) {
-              sendBinaryAudio(socket, audioChunk);
+              // Resample TTS from 24kHz to bridge's expected rate
+              sendResampledAudio(socket, audioChunk, sessionState.outboundSampleRate, sessionState.callId, !sessionState.loggedFirstTtsResample);
+              sessionState.loggedFirstTtsResample = true;
             }
             sessionState.pendingAudioBuffer = [];
             sessionState.audioVerified = true; // Stop buffering
           }
         } else {
-          // Forward audio to bridge immediately as binary (33% smaller, faster)
-          sendBinaryAudio(socket, message.delta);
+          // Forward audio to bridge with resampling to match expected rate
+          // OpenAI sends 24kHz PCM16, bridge may expect 8kHz or 16kHz
+          sendResampledAudio(socket, message.delta, sessionState.outboundSampleRate, sessionState.callId, !sessionState.loggedFirstTtsResample);
+          sessionState.loggedFirstTtsResample = true;
         }
         break;
       }
@@ -8185,6 +8267,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           finalGoodbyePending: false,
           inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
           inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
+          // Outbound sample rate for TTS audio - defaults to same as inbound, or bridge can specify
+          // If bridge upsamples inbound to 24k but expects 8k/16k outbound, this handles it
+          outboundSampleRate: message.outbound_sample_rate || message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
+          loggedFirstTtsResample: false, // Track first resample log
           useRasaAudioProcessing: message.rasa_audio_processing ?? false,
           halfDuplex: message.half_duplex ?? false,
           halfDuplexBuffer: [],
@@ -8407,6 +8493,8 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
              finalGoodbyePending: false,
              inboundAudioFormat: (message.inbound_format as "ulaw" | "slin" | "slin16") ?? "ulaw",
              inboundSampleRate: message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
+             outboundSampleRate: message.outbound_sample_rate || message.inbound_sample_rate || (message.inbound_format === "slin16" ? 16000 : 8000),
+             loggedFirstTtsResample: false,
              useRasaAudioProcessing: message.rasa_audio_processing ?? false,
             halfDuplex: message.half_duplex ?? false,
             halfDuplexBuffer: [],
@@ -9846,6 +9934,18 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
           console.log(`[${state.callId}] 🔊 Audio format update: ${state.inboundAudioFormat}@${state.inboundSampleRate}Hz → ${newFormat}@${newRate}Hz`);
           if (newFormat) state.inboundAudioFormat = newFormat;
           state.inboundSampleRate = newRate;
+          // Also update outbound rate if bridge didn't explicitly set it differently
+          // (Assumes bridge expects same rate for bidirectional audio)
+          if (!message.outbound_sample_rate) {
+            state.outboundSampleRate = newRate;
+            console.log(`[${state.callId}] 🔊 Outbound rate synced to ${newRate}Hz for TTS resampling`);
+          }
+        }
+        
+        // Handle explicit outbound rate update
+        if (message.outbound_sample_rate && message.outbound_sample_rate !== state.outboundSampleRate) {
+          state.outboundSampleRate = message.outbound_sample_rate;
+          console.log(`[${state.callId}] 🔊 Outbound rate explicitly set to ${message.outbound_sample_rate}Hz`);
         }
         return;
       }
