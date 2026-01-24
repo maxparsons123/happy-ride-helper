@@ -1193,8 +1193,15 @@ class TaxiBridge:
                     # Frame timing is handled by encoder (20ms frames)
                     bytes_per_sec = OPUS_BITRATE // 8  # Approximate
                 else:
-                    # PCM: 50 frames/sec × frame_size = bytes/sec
-                    bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
+                    # PCM pacing: derive from negotiated sample rate.
+                    # AudioSocket may deliver 10ms frames (e.g. 320 bytes at 16kHz),
+                    # so assuming 20ms (50 frames/sec) can make playback 2× slower.
+                    if self.state.ast_codec == "ulaw":
+                        # 8k samples/sec × 1 byte/sample
+                        bytes_per_sec = max(1, self.state.ast_rate)
+                    else:
+                        # PCM16 mono: sample_rate × 2 bytes/sample
+                        bytes_per_sec = max(1, self.state.ast_rate * 2)
                 
                 # Pace to real-time
                 expected_time = start_time + (bytes_played / max(1, bytes_per_sec))
