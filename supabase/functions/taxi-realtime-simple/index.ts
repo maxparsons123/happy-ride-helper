@@ -2780,6 +2780,14 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
             safeCancel(sessionState, `turn-based: awaiting user answer for ${sessionState.awaitingAnswerForStep}`);
             break;
           } else {
+            // CRITICAL: Don't allow response during greeting protection even if timeout passed
+            // The greeting already includes the pickup question - avoid double-asking
+            const stillInGreetingProtection = Date.now() < sessionState.greetingProtectionUntil;
+            if (stillInGreetingProtection) {
+              console.log(`[${sessionState.callId}] 🛡️ GREETING PROTECTION: Turn timeout exceeded but still in greeting window - blocking response`);
+              safeCancel(sessionState, "greeting protection active");
+              break;
+            }
             console.log(`[${sessionState.callId}] ⏰ TURN-BASED TIMEOUT: No user response after ${(waitTime / 1000).toFixed(1)}s - allowing response`);
             sessionState.awaitingUserAnswer = false;
             sessionState.awaitingUserAnswerSince = null;
