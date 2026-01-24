@@ -3513,16 +3513,26 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           
           // --- DUPLICATE QUESTION DETECTION: Prevent Ada from asking the same question twice ---
           // This catches OpenAI generating back-to-back identical questions (common with passenger question)
-          // EXCEPTION: Allow re-asking after address-vs-passenger mismatch recovery
+          // EXCEPTIONS: Allow re-asking in intentional reprompt scenarios
           const duplicateQuestionWindow = 10000; // 10 seconds
           const isWithinDuplicateWindow = sessionState.lastSpokenQuestionAt && 
             (Date.now() - sessionState.lastSpokenQuestionAt < duplicateQuestionWindow);
           
-          // Allow the re-ask if we recently had an address-vs-passenger mismatch (intentional re-prompt)
+          // Allow the re-ask in these intentional scenarios:
+          // 1. Address-vs-passenger mismatch recovery
+          // 2. Safety timeout reprompt (allowOneResponseWhileAwaitingUserAnswer bypass)
+          // 3. Missing step data guard reprompt (lastMissingStepRepromptAt within 5s)
           const isRecoveringFromMismatch = sessionState.lastPassengerMismatchAt &&
             (Date.now() - sessionState.lastPassengerMismatchAt < 5000); // 5 second window after mismatch
           
-          if (isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15 && !isRecoveringFromMismatch) {
+          const isIntentionalReprompt = sessionState.lastMissingStepRepromptAt &&
+            (Date.now() - sessionState.lastMissingStepRepromptAt < 5000); // 5 second window after missing step reprompt
+          
+          const isSafetyTimeoutReprompt = sessionState.allowOneResponseWhileAwaitingUserAnswer;
+          
+          const allowDuplicateQuestion = isRecoveringFromMismatch || isIntentionalReprompt || isSafetyTimeoutReprompt;
+          
+          if (isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15 && !allowDuplicateQuestion) {
             // Check if this is the same question being asked again
             const normalizeQuestion = (q: string) => q.toLowerCase()
               .replace(/[.,!?'"]/g, '')
@@ -3561,6 +3571,8 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
               
               break;
             }
+          } else if (allowDuplicateQuestion && isWithinDuplicateWindow && sessionState.lastSpokenQuestion && currentText.length > 15) {
+            console.log(`[${sessionState.callId}] ✅ INTENTIONAL REPROMPT: Allowing duplicate question (mismatch=${isRecoveringFromMismatch}, reprompt=${isIntentionalReprompt}, timeout=${isSafetyTimeoutReprompt})`);
           }
 
           // --- BOOKING ENFORCEMENT: Detect hallucinated confirmations ---
