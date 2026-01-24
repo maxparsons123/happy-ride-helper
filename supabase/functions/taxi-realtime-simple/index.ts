@@ -2180,19 +2180,59 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         resumeInstruction = "The booking has already been confirmed. Ask if there's anything else you can help with.";
         resumeText = "Apologies for the brief interruption. Your booking is confirmed. Is there anything else I can help you with?";
       } else if (sessionState.bookingStep === "summary") {
-        resumeInstruction = `Continue with the booking summary. Pickup: "${pickup || 'not set'}", Destination: "${destination || 'not set'}", Passengers: ${passengers || 'not set'}. Ask if the details are correct.`;
-        resumeText = pickup && destination && passengers
-          ? `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. Is that correct?`
-          : `Sorry about that. Let me confirm your booking details.`;
+        // Validate we have all the data for summary - if not, fall back to asking for missing data
+        if (pickup && destination && passengers) {
+          resumeInstruction = `Continue with the booking summary. Pickup: "${pickup}", Destination: "${destination}", Passengers: ${passengers}. Ask if the details are correct.`;
+          resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. Is that correct?`;
+        } else {
+          // Missing data - fall back to asking for it
+          console.log(`[${sessionState.callId}] ⚠️ Summary step but missing data - falling back to collect missing fields`);
+          if (!pickup) {
+            resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+            resumeText = `Sorry about that. Where would you like to be picked up?`;
+          } else if (!destination) {
+            resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+            resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
+          } else {
+            resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
+            resumeText = `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`;
+          }
+        }
       } else if (sessionState.bookingStep === "time") {
-        resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}" for ${passengers} passengers. Ask when they need the taxi.`;
-        resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. When do you need the taxi?`;
+        // Validate we have pickup, destination, passengers for this step
+        if (pickup && destination && passengers) {
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}" for ${passengers} passengers. Ask when they need the taxi.`;
+          resumeText = `Apologies for the brief interruption. So, you're going from ${pickup} to ${destination} with ${passengers} passenger${passengers === 1 ? '' : 's'}. When do you need the taxi?`;
+        } else if (pickup && destination) {
+          // Missing passengers - ask for it
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
+          resumeText = `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`;
+        } else if (pickup) {
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+          resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
+        } else {
+          resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+          resumeText = `Sorry about that. Where would you like to be picked up?`;
+        }
       } else if (sessionState.bookingStep === "passengers") {
-        resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
-        resumeText = `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`;
+        if (pickup && destination) {
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}" and destination="${destination}". Ask how many passengers.`;
+          resumeText = `Sorry about that brief pause. You're going from ${pickup} to ${destination}. How many passengers will there be?`;
+        } else if (pickup) {
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+          resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
+        } else {
+          resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+          resumeText = `Sorry about that. Where would you like to be picked up?`;
+        }
       } else if (sessionState.bookingStep === "destination") {
-        resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
-        resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
+        if (pickup) {
+          resumeInstruction = `Continue where you left off. You have pickup="${pickup}". Ask for the destination.`;
+          resumeText = `Sorry about that brief pause. Your pickup is ${pickup}. Where would you like to go?`;
+        } else {
+          resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
+          resumeText = `Sorry about that. Where would you like to be picked up?`;
+        }
       } else {
         resumeInstruction = "Continue helping the caller book a taxi. Ask where they would like to be picked up.";
         resumeText = `Sorry about that. Where would you like to be picked up?`;
@@ -3830,22 +3870,14 @@ Do NOT say 'booked' until the tool returns success.]`
                 console.log(`[${sessionState.callId}] ✅ Pickup saved to DB: "${extractedPickup}"`);
               });
               
-              // Advance to destination
+              // Advance to destination - let OpenAI's natural VAD handle the response timing
               sessionState.lastQuestionType = "destination";
               sessionState.bookingStep = "destination";
+              sessionState.lastQuestionAt = Date.now();
               
-              // ✅ TRIGGER NEXT QUESTION: Force Ada to ask destination
-              if (openaiWs && openaiConnected && !sessionState.callEnded) {
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: `[VERIFIED PICKUP: "${extractedPickup}"] Now ask ONLY: "And what is your destination?" - NO filler words, NO confirmation.` }]
-                  }
-                }));
-                safeResponseCreate(sessionState, "authoritative-pickup-next-question");
-              }
+              // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
+              // This prevents aggressive prompting where Ada asks next question before user finishes speaking
+              console.log(`[${sessionState.callId}] 📈 State advanced to destination - waiting for VAD to trigger response`);
             }
             
             // === DESTINATION EXTRACTION ===
@@ -3863,22 +3895,14 @@ Do NOT say 'booked' until the tool returns success.]`
                 console.log(`[${sessionState.callId}] ✅ Destination saved to DB: "${extractedDest}"`);
               });
               
-              // Advance to passengers
+              // Advance to passengers - let OpenAI's natural VAD handle the response timing
               sessionState.lastQuestionType = "passengers";
               sessionState.bookingStep = "passengers";
+              sessionState.lastQuestionAt = Date.now();
               
-              // ✅ TRIGGER NEXT QUESTION: Force Ada to ask passengers
-              if (openaiWs && openaiConnected && !sessionState.callEnded) {
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: `[VERIFIED DESTINATION: "${extractedDest}"] Now ask ONLY: "How many people will be travelling?" - NO filler words, NO confirmation.` }]
-                  }
-                }));
-                safeResponseCreate(sessionState, "authoritative-destination-next-question");
-              }
+              // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
+              // This prevents aggressive prompting where Ada asks next question before user finishes speaking
+              console.log(`[${sessionState.callId}] 📈 State advanced to passengers - waiting for VAD to trigger response`);
             }
             
             // === PASSENGER EXTRACTION ===
@@ -3925,22 +3949,14 @@ Do NOT say 'booked' until the tool returns success.]`
                   console.log(`[${sessionState.callId}] ✅ Passengers saved to DB: ${extractedPax}`);
                 });
                 
-                // Advance to time
+                // Advance to time - let OpenAI's natural VAD handle the response timing
                 sessionState.lastQuestionType = "time";
                 sessionState.bookingStep = "time";
+                sessionState.lastQuestionAt = Date.now();
                 
-                // ✅ TRIGGER NEXT QUESTION: Force Ada to ask time
-                if (openaiWs && openaiConnected && !sessionState.callEnded) {
-                  openaiWs.send(JSON.stringify({
-                    type: "conversation.item.create",
-                    item: {
-                      type: "message",
-                      role: "user",
-                      content: [{ type: "input_text", text: `[VERIFIED PASSENGERS: ${extractedPax}] Now ask ONLY: "When do you need the taxi?" - NO filler words, NO confirmation.` }]
-                    }
-                  }));
-                  safeResponseCreate(sessionState, "authoritative-passengers-next-question");
-                }
+                // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
+                // This prevents aggressive prompting where Ada asks next question before user finishes speaking
+                console.log(`[${sessionState.callId}] 📈 State advanced to time - waiting for VAD to trigger response`);
               }
             }
             
@@ -3957,11 +3973,13 @@ Do NOT say 'booked' until the tool returns success.]`
                 sessionState.booking.pickup_time = extractedTime;
                 sessionState.transcriptExtractedTime = extractedTime;
                 
-                // Advance to summary
+                // Advance to summary - for summary we DO want to trigger immediately since all fields are collected
                 sessionState.lastQuestionType = "confirmation";
                 sessionState.bookingStep = "summary";
+                sessionState.lastQuestionAt = Date.now();
                 
-                // ✅ TRIGGER SUMMARY: Force Ada to give booking summary
+                // ✅ For summary, we DO trigger response since all fields are collected and we want to move forward
+                // This is different from pickup/destination/passengers where we let VAD handle timing
                 if (openaiWs && openaiConnected && !sessionState.callEnded) {
                   const pickup = sessionState.booking.pickup || "pickup";
                   const destination = sessionState.booking.destination || "destination";

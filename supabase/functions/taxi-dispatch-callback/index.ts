@@ -90,7 +90,8 @@ interface DispatchCallback {
   ignored?: boolean; // Flag to mark questions that don't need processing
   // For ask_confirm action - fare confirmation with callback
   callback_url?: string; // URL to POST yes/no response
-  // For say action (uses message field)
+  // For say and ask_confirm actions - bypass AI for direct TTS
+  bypass_ai?: boolean; // If true, use direct TTS instead of going through OpenAI
   // For hangup call_action - optional goodbye message
   // For booking_modified event
   field_changed?: string;
@@ -130,6 +131,7 @@ serve(async (req) => {
       context,
       ignored,
       callback_url,
+      bypass_ai,
       field_changed,
       old_value,
       new_value
@@ -347,7 +349,7 @@ serve(async (req) => {
       }
 
       // Check if bypass_ai is requested
-      const bypassAi = (callback as any).bypass_ai === true;
+      const bypassAi = bypass_ai === true;
       console.log(`[${call_id}] 💰 Dispatch ask_confirm: "${message}" (bypass_ai=${bypassAi})`);
       console.log(`[${call_id}] Fare: ${fare}, ETA: ${normalizedEta}, Callback: ${callback_url}`);
 
