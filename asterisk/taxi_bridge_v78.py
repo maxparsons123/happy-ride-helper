@@ -342,6 +342,11 @@ class CallState:
     ast_frame_bytes: int = 160
     format_locked: bool = False
     format_lock_time: float = 0.0
+    first_frame_at: float = 0.0
+    frames_observed: int = 0
+    seen_160: bool = False
+    seen_320: bool = False
+    seen_640: bool = False
     ws_connected: bool = False
     reconnect_attempts: int = 0
     last_ws_activity: float = field(default_factory=time.time)
@@ -403,52 +408,86 @@ class TaxiBridge:
             self.state.ast_frame_bytes = frame_len
             return
 
+        # If format is locked, allow different frame sizes that are still compatible
+        # with the locked codec (e.g. slin16 can legitimately appear as 320 bytes (10ms)
+        # or 640 bytes (20ms), depending on channel framing).
+        if self.state.format_locked:
+            elapsed = time.time() - self.state.format_lock_time
+            if elapsed < FORMAT_LOCK_DURATION_S:
+                if self.state.ast_codec == "slin16" and frame_len in {320, 640}:
+                    # Same codec, different framing; update frame size and keep going.
+                    self.state.ast_frame_bytes = frame_len
+                    return
+                if self.state.ast_codec == "slin" and frame_len == 320:
+                    self.state.ast_frame_bytes = frame_len
+                    return
+                if self.state.ast_codec == "ulaw" and frame_len == 160:
+                    self.state.ast_frame_bytes = frame_len
+                    return
+                # Otherwise, treat as a mismatch and ignore.
+                if frame_len != self.state.ast_frame_bytes:
+                    if not hasattr(self.state, '_format_mismatch_logged'):
+                        logger.warning(
+                            "[%s] ⚠️ Ignoring frame size change %d→%d (format locked to %s)",
+                            self.state.call_id,
+                            self.state.ast_frame_bytes,
+                            frame_len,
+                            self.state.ast_codec,
+                        )
+                        self.state._format_mismatch_logged = True
+                return
+
         if LOCK_FORMAT_ULAW and frame_len not in {320, 640}:
             if frame_len != self.state.ast_frame_bytes:
                 logger.warning("[%s] ⚠️ Frame size %d (locked to ulaw)", self.state.call_id, frame_len)
             self.state.ast_frame_bytes = frame_len
             return
 
-        # FORMAT LOCK: Once locked, ignore ALL frame size changes (prevents oscillation)
-        if self.state.format_locked:
-            elapsed = time.time() - self.state.format_lock_time
-            if elapsed < FORMAT_LOCK_DURATION_S:
-                # Ignore any frame size changes - stick with locked format
-                if frame_len != self.state.ast_frame_bytes:
-                    # Log but don't change format
-                    if not hasattr(self.state, '_format_mismatch_logged'):
-                        logger.warning("[%s] ⚠️ Ignoring frame size change %d→%d (format locked to %s)",
-                                     self.state.call_id, self.state.ast_frame_bytes, frame_len, self.state.ast_codec)
-                        self.state._format_mismatch_logged = True
-                return
+        # === OBSERVATION WINDOW BEFORE LOCKING ===
+        # AudioSocket framing can fluctuate at call start (e.g. first 320 then 640).
+        # Instead of locking immediately on the first frame, observe a few frames and
+        # pick the best match (prefer slin16 if we ever see 640, or if FORCE_SLIN16).
+        if self.state.frames_observed == 0:
+            self.state.first_frame_at = time.time()
+        self.state.frames_observed += 1
+        if frame_len == 160:
+            self.state.seen_160 = True
+        elif frame_len == 320:
+            self.state.seen_320 = True
+        elif frame_len == 640:
+            self.state.seen_640 = True
 
         old_codec = self.state.ast_codec
-        if frame_len == 640:
-            self.state.ast_codec = "slin16"
-            self.state.ast_rate = RATE_SLIN16
-        elif frame_len == 320:
-            # FORCE_SLIN16: Treat 320-byte frames as 16kHz when dialplan forces slin16
-            # AudioSocket may send smaller frames even when slin16 is set
-            if FORCE_SLIN16:
-                self.state.ast_codec = "slin16"
-                self.state.ast_rate = RATE_SLIN16
-            else:
-                # Legacy: 320 bytes = slin (PCM16 @ 8kHz) with 20ms frames
-                self.state.ast_codec = "slin"
-                self.state.ast_rate = RATE_SLIN
-        elif frame_len == 160:
-            self.state.ast_codec = "ulaw"
-            self.state.ast_rate = RATE_ULAW
-        else:
-            self.state.ast_codec = "slin16" if frame_len > 400 else "ulaw"
-            self.state.ast_rate = RATE_SLIN16 if frame_len > 400 else RATE_ULAW
-            logger.warning("[%s] ⚠️ Unusual frame size %d, assuming %s", self.state.call_id, frame_len, self.state.ast_codec)
 
+        # Decide best codec/rate based on what we've observed so far.
+        # Prefer slin16 if we saw 640 at least once, OR if FORCE_SLIN16 is enabled.
+        decided_codec: str
+        decided_rate: int
+        if self.state.seen_640 or (FORCE_SLIN16 and self.state.seen_320 and not self.state.seen_160):
+            decided_codec = "slin16"
+            decided_rate = RATE_SLIN16
+        elif self.state.seen_320:
+            decided_codec = "slin"
+            decided_rate = RATE_SLIN
+        elif self.state.seen_160:
+            decided_codec = "ulaw"
+            decided_rate = RATE_ULAW
+        else:
+            decided_codec = "slin16" if frame_len > 400 else "ulaw"
+            decided_rate = RATE_SLIN16 if frame_len > 400 else RATE_ULAW
+
+        self.state.ast_codec = decided_codec
+        self.state.ast_rate = decided_rate
         self.state.ast_frame_bytes = frame_len
-        
-        # Lock format after detection (permanent for this call)
-        self.state.format_locked = True
-        self.state.format_lock_time = time.time()
+
+        # Lock once we've seen enough frames, or after ~1s of audio.
+        should_lock = (
+            self.state.frames_observed >= FORMAT_LOCK_FRAME_COUNT
+            or (time.time() - self.state.first_frame_at) >= 1.0
+        )
+        if should_lock:
+            self.state.format_locked = True
+            self.state.format_lock_time = time.time()
 
         if old_codec != self.state.ast_codec:
             logger.info("[%s] 🔊 Format: %s @ %dHz (%d bytes/frame)",
@@ -812,7 +851,12 @@ class TaxiBridge:
                 if self.state.ast_codec == "opus":
                     bytes_per_sec = OPUS_BITRATE // 8
                 else:
-                    bytes_per_sec = max(1, self.state.ast_frame_bytes * 50)
+                    # Derive pacing from the negotiated sample rate instead of assuming 20ms frames.
+                    # This prevents "fast Ada" when AudioSocket uses 10ms frames (e.g. 320 bytes at 16kHz).
+                    if self.state.ast_codec == "ulaw":
+                        bytes_per_sec = max(1, self.state.ast_rate)  # 8k samples/sec * 1 byte/sample
+                    else:
+                        bytes_per_sec = max(1, self.state.ast_rate * 2)  # PCM16 mono
                 expected_time = start_time + (bytes_played / max(1, bytes_per_sec))
                 delay = expected_time - time.time()
                 if delay > 0:
@@ -874,6 +918,7 @@ async def main() -> None:
         f"   Endpoint:  {WS_URL.split('/')[-1]}",
         f"   Opus:      {opus_status} @ {OPUS_BITRATE//1000}kbps",
         f"   Format:    {'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect'}",
+        f"   Force16k:  {'on' if FORCE_SLIN16 else 'off'}",
         f"   DSP:       noise_gate + adaptive pre-emph + soft clip",
         f"   Reconnect: {MAX_RECONNECT_ATTEMPTS} attempts",
     ]
