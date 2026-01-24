@@ -2531,7 +2531,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           break;
 
         case "response.audio.delta":
-          // Forward audio to client (and mark that Ada is speaking)
+          // Forward audio to client as BINARY (more efficient than base64 JSON)
           if (data.delta) {
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
@@ -2541,10 +2541,17 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             sessionState.openAiResponseActive = true;
 
             if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({
-                type: "audio",
-                audio: data.delta
-              }));
+              // Decode base64 and send as raw binary - 33% smaller, no JSON parsing needed
+              try {
+                const binaryString = atob(data.delta);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                socket.send(bytes.buffer);
+              } catch (e) {
+                console.error(`[${callId}] ❌ Failed to decode audio delta:`, e);
+              }
             } else {
               console.log(`[${callId}] ⚠️ Socket not open (state: ${socket.readyState}), can't send audio`);
             }
