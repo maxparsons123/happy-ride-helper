@@ -3156,7 +3156,17 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         sessionState.echoGuardUntil = Date.now() + echoGuardMs;
         console.log(`[${sessionState.callId}] 🔇 Echo guard active for ${echoGuardMs}ms`);
 
-        
+        // FRESH INPUT: Clear audio buffer when Ada finishes to prevent stale audio
+        // Audio that accumulated while Ada was speaking is mostly echo/noise - discard it
+        // so the caller's next reply starts from a clean slate
+        if (!sessionState.halfDuplex && openaiWs && openaiConnected) {
+          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          sessionState.audioBufferedMs = 0;
+          sessionState.audioBufferedSinceSpeechStart = false;
+          console.log(`[${sessionState.callId}] 🧹 Cleared audio buffer for fresh input`);
+        }
+
+
         // HALF-DUPLEX: Flush buffered audio now that Ada stopped speaking
         if (sessionState.halfDuplex && sessionState.halfDuplexBuffer.length > 0) {
           console.log(`[${sessionState.callId}] 📤 Half-duplex: flushing ${sessionState.halfDuplexBuffer.length} buffered audio chunks`);
