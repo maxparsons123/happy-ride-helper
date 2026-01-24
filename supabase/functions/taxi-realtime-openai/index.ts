@@ -373,13 +373,14 @@ async function handleConnection(clientWs: WebSocket, callId: string, callerPhone
     cleanup();
   }, MAX_SESSION_DURATION_MS) as unknown as number;
 
-  // Create live call record
-  await supabase.from("live_calls").insert({
+  // Create live call record (use upsert to handle reconnects)
+  await supabase.from("live_calls").upsert({
     call_id: callId,
     caller_phone: callerPhone,
     status: "connecting",
     source: "openai-realtime",
-  });
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "call_id" });
 
   // Connect to OpenAI Realtime API
   const openaiWs = new WebSocket(
