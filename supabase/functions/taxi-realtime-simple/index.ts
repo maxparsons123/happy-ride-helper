@@ -4096,6 +4096,13 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.awaitingUserAnswer = true;
             sessionState.awaitingUserAnswerSince = Date.now();
             sessionState.awaitingAnswerForStep = sessionState.lastQuestionType as any;
+
+            // ✅ CRITICAL: Reset any leftover bypass/flush flags from prior turns.
+            // If allowOneResponseWhileAwaitingUserAnswer is accidentally still true here,
+            // the next VAD-triggered response.created will bypass the guard and Ada can
+            // ask the next question before the user's transcript is processed.
+            sessionState.allowOneResponseWhileAwaitingUserAnswer = false;
+            sessionState.pendingTurnResponseCreate = false;
             
             console.log(`[${sessionState.callId}] ╔════════════════════════════════════════════════════════════════╗`);
             console.log(`[${sessionState.callId}] ║  🔒 TURN-BASED LOCK ENGAGED                                    ║`);
