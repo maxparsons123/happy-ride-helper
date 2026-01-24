@@ -4089,12 +4089,42 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
+          // ═══════════════════════════════════════════════════════════════════════════
+          // FIELD RESET: Clear pickup when Ada asks about it
+          // This ensures stale data doesn't prevent the next answer from being captured
+          // ═══════════════════════════════════════════════════════════════════════════
+          if (sessionState.booking.pickup) {
+            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing pickup "${sessionState.booking.pickup}" - Ada is re-asking`);
+            sessionState.booking.pickup = null;
+            sessionState.transcriptExtractedPickup = null;
+            // Also update DB to clear stale data
+            supabase.from("live_calls").update({ 
+              pickup: null, 
+              updated_at: new Date().toISOString() 
+            }).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ Pickup cleared in DB`);
+            });
+          }
         } else if (/(?:destination|where.*(?:going|to\??|drop|travel)|what is your destination)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "destination";
           sessionState.lastQuestionAt = Date.now();
           if (isQuestion) {
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
+          }
+          // ═══════════════════════════════════════════════════════════════════════════
+          // FIELD RESET: Clear destination when Ada asks about it
+          // ═══════════════════════════════════════════════════════════════════════════
+          if (sessionState.booking.destination) {
+            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing destination "${sessionState.booking.destination}" - Ada is re-asking`);
+            sessionState.booking.destination = null;
+            sessionState.transcriptExtractedDestination = null;
+            supabase.from("live_calls").update({ 
+              destination: null, 
+              updated_at: new Date().toISOString() 
+            }).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ Destination cleared in DB`);
+            });
           }
         } else if (/(?:how many|passengers|people|travell)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "passengers";
@@ -4103,12 +4133,40 @@ Do NOT say 'booked' until the tool returns success.]`
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
           }
+          // ═══════════════════════════════════════════════════════════════════════════
+          // FIELD RESET: Clear passengers when Ada asks about it
+          // ═══════════════════════════════════════════════════════════════════════════
+          if (sessionState.booking.passengers !== null) {
+            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing passengers ${sessionState.booking.passengers} - Ada is re-asking`);
+            sessionState.booking.passengers = null;
+            sessionState.transcriptExtractedPassengers = null;
+            supabase.from("live_calls").update({ 
+              passengers: null, 
+              updated_at: new Date().toISOString() 
+            }).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ Passengers cleared in DB`);
+            });
+          }
         } else if (/(?:when|what time|timing|schedule)/i.test(lowerAssistantText)) {
           sessionState.lastQuestionType = "time";
           sessionState.lastQuestionAt = Date.now();
           if (isQuestion) {
             sessionState.lastSpokenQuestion = lastAssistantText;
             sessionState.lastSpokenQuestionAt = Date.now();
+          }
+          // ═══════════════════════════════════════════════════════════════════════════
+          // FIELD RESET: Clear pickup_time when Ada asks about it
+          // ═══════════════════════════════════════════════════════════════════════════
+          if (sessionState.booking.pickup_time) {
+            console.log(`[${sessionState.callId}] 🔄 FIELD RESET: Clearing pickup_time "${sessionState.booking.pickup_time}" - Ada is re-asking`);
+            sessionState.booking.pickup_time = null;
+            sessionState.transcriptExtractedTime = null;
+            supabase.from("live_calls").update({ 
+              pickup_time: null, 
+              updated_at: new Date().toISOString() 
+            }).eq("call_id", sessionState.callId).then(() => {
+              console.log(`[${sessionState.callId}] ✅ Pickup time cleared in DB`);
+            });
           }
         } else if (isForbiddenAddressConfirmation) {
           console.log(`[${sessionState.callId}] ⚠️ Detected forbidden address confirmation phrase - NOT treating as confirmation`);
