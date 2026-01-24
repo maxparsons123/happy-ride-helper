@@ -2750,8 +2750,8 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
         // ✅ STRICT TURN-BASED GUARD: If Ada has asked a data-collection question and is
         // waiting for a user answer, block ALL VAD-triggered responses until a user transcript arrives.
         // This prevents Ada from advancing to the next question before the user speaks.
-        // Maximum wait time: 30 seconds (after which we allow timeout handling)
-        const TURN_BASED_TIMEOUT_MS = 30000;
+        // Maximum wait time: 8 seconds (Asterisk drops calls after ~10s silence - must be shorter)
+        const TURN_BASED_TIMEOUT_MS = 8000;
         if (sessionState.awaitingUserAnswer && sessionState.awaitingUserAnswerSince) {
           // Allow one forced/system reprompt (prevents infinite cancel loops).
           if (sessionState.allowOneResponseWhileAwaitingUserAnswer) {
@@ -3986,6 +3986,28 @@ Do NOT say 'booked' until the tool returns success.]`
             console.log(`[${sessionState.callId}] ║  Booking: P=${(sessionState.booking.pickup || '❌').substring(0, 10).padEnd(10)} D=${(sessionState.booking.destination || '❌').substring(0, 10).padEnd(10)} X=${String(sessionState.booking.passengers ?? '❌').padEnd(3)}   ║`);
             console.log(`[${sessionState.callId}] ║  → Blocking ALL responses until user transcript arrives        ║`);
             console.log(`[${sessionState.callId}] ╚════════════════════════════════════════════════════════════════╝`);
+            
+            // ✅ UNCONDITIONAL SAFETY TIMEOUT: Clear turn-based lock after 6s if no transcript arrives.
+            // Prevents Ada from going silent and Asterisk dropping the call (~10s silence limit).
+            // This fires regardless of extractionInProgress state.
+            const lockEngagedAt = Date.now();
+            setTimeout(() => {
+              // Only clear if still awaiting and time matches (prevents stale timeout from prior question)
+              if (sessionState.awaitingUserAnswer && 
+                  sessionState.awaitingUserAnswerSince === lockEngagedAt &&
+                  !sessionState.callEnded) {
+                console.log(`[${sessionState.callId}] ⏰ TURN-LOCK SAFETY TIMEOUT (6s): Clearing lock and re-prompting`);
+                sessionState.awaitingUserAnswer = false;
+                sessionState.awaitingUserAnswerSince = null;
+                sessionState.awaitingAnswerForStep = null;
+                
+                // Trigger a reprompt if no response is active
+                if (!sessionState.openAiResponseActive && openaiWs && openaiConnected) {
+                  sessionState.allowOneResponseWhileAwaitingUserAnswer = true;
+                  safeResponseCreate(sessionState, "turn-lock-safety-timeout");
+                }
+              }
+            }, 6000);
           } else {
             // Non-data-collection question (confirmation, etc.) - log but don't lock
             console.log(`[${sessionState.callId}] ════════════════════════════════════════════`);
