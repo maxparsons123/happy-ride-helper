@@ -847,11 +847,21 @@ const PHANTOM_PHRASES = [
 
 function isHallucination(text: string): boolean {
   const trimmed = text.trim();
-  // IMPORTANT: Do NOT filter single-digit transcripts ("4", "3", etc.).
-  // Whisper often returns passenger counts as a single digit, and filtering them breaks booking.
+  const lower = trimmed.toLowerCase();
+  
+  // IMPORTANT: Do NOT filter single-digit transcripts ("4", "3", etc.) or number WORDS.
+  // Whisper often returns passenger counts as a single digit or word, and filtering them breaks booking.
   if (trimmed.length < 2) {
     if (/^[0-9]$/.test(trimmed)) return false;
     return true;
+  }
+  
+  // CRITICAL: Allow number words through (one, two, three, four, five, six, seven, eight, nine, ten)
+  // These are common passenger count responses that must NOT be filtered
+  const numberWords = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", 
+                       "yes", "no", "yep", "nope", "ok", "okay", "yeah", "nah", "sure", "correct"];
+  if (numberWords.includes(lower)) {
+    return false;
   }
   
   // Check regex patterns first
@@ -860,7 +870,7 @@ function isHallucination(text: string): boolean {
   }
   
   // Check phantom phrases with normalized comparison (strip punctuation)
-  const clean = trimmed.toLowerCase().replace(/[^\w\s]/g, "");
+  const clean = lower.replace(/[^\w\s]/g, "");
   if (PHANTOM_PHRASES.some(phrase => 
     clean.includes(phrase.toLowerCase().replace(/[^\w\s]/g, ""))
   )) {
@@ -7077,7 +7087,7 @@ Do NOT say 'booked' until the tool returns success.]`
             } catch {
               // ignore
             }
-          }, 10000) as unknown as number; // 10 second delay for full goodbye audio with WhatsApp tip
+          }, 5000) as unknown as number; // 5 second delay - enough for goodbye audio to finish
           
           // Return early - don't trigger another response.create at the end
           return;
