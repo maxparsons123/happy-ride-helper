@@ -2339,12 +2339,25 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           updated_at: new Date().toISOString()
         };
         
+        // Helper for address comparison
+        const normalizeForCompare = (s: string | null) => (s || "").toLowerCase().replace(/[.,\s]+/g, " ").trim();
+        
         // Only include booking fields if they have values (don't overwrite with nulls)
         if (sessionState.booking.pickup) {
           updatePayload.pickup = sessionState.booking.pickup;
         }
         if (sessionState.booking.destination) {
-          updatePayload.destination = sessionState.booking.destination;
+          // === DUPLICATE ADDRESS GUARD ===
+          // Prevent saving destination that's identical to pickup
+          const normalizedPickup = normalizeForCompare(sessionState.booking.pickup);
+          const normalizedDest = normalizeForCompare(sessionState.booking.destination);
+          
+          if (normalizedPickup && normalizedDest && normalizedPickup === normalizedDest) {
+            console.log(`[${callId}] ⚠️ DB FLUSH: Skipping destination - identical to pickup`);
+            // Don't include destination in update
+          } else {
+            updatePayload.destination = sessionState.booking.destination;
+          }
         }
         if (sessionState.booking.passengers !== null && sessionState.booking.passengers > 0) {
           updatePayload.passengers = sessionState.booking.passengers;
@@ -3654,6 +3667,32 @@ Do NOT say 'booked' until the tool returns success.]`
           }, 5000);
         }
         
+        // === CONFIRMATION PHASE PERIODIC COMMIT ===
+        // During confirmation phase (summary/fare), VAD often misses short "yes" responses.
+        // Schedule periodic forced commits to ensure transcription happens.
+        const isConfirmationPhase = sessionState.bookingStep === "summary" || 
+          sessionState.lastQuestionType === "confirmation" ||
+          !!sessionState.pendingQuote;
+        
+        if (isConfirmationPhase && openaiWs && openaiConnected && !sessionState.callEnded) {
+          console.log(`[${sessionState.callId}] ⏰ CONFIRMATION PHASE: Scheduling periodic commits to catch "yes" responses`);
+          
+          // Schedule 3 additional commits over the next 4 seconds to catch delayed responses
+          const commitIntervals = [1500, 2500, 3500];
+          commitIntervals.forEach((delay) => {
+            setTimeout(() => {
+              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed) {
+                try {
+                  console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Forcing transcription check (${delay}ms after speech_stopped)`);
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                } catch (e) {
+                  // Ignore - connection may have closed
+                }
+              }
+            }, delay);
+          });
+        }
+        
         // NOTE: Do NOT call response.create here - server VAD handles turn-taking automatically
         break;
       }
@@ -3883,26 +3922,52 @@ Do NOT say 'booked' until the tool returns success.]`
             // === DESTINATION EXTRACTION ===
             else if (questionType === "destination" && isAddressLike && !sessionState.booking.destination) {
               const extractedDest = correctTranscript(userText);
-              console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE DESTINATION: "${extractedDest}" (from transcript, question was destination)`);
-              sessionState.booking.destination = extractedDest;
-              sessionState.transcriptExtractedDestination = extractedDest; // Track what transcript said
               
-              // Sync to DB immediately
-              supabase.from("live_calls").update({ 
-                destination: extractedDest, 
-                updated_at: new Date().toISOString() 
-              }).eq("call_id", sessionState.callId).then(() => {
-                console.log(`[${sessionState.callId}] ✅ Destination saved to DB: "${extractedDest}"`);
-              });
+              // === DUPLICATE ADDRESS GUARD ===
+              // Prevent saving destination that's identical to pickup (common STT/extraction error)
+              const normalizeForCompare = (s: string | null) => (s || "").toLowerCase().replace(/[.,\s]+/g, " ").trim();
+              const normalizedPickup = normalizeForCompare(sessionState.booking.pickup);
+              const normalizedDest = normalizeForCompare(extractedDest);
               
-              // Advance to passengers - let OpenAI's natural VAD handle the response timing
-              sessionState.lastQuestionType = "passengers";
-              sessionState.bookingStep = "passengers";
-              sessionState.lastQuestionAt = Date.now();
-              
-              // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
-              // This prevents aggressive prompting where Ada asks next question before user finishes speaking
-              console.log(`[${sessionState.callId}] 📈 State advanced to passengers - waiting for VAD to trigger response`);
+              if (normalizedPickup && normalizedDest && normalizedPickup === normalizedDest) {
+                console.log(`[${sessionState.callId}] ⚠️ DUPLICATE ADDRESS BLOCKED: destination "${extractedDest}" === pickup "${sessionState.booking.pickup}"`);
+                // Don't save - ask for destination again
+                if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{
+                        type: "input_text",
+                        text: `[SYSTEM: The user repeated their pickup address. Ask ONLY: "And where would you like to go to?" Do NOT repeat the pickup address back.]`,
+                      }],
+                    },
+                  }));
+                  safeResponseCreate(sessionState, "duplicate-address-guard");
+                }
+              } else {
+                console.log(`[${sessionState.callId}] 📍 AUTHORITATIVE DESTINATION: "${extractedDest}" (from transcript, question was destination)`);
+                sessionState.booking.destination = extractedDest;
+                sessionState.transcriptExtractedDestination = extractedDest; // Track what transcript said
+                
+                // Sync to DB immediately
+                supabase.from("live_calls").update({ 
+                  destination: extractedDest, 
+                  updated_at: new Date().toISOString() 
+                }).eq("call_id", sessionState.callId).then(() => {
+                  console.log(`[${sessionState.callId}] ✅ Destination saved to DB: "${extractedDest}"`);
+                });
+                
+                // Advance to passengers - let OpenAI's natural VAD handle the response timing
+                sessionState.lastQuestionType = "passengers";
+                sessionState.bookingStep = "passengers";
+                sessionState.lastQuestionAt = Date.now();
+                
+                // ✅ DO NOT force safeResponseCreate - let OpenAI VAD handle response timing naturally
+                // This prevents aggressive prompting where Ada asks next question before user finishes speaking
+                console.log(`[${sessionState.callId}] 📈 State advanced to passengers - waiting for VAD to trigger response`);
+              }
             }
             
             // === PASSENGER EXTRACTION ===
