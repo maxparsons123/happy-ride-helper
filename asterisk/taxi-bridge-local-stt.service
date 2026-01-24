@@ -1,0 +1,29 @@
+[Unit]
+Description=Taxi AI Bridge - Local STT Architecture
+After=network.target asterisk.service
+
+[Service]
+Type=simple
+User=asterisk
+Group=asterisk
+WorkingDirectory=/opt/taxi-bridge
+
+# Environment Variables
+Environment="OPENAI_API_KEY=sk-your-openai-key-here"
+Environment="EDGE_FUNCTION_URL=https://oerketnvlmptpfvttysy.supabase.co/functions/v1/taxi-text-handler"
+Environment="AUDIOSOCKET_PORT=9093"
+
+# Use virtual environment Python
+ExecStart=/opt/taxi-bridge/venv/bin/python3 /opt/taxi-bridge/taxi_bridge_local_stt.py
+
+# Restart Policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taxi-bridge-local-stt
+
+[Install]
+WantedBy=multi-user.target
