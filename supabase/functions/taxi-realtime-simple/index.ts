@@ -3740,15 +3740,38 @@ Do NOT say 'booked' until the tool returns success.]`
         console.log(`[${sessionState.callId}] 🔇 Speech stopped after ${speechDuration}ms - VAD will wait ${vadSilenceMs}ms before responding`);
         sessionState.speechStopTime = Date.now();
         
+        // === SILENCE PADDING BEFORE COMMIT ===
+        // When streaming audio to OpenAI Realtime, if VAD triggers on a very small final chunk,
+        // the decoder can hang or drop the last word/phoneme. By padding the audio buffer with 
+        // ~100ms of silence BEFORE committing, we give the transcription engine "room to breathe"
+        // and process trailing audio data that was sitting in a buffer waiting for more input.
+        // This fixes the "52A" → "52" problem where the final phoneme gets cut off.
+        const SILENCE_PADDING_MS = 100; // 100ms of silence padding
+        const SILENCE_SAMPLE_RATE = 24000; // OpenAI expects 24kHz
+        const SILENCE_SAMPLES = Math.floor(SILENCE_SAMPLE_RATE * SILENCE_PADDING_MS / 1000);
+        const silenceBuffer = new Int16Array(SILENCE_SAMPLES); // Already zeros = silence
+        const silenceBytes = new Uint8Array(silenceBuffer.buffer);
+        let silenceBinary = "";
+        for (let i = 0; i < silenceBytes.length; i++) {
+          silenceBinary += String.fromCharCode(silenceBytes[i]);
+        }
+        const silenceBase64 = btoa(silenceBinary);
+        
         // === MANUAL COMMIT FALLBACK FOR SHORT WORDS ===
         // Short utterances like "yes", "3", "ok" are often missed by server VAD because
         // they don't have enough acoustic energy to trigger transcription.
         // Force a manual commit after ANY speech to ensure short words are captured.
         // This is especially critical for confirmation responses and passenger counts.
         if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected && sessionState.audioBufferedSinceSpeechStart) {
-          // Short speech detected - send manual commit to force transcription
-          console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Forcing transcription for short speech (${speechDuration}ms)`);
+          // Short speech detected - pad with silence and send manual commit to force transcription
+          console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Padding ${SILENCE_PADDING_MS}ms silence + forcing transcription for short speech (${speechDuration}ms)`);
           try {
+            // Append silence padding to give decoder room for trailing phonemes
+            openaiWs.send(JSON.stringify({
+              type: "input_audio_buffer.append",
+              audio: silenceBase64
+            }));
+            // Now commit with the padded audio
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
             sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
           } catch (e) {
@@ -3818,7 +3841,12 @@ Do NOT say 'booked' until the tool returns success.]`
               // GUARD: Only commit if we have buffered audio AND connection is open
               if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed && sessionState.audioBufferedSinceSpeechStart) {
                 try {
-                  console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Forcing transcription check (${delay}ms after speech_stopped)`);
+                  console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Padding silence + forcing transcription check (${delay}ms after speech_stopped)`);
+                  // Append silence padding before commit to give decoder room for trailing phonemes
+                  openaiWs.send(JSON.stringify({
+                    type: "input_audio_buffer.append",
+                    audio: silenceBase64
+                  }));
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
                   sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
                 } catch (e) {
