@@ -4204,12 +4204,20 @@ Do NOT say 'booked' until the tool returns success.]`
           const isPassengerCount = /^(one|two|three|four|five|six|seven|eight|1|2|3|4|5|6|7|8)\.?$/i.test(lowerUserText.trim()) ||
             /\b(just me|myself|alone|one person|two people|three people|four people|us|passengers?)\b/i.test(lowerUserText);
           
+          // NEW: Detect place names (single capitalized words) that are NOT valid passenger answers
+          // e.g., "Wolframpton", "Birmingham", "Heathrow" - these look like destinations, not passenger counts
+          const trimmedText = userText.trim();
+          const looksLikePlaceName = (
+            /^[A-Z][a-z]{3,}(ton|ham|wich|pool|field|ford|bury|bridge|port|mouth|gate|worth|ley|chester|cester|borough|wood)$/i.test(trimmedText) || // UK place name patterns
+            /^(the\s+)?[A-Z][a-z]+\s*(airport|station|hospital|centre|center|mall|park|hotel)$/i.test(trimmedText) // "Heathrow Airport", "The Station"
+          ) && !isPassengerCount;
+          
           // Prevent double-asking passengers due to mismatch loop
           const recentPassengerMismatchInjection = sessionState.lastPassengerMismatchAt && 
             (Date.now() - sessionState.lastPassengerMismatchAt < 15000); // 15 second cooldown
           
-          if (isRecentQuestion && sessionState.lastQuestionType === "passengers" && isAddressLike && !isPassengerCount && !recentPassengerMismatchInjection) {
-            console.log(`[${sessionState.callId}] 🔄 ADDRESS-VS-PASSENGER MISMATCH: User gave address "${userText}" when asked about passengers`);
+          if (isRecentQuestion && sessionState.lastQuestionType === "passengers" && (isAddressLike || looksLikePlaceName) && !isPassengerCount && !recentPassengerMismatchInjection) {
+            console.log(`[${sessionState.callId}] 🔄 ADDRESS-VS-PASSENGER MISMATCH: User gave ${looksLikePlaceName ? 'place name' : 'address'} "${userText}" when asked about passengers`);
             
             // Store the address as potential destination correction
             const mismatchedAddress = userText;
