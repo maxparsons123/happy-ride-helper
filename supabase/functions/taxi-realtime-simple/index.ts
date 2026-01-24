@@ -4059,29 +4059,15 @@ Do NOT say 'booked' until the tool returns success.]`
             }
             // === HALLUCINATED ADDRESS PATTERNS ===
             // Whisper sometimes hallucinates full addresses from short passenger words
-            // e.g., "three" → "Number 7, Russell Street" or "Number 3, High Street"
-            // When asked for passengers, "Number N, [street]" should map to N
-            else if (/^number\s+(\d+)\s*[,.]?\s*(street|road|avenue|lane|drive|close|way|place|court|crescent|terrace|park|square|row|gardens|grove|hill|view|rd|st|ave|ln|dr|cl|pl|ct|[a-z]+\s+street|[a-z]+\s+road)/i.test(tLong)) {
-              const numMatch = tLong.match(/^number\s+(\d+)/i);
-              if (numMatch) {
-                const hallNum = parseInt(numMatch[1], 10);
-                // Only accept 1-8 as valid passenger counts from hallucinated addresses
-                if (hallNum >= 1 && hallNum <= 8) {
-                  sttText = String(hallNum);
-                  console.log(`[${sessionState.callId}] 🔄 Hallucinated address → passenger fix: "${rawText}" → ${hallNum}`);
-                }
-              }
-            }
-            // Also catch "N [street name]" pattern like "7 Russell Street" or "3 High Street"
-            else if (/^(\d)\s+(street|road|avenue|lane|drive|close|way|place|court|crescent|terrace|park|square|row|gardens|grove|hill|view|rd|st|ave|[a-z]+\s+street|[a-z]+\s+road)/i.test(tLong)) {
-              const numMatch = tLong.match(/^(\d)/);
-              if (numMatch) {
-                const hallNum = parseInt(numMatch[1], 10);
-                if (hallNum >= 1 && hallNum <= 8) {
-                  sttText = String(hallNum);
-                  console.log(`[${sessionState.callId}] 🔄 Hallucinated address → passenger fix: "${rawText}" → ${hallNum}`);
-                }
-              }
+            // e.g., "three" → "Number 7, Russell Street" (the number is WRONG - user said "three" not "seven")
+            // These are FULL HALLUCINATIONS where Whisper invents a complete address.
+            // We CANNOT trust the number extracted - it's often completely wrong.
+            // Instead, mark this as a known hallucination pattern so the address-vs-passenger 
+            // mismatch handler will ask again for passengers.
+            // The existing isAddressLike check (line ~4178) will catch these and re-prompt.
+            else if (/^number\s+\d+\s*[,.]?\s*[a-z]/i.test(tLong)) {
+              // Don't modify sttText - let the address-vs-passenger mismatch handler deal with it
+              console.log(`[${sessionState.callId}] ⚠️ HALLUCINATED ADDRESS detected during passengers: "${rawText}" - will trigger re-prompt`);
             }
           }
         }
