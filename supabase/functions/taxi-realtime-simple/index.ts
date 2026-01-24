@@ -1815,6 +1815,13 @@ interface SessionState {
   // If dispatch_confirm broadcast doesn't arrive within timeout, trigger confirmation directly
   confirmationSpoken: boolean; // True once Ada has spoken the confirmation message
   confirmationFailsafeTimerId: ReturnType<typeof setTimeout> | null; // Timer ID for the failsafe
+  
+  // === AUDIO BUFFER TRACKING (for safe commits) ===
+  // Set true when audio is actually appended, false on commit. Prevents empty buffer commit errors.
+  audioBufferedSinceSpeechStart: boolean;
+  // Count of recent OpenAI errors - used to detect stuck state and trigger recovery
+  recentErrorCount: number;
+  lastErrorAt: number | null;
 }
 
 serve(async (req) => {
@@ -3596,6 +3603,8 @@ Do NOT say 'booked' until the tool returns success.]`
       case "input_audio_buffer.speech_started": {
         // Track when user started speaking for timing diagnostics
         sessionState.speechStartTime = Date.now();
+        // Reset audio buffer tracking flag - will be set true when audio is appended
+        sessionState.audioBufferedSinceSpeechStart = false;
         console.log(`[${sessionState.callId}] 🎙️ Speech started`);
         break;
       }
@@ -3614,14 +3623,17 @@ Do NOT say 'booked' until the tool returns success.]`
         // they don't have enough acoustic energy to trigger transcription.
         // Force a manual commit after ANY speech to ensure short words are captured.
         // This is especially critical for confirmation responses and passenger counts.
-        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected) {
+        if (speechDuration > 0 && speechDuration < 3000 && openaiWs && openaiConnected && sessionState.audioBufferedSinceSpeechStart) {
           // Short speech detected - send manual commit to force transcription
           console.log(`[${sessionState.callId}] 📤 MANUAL COMMIT: Forcing transcription for short speech (${speechDuration}ms)`);
           try {
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
           } catch (e) {
             console.error(`[${sessionState.callId}] Manual commit failed:`, e);
           }
+        } else if (speechDuration > 0 && !sessionState.audioBufferedSinceSpeechStart) {
+          console.log(`[${sessionState.callId}] ⏭️ Skipping manual commit - no audio buffered since speech start`);
         }
         
         // Track speech duration for STT metrics (cap array to prevent memory leaks)
@@ -3681,13 +3693,17 @@ Do NOT say 'booked' until the tool returns success.]`
           const commitIntervals = [1500, 2500, 3500];
           commitIntervals.forEach((delay) => {
             setTimeout(() => {
-              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed) {
+              // GUARD: Only commit if we have buffered audio AND connection is open
+              if (openaiWs && openaiConnected && !sessionState.callEnded && !isConnectionClosed && sessionState.audioBufferedSinceSpeechStart) {
                 try {
                   console.log(`[${sessionState.callId}] 📤 PERIODIC COMMIT: Forcing transcription check (${delay}ms after speech_stopped)`);
                   openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+                  sessionState.audioBufferedSinceSpeechStart = false; // Reset after commit
                 } catch (e) {
                   // Ignore - connection may have closed
                 }
+              } else if (!sessionState.audioBufferedSinceSpeechStart) {
+                console.log(`[${sessionState.callId}] ⏭️ Skipping periodic commit (${delay}ms) - no audio buffered`);
               }
             }, delay);
           });
@@ -5353,9 +5369,59 @@ Do NOT say 'booked' until the tool returns success.]`
         );
         break;
 
-      case "error":
-        console.error(`[${sessionState.callId}] 🚨 OpenAI Error:`, message.error);
+      case "error": {
+        const errorCode = message.error?.code || "unknown";
+        const errorMessage = message.error?.message || "Unknown error";
+        console.error(`[${sessionState.callId}] 🚨 OpenAI Error [${errorCode}]:`, errorMessage);
+        
+        // Track error frequency for stuck detection
+        sessionState.recentErrorCount++;
+        sessionState.lastErrorAt = Date.now();
+        
+        // Handle specific recoverable errors
+        if (errorCode === "input_audio_buffer_commit_empty") {
+          // Buffer was empty when we tried to commit - this is benign, just log and continue
+          console.log(`[${sessionState.callId}] ℹ️ Empty buffer commit (benign) - continuing`);
+        } else if (errorCode === "response_cancel_not_active") {
+          // Tried to cancel a response that wasn't active - reset our tracking flag
+          console.log(`[${sessionState.callId}] ℹ️ Cancel on inactive response (benign) - resetting openAiResponseActive`);
+          sessionState.openAiResponseActive = false;
+        }
+        
+        // STUCK DETECTION: If we get 3+ errors in 10 seconds and no response is active,
+        // the model may be stuck. Force a response to unstick it.
+        const timeSinceLastError = sessionState.lastErrorAt 
+          ? Date.now() - sessionState.lastErrorAt 
+          : 10000;
+        
+        if (sessionState.recentErrorCount >= 3 && timeSinceLastError < 10000) {
+          console.log(`[${sessionState.callId}] ⚠️ STUCK DETECTION: ${sessionState.recentErrorCount} errors in ${timeSinceLastError}ms - triggering recovery`);
+          
+          // Reset error count to prevent repeated recovery
+          sessionState.recentErrorCount = 0;
+          
+          // Clear any extraction blocks
+          sessionState.extractionInProgress = false;
+          
+          // If no response is active and we have context, force a response
+          if (!sessionState.openAiResponseActive && openaiWs && openaiConnected) {
+            console.log(`[${sessionState.callId}] 🔧 RECOVERY: Forcing response.create to unstick OpenAI`);
+            
+            // Inject a recovery prompt
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: "[SYSTEM: Resume the conversation. Ask the next question if waiting for information, or confirm if ready to proceed.]" }]
+              }
+            }));
+            
+            openaiWs.send(JSON.stringify({ type: "response.create" }));
+          }
+        }
         break;
+      }
     }
   };
 
@@ -7723,6 +7789,11 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             type: "input_audio_buffer.append",
             audio: base64Audio
           }));
+          
+          // Track that we have audio buffered (for safe commit logic)
+          if (state) {
+            state.audioBufferedSinceSpeechStart = true;
+          }
         }
         return;
       }
@@ -7853,6 +7924,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           transcriptExtractedDestination: null,
           transcriptExtractedPassengers: null,
           transcriptExtractedTime: null,
+          // Audio buffer tracking (for safe commits)
+          audioBufferedSinceSpeechStart: false,
+          recentErrorCount: 0,
+          lastErrorAt: null,
         };
         
         preConnected = true;
@@ -8056,6 +8131,10 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             transcriptExtractedDestination: null,
             transcriptExtractedPassengers: null,
             transcriptExtractedTime: null,
+            // Audio buffer tracking (for safe commits)
+            audioBufferedSinceSpeechStart: false,
+            recentErrorCount: 0,
+            lastErrorAt: null,
           };
           
           // ═══════════════════════════════════════════════════════════════════
