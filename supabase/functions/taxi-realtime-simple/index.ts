@@ -3833,6 +3833,19 @@ Do NOT say 'booked' until the tool returns success.]`
               // Advance to destination
               sessionState.lastQuestionType = "destination";
               sessionState.bookingStep = "destination";
+              
+              // ✅ TRIGGER NEXT QUESTION: Force Ada to ask destination
+              if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: `[VERIFIED PICKUP: "${extractedPickup}"] Now ask ONLY: "And what is your destination?" - NO filler words, NO confirmation.` }]
+                  }
+                }));
+                safeResponseCreate(sessionState, "authoritative-pickup-next-question");
+              }
             }
             
             // === DESTINATION EXTRACTION ===
@@ -3853,6 +3866,19 @@ Do NOT say 'booked' until the tool returns success.]`
               // Advance to passengers
               sessionState.lastQuestionType = "passengers";
               sessionState.bookingStep = "passengers";
+              
+              // ✅ TRIGGER NEXT QUESTION: Force Ada to ask passengers
+              if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: `[VERIFIED DESTINATION: "${extractedDest}"] Now ask ONLY: "How many people will be travelling?" - NO filler words, NO confirmation.` }]
+                  }
+                }));
+                safeResponseCreate(sessionState, "authoritative-destination-next-question");
+              }
             }
             
             // === PASSENGER EXTRACTION ===
@@ -3884,8 +3910,10 @@ Do NOT say 'booked' until the tool returns success.]`
                 }
               }
               
-              if (extractedPax && !sessionState.booking.passengers) {
-                console.log(`[${sessionState.callId}] 👥 AUTHORITATIVE PASSENGERS: ${extractedPax} (from transcript)`);
+              // ✅ Allow updates even if passengers already set (for corrections like "Four now")
+              if (extractedPax) {
+                const wasUpdate = sessionState.booking.passengers !== null;
+                console.log(`[${sessionState.callId}] 👥 AUTHORITATIVE PASSENGERS: ${extractedPax} (from transcript)${wasUpdate ? ` [UPDATE from ${sessionState.booking.passengers}]` : ""}`);
                 sessionState.booking.passengers = extractedPax;
                 sessionState.transcriptExtractedPassengers = extractedPax;
                 
@@ -3900,6 +3928,19 @@ Do NOT say 'booked' until the tool returns success.]`
                 // Advance to time
                 sessionState.lastQuestionType = "time";
                 sessionState.bookingStep = "time";
+                
+                // ✅ TRIGGER NEXT QUESTION: Force Ada to ask time
+                if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: `[VERIFIED PASSENGERS: ${extractedPax}] Now ask ONLY: "When do you need the taxi?" - NO filler words, NO confirmation.` }]
+                    }
+                  }));
+                  safeResponseCreate(sessionState, "authoritative-passengers-next-question");
+                }
               }
             }
             
@@ -3919,6 +3960,24 @@ Do NOT say 'booked' until the tool returns success.]`
                 // Advance to summary
                 sessionState.lastQuestionType = "confirmation";
                 sessionState.bookingStep = "summary";
+                
+                // ✅ TRIGGER SUMMARY: Force Ada to give booking summary
+                if (openaiWs && openaiConnected && !sessionState.callEnded) {
+                  const pickup = sessionState.booking.pickup || "pickup";
+                  const destination = sessionState.booking.destination || "destination";
+                  const passengers = sessionState.booking.passengers || 1;
+                  const time = extractedTime;
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: `[ALL DETAILS VERIFIED] Now give the summary EXACTLY: "Alright, let me quickly summarize your booking. You'd like to be picked up at ${pickup}, and travel to ${destination}. There will be ${passengers} passengers, and you'd like to be picked up ${time}. Is that correct?"` }]
+                    }
+                  }));
+                  safeResponseCreate(sessionState, "authoritative-time-trigger-summary");
+                }
               }
             }
           }
