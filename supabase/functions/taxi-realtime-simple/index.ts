@@ -2741,6 +2741,59 @@ ${sessionState.bookingStep === "summary" ? "→ Deliver the booking summary now.
           }
         }
         
+        // ✅ MISSING STEP DATA GUARD: Prevent Ada from advancing if current step's field is empty.
+        // This catches cases where VAD triggered a response but no user speech was detected,
+        // or when the user's answer wasn't transcribed. Forces Ada to re-ask the current question.
+        const currentStep = sessionState.bookingStep;
+        const isDataStep = ["pickup", "destination", "passengers", "time"].includes(currentStep || "");
+        
+        if (isDataStep && sessionState.greetingDelivered) {
+          const stepFieldEmpty = (
+            (currentStep === "pickup" && !sessionState.booking.pickup) ||
+            (currentStep === "destination" && !sessionState.booking.destination) ||
+            (currentStep === "passengers" && sessionState.booking.passengers === null) ||
+            (currentStep === "time" && !sessionState.booking.pickup_time)
+          );
+          
+          if (stepFieldEmpty) {
+            console.log(`[${sessionState.callId}] 🛡️ MISSING STEP DATA GUARD: ${currentStep} field is empty - injecting reprompt`);
+            
+            // Cancel the current response (which would advance to next question)
+            safeCancel(sessionState, `step ${currentStep} incomplete`);
+            
+            // Inject a reprompt for the current step
+            const repromptMap: Record<string, string> = {
+              pickup: "Sorry, I didn't catch that. Where would you like to be picked up?",
+              destination: "Sorry, I didn't catch that. Where would you like to go?",
+              passengers: "Sorry, I didn't catch that. How many people will be travelling?",
+              time: "Sorry, I didn't catch that. When do you need the taxi?"
+            };
+            
+            const repromptText = repromptMap[currentStep] || "Sorry, I didn't catch that. Could you please repeat?";
+            
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: `[SYSTEM: User's response was not detected. Ask ONLY: "${repromptText}" - NOTHING ELSE. Do not advance to the next question.]`
+                }]
+              }
+            }));
+            
+            // Re-engage the turn-based lock for this step
+            sessionState.awaitingUserAnswer = true;
+            sessionState.awaitingUserAnswerSince = Date.now();
+            sessionState.awaitingAnswerForStep = currentStep as any;
+            
+            // Trigger the reprompt
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            break;
+          }
+        }
+        
         // Clear confirmationResponsePending after allowing one response through
         if (sessionState.confirmationResponsePending) {
           console.log(`[${sessionState.callId}] ✅ Allowing confirmation response through guard`);
