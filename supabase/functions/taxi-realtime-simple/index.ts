@@ -8582,61 +8582,15 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
 
         // ═══════════════════════════════════════════════════════════════════
         // SESSION RESTORATION: If bridge sends reconnect=true or resume=true,
-        // restore state from live_calls table instead of starting fresh greeting
-        // ═══════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════════════════
+        // DEMO MODE: Each call is completely fresh - no session restoration
+        // Phone number is used as unique key to overwrite existing records
+        // ═══════════════════════════════════════════════════════════════════════════
         let restoredSession: any = null;
         let skipGreeting = false;
         
-        if (isReconnect) {
-          console.log(`[${callId}] 🔄 RESUME: Looking up session ${resumeCallId || callId} or phone ${phone}`);
-          
-          try {
-            // First try by call_id
-            if (resumeCallId || callId) {
-              const lookupId = resumeCallId || callId;
-              const { data: callData } = await supabase
-                .from("live_calls")
-                .select("*")
-                .eq("call_id", lookupId)
-                .maybeSingle();
-              
-              if (callData && !callData.ended_at) {
-                restoredSession = callData;
-                console.log(`[${callId}] ✅ Found session by call_id: ${lookupId}`);
-              }
-            }
-            
-            // Fallback: lookup by phone number (most recent active call in last 10 minutes)
-            if (!restoredSession && phone && phone !== "unknown") {
-              const phoneKey = normalizePhone(phone);
-              const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-              const { data: phoneData } = await supabase
-                .from("live_calls")
-                .select("*")
-                .eq("caller_phone", phoneKey)
-                .in("status", ["active", "awaiting_confirmation", "confirmed"])
-                .gt("updated_at", tenMinutesAgo)
-                .order("updated_at", { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              
-              if (phoneData && !phoneData.ended_at) {
-                restoredSession = phoneData;
-                console.log(`[${callId}] ✅ Found session by phone fallback: ${phoneData.call_id}`);
-              }
-            }
-            
-            if (restoredSession) {
-              skipGreeting = true;
-              console.log(`[${callId}] 📦 RESTORED STATE: pickup=${restoredSession.pickup}, dest=${restoredSession.destination}, pax=${restoredSession.passengers}`);
-            } else {
-              console.log(`[${callId}] ♻️ No session found to restore - will use fresh greeting`);
-            }
-          } catch (e) {
-            console.error(`[${callId}] Session restore lookup failed:`, e);
-            // Continue without restoration
-          }
-        }
+        // DEMO: Always start fresh - no session restoration
+        console.log(`[${callId}] 🆕 DEMO MODE: Starting fresh call (no session restoration)`);
 
         // Detect language from phone number FIRST (fast, no DB)
         const detectedLanguage = detectLanguageFromPhone(phone);
@@ -10022,21 +9976,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
               .limit(1)
               .maybeSingle();
 
+            // ═══════════════════════════════════════════════════════════════════════════
+            // DEMO MODE: Always start fresh - overwrite existing record by phone number
+            // ═══════════════════════════════════════════════════════════════════════════
             if (existingCall) {
-              // ═══════════════════════════════════════════════════════════════════════════
-              // PRESERVE existing booking state from the card - don't overwrite with nulls!
-              // Only use activeBooking (from bookings table) if it has BETTER data
-              // ═══════════════════════════════════════════════════════════════════════════
-              const preservedPickup = existingCall.pickup || activeBooking?.pickup || null;
-              const preservedDestination = existingCall.destination || activeBooking?.destination || null;
-              const preservedPassengers = existingCall.passengers || activeBooking?.passengers || null;
-              const preservedFare = existingCall.fare || activeBooking?.fare || null;
-              const preservedEta = existingCall.eta || activeBooking?.eta || null;
-              const preservedBookingStep = existingCall.booking_step || "pickup";
-              const preservedTranscripts = existingCall.transcripts || [];
-              
-              console.log(`[${callId}] ♻️ Reusing existing live_call card for ${phoneKey} (old call_id: ${existingCall.call_id})`);
-              console.log(`[${callId}] 🛡️ PRESERVING booking state: pickup="${preservedPickup}", dest="${preservedDestination}", pax=${preservedPassengers}`);
+              console.log(`[${callId}] 🆕 DEMO: Overwriting existing call for ${phoneKey} (old call_id: ${existingCall.call_id})`);
               
               await supabase
                 .from("live_calls")
@@ -10045,27 +9989,23 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                   caller_name: state?.customerName,
                   status: "active",
                   source: "simple",
-                  // ✅ PRESERVE transcripts and booking data instead of wiping them
-                  transcripts: preservedTranscripts,
+                  // DEMO: Start completely fresh
+                  transcripts: [],
                   started_at: new Date().toISOString(),
                   ended_at: null,
-                  pickup: preservedPickup,
-                  destination: preservedDestination,
-                  passengers: preservedPassengers,
-                  fare: preservedFare,
-                  eta: preservedEta,
-                  booking_step: preservedBookingStep,
-                  booking_confirmed:
-                    existingCall.booking_confirmed ||
-                    activeBooking?.status === "confirmed" ||
-                    activeBooking?.status === "dispatched" ||
-                    activeBooking?.status === "active" ||
-                    false,
+                  pickup: null,
+                  destination: null,
+                  passengers: null,
+                  fare: null,
+                  eta: null,
+                  booking_step: "pickup",
+                  booking_confirmed: false,
                   updated_at: new Date().toISOString(),
                 })
                 .eq("id", existingCall.id);
             } else {
-              // No existing active card - create new one
+              // No existing card - create new one
+              console.log(`[${callId}] 🆕 DEMO: Creating fresh call record for ${phoneKey}`);
               await supabase
                 .from("live_calls")
                 .upsert(
@@ -10076,18 +10016,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with confirmation_state: "con
                     status: "active",
                     source: "simple",
                     transcripts: [],
-
-                    // Optional context for the dashboard when an active booking exists
-                    pickup: activeBooking?.pickup ?? null,
-                    destination: activeBooking?.destination ?? null,
-                    passengers: activeBooking?.passengers ?? null,
-                    fare: activeBooking?.fare ?? null,
-                    eta: activeBooking?.eta ?? null,
-                    booking_confirmed:
-                      activeBooking?.status === "confirmed" ||
-                      activeBooking?.status === "dispatched" ||
-                      activeBooking?.status === "active" ||
-                      false,
+                    pickup: null,
+                    destination: null,
+                    passengers: null,
+                    fare: null,
+                    eta: null,
+                    booking_step: "pickup",
+                    booking_confirmed: false,
                   },
                   { onConflict: "call_id" }
                 );
