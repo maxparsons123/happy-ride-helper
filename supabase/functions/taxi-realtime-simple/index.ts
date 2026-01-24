@@ -8122,6 +8122,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           confirmationSpoken: false,
           confirmationFailsafeTimerId: null,
           adaAskedQuestionAt: null, // Track when Ada last asked any question
+          codeDrivenSummaryInjectedAt: null, // Track when code-driven summary was injected
           parallelExtraction: {
             enabled: true,
             autoCorrect: false, // DISABLED - was causing flip-flop chaos
@@ -8328,6 +8329,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
             confirmationSpoken: false,
             confirmationFailsafeTimerId: null,
             adaAskedQuestionAt: null, // Track when Ada last asked any question
+            codeDrivenSummaryInjectedAt: null, // Track when code-driven summary was injected
             parallelExtraction: {
               enabled: true,
               autoCorrect: false, // DISABLED - was causing flip-flop chaos
@@ -8341,7 +8343,7 @@ DO NOT say "booked" or "confirmed" until the book_taxi tool with confirmation_st
           // ═══════════════════════════════════════════════════════════════════
           // APPLY RESTORED SESSION DATA (if available)
           // ═══════════════════════════════════════════════════════════════════
-          if (restoredSession) {
+          if (restoredSession && state) {
             // Restore booking state
             state.booking.pickup = restoredSession.pickup || null;
             state.booking.destination = restoredSession.destination || null;
