@@ -663,54 +663,77 @@ serve(async (req) => {
         const isDestinationIndicator = /\b(destination|to|going to|drop off|dropoff|drop me|take me|heading to)\b/i.test(correctedTranscript);
         
         // If user explicitly mentions "pickup" or "destination" with an address, treat as update
+        // Also allow updates during summary step when data already exists
         const isExplicitUpdate = detection.isAddress && (isPickupIndicator || isDestinationIndicator);
         const isExplicitCorrection = detection.isCorrection && detection.isAddress;
+        const isInSummaryWithData = currentStep === "summary" && detection.isAddress;
         
-        if (isExplicitCorrection || (isExplicitUpdate && (booking.pickup || booking.destination))) {
-          log(`🔄 Update detected: correction=${detection.isCorrection}, explicit=${isExplicitUpdate}`);
+        if (isExplicitCorrection || isExplicitUpdate || isInSummaryWithData) {
+          log(`🔄 Update detected: correction=${detection.isCorrection}, explicit=${isExplicitUpdate}, summary=${isInSummaryWithData}`);
           
-          // Extract the address (remove keywords but keep the core address)
-          let addressPart = correctedTranscript
-            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|pickup is|pickup should be|destination is|destination should be|to amend|pick up from|picked up from|collect from|drop off at|drop me at|take me to|heading to|going to|from|to)\b/gi, "")
-            .trim();
+          // Extract the address - be more careful about what we remove
+          // Only remove explicit correction/direction words, keep the actual address
+          let addressPart = correctedTranscript;
           
-          // Clean up any leading/trailing punctuation
-          addressPart = addressPart.replace(/^[\s,]+|[\s,]+$/g, '').trim();
+          // Step 1: Remove only the explicit direction/correction prefixes
+          const prefixPatterns = [
+            /^(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify)\s*/i,
+            /^(the\s+)?(pickup|pick up|destination)\s+(is|should be)\s*/i,
+            /^(pick up from|picked up from|collect from|drop off at|drop me at|take me to|heading to|going to)\s*/i,
+            /^(from|to)\s+/i
+          ];
           
-          if (isDestinationIndicator && !isPickupIndicator) {
-            userTruth.destination = addressPart;
-            booking.destination = addressPart;
-            log(`✅ Destination updated to: ${addressPart}`);
-          } else if (isPickupIndicator) {
-            userTruth.pickup = addressPart;
-            booking.pickup = addressPart;
-            log(`✅ Pickup updated to: ${addressPart}`);
+          for (const pattern of prefixPatterns) {
+            addressPart = addressPart.replace(pattern, '');
           }
           
-          // If we have all required fields, go to summary; otherwise continue flow
-          if (booking.pickup && booking.destination && booking.passengers && booking.time) {
-            currentStep = "summary";
-            const passengerWord = passengersToWord(booking.passengers);
+          // Step 2: Clean up punctuation and whitespace
+          addressPart = addressPart.replace(/^[\s,]+|[\s,]+$/g, '').trim();
+          
+          // Only update if we have a meaningful address left (not empty after cleaning)
+          if (addressPart.length > 2) {
+            if (isDestinationIndicator && !isPickupIndicator) {
+              log(`✅ Destination OVERWRITTEN: "${booking.destination}" → "${addressPart}"`);
+              userTruth.destination = addressPart;
+              booking.destination = addressPart;
+            } else {
+              log(`✅ Pickup OVERWRITTEN: "${booking.pickup}" → "${addressPart}"`);
+              userTruth.pickup = addressPart;
+              booking.pickup = addressPart;
+            }
             
-            if (openaiWs?.readyState === WebSocket.OPEN) {
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, ${booking.time}. Is that correct?"` }] }
-              }));
+            // Always go back to summary after an update if we have all fields
+            if (booking.pickup && booking.destination && booking.passengers && booking.time) {
+              currentStep = "summary";
+              const passengerWord = passengersToWord(booking.passengers);
+              
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary with EXACTLY these values:
+- Pickup: "${booking.pickup}"
+- Destination: "${booking.destination}"
+- Passengers: ${passengerWord}
+- Time: "${booking.time}"
+Say: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
+                }));
+              }
+            } else {
+              // Continue collecting missing info
+              const nextStep = !booking.pickup ? "pickup" : !booking.destination ? "destination" : !booking.passengers ? "passengers" : "time";
+              const nextQuestion = nextStep === "pickup" ? "Where would you like to be picked up from?" :
+                                   nextStep === "destination" ? "And where would you like to go?" :
+                                   nextStep === "passengers" ? "How many passengers?" : "When would you like to be picked up?";
+              
+              if (openaiWs?.readyState === WebSocket.OPEN) {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: { type: "message", role: "system", content: [{ type: "input_text", text: `[UPDATED] Got it. Now ask: "${nextQuestion}"` }] }
+                }));
+              }
             }
           } else {
-            // Continue collecting missing info
-            const nextStep = !booking.pickup ? "pickup" : !booking.destination ? "destination" : !booking.passengers ? "passengers" : "time";
-            const nextQuestion = nextStep === "pickup" ? "Where would you like to be picked up from?" :
-                                 nextStep === "destination" ? "And where would you like to go?" :
-                                 nextStep === "passengers" ? "How many passengers?" : "When would you like to be picked up?";
-            
-            if (openaiWs?.readyState === WebSocket.OPEN) {
-              openaiWs.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[UPDATED] Got it. Now ask: "${nextQuestion}"` }] }
-              }));
-            }
+            log(`⚠️ Address extraction failed, addressPart too short: "${addressPart}"`);
           }
         }
         else if (detection.isCorrection && !detection.isAddress) {
