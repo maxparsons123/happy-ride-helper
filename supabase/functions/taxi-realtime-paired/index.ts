@@ -3659,6 +3659,24 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                   timestamp: Date.now()
                 });
                 
+                // DUPLICATE QUESTION FIX: Check if Ada already asked the next question
+                const willAskNext = computeNextStep({ ...sessionState.booking, destination: userText });
+                if (willAskNext === sessionState.lastQuestionAsked) {
+                  console.log(`[${callId}] ⏭️ SKIPPING response.create - Ada already asked "${willAskNext}"`);
+                  openaiWs!.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [{
+                        type: "input_text",
+                        text: `[DESTINATION CAPTURED] User said "${userText}" as destination. Call sync_booking_data(destination="${userText}"). Do NOT re-ask - you already asked the next question.`
+                      }]
+                    }
+                  }));
+                  break;
+                }
+                
                 // Update destination directly and ask Ada to continue to passengers
                 openaiWs!.send(JSON.stringify({
                   type: "conversation.item.create",
@@ -3689,6 +3707,27 @@ Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userTex
                   content: `[CONTEXT: Ada asked about pickup] ${userText}`,
                   timestamp: Date.now()
                 });
+                
+                // DUPLICATE QUESTION FIX: If Ada just asked for destination and we're routing pickup,
+                // DON'T trigger a new response - Ada already asked the right question (destination)
+                // Just let the tool call flow naturally without re-asking
+                const willAskNext = computeNextStep({ ...sessionState.booking, pickup: userText });
+                if (willAskNext === sessionState.lastQuestionAsked) {
+                  console.log(`[${callId}] ⏭️ SKIPPING response.create - Ada already asked "${willAskNext}"`);
+                  // Just inject the system message for context, but don't trigger a new response
+                  openaiWs!.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [{
+                        type: "input_text",
+                        text: `[PICKUP CAPTURED] User said "${userText}" as pickup. Call sync_booking_data(pickup="${userText}"). Do NOT re-ask for destination - you already asked.`
+                      }]
+                    }
+                  }));
+                  break;
+                }
                 
                 openaiWs!.send(JSON.stringify({
                   type: "conversation.item.create",
