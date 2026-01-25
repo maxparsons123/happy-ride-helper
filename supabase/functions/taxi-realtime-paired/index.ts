@@ -1201,6 +1201,13 @@ const STT_CORRECTIONS: Record<string, string> = {
   "5208 david": "52A David",
   "five two a david": "52A David",
   "fifty two a david": "52A David",
+  
+  // 52→62 mishearings (common telephony confusion)
+  "62a david road": "52A David Road",
+  "62a david": "52A David",
+  "62 a david": "52A David",
+  "sixty two a david": "52A David",
+  "sixty two a": "52A",
 };
 
 // Pre-compiled regex pattern for O(1) STT correction lookups
