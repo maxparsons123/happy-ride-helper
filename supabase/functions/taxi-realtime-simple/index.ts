@@ -69,12 +69,12 @@ function isLikelyEcho(echo: string, reference: string): boolean {
   return tokenOverlapScore(ne, nr) >= 0.75;
 }
 
-// === TOOLS DEFINITION ===
+// === TOOLS DEFINITION (STRICT MODE) ===
 const TOOLS = [
   {
     type: "function",
     name: "book_taxi",
-    description: "Book a taxi after the user confirms the booking summary. Use action='request_quote' to get fare estimate, action='confirmed' after user accepts the fare.",
+    description: "Book a taxi after the user confirms the booking summary. Use action='request_quote' to get fare estimate, action='confirmed' after user accepts the fare. CRITICAL: You MUST use the EXACT addresses the customer spoke - never alter house numbers.",
     parameters: {
       type: "object",
       properties: {
@@ -83,15 +83,43 @@ const TOOLS = [
           enum: ["request_quote", "confirmed"],
           description: "request_quote = get fare estimate, confirmed = finalize booking"
         },
-        pickup: { type: "string", description: "Full pickup address exactly as spoken" },
-        destination: { type: "string", description: "Full destination address exactly as spoken" },
-        passengers: { type: "number", description: "Number of passengers (1-10)" },
-        time: { type: "string", description: "Pickup time (e.g., 'now', '3pm', 'in 10 minutes')" },
-        luggage: { type: "string", description: "Luggage description (e.g., 'none', '2 suitcases', 'small bag')" },
-        vehicle_type: { type: "string", description: "Vehicle preference (e.g., 'standard', 'estate', 'mpv', 'executive')" }
+        pickup_house_number: { 
+          type: "string", 
+          description: "EXACT house number as spoken, including letters. Examples: '52A', '32B', '10-12', '14'. NEVER alter this - if customer said '32A' use '32A' not '28' or '32'." 
+        },
+        pickup_street: { 
+          type: "string", 
+          description: "Street name and any additional address parts exactly as spoken. Example: 'David Road'" 
+        },
+        destination_house_number: { 
+          type: "string", 
+          description: "EXACT destination house number as spoken, including letters. Use empty string if not applicable (e.g., for landmarks like 'Sweetspot')." 
+        },
+        destination_street: { 
+          type: "string", 
+          description: "Destination street/place name exactly as spoken. Example: 'Sweetspot' or 'High Street'" 
+        },
+        passengers: { 
+          type: "integer", 
+          description: "Number of passengers as an integer (1-10)" 
+        },
+        time: { 
+          type: "string", 
+          description: "Pickup time (e.g., 'now', '3pm', 'in 10 minutes')" 
+        },
+        luggage: { 
+          type: "string", 
+          description: "Luggage description (e.g., 'none', '2 suitcases', 'small bag')" 
+        },
+        vehicle_type: { 
+          type: "string", 
+          description: "Vehicle preference (e.g., 'standard', 'estate', 'mpv', 'executive')" 
+        }
       },
-      required: ["action", "pickup", "destination", "passengers"]
-    }
+      required: ["action", "pickup_house_number", "pickup_street", "destination_house_number", "destination_street", "passengers", "time", "luggage", "vehicle_type"],
+      additionalProperties: false
+    },
+    strict: true
   },
   {
     type: "function",
@@ -100,10 +128,16 @@ const TOOLS = [
     parameters: {
       type: "object",
       properties: {
-        reason: { type: "string", enum: ["booking_complete", "user_cancelled", "user_hangup"] }
+        reason: { 
+          type: "string", 
+          enum: ["booking_complete", "user_cancelled", "user_hangup"],
+          description: "Reason for ending the call"
+        }
       },
-      required: ["reason"]
-    }
+      required: ["reason"],
+      additionalProperties: false
+    },
+    strict: true
   }
 ];
 
@@ -512,10 +546,22 @@ Wait for their YES or NO response.`;
     if (name === "book_taxi") {
       const action = args.action as string;
       
-      // Update booking state from tool args
-      if (args.pickup) bookingState.pickup = args.pickup as string;
-      if (args.destination) bookingState.destination = args.destination as string;
-      if (args.passengers) bookingState.passengers = args.passengers as number;
+      // Build full addresses from strict schema fields
+      const pickupHouseNum = (args.pickup_house_number as string) || "";
+      const pickupStreet = (args.pickup_street as string) || "";
+      const destHouseNum = (args.destination_house_number as string) || "";
+      const destStreet = (args.destination_street as string) || "";
+      
+      // Combine house number + street for full address
+      const fullPickup = pickupHouseNum ? `${pickupHouseNum} ${pickupStreet}`.trim() : pickupStreet;
+      const fullDest = destHouseNum ? `${destHouseNum} ${destStreet}`.trim() : destStreet;
+      
+      log(`📍 Strict schema: Pickup="${fullPickup}" (house: "${pickupHouseNum}"), Dest="${fullDest}" (house: "${destHouseNum}")`);
+      
+      // Update booking state from strict tool args
+      if (fullPickup) bookingState.pickup = fullPickup;
+      if (fullDest) bookingState.destination = fullDest;
+      if (args.passengers != null) bookingState.passengers = args.passengers as number;
       if (args.time) bookingState.time = args.time as string;
       if (args.luggage) bookingState.luggage = args.luggage as string;
       if (args.vehicle_type) bookingState.vehicle_type = args.vehicle_type as string;
