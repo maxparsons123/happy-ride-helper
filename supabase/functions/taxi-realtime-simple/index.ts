@@ -149,18 +149,10 @@ RULES:
         }
       }
       
-      // Session created - trigger greeting
+      // Session created - trigger greeting via response.create (instructions tell AI to greet first)
       if (msg.type === "session.created") {
-        log("📋 Session created, sending greeting");
-        // Ensure an initial assistant utterance exists.
-        openaiWs?.send(JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "text", text: "Hello! Where would you like to be picked up?" }],
-          },
-        }));
+        log("📋 Session created, triggering greeting");
+        // Just trigger a response - the instructions tell Ada to greet and ask for pickup
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
