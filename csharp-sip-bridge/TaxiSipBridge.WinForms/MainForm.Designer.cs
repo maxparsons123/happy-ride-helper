@@ -83,12 +83,12 @@ partial class MainForm
 
         // OpenAI API Key (shown when Local mode is checked)
         lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
-        txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(320, 23), UseSystemPasswordChar = true, Visible = false };
-        txtApiKey.PlaceholderText = "sk-...";
+        txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(520, 23), UseSystemPasswordChar = true, Visible = false };
+        txtApiKey.PlaceholderText = "sk-... (Your OpenAI API key for direct connection)";
 
         // WebSocket URL (hidden when Local mode is checked)
-        lblWs = new Label { Text = "Ada URL:", Location = new Point(400, 118), Size = new Size(60, 23) };
-        txtWebSocketUrl = new TextBox { Location = new Point(465, 115), Size = new Size(130, 23) };
+        lblWs = new Label { Text = "Ada URL:", Location = new Point(15, 118), Size = new Size(60, 23) };
+        txtWebSocketUrl = new TextBox { Location = new Point(75, 115), Size = new Size(520, 23) };
 
         // Start SIP Button
         btnStartStop = new Button
