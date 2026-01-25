@@ -128,9 +128,12 @@ Ask ONLY ONE question per response. NEVER combine questions.
 - Help with local events, attractions, and directions
 - After sharing info, guide back: "Would you like me to book a taxi there?"
 
-# CORRECTIONS
-- Listen for: "actually", "no wait", "change", "I meant"
-- Update immediately and acknowledge: "Updated to [new value]."
+# CORRECTIONS (CRITICAL - HIGHEST PRIORITY)
+- Listen for: "no", "actually", "no wait", "change", "I meant", "not X, it's Y"
+- When user says "no" followed by new info, IMMEDIATELY update to their new value
+- Say: "Updated to [new value]." then continue
+- NEVER repeat the old incorrect value after a correction
+- If user says "no, the destination is X" - set destination to X immediately
 
 # CRITICAL RULES
 - Do NOT quote fares until you receive them from book_taxi
@@ -609,14 +612,50 @@ serve(async (req) => {
         }
       }
 
-      // Log user transcript
+      // Log user transcript and handle corrections
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        const raw = msg.transcript;
+        const raw = msg.transcript || "";
         const corrected = applySTTCorrections(raw);
         if (raw !== corrected) {
           log(`👤 User: ${raw} → [STT FIX] ${corrected}`);
         } else {
           log(`👤 User: ${raw}`);
+        }
+        
+        // Detect corrections - user saying "no", "actually", "change", etc.
+        const lowerText = corrected.toLowerCase();
+        const isCorrection = /^(no[,\s]|actually|i meant|change|wait|not |wrong|correction)/i.test(lowerText) ||
+                            /\b(no[,\s]+the|no[,\s]+it's|actually[,\s]+it's|should be|is actually|change .* to)\b/i.test(lowerText);
+        
+        if (isCorrection) {
+          log(`🔄 CORRECTION DETECTED: "${corrected}"`);
+          
+          // Extract what field and new value
+          let correctionHint = `[CORRECTION DETECTED] User said: "${corrected}". `;
+          
+          // Check what they're correcting
+          if (/destination|going to|drop|heading/i.test(lowerText)) {
+            correctionHint += "User is CORRECTING THE DESTINATION. Extract the new destination from their words and update it immediately.";
+            bookingState.destination = ""; // Clear to force re-extraction
+          } else if (/pickup|pick up|from|picked up/i.test(lowerText)) {
+            correctionHint += "User is CORRECTING THE PICKUP. Extract the new pickup from their words and update it immediately.";
+            bookingState.pickup = ""; // Clear to force re-extraction
+          } else if (/passenger/i.test(lowerText)) {
+            correctionHint += "User is CORRECTING PASSENGER COUNT. Extract the new count.";
+          } else {
+            // General correction - let AI figure it out
+            correctionHint += "Update the booking field they are correcting. Acknowledge with 'Updated to [new value].'";
+          }
+          
+          // Inject high-priority correction instruction
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [{ type: "input_text", text: correctionHint }]
+            }
+          }));
         }
       }
 
