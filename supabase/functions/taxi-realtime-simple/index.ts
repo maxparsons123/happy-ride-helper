@@ -467,92 +467,7 @@ serve(async (req) => {
     lastUserTranscript: null
   };
 
-  // Audio buffering for short utterance padding
-  // At 24kHz mono 16-bit, 1 second = 48000 bytes
-  const MIN_AUDIO_MS = 400; // Minimum audio length before sending
-  const MIN_AUDIO_BYTES = Math.floor(24000 * 2 * (MIN_AUDIO_MS / 1000)); // ~19200 bytes
-  const SILENCE_PAD_MS = 150; // Trailing silence to add after short utterances
-  const SILENCE_PAD_BYTES = Math.floor(24000 * 2 * (SILENCE_PAD_MS / 1000)); // ~7200 bytes
-  const FLUSH_TIMEOUT_MS = 200; // Flush buffer after this silence gap
-  
-  let audioBuffer: Uint8Array[] = [];
-  let audioBufferBytes = 0;
-  let lastAudioTime = 0;
-  let flushTimer: number | null = null;
-
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
-
-  // Create silence padding (zeros = silence in PCM16)
-  const createSilencePad = (bytes: number): Uint8Array => {
-    return new Uint8Array(bytes); // Already zeros
-  };
-
-  // Flush audio buffer to OpenAI with optional padding
-  const flushAudioBuffer = () => {
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    
-    if (audioBuffer.length === 0 || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-      audioBuffer = [];
-      audioBufferBytes = 0;
-      return;
-    }
-
-    // Calculate total size including padding if needed
-    const needsPadding = audioBufferBytes < MIN_AUDIO_BYTES;
-    const padBytes = needsPadding ? SILENCE_PAD_BYTES : 0;
-    const totalBytes = audioBufferBytes + padBytes;
-    
-    // Merge all chunks + padding into single buffer
-    const merged = new Uint8Array(totalBytes);
-    let offset = 0;
-    for (const chunk of audioBuffer) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    // Add trailing silence if this was a short utterance
-    if (needsPadding) {
-      merged.set(createSilencePad(padBytes), offset);
-      log(`🔊 Padded short audio: ${audioBufferBytes}b + ${padBytes}b silence = ${totalBytes}b (~${Math.round(totalBytes / 48)}ms)`);
-    }
-
-    try {
-      openaiWs.send(JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: arrayBufferToBase64(merged)
-      }));
-    } catch (e) {
-      log(`❌ Failed to flush audio buffer: ${(e as Error).message}`);
-    }
-
-    audioBuffer = [];
-    audioBufferBytes = 0;
-  };
-
-  // Queue audio chunk with buffering
-  const queueAudio = (pcm24k: Uint8Array) => {
-    audioBuffer.push(pcm24k);
-    audioBufferBytes += pcm24k.length;
-    lastAudioTime = Date.now();
-
-    // Clear any pending flush
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-    }
-
-    // If we have enough audio, send immediately
-    if (audioBufferBytes >= MIN_AUDIO_BYTES) {
-      flushAudioBuffer();
-    } else {
-      // Schedule a flush after silence gap
-      flushTimer = setTimeout(() => {
-        flushAudioBuffer();
-      }, FLUSH_TIMEOUT_MS) as unknown as number;
-    }
-  };
 
   const safeJsonParse = (raw: string) => {
     try {
@@ -638,9 +553,9 @@ ${SYSTEM_PROMPT}
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 800
+              threshold: 0.4,              // Lower threshold to catch quieter short words
+              prefix_padding_ms: 500,      // Rewind 500ms to catch start of "three", "yes", etc.
+              silence_duration_ms: 1000    // Wait 1 second of silence before responding
             },
             tools: [
               {
@@ -807,16 +722,23 @@ ${SYSTEM_PROMPT}
   socket.onerror = (e) => log(`🔴 Bridge WS Error: ${JSON.stringify(e)}`);
 
   socket.onmessage = (event) => {
-    // Binary audio from bridge (8kHz slin)
+    // Binary audio from bridge (8kHz slin) - stream 100% to OpenAI, let server VAD handle detection
     if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
       if (openaiWs?.readyState === WebSocket.OPEN) {
         const pcm8k = event.data instanceof ArrayBuffer 
           ? new Uint8Array(event.data) 
           : event.data;
         
-        // Upsample to 24kHz and queue with buffering for short utterance padding
+        // Upsample to 24kHz and send directly - no client-side buffering
         const pcm24k = pcm8kTo24k(pcm8k);
-        queueAudio(pcm24k);
+        try {
+          openaiWs.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: arrayBufferToBase64(pcm24k)
+          }));
+        } catch (e) {
+          log(`❌ Failed to forward audio: ${(e as Error).message}`);
+        }
       } else {
         // Avoid crashing if we get audio before OpenAI is ready
         log(`⚠️ Dropping inbound audio: OpenAI not open (state=${openaiWs?.readyState ?? "null"})`);
@@ -862,11 +784,6 @@ ${SYSTEM_PROMPT}
 
   socket.onclose = (ev) => {
     log(`🔌 Bridge disconnected code=${ev.code} clean=${ev.wasClean} reason=${ev.reason || ""}`);
-    // Flush any remaining buffered audio before closing
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
     openaiWs?.close();
   };
 
