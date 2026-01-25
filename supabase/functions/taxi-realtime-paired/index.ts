@@ -691,7 +691,8 @@ function computeNextStep(booking: SessionState["booking"], preSummaryDone?: bool
 }
 
 // Get instruction for next step based on what's needed
-function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"]): string {
+// USES userTruth for summary to prevent address hallucinations
+function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"], userTruth?: UserTruth): string {
   switch (nextStep) {
     case "pickup":
       return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
@@ -701,8 +702,17 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
       return "How many passengers will be traveling?";
     case "time":
       return "When do you need the taxi - now or for a specific time?";
-    case "pre_summary":
-      return `Give a quick recap: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger${booking.passengers === 1 ? '' : 's'}, ${booking.pickupTime || 'as soon as possible'}. Is there anything you'd like to change before I get you a quote?" Wait for their response.`;
+    case "pre_summary": {
+      // CRITICAL: Use userTruth (raw STT) values, falling back to booking if empty
+      const pickup = userTruth?.pickup || booking.pickup || "unknown";
+      const destination = userTruth?.destination || booking.destination || "unknown";
+      const passengers = userTruth?.passengers || booking.passengers || 1;
+      const time = userTruth?.time || booking.pickupTime || "as soon as possible";
+      return `Give a quick recap using EXACTLY these addresses (do NOT change them):
+"So that's from ${pickup} to ${destination}, ${passengers} passenger${passengers === 1 ? '' : 's'}, ${time}. Is there anything you'd like to change before I get you a quote?"
+CRITICAL: Say the pickup "${pickup}" and destination "${destination}" EXACTLY as written above - do NOT substitute or alter them.
+Wait for their response.`;
+    }
     case "confirmation":
       // This is the "Shall I get you a price?" phase - user hasn't agreed to get quote yet
       return `Ask the user: "Great! Shall I get you a price for this journey?" and wait for their response.`;
@@ -3986,7 +3996,8 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
             const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
             sessionState.lastQuestionAsked = nextStep;
-            const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking);
+            // Pass userTruth for accurate summary (prevents address hallucinations)
+            const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking, sessionState.userTruth);
             
             console.log(`[${callId}] 📊 Booking updated (${fieldUpdated}):`, sessionState.booking, `| Next: ${nextStep}`);
             await updateLiveCall(sessionState);
