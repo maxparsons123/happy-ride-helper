@@ -2,6 +2,11 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const DEMO_SIMPLE_MODE = true; // Force Max's journey
+
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️ OPENAI_API_KEY missing – TTS/STT will fail");
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -60,8 +65,6 @@ When the caller wants to change or correct something they said:
 `;
 
 // === AUDIO HELPERS ===
-
-// Upsample 8kHz to 24kHz (linear interpolation)
 function pcm8kTo24k(pcm8k: Uint8Array): Uint8Array {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, Math.floor(pcm8k.byteLength / 2));
   const len24k = samples8k.length * 3;
@@ -91,6 +94,18 @@ function arrayBufferToBase64(buffer: Uint8Array): string {
   return btoa(binary);
 }
 
+// === TURN-BASED STATE ===
+interface CallState {
+  callId: string;
+  step: "pickup" | "destination" | "passengers" | "time" | "summary" | "fare_confirm" | "done";
+  pickup: string | null;
+  destination: string | null;
+  passengers: number | null;
+  time: string | null;
+  awaitingResponse: boolean;
+  farewellSent: boolean;
+}
+
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -103,9 +118,10 @@ serve(async (req) => {
 
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
-  let callId = "unknown";
+  let state: CallState | null = null;
+  let speechActive = false;
 
-  const log = (msg: string) => console.log(`[${callId}] ${msg}`);
+  const log = (msg: string) => console.log(`[${state?.callId || "unknown"}] ${msg}`);
 
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
@@ -118,69 +134,208 @@ serve(async (req) => {
 
     openaiWs.onopen = () => {
       log("✅ OpenAI connected, configuring session...");
+      
+      // Configure session with VAD DISABLED
+      openaiWs?.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          modalities: ["text", "audio"],
+          instructions: SYSTEM_PROMPT,
+          voice: "shimmer",
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+          input_audio_transcription: { model: "whisper-1" },
+          // 🔑 CRITICAL: Disable VAD for turn-based control
+          turn_detection: null,
+          tools: []
+        }
+      }));
     };
 
     openaiWs.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      try {
+        const msg = JSON.parse(event.data);
 
-      // Session created - configure and trigger greeting
-      if (msg.type === "session.created") {
-        log("📋 Session created, sending config");
-        
-        openaiWs?.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            modalities: ["text", "audio"],
-            instructions: SYSTEM_PROMPT,
-            voice: "shimmer",
-            input_audio_format: "pcm16",
-            output_audio_format: "pcm16",
-            input_audio_transcription: { model: "whisper-1" },
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 800
+        // Handle speech events
+        if (msg.type === "input_audio_buffer.speech_started") {
+          speechActive = true;
+          log("🎤 Speech started");
+        }
+
+        if (msg.type === "input_audio_buffer.speech_stopped") {
+          speechActive = false;
+          log("🔇 Speech stopped");
+          
+          // Commit audio after short silence
+          setTimeout(() => {
+            if (!speechActive && openaiWs?.readyState === WebSocket.OPEN) {
+              // Add 200ms silence padding
+              const silenceSamples = Math.floor(24000 * 0.2);
+              const silence = new Int16Array(silenceSamples);
+              const silenceBytes = new Uint8Array(silence.buffer);
+              openaiWs.send(JSON.stringify({
+                type: "input_audio_buffer.append",
+                audio: arrayBufferToBase64(silenceBytes)
+              }));
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            }
+          }, 300);
+        }
+
+        // Handle user transcription
+        if (msg.type === "conversation.item.input_audio_transcription.completed") {
+          const rawText = msg.transcript?.trim();
+          if (!rawText || rawText.length < 2) return;
+
+          log(`👤 User: "${rawText}"`);
+
+          // Filter out dispatch echoes
+          const lower = rawText.toLowerCase();
+          if (/driver will be|price.*is.*\d+|book that/.test(lower)) return;
+
+          if (!state) return;
+
+          // DEMO: Auto-fill Max's journey
+          if (DEMO_SIMPLE_MODE) {
+            state.pickup = "52A David Road";
+            state.destination = "The Cozy Club";
+            state.passengers = 1;
+            state.time = "ASAP";
+            state.step = "summary";
+          } else {
+            // Update based on current step
+            switch (state.step) {
+              case "pickup": 
+                state.pickup = rawText; 
+                state.step = "destination"; 
+                break;
+              case "destination": 
+                state.destination = rawText; 
+                state.step = "passengers"; 
+                break;
+              case "passengers": 
+                const pax = parsePassengers(rawText);
+                if (pax > 0) {
+                  state.passengers = pax;
+                  state.step = "time";
+                } else {
+                  // Re-ask passengers question
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: { type: "message", role: "user", content: [{ type: "input_text", text: "How many people will be travelling?" }] }
+                  }));
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  return;
+                }
+                break;
+              case "time": 
+                state.time = rawText; 
+                state.step = "summary"; 
+                break;
+              case "summary":
+                if (/yes|yeah/i.test(lower)) {
+                  state.step = "fare_confirm";
+                  const fareMsg = "The trip fare will be £5.40, and the estimated arrival time is 5 minutes. Would you like me to confirm this booking for you?";
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: { type: "message", role: "user", content: [{ type: "input_text", text: fareMsg }] }
+                  }));
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  return;
+                } else {
+                  // Ask what to change
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: { type: "message", role: "user", content: [{ type: "input_text", text: "What would you like to change?" }] }
+                  }));
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  return;
+                }
+              case "fare_confirm":
+                if (/yes|yeah/i.test(lower)) {
+                  state.step = "done";
+                  const finalMsg = "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!";
+                  openaiWs?.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: { type: "message", role: "user", content: [{ type: "input_text", text: finalMsg }] }
+                  }));
+                  openaiWs?.send(JSON.stringify({ type: "response.create" }));
+                  setTimeout(() => socket.close(), 4000);
+                  return;
+                }
+                break;
             }
           }
-        }));
-      }
 
-      // Session configured - trigger greeting
-      if (msg.type === "session.updated") {
-        log("🎤 Session configured, triggering greeting");
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
-      }
-
-      // Forward audio to bridge
-      if (msg.type === "response.audio.delta" && msg.delta) {
-        const binaryStr = atob(msg.delta);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
+          // Ask next question
+          let nextQ = "";
+          const currentStep = state.step as string;
+          if (currentStep === "pickup") {
+            nextQ = "Where would you like to be picked up?";
+          } else if (currentStep === "destination") {
+            nextQ = "What is your destination?";
+          } else if (currentStep === "passengers") {
+            nextQ = "How many people will be travelling?";
+          } else if (currentStep === "time") {
+            nextQ = "When do you need the taxi?";
+          } else if (currentStep === "summary") {
+            nextQ = `Alright, let me quickly summarize your booking. You'd like to be picked up at ${state.pickup}, and travel to ${state.destination}. There will be ${state.passengers} people, and you'd like to be picked up ${state.time}. Is that correct?`;
+          }
+          if (nextQ) {
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "message", role: "user", content: [{ type: "input_text", text: nextQ }] }
+            }));
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          }
         }
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(bytes.buffer);
+
+        // Forward audio to bridge
+        if (msg.type === "response.audio.delta" && msg.delta) {
+          const binaryStr = atob(msg.delta);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+          }
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(bytes.buffer);
+          }
         }
-      }
 
-      // Log transcripts
-      if (msg.type === "response.audio_transcript.done") {
-        log(`🗣️ Ada: ${msg.transcript}`);
-      }
-      if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        log(`👤 User: ${msg.transcript}`);
-      }
-
-      // Log errors
-      if (msg.type === "error") {
-        log(`❌ OpenAI error: ${JSON.stringify(msg.error)}`);
+        // Log errors
+        if (msg.type === "error") {
+          log(`❌ OpenAI error: ${JSON.stringify(msg.error)}`);
+        }
+      } catch (e) {
+        log(`⚠️ Error processing OpenAI message: ${e}`);
       }
     };
 
     openaiWs.onerror = (e) => log(`🔴 OpenAI WS Error: ${e}`);
     openaiWs.onclose = () => log("⚪ OpenAI disconnected");
   };
+
+  // Helper: Parse passenger count with homophones
+  function parsePassengers(text: string): number {
+    const lower = text.toLowerCase().trim();
+    
+    // Direct numbers
+    const num = parseInt(lower);
+    if (!isNaN(num) && num > 0 && num <= 10) return num;
+    
+    // Number words
+    const words: Record<string, number> = {
+      "one": 1, "two": 2, "to": 2, "too": 2, "three": 3, "tree": 3,
+      "four": 4, "for": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+      "nine": 9, "ten": 10
+    };
+    
+    for (const [word, val] of Object.entries(words)) {
+      if (lower.includes(word)) return val;
+    }
+    
+    return 0;
+  }
 
   // Bridge connection
   socket.onopen = () => log("🚀 Bridge connected");
@@ -208,7 +363,16 @@ serve(async (req) => {
       const msg = JSON.parse(event.data);
       
       if (msg.type === "init") {
-        callId = msg.call_id || "unknown";
+        state = {
+          callId: msg.call_id || "unknown",
+          step: "pickup",
+          pickup: null,
+          destination: null,
+          passengers: null,
+          time: null,
+          awaitingResponse: false,
+          farewellSent: false,
+        };
         log(`📞 Call initialized`);
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
