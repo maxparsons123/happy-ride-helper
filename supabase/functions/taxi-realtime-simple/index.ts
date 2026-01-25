@@ -481,6 +481,11 @@ serve(async (req) => {
   let dispatchQuoteReceived = false;
   let quoteTimeoutId: number | null = null;
   const QUOTE_TIMEOUT_MS = 4000; // 4 seconds to wait for real quote
+  
+  // Post-booking flow
+  let bookingConfirmed = false;
+  let askedAnythingElse = false;
+  let finalGoodbyePending = false;
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
@@ -579,6 +584,21 @@ Wait for their YES or NO response.`;
       } else if (action === "confirmed") {
         const confirmResult = await sendDispatchWebhook(callId, callerPhone, "confirmed", bookingState, "", log);
         
+        bookingConfirmed = true;
+        askedAnythingElse = true;
+        currentStep = "done";
+        
+        // Inject post-booking pleasantry + "anything else?" question
+        const postBookingScript = `[BOOKING CONFIRMED - POST-BOOKING MODE]
+The booking is now confirmed.
+
+Say EXACTLY this (warm and pleasant):
+"Wonderful! Your taxi is booked. You'll receive updates via WhatsApp. Is there anything else I can help you with today?"
+
+Wait for the customer's response:
+- If they say NO/nothing/that's all/bye → Say "Thank you for using the Taxibot demo. Have a lovely day, goodbye!" then call end_call(reason="booking_complete")
+- If they ask something else → Help them, then ask again if there's anything else`;
+        
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
@@ -586,12 +606,11 @@ Wait for their YES or NO response.`;
             call_id: toolCallId,
             output: JSON.stringify({
               status: "booking_confirmed",
-              message: "Booking confirmed! Tell the user their taxi is booked and they'll receive WhatsApp updates."
+              message: postBookingScript
             })
           }
         }));
         
-        currentStep = "done";
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
       
@@ -674,6 +693,14 @@ Wait for their YES or NO response.`;
           log(`📍 Step: ${currentStep}`);
         }
         contextInjected = false;
+        
+        // === DETECT GOODBYE FOR GRACEFUL HANGUP ===
+        const lowerAda = adaText.toLowerCase();
+        const isGoodbye = /\b(goodbye|have a (lovely|great|safe|wonderful) day|safe journey|thank you for (using|trying)|bye)\b/i.test(lowerAda);
+        if (isGoodbye && bookingConfirmed) {
+          log(`👋 Goodbye detected, preparing graceful hangup`);
+          finalGoodbyePending = true;
+        }
         
         // === EXTRACT ECHOED VALUES FROM ADA'S TRANSCRIPT ===
         // Ada sometimes repeats what the user said. We ONLY accept Ada "echo" updates when
@@ -899,6 +926,19 @@ When summarizing, say EXACTLY these addresses. DO NOT substitute or change them.
         }
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(bytes.buffer);
+        }
+      }
+
+      // Handle response.done - trigger hangup if goodbye pending
+      if (msg.type === "response.done") {
+        if (finalGoodbyePending) {
+          log(`👋 Response done after goodbye, sending hangup in 500ms`);
+          setTimeout(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "hangup", reason: "booking_complete" }));
+              log(`📞 Hangup sent to bridge`);
+            }
+          }, 500);
         }
       }
 
