@@ -320,6 +320,65 @@ function getLocalEvents(query: string, location: string): object {
   };
 }
 
+// Detect country/locale from phone number
+interface LocaleInfo {
+  country: string;
+  language: string;
+  greeting: string;
+  currency: string;
+}
+
+function detectLocaleFromPhone(phoneNumber: string): LocaleInfo {
+  const cleaned = phoneNumber.replace(/[\s\-\(\)]/g, '');
+  
+  // Country code mappings
+  const countryMap: Record<string, LocaleInfo> = {
+    '+44': { country: 'UK', language: 'British English', greeting: 'Hello', currency: 'GBP' },
+    '+1': { country: 'USA/Canada', language: 'American English', greeting: 'Hi there', currency: 'USD' },
+    '+33': { country: 'France', language: 'French', greeting: 'Bonjour', currency: 'EUR' },
+    '+34': { country: 'Spain', language: 'Spanish', greeting: 'Hola', currency: 'EUR' },
+    '+49': { country: 'Germany', language: 'German', greeting: 'Guten Tag', currency: 'EUR' },
+    '+39': { country: 'Italy', language: 'Italian', greeting: 'Ciao', currency: 'EUR' },
+    '+31': { country: 'Netherlands', language: 'Dutch', greeting: 'Hallo', currency: 'EUR' },
+    '+32': { country: 'Belgium', language: 'Dutch/French', greeting: 'Bonjour', currency: 'EUR' },
+    '+48': { country: 'Poland', language: 'Polish', greeting: 'Dzień dobry', currency: 'PLN' },
+    '+351': { country: 'Portugal', language: 'Portuguese', greeting: 'Olá', currency: 'EUR' },
+    '+353': { country: 'Ireland', language: 'English', greeting: 'Hello', currency: 'EUR' },
+    '+420': { country: 'Czech Republic', language: 'Czech', greeting: 'Dobrý den', currency: 'CZK' },
+    '+91': { country: 'India', language: 'Hindi/English', greeting: 'Namaste', currency: 'INR' },
+    '+86': { country: 'China', language: 'Mandarin', greeting: '你好', currency: 'CNY' },
+    '+81': { country: 'Japan', language: 'Japanese', greeting: 'こんにちは', currency: 'JPY' },
+    '+82': { country: 'South Korea', language: 'Korean', greeting: '안녕하세요', currency: 'KRW' },
+    '+971': { country: 'UAE', language: 'Arabic/English', greeting: 'Marhaba', currency: 'AED' },
+    '+966': { country: 'Saudi Arabia', language: 'Arabic', greeting: 'مرحبا', currency: 'SAR' },
+    '+7': { country: 'Russia', language: 'Russian', greeting: 'Привет', currency: 'RUB' },
+    '+380': { country: 'Ukraine', language: 'Ukrainian', greeting: 'Привіт', currency: 'UAH' },
+    '+90': { country: 'Turkey', language: 'Turkish', greeting: 'Merhaba', currency: 'TRY' },
+    '+61': { country: 'Australia', language: 'Australian English', greeting: "G'day", currency: 'AUD' },
+    '+64': { country: 'New Zealand', language: 'New Zealand English', greeting: 'Kia ora', currency: 'NZD' },
+    '+27': { country: 'South Africa', language: 'English', greeting: 'Hello', currency: 'ZAR' },
+    '+55': { country: 'Brazil', language: 'Portuguese', greeting: 'Olá', currency: 'BRL' },
+    '+52': { country: 'Mexico', language: 'Spanish', greeting: 'Hola', currency: 'MXN' },
+  };
+  
+  // Check longest prefixes first (3-digit country codes)
+  for (const prefix of ['+971', '+966', '+351', '+353', '+420', '+380']) {
+    if (cleaned.startsWith(prefix)) {
+      return countryMap[prefix];
+    }
+  }
+  
+  // Then 2-digit codes
+  for (const prefix of Object.keys(countryMap).filter(k => k.length === 3)) {
+    if (cleaned.startsWith(prefix)) {
+      return countryMap[prefix];
+    }
+  }
+  
+  // Default to UK
+  return { country: 'UK', language: 'British English', greeting: 'Hello', currency: 'GBP' };
+}
+
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -333,6 +392,8 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
+  let callerPhone = "";
+  let callerLocale: LocaleInfo = { country: 'UK', language: 'British English', greeting: 'Hello', currency: 'GBP' };
   
   // Booking state tracking
   const bookingState: BookingState = {
@@ -388,13 +449,32 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
 
       // Session created - configure and trigger greeting
       if (msg.type === "session.created") {
-        log("📋 Session created, sending config");
+        log("📋 Session created, sending config with locale: " + callerLocale.country);
+        
+        // Build locale-aware instructions
+        const localeInstructions = `
+${SYSTEM_PROMPT}
+
+# CALLER LOCALE (DETECTED FROM PHONE NUMBER)
+- Caller country: ${callerLocale.country}
+- Preferred language: ${callerLocale.language}
+- Native greeting: "${callerLocale.greeting}"
+- Currency: ${callerLocale.currency}
+
+# LOCALE-SPECIFIC BEHAVIOR
+- Start with the greeting appropriate for ${callerLocale.country}: "${callerLocale.greeting}"
+- Use ${callerLocale.language} conventions and phrasing
+- If UK caller (+44): Use British English, say "taxi" not "cab", "queue" not "line", "mobile" not "cell phone"
+- If US/Canada caller (+1): Use American English, say "cab" or "ride", use "line" not "queue"
+- If non-English caller: Start in their language, they may still speak English but adapt to their preference
+- Currency references should use ${callerLocale.currency} conventions
+`;
         
         openaiWs?.send(JSON.stringify({
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: SYSTEM_PROMPT,
+            instructions: localeInstructions,
             voice: "shimmer",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
@@ -433,7 +513,7 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
 
       // Session configured - trigger greeting
       if (msg.type === "session.updated") {
-        log("🎤 Session configured, triggering greeting");
+        log("🎤 Session configured, triggering greeting in " + callerLocale.language);
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
@@ -586,7 +666,16 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
       
       if (msg.type === "init") {
         callId = msg.call_id || "unknown";
-        log(`📞 Call initialized`);
+        callerPhone = msg.caller_phone || msg.from || msg.caller || "";
+        
+        // Detect locale from caller ID
+        if (callerPhone) {
+          callerLocale = detectLocaleFromPhone(callerPhone);
+          log(`📞 Call initialized from ${callerPhone} → ${callerLocale.country} (${callerLocale.language})`);
+        } else {
+          log(`📞 Call initialized (no caller ID, defaulting to UK)`);
+        }
+        
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
       }
