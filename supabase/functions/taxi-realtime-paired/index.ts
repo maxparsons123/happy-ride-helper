@@ -3263,11 +3263,68 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
               // will use the tool via sync_booking_data. The tool result includes next step instruction.
             }
             
+            // === INLINE CORRECTION DETECTION (ANTI-HALLUCINATION) ===
+            // Detect "change pickup to X" or "pickup is X" and extract X directly from transcript
+            // This prevents AI from hallucinating by combining old + new addresses
+            const lower = userText.toLowerCase();
+            
+            // Patterns that indicate a direct correction with new value
+            const pickupChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?pick\s*-?\s*up\s+(?:to|is|should be|as)\s+(.+)/i) 
+              || lower.match(/pick\s*-?\s*up\s+(?:from|at)\s+(.+)/i)
+              || lower.match(/(?:actually|no,?\s*)?(?:it'?s?|its)\s+(.+?)(?:\s+for\s+pick\s*-?\s*up)?$/i);
+            
+            const destChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?destination\s+(?:to|is|should be|as)\s+(.+)/i)
+              || lower.match(/(?:going|go)\s+to\s+(.+)/i)
+              || lower.match(/drop\s*-?\s*off\s+(?:at|to)\s+(.+)/i);
+            
+            if (pickupChangeMatch) {
+              const newPickup = pickupChangeMatch[1].trim().replace(/^(to|at|is)\s+/i, '');
+              console.log(`[${callId}] 🔧 INLINE CORRECTION: pickup extracted = "${newPickup}"`);
+              sessionState.userTruth.pickup = newPickup;
+              sessionState.booking.pickup = newPickup;
+              await updateLiveCall(sessionState);
+              
+              // Inject explicit instruction to use EXACTLY this value
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[CORRECTION CAPTURED] User changed pickup to EXACTLY: "${newPickup}". Use this EXACT value - do NOT add house numbers or modify it. Acknowledge: "Updated pickup to ${newPickup}." then ask if anything else needs changing.`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              break;
+            }
+            
+            if (destChangeMatch) {
+              const newDest = destChangeMatch[1].trim().replace(/^(to|at|is)\s+/i, '');
+              console.log(`[${callId}] 🔧 INLINE CORRECTION: destination extracted = "${newDest}"`);
+              sessionState.userTruth.destination = newDest;
+              sessionState.booking.destination = newDest;
+              await updateLiveCall(sessionState);
+              
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[CORRECTION CAPTURED] User changed destination to EXACTLY: "${newDest}". Use this EXACT value - do NOT modify it. Acknowledge: "Updated destination to ${newDest}." then ask if anything else needs changing.`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              break;
+            }
+            
             // === PRE-SUMMARY RESPONSE DETECTION ===
             // Handle user's response to "Is there anything you'd like to change?"
             if (effectiveQuestionType === "pre_summary" || sessionState.lastQuestionAsked === "pre_summary") {
-              const lower = userText.toLowerCase();
-              
               // User says NO (nothing to change) - proceed to summary
               const noChangesNeeded = /^(no+|nope|nothing|all good|that.s fine|fine|correct|sounds good|all correct|no changes|no thank|not at all)/i.test(lower.trim());
               // User wants to make changes
