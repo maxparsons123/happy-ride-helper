@@ -68,6 +68,13 @@ When the caller wants to change or correct something they said:
 - If they correct during the summary, say "Let me update that" and give a NEW summary with the corrected info
 - NEVER ignore corrections - always act on them
 
+# LOCAL EVENTS & INFORMATION
+When the caller asks about local events, things to do, attractions, or what's happening:
+- Use the get_local_events tool to fetch current events
+- Share the information helpfully and enthusiastically
+- After sharing, gently guide them back: "Would you like me to book a taxi to any of these?"
+- Be knowledgeable and informative about the local area
+
 # RULES
 - Do NOT say "Got it" or "Great" before asking the next question
 - Do NOT repeat or confirm individual answers mid-flow
@@ -188,6 +195,55 @@ function extractTime(text: string): string | null {
   return null;
 }
 
+// Get local events (mock data - could be replaced with real API)
+function getLocalEvents(query: string, location: string): object {
+  const lowerQuery = query.toLowerCase();
+  const today = new Date();
+  const dayOfWeek = today.toLocaleDateString('en-GB', { weekday: 'long' });
+  
+  // Dynamic event suggestions based on query
+  const eventCategories: Record<string, object[]> = {
+    concerts: [
+      { name: "Live Jazz at The Jam House", venue: "The Jam House, St. Pauls Square", time: "8pm tonight", type: "music" },
+      { name: "Symphony Hall Classical Evening", venue: "Symphony Hall", time: "7:30pm", type: "music" },
+      { name: "Indie Night at O2 Academy", venue: "O2 Academy Birmingham", time: "9pm", type: "music" }
+    ],
+    football: [
+      { name: "Aston Villa vs Manchester City", venue: "Villa Park", time: "3pm Saturday", type: "sport" },
+      { name: "Birmingham City FC Home Game", venue: "St Andrew's Stadium", time: "7:45pm Tuesday", type: "sport" }
+    ],
+    theatre: [
+      { name: "The Lion King", venue: "Birmingham Hippodrome", time: "7:30pm", type: "theatre" },
+      { name: "Comedy Night", venue: "Glee Club", time: "8pm", type: "comedy" }
+    ],
+    food: [
+      { name: "Street Food Market", venue: "Digbeth", time: "12pm-10pm", type: "food" },
+      { name: "Balti Triangle Food Tour", venue: "Sparkbrook", time: "6pm", type: "food" }
+    ],
+    general: [
+      { name: "Live Music at The Jam House", venue: "The Jam House", time: "8pm", type: "music" },
+      { name: "Street Food Market", venue: "Digbeth", time: "All day", type: "food" },
+      { name: "The Lion King Musical", venue: "Birmingham Hippodrome", time: "7:30pm", type: "theatre" },
+      { name: "Bullring Late Night Shopping", venue: "Bullring", time: "Until 9pm", type: "shopping" }
+    ]
+  };
+  
+  // Match query to category
+  let events = eventCategories.general;
+  if (/concert|music|gig|live/.test(lowerQuery)) events = eventCategories.concerts;
+  else if (/football|soccer|match|villa|blues/.test(lowerQuery)) events = eventCategories.football;
+  else if (/theatre|theater|show|musical|comedy/.test(lowerQuery)) events = eventCategories.theatre;
+  else if (/food|restaurant|eat|dinner/.test(lowerQuery)) events = eventCategories.food;
+  
+  return {
+    location: location,
+    date: dayOfWeek,
+    query: query,
+    events: events,
+    message: `Here are some ${query} happening in ${location} today and this week.`
+  };
+}
+
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -272,7 +328,29 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
               threshold: 0.5,
               prefix_padding_ms: 300,
               silence_duration_ms: 800
-            }
+            },
+            tools: [
+              {
+                type: "function",
+                name: "get_local_events",
+                description: "Get information about local events, attractions, things to do, concerts, shows, sports, festivals, or what's happening in the area. Call this when the user asks about events or activities.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    query: { 
+                      type: "string",
+                      description: "What the user is looking for (e.g., 'concerts tonight', 'football matches', 'things to do')"
+                    },
+                    location: {
+                      type: "string",
+                      description: "The city or area to search in (default: Birmingham)"
+                    }
+                  },
+                  required: ["query"]
+                }
+              }
+            ],
+            tool_choice: "auto"
           }
         }));
       }
@@ -358,6 +436,41 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
         
         // Log current state
         log(`📊 State: P=${bookingState.pickup || "?"} | D=${bookingState.destination || "?"} | Pax=${bookingState.passengers || "?"} | T=${bookingState.time || "?"}`);
+      }
+
+      // Handle function calls (tools)
+      if (msg.type === "response.function_call_arguments.done") {
+        const funcName = msg.name;
+        const callIdFunc = msg.call_id;
+        log(`🔧 Tool called: ${funcName}`);
+        
+        try {
+          const args = JSON.parse(msg.arguments || "{}");
+          
+          if (funcName === "get_local_events") {
+            const query = args.query || "events";
+            const location = args.location || "Birmingham";
+            log(`🎭 Getting local events: "${query}" in ${location}`);
+            
+            // Mock local events data - in production, this could call a real events API
+            const events = getLocalEvents(query, location);
+            
+            // Send tool result back to OpenAI
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: callIdFunc,
+                output: JSON.stringify(events)
+              }
+            }));
+            
+            // Trigger response generation
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          }
+        } catch (e) {
+          log(`❌ Tool error: ${e}`);
+        }
       }
 
       // Log errors
