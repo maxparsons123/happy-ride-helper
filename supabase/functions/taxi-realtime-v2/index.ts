@@ -14,6 +14,113 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === HOUSE NUMBER PARSING ===
+// Maps spoken words to digits for compound house numbers like "twelve fourteen" → "1214"
+const SPOKEN_NUMBERS: Record<string, string> = {
+  "zero": "0", "oh": "0", "o": "0",
+  "one": "1", "won": "1",
+  "two": "2", "to": "2", "too": "2",
+  "three": "3", "tree": "3", "free": "3",
+  "four": "4", "for": "4", "fore": "4",
+  "five": "5",
+  "six": "6", "sex": "6",
+  "seven": "7",
+  "eight": "8", "ate": "8",
+  "nine": "9", "niner": "9",
+  "ten": "10",
+  "eleven": "11",
+  "twelve": "12",
+  "thirteen": "13",
+  "fourteen": "14",
+  "fifteen": "15",
+  "sixteen": "16",
+  "seventeen": "17",
+  "eighteen": "18",
+  "nineteen": "19",
+  "twenty": "20",
+  "thirty": "30",
+  "forty": "40",
+  "fifty": "50",
+  "sixty": "60",
+  "seventy": "70",
+  "eighty": "80",
+  "ninety": "90",
+  "hundred": "00",
+};
+
+// Convert spoken compound numbers to digits: "twelve fourteen a" → "1214A"
+function parseSpokenHouseNumber(text: string): string {
+  const words = text.toLowerCase().split(/\s+/);
+  let result = "";
+  let i = 0;
+  
+  while (i < words.length) {
+    const word = words[i];
+    
+    // Check for alphanumeric suffix (a, b, c, etc.) - keep uppercase
+    if (/^[a-z]$/.test(word) && result.length > 0) {
+      result += word.toUpperCase();
+      i++;
+      continue;
+    }
+    
+    // Check for digit
+    if (/^\d+$/.test(word)) {
+      result += word;
+      i++;
+      continue;
+    }
+    
+    // Check for spoken number
+    const num = SPOKEN_NUMBERS[word];
+    if (num) {
+      // Handle "twenty one" → "21", "twelve fourteen" → "1214"
+      if (num.length === 2 && num.endsWith("0") && i + 1 < words.length) {
+        const nextNum = SPOKEN_NUMBERS[words[i + 1]];
+        if (nextNum && nextNum.length === 1) {
+          // "twenty" + "one" → "21"
+          result += String(parseInt(num) + parseInt(nextNum));
+          i += 2;
+          continue;
+        }
+      }
+      result += num;
+      i++;
+      continue;
+    }
+    
+    // Not a number word - stop parsing house number
+    break;
+  }
+  
+  // Return remaining text with the parsed number
+  const remaining = words.slice(i).join(" ");
+  return result ? `${result} ${remaining}`.trim() : text;
+}
+
+// Apply STT corrections for common misheard house numbers
+function applyAddressCorrections(text: string): string {
+  let corrected = text;
+  
+  // Join separated alphanumeric suffixes: "52 A" → "52A", "1214 B" → "1214B"
+  corrected = corrected.replace(/(\d+)\s+([A-Za-z])(?=\s|$)/g, (_, num, letter) => `${num}${letter.toUpperCase()}`);
+  
+  // Fix hyphenated numbers: "52-8" → "528" or keep as-is if legitimate
+  corrected = corrected.replace(/(\d+)-(\d)(?=\s|$)/g, "$1$2");
+  
+  // Parse compound spoken numbers at start of address
+  const addressMatch = corrected.match(/^([\w\s]+?)\s+(road|street|avenue|lane|drive|close|way|crescent|place|court|grove|gardens|terrace|walk|hill|rise|view|park|green|square|mews)/i);
+  if (addressMatch) {
+    const [, prefix, roadType] = addressMatch;
+    const parsedPrefix = parseSpokenHouseNumber(prefix);
+    if (parsedPrefix !== prefix) {
+      corrected = parsedPrefix + " " + roadType + corrected.slice(addressMatch[0].length);
+    }
+  }
+  
+  return corrected;
+}
+
 // === SYSTEM PROMPT (Clean, focused - from minimal version) ===
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -43,6 +150,12 @@ Ask ONLY ONE question per response. NEVER combine questions.
 6. If confirmed, call the book_taxi tool with action="request_quote" and say "One moment please"
 7. Wait for the fare quote, then present it to the user
 8. If user accepts, call book_taxi with action="confirmed", thank them and call end_call
+
+# HOUSE NUMBERS (CRITICAL)
+- Callers may say house numbers as compound words: "twelve fourteen" = 1214, "twenty three" = 23
+- Letter suffixes may be spoken separately: "fifty two A" = 52A
+- NEVER alter or paraphrase house numbers - use them EXACTLY as understood
+- "1214A Warwick Road" is a valid address - the number is "twelve fourteen A"
 
 # PASSENGERS (ANTI-STUCK RULE)
 - Accept digits (1-9) or number words (one, two, three, four, five, six, seven, eight, nine, ten)
@@ -353,8 +466,28 @@ serve(async (req) => {
       }
       
       if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
-        log(`👤 User: ${msg.transcript}`);
-        transcripts.push({ role: "user", text: msg.transcript, timestamp: new Date().toISOString() });
+        const rawTranscript = msg.transcript;
+        const correctedTranscript = applyAddressCorrections(rawTranscript);
+        
+        if (correctedTranscript !== rawTranscript) {
+          log(`👤 User: ${rawTranscript} → ${correctedTranscript}`);
+        } else {
+          log(`👤 User: ${rawTranscript}`);
+        }
+        
+        transcripts.push({ role: "user", text: correctedTranscript, timestamp: new Date().toISOString() });
+        
+        // Inject corrected transcript as context hint if it differs
+        if (correctedTranscript !== rawTranscript && openaiWs?.readyState === WebSocket.OPEN) {
+          openaiWs.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: { 
+              type: "message", 
+              role: "system", 
+              content: [{ type: "input_text", text: `[ADDRESS CORRECTION] The user said: "${correctedTranscript}"` }] 
+            }
+          }));
+        }
       }
 
       // Handle tool calls
