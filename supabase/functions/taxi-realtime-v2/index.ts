@@ -14,8 +14,14 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === PASSENGER NUMBER TO WORD (for natural TTS) ===
+const PASSENGER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+function passengersToWord(num: number): string {
+  return PASSENGER_WORDS[num] || String(num);
+}
+
 // === HOUSE NUMBER PARSING ===
-// Maps spoken words to digits for compound house numbers like "twelve fourteen" → "1214"
 const SPOKEN_NUMBERS: Record<string, string> = {
   "zero": "0", "oh": "0", "o": "0",
   "one": "1", "won": "1",
@@ -48,7 +54,6 @@ const SPOKEN_NUMBERS: Record<string, string> = {
   "hundred": "00",
 };
 
-// Convert spoken compound numbers to digits: "twelve fourteen a" → "1214A"
 function parseSpokenHouseNumber(text: string): string {
   const words = text.toLowerCase().split(/\s+/);
   let result = "";
@@ -57,28 +62,23 @@ function parseSpokenHouseNumber(text: string): string {
   while (i < words.length) {
     const word = words[i];
     
-    // Check for alphanumeric suffix (a, b, c, etc.) - keep uppercase
     if (/^[a-z]$/.test(word) && result.length > 0) {
       result += word.toUpperCase();
       i++;
       continue;
     }
     
-    // Check for digit
     if (/^\d+$/.test(word)) {
       result += word;
       i++;
       continue;
     }
     
-    // Check for spoken number
     const num = SPOKEN_NUMBERS[word];
     if (num) {
-      // Handle "twenty one" → "21", "twelve fourteen" → "1214"
       if (num.length === 2 && num.endsWith("0") && i + 1 < words.length) {
         const nextNum = SPOKEN_NUMBERS[words[i + 1]];
         if (nextNum && nextNum.length === 1) {
-          // "twenty" + "one" → "21"
           result += String(parseInt(num) + parseInt(nextNum));
           i += 2;
           continue;
@@ -89,23 +89,20 @@ function parseSpokenHouseNumber(text: string): string {
       continue;
     }
     
-    // Not a number word - stop parsing house number
     break;
   }
   
-  // Return remaining text with the parsed number
   const remaining = words.slice(i).join(" ");
   return result ? `${result} ${remaining}`.trim() : text;
 }
 
-// Apply STT corrections for common misheard house numbers
 function applyAddressCorrections(text: string): string {
   let corrected = text;
   
-  // Join separated alphanumeric suffixes: "52 A" → "52A", "1214 B" → "1214B"
+  // Join separated alphanumeric suffixes: "52 A" → "52A"
   corrected = corrected.replace(/(\d+)\s+([A-Za-z])(?=\s|$)/g, (_, num, letter) => `${num}${letter.toUpperCase()}`);
   
-  // Fix hyphenated numbers: "52-8" → "528" or keep as-is if legitimate
+  // Fix hyphenated numbers: "52-8" → "528"
   corrected = corrected.replace(/(\d+)-(\d)(?=\s|$)/g, "$1$2");
   
   // Parse compound spoken numbers at start of address
@@ -121,16 +118,37 @@ function applyAddressCorrections(text: string): string {
   return corrected;
 }
 
+// === TIME NORMALIZATION HELPERS ===
+function normalizeTime(text: string): string {
+  const lower = text.toLowerCase().trim();
+  
+  // ASAP patterns
+  if (/\b(now|asap|immediately|straight away|right now|as soon as possible)\b/i.test(lower)) {
+    return "ASAP";
+  }
+  
+  // Keep other time expressions as-is for Ada to speak naturally
+  return text;
+}
+
 // === STEP TRACKING ===
 type BookingStep = "greeting" | "pickup" | "destination" | "passengers" | "time" | "summary" | "quote" | "confirmed";
 
-function detectStepFromTranscript(text: string, currentStep: BookingStep): { isAddress: boolean; isPassengerCount: boolean; isTime: boolean; isConfirmation: boolean; isCorrection: boolean } {
+function detectStepFromTranscript(text: string, currentStep: BookingStep): { 
+  isAddress: boolean; 
+  isPassengerCount: boolean; 
+  isTime: boolean; 
+  isConfirmation: boolean; 
+  isCorrection: boolean;
+  isLuggage: boolean;
+  isSpecialRequest: boolean;
+} {
   const lower = text.toLowerCase();
   
-  // Correction detection - includes "amend", "update", "modify"
-  const isCorrection = /\b(actually|no wait|change|i meant|not .+, it's|sorry,? it's|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be)\b/i.test(text);
+  // Correction detection
+  const isCorrection = /\b(actually|no wait|change|i meant|not .+, it's|sorry,? it's|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be|to amend)\b/i.test(text);
   
-  // Address patterns - street types, house numbers, landmarks
+  // Address patterns
   const addressPatterns = /\b(road|street|avenue|lane|drive|close|way|crescent|place|court|grove|gardens|terrace|walk|hill|rise|view|park|green|square|mews|station|airport|hospital|hotel|pub|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|waitrose|mcdonald|costa|starbucks)\b/i;
   const hasHouseNumber = /\b\d+[a-z]?\b/i.test(text);
   const isAddress = addressPatterns.test(text) || (hasHouseNumber && text.length > 5);
@@ -148,33 +166,21 @@ function detectStepFromTranscript(text: string, currentStep: BookingStep): { isA
   const noPatterns = /\b(no|nope|wrong|incorrect|change|wait|hold on|actually)\b/i;
   const isConfirmation = (yesPatterns.test(text) || noPatterns.test(text)) && currentStep === "summary";
   
-  return { isAddress, isPassengerCount, isTime, isConfirmation, isCorrection };
+  // Luggage patterns (from experimental code)
+  const luggagePatterns = /\b(luggage|bags?|suitcases?|cases?|holdall|backpack|rucksack)\b/i;
+  const isLuggage = luggagePatterns.test(text);
+  
+  // Special request patterns (from experimental code)
+  const specialRequestPatterns = /\b(driver \d+|wheelchair|lady driver|ring me|call me when|hurry|asap|dog|pet|child seat|baby seat)\b/i;
+  const isSpecialRequest = specialRequestPatterns.test(text);
+  
+  return { isAddress, isPassengerCount, isTime, isConfirmation, isCorrection, isLuggage, isSpecialRequest };
 }
 
-function getNextStep(currentStep: BookingStep, booking: { pickup?: string; destination?: string; passengers?: number; time?: string }): BookingStep {
-  if (!booking.pickup) return "pickup";
-  if (!booking.destination) return "destination";
-  if (!booking.passengers) return "passengers";
-  if (!booking.time) return "time";
-  return "summary";
-}
-
-function getStepQuestion(step: BookingStep): string {
-  switch (step) {
-    case "pickup": return "Where would you like to be picked up from?";
-    case "destination": return "And where would you like to go?";
-    case "passengers": return "How many passengers will be travelling?";
-    case "time": return "When would you like to be picked up?";
-    case "summary": return "Please summarize the booking and ask for confirmation.";
-    default: return "";
-  }
-}
-
-// Parse passenger count from various spoken forms
 function parsePassengers(text: string): number | null {
   const lower = text.toLowerCase().trim();
   
-  // Direct digit extraction first (handles "6", "6 passengers", etc.)
+  // Direct digit extraction first
   const digitMatch = lower.match(/\b(\d{1,2})\b/);
   if (digitMatch) {
     const num = parseInt(digitMatch[1]);
@@ -190,12 +196,9 @@ function parsePassengers(text: string): number | null {
     "nine": 9, "ten": 10
   };
   
-  // Check for number words (exact match first)
   if (numberWords[lower]) return numberWords[lower];
   
-  // Check for number words within the text
   for (const [word, num] of Object.entries(numberWords)) {
-    // Use word boundary to avoid partial matches
     const regex = new RegExp(`\\b${word}\\b`, 'i');
     if (regex.test(lower)) return num;
   }
@@ -203,7 +206,7 @@ function parsePassengers(text: string): number | null {
   return null;
 }
 
-// === SYSTEM PROMPT (with step awareness) ===
+// === SYSTEM PROMPT ===
 const SYSTEM_PROMPT = `
 # IDENTITY
 You are ADA, the professional taxi booking assistant for the Taxibot demo.
@@ -253,6 +256,10 @@ When speaking addresses back, say house numbers naturally:
 - "52A" say as "fifty-two A"
 - Always say letter suffixes clearly as separate letters: A, B, C
 
+When speaking passenger counts, use words:
+- "1" say as "one passenger"
+- "6" say as "six passengers"
+
 # PASSENGERS (ANTI-STUCK RULE)
 - Accept digits (1-9) or number words (one, two, three, four, five, six, seven, eight, nine, ten)
 - Also accept homophones: "to/too" → two, "for" → four, "tree" → three
@@ -260,9 +267,15 @@ When speaking addresses back, say house numbers naturally:
 
 # CORRECTIONS & CHANGES
 When the caller wants to change something:
-- Listen for: "actually", "no wait", "change", "I meant", "not X, it's Y"
+- Listen for: "actually", "no wait", "change", "I meant", "not X, it's Y", "amend", "update"
 - Update immediately, acknowledge briefly, continue the flow
 - If correcting during summary, give a NEW summary with corrected info
+
+# SPECIAL REQUESTS & LUGGAGE
+If user mentions luggage, wheelchair, specific driver, or other requests:
+- Acknowledge briefly
+- Continue with booking flow
+- Include in final summary
 
 # RULES
 - Do NOT say "Got it" or "Great" before asking the next question
@@ -283,10 +296,12 @@ const TOOLS = [
       type: "object",
       properties: {
         action: { type: "string", enum: ["request_quote", "confirmed"] },
-        pickup: { type: "string", description: "Full pickup address" },
-        destination: { type: "string", description: "Full destination address" },
+        pickup: { type: "string", description: "Full pickup address EXACTLY as spoken by user" },
+        destination: { type: "string", description: "Full destination address EXACTLY as spoken by user" },
         passengers: { type: "integer", minimum: 1 },
-        time: { type: "string", description: "When taxi is needed" }
+        time: { type: "string", description: "When taxi is needed" },
+        luggage: { type: "string", description: "Any luggage mentioned" },
+        special_requests: { type: "string", description: "Any special requests" }
       },
       required: ["action"]
     }
@@ -356,7 +371,7 @@ async function sendDispatchWebhook(
   callId: string,
   callerPhone: string,
   action: string,
-  booking: { pickup?: string; destination?: string; passengers?: number; time?: string },
+  booking: { pickup?: string; destination?: string; passengers?: number; time?: string; luggage?: string; special_requests?: string },
   log: (msg: string) => void
 ): Promise<{ success: boolean; fare?: string; eta?: string; booking_ref?: string }> {
   if (!DISPATCH_WEBHOOK_URL) {
@@ -377,6 +392,8 @@ async function sendDispatchWebhook(
         destination: booking.destination || "",
         passengers: booking.passengers || 1,
         pickup_time: booking.time || "ASAP",
+        luggage: booking.luggage || "",
+        special_requests: booking.special_requests || "",
         source: "taxi-realtime-v2"
       })
     });
@@ -407,7 +424,7 @@ serve(async (req) => {
   const url = new URL(req.url);
   if (url.pathname.endsWith("/health") || req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     if (url.pathname.endsWith("/health")) {
-      return new Response(JSON.stringify({ status: "ok", version: "v2-minimal" }), {
+      return new Response(JSON.stringify({ status: "ok", version: "v2-hybrid" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
@@ -420,7 +437,7 @@ serve(async (req) => {
   let callerPhone = url.searchParams.get("caller_phone") || "";
   
   // State
-  const booking: { pickup?: string; destination?: string; passengers?: number; time?: string } = {};
+  const booking: { pickup?: string; destination?: string; passengers?: number; time?: string; luggage?: string; special_requests?: string } = {};
   const transcripts: Array<{ role: string; text: string; timestamp: string }> = [];
   let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   let quoteDelivered = false;
@@ -443,10 +460,14 @@ serve(async (req) => {
 
     if (name === "book_taxi") {
       const action = String(args.action || "request_quote");
-      if (args.pickup) booking.pickup = String(args.pickup);
-      if (args.destination) booking.destination = String(args.destination);
-      if (args.passengers) booking.passengers = Number(args.passengers);
+      
+      // Use userTruth values preferentially (prevent AI hallucinations)
+      if (args.pickup) booking.pickup = userTruth.pickup || String(args.pickup);
+      if (args.destination) booking.destination = userTruth.destination || String(args.destination);
+      if (args.passengers) booking.passengers = userTruth.passengers || Number(args.passengers);
       if (args.time) booking.time = String(args.time);
+      if (args.luggage) booking.luggage = String(args.luggage);
+      if (args.special_requests) booking.special_requests = String(args.special_requests);
 
       if (action === "request_quote") {
         // Start fallback timer
@@ -581,17 +602,31 @@ serve(async (req) => {
         const detection = detectStepFromTranscript(correctedTranscript, currentStep);
         log(`📊 Step: ${currentStep}, Detection: ${JSON.stringify(detection)}`);
         
-        // Handle corrections - extract address and update state
+        // Handle luggage mentions (capture but don't change flow)
+        if (detection.isLuggage) {
+          const luggageMatch = correctedTranscript.match(/(\d+)?\s*(luggage|bags?|suitcases?|cases?)/i);
+          if (luggageMatch) {
+            booking.luggage = luggageMatch[0];
+            log(`🧳 Luggage noted: ${booking.luggage}`);
+          }
+        }
+        
+        // Handle special requests (capture but don't change flow)
+        if (detection.isSpecialRequest) {
+          booking.special_requests = (booking.special_requests ? booking.special_requests + "; " : "") + correctedTranscript;
+          log(`📝 Special request: ${correctedTranscript}`);
+        }
+        
+        // Handle corrections
         if (detection.isCorrection && detection.isAddress) {
           log(`🔄 Correction with address detected: ${correctedTranscript}`);
           
-          // Detect if it's a pickup or destination correction
           const isPickupCorrection = /\b(pickup|pick up|from|picked up from)\b/i.test(correctedTranscript);
-          const isDestinationCorrection = /\b(destination|to|going to|drop off)\b/i.test(correctedTranscript);
+          const isDestinationCorrection = /\b(destination|to|going to|drop off|dropoff)\b/i.test(correctedTranscript);
           
-          // Extract the address part (remove correction keywords)
+          // Extract the address (remove correction keywords)
           const addressPart = correctedTranscript
-            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be|to amend)\b/gi, "")
+            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be|to amend|from|to)\b/gi, "")
             .trim();
           
           if (isDestinationCorrection && !isPickupCorrection) {
@@ -599,19 +634,20 @@ serve(async (req) => {
             booking.destination = addressPart;
             log(`✅ Destination corrected to: ${addressPart}`);
           } else {
-            // Default to pickup correction
             userTruth.pickup = addressPart;
             booking.pickup = addressPart;
             log(`✅ Pickup corrected to: ${addressPart}`);
           }
           
-          // Go back to summary to confirm changes
           currentStep = "summary";
+          
+          // Build summary with passenger word
+          const passengerWord = passengersToWord(booking.passengers || 1);
           
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
-              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger(s), ${booking.time}. Is that correct?"` }] }
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, ${booking.time}. Is that correct?"` }] }
             }));
           }
         }
@@ -624,7 +660,7 @@ serve(async (req) => {
             }));
           }
         }
-        // Save data based on current step and advance
+        // Normal step progression
         else if (currentStep === "greeting" || currentStep === "pickup") {
           if (detection.isAddress) {
             userTruth.pickup = correctedTranscript;
@@ -632,7 +668,6 @@ serve(async (req) => {
             currentStep = "destination";
             log(`✅ Pickup saved: ${correctedTranscript}, next: destination`);
             
-            // Inject step hint
             if (openaiWs?.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
@@ -662,16 +697,16 @@ serve(async (req) => {
             userTruth.passengers = parsed;
             booking.passengers = parsed;
             currentStep = "time";
-            log(`✅ Passengers saved: ${parsed}, next: time`);
+            const passengerWord = passengersToWord(parsed);
+            log(`✅ Passengers saved: ${parsed} (${passengerWord}), next: time`);
             
             if (openaiWs?.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
                 type: "conversation.item.create",
-                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] ${parsed} passenger(s). NOW ASK: "When would you like to be picked up?" (Accept "now" or "ASAP")` }] }
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] ${passengerWord} passenger(s). NOW ASK: "When would you like to be picked up?" (Accept "now" or "ASAP")` }] }
               }));
             }
           } else if (detection.isAddress) {
-            // User gave an address when we asked for passengers - don't advance
             log(`⚠️ Address given during passengers step, repeating question`);
             if (openaiWs?.readyState === WebSocket.OPEN) {
               openaiWs.send(JSON.stringify({
@@ -682,12 +717,13 @@ serve(async (req) => {
           }
         }
         else if (currentStep === "time") {
-          // Accept most responses as time, default to "now"
-          const timeValue = detection.isTime ? correctedTranscript : "now";
+          const timeValue = normalizeTime(correctedTranscript);
           userTruth.time = timeValue;
           booking.time = timeValue;
           currentStep = "summary";
           log(`✅ Time saved: ${timeValue}, next: summary`);
+          
+          const passengerWord = passengersToWord(booking.passengers || 1);
           
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
@@ -695,14 +731,14 @@ serve(async (req) => {
               item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Time: ${timeValue}. NOW GIVE SUMMARY using EXACTLY these values:
 - Pickup: "${booking.pickup}"
 - Destination: "${booking.destination}"  
-- Passengers: ${booking.passengers} (say this number EXACTLY)
+- Passengers: ${passengerWord} (say "${passengerWord}" NOT "${booking.passengers}")
 - Time: "${booking.time}"
-Say: "So that's from [pickup] to [destination], for ${booking.passengers} passengers, pickup ${booking.time}. Is that correct?"` }] }
+${booking.luggage ? `- Luggage: ${booking.luggage}` : ''}
+Say: "So that's from [pickup] to [destination], for ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
             }));
           }
         }
         else if (currentStep === "summary") {
-          // Check for confirmation
           const yesPatterns = /\b(yes|yeah|yep|yup|correct|right|exactly|perfect|sure|ok|okay|book it|go ahead|confirm|that's right|sounds good)\b/i;
           const noPatterns = /\b(no|nope|wrong|incorrect|change|wait|hold on)\b/i;
           
@@ -763,7 +799,6 @@ Say: "So that's from [pickup] to [destination], for ${booking.passengers} passen
       
       const incoming = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
       
-      // Auto-detect format (ulaw = 160 bytes/20ms, slin8k = 320 bytes/20ms)
       if (!inboundFormat) {
         inboundFormat = incoming.byteLength <= 200 ? "ulaw" : "slin";
         log(`🎧 Audio format: ${inboundFormat}`);
@@ -790,7 +825,7 @@ Say: "So that's from [pickup] to [destination], for ${booking.passengers} passen
         callerPhone = msg.phone || msg.caller || callerPhone;
         log(`📞 Init: ${callerPhone}`);
         
-        await supabase.from("live_calls").upsert({ call_id: callId, caller_phone: callerPhone, status: "active", source: "v2", transcripts: [] }, { onConflict: "call_id" });
+        await supabase.from("live_calls").upsert({ call_id: callId, caller_phone: callerPhone, status: "active", source: "v2-hybrid", transcripts: [] }, { onConflict: "call_id" });
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
       }
