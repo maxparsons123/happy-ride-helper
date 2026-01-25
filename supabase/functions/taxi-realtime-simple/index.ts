@@ -584,7 +584,7 @@ serve(async (req) => {
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
-      // Track Ada's speech for step detection
+      // Track Ada's speech for step detection AND extract echoed values
       if (msg.type === "response.audio_transcript.done") {
         const adaText = msg.transcript || "";
         log(`🗣️ Ada: ${adaText}`);
@@ -595,6 +595,51 @@ serve(async (req) => {
           log(`📍 Step: ${currentStep}`);
         }
         contextInjected = false;
+        
+        // === EXTRACT ECHOED VALUES FROM ADA'S TRANSCRIPT ===
+        // Ada often echoes back what user said - use this as verification
+        const lower = adaText.toLowerCase();
+        
+        // Pattern: "picking you up from X" or "pickup is X" or "from X"
+        const pickupMatch = adaText.match(/(?:picking you up from|pickup (?:is|at)|collect you from|from)\s+([^,\.]+?)(?:\s*,|\s+and\s+|\s+to\s+|\s*\.|$)/i);
+        if (pickupMatch && pickupMatch[1]) {
+          const adaPickup = pickupMatch[1].trim();
+          // Only update if we don't have a value OR Ada's version is more complete
+          if (!bookingState.pickup || (adaPickup.length > bookingState.pickup.length && adaPickup.includes(bookingState.pickup.substring(0, 5)))) {
+            log(`🎯 Ada echoed PICKUP: "${adaPickup}" (was: "${bookingState.pickup}")`);
+            // If Ada's version contains our captured value, use Ada's (more complete)
+            if (!bookingState.pickup || adaPickup.toLowerCase().includes(bookingState.pickup.toLowerCase().substring(0, Math.min(5, bookingState.pickup.length)))) {
+              bookingState.pickup = adaPickup;
+              log(`📍 UPDATED PICKUP from Ada: "${adaPickup}"`);
+            }
+          }
+        }
+        
+        // Pattern: "going to X" or "destination is X" or "dropping off at X" or "to X"
+        const destMatch = adaText.match(/(?:going to|heading to|destination (?:is|at)|dropping (?:you )?off at|taking you to)\s+([^,\.]+?)(?:\s*,|\s+with\s+|\s*\.|$)/i);
+        if (destMatch && destMatch[1]) {
+          const adaDest = destMatch[1].trim();
+          // Only update if we don't have a value OR Ada's version is more complete
+          if (!bookingState.destination || (adaDest.length > bookingState.destination.length && adaDest.includes(bookingState.destination.substring(0, 5)))) {
+            log(`🎯 Ada echoed DESTINATION: "${adaDest}" (was: "${bookingState.destination}")`);
+            if (!bookingState.destination || adaDest.toLowerCase().includes(bookingState.destination.toLowerCase().substring(0, Math.min(5, bookingState.destination.length)))) {
+              bookingState.destination = adaDest;
+              log(`📍 UPDATED DESTINATION from Ada: "${adaDest}"`);
+            }
+          }
+        }
+        
+        // Pattern: "X passengers" or "for X passengers" or "X people"
+        const passMatch = adaText.match(/(?:for\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:passenger|people|person)/i);
+        if (passMatch && passMatch[1]) {
+          const numWords: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+          const val = /^\d+$/.test(passMatch[1]) ? parseInt(passMatch[1]) : numWords[passMatch[1].toLowerCase()] || 1;
+          if (val !== bookingState.passengers) {
+            log(`🎯 Ada echoed PASSENGERS: ${val} (was: ${bookingState.passengers})`);
+            bookingState.passengers = val;
+            log(`📍 UPDATED PASSENGERS from Ada: ${val}`);
+          }
+        }
       }
 
       // Handle tool calls
