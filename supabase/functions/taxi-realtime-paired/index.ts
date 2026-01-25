@@ -1844,6 +1844,7 @@ NEVER swap fields. Trust the question context.
 }
 
 // Update live_calls table with current state
+// CRITICAL: This persists ALL booking fields immediately to prevent data loss
 async function updateLiveCall(sessionState: SessionState) {
   try {
     const { error } = await supabase
@@ -1854,6 +1855,10 @@ async function updateLiveCall(sessionState: SessionState) {
         pickup: sessionState.booking.pickup,
         destination: sessionState.booking.destination,
         passengers: sessionState.booking.passengers,
+        pickup_time: sessionState.booking.pickupTime,
+        booking_step: sessionState.lastQuestionAsked,
+        fare: sessionState.pendingFare,
+        eta: sessionState.pendingEta,
         status: sessionState.bookingConfirmed ? "confirmed" : "active",
         booking_confirmed: sessionState.bookingConfirmed,
         transcripts: sessionState.conversationHistory,
@@ -1863,6 +1868,8 @@ async function updateLiveCall(sessionState: SessionState) {
     
     if (error) {
       console.error(`[${sessionState.callId}] Failed to update live_calls:`, error);
+    } else {
+      console.log(`[${sessionState.callId}] 💾 DB updated: pickup="${sessionState.booking.pickup}", dest="${sessionState.booking.destination}", pax=${sessionState.booking.passengers}, time="${sessionState.booking.pickupTime}"`);
     }
   } catch (e) {
     console.error(`[${sessionState.callId}] Error updating live_calls:`, e);
@@ -3214,21 +3221,37 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             // === USER TRUTH CAPTURE (from simple) ===
             // Capture raw corrected STT output BEFORE any AI processing
             // This provides "ground truth" that overrides AI-extracted values
+            // CRITICAL: Also update booking state AND persist immediately to prevent data loss
+            let userTruthUpdated = false;
             if (effectiveQuestionType === "pickup") {
               sessionState.userTruth.pickup = userText;
+              sessionState.booking.pickup = userText; // Sync to booking
               console.log(`[${callId}] 📌 User Truth: pickup = "${userText}"`);
+              userTruthUpdated = true;
             } else if (effectiveQuestionType === "destination") {
               sessionState.userTruth.destination = userText;
+              sessionState.booking.destination = userText; // Sync to booking
               console.log(`[${callId}] 📌 User Truth: destination = "${userText}"`);
+              userTruthUpdated = true;
             } else if (effectiveQuestionType === "passengers") {
               const pax = parsePassengersFromText(userText);
               if (pax > 0) {
                 sessionState.userTruth.passengers = pax;
+                sessionState.booking.passengers = pax; // Sync to booking
                 console.log(`[${callId}] 📌 User Truth: passengers = ${pax}`);
+                userTruthUpdated = true;
               }
             } else if (effectiveQuestionType === "time") {
               sessionState.userTruth.time = userText;
+              sessionState.booking.pickupTime = userText; // Sync to booking
               console.log(`[${callId}] 📌 User Truth: time = "${userText}"`);
+              userTruthUpdated = true;
+            }
+            
+            // IMMEDIATELY persist User Truth to database to prevent data loss
+            if (userTruthUpdated) {
+              await updateLiveCall(sessionState);
+              console.log(`[${callId}] 💾 User Truth persisted immediately`);
             }
             
             // === SUMMARY PHASE CONFIRMATION DETECTION (from simple) ===

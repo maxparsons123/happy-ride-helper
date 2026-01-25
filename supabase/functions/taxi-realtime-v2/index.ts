@@ -624,7 +624,7 @@ serve(async (req) => {
         log(`🗣️ Ada: ${msg.transcript}`);
         if (transcripts.length >= MAX_TRANSCRIPTS) transcripts.shift(); // Remove oldest
         transcripts.push({ role: "assistant", text: msg.transcript, timestamp: new Date().toISOString() });
-        supabase.from("live_calls").update({ transcripts, pickup: booking.pickup, destination: booking.destination, passengers: booking.passengers }).eq("call_id", callId);
+        supabase.from("live_calls").update({ transcripts, pickup: booking.pickup, destination: booking.destination, passengers: booking.passengers, pickup_time: booking.time, booking_step: currentStep }).eq("call_id", callId);
       }
       
       if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
@@ -709,9 +709,11 @@ serve(async (req) => {
               pickup: booking.pickup, 
               destination: booking.destination, 
               passengers: booking.passengers,
-              booking_step: currentStep
+              pickup_time: booking.time,
+              booking_step: currentStep,
+              updated_at: new Date().toISOString()
             }).eq("call_id", callId);
-            log(`💾 Correction persisted to DB: pickup="${booking.pickup}", destination="${booking.destination}"`);
+            log(`💾 Correction persisted to DB: pickup="${booking.pickup}", destination="${booking.destination}", time="${booking.time}"`);
             
             // Always go back to summary after an update if we have all fields
             if (booking.pickup && booking.destination && booking.passengers && booking.time) {
@@ -859,14 +861,17 @@ Say: "So that's from [pickup] to [destination], for ${passengerWord} passenger${
           }
         }
         
-        // Update database
-        supabase.from("live_calls").update({ 
+        // Update database with all booking fields
+        await supabase.from("live_calls").update({ 
           transcripts, 
           pickup: booking.pickup, 
           destination: booking.destination, 
           passengers: booking.passengers,
-          booking_step: currentStep
+          pickup_time: booking.time,
+          booking_step: currentStep,
+          updated_at: new Date().toISOString()
         }).eq("call_id", callId);
+        log(`💾 DB updated: pickup="${booking.pickup}", dest="${booking.destination}", pax=${booking.passengers}, time="${booking.time}", step=${currentStep}`);
       }
 
       // Handle tool calls
