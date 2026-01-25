@@ -156,6 +156,17 @@ serve(async (req) => {
       try {
         const msg = JSON.parse(event.data);
 
+        // Session created - wait for session.updated
+        if (msg.type === "session.created") {
+          log("📋 Session created, sending config");
+        }
+
+        // Session configured - trigger greeting
+        if (msg.type === "session.updated") {
+          log("🎤 Session configured, triggering greeting");
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        }
+
         // Handle speech events
         if (msg.type === "input_audio_buffer.speech_started") {
           speechActive = true;
