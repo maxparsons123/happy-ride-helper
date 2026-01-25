@@ -617,42 +617,64 @@ serve(async (req) => {
           log(`📝 Special request: ${correctedTranscript}`);
         }
         
-        // Handle corrections
-        if (detection.isCorrection && detection.isAddress) {
-          log(`🔄 Correction with address detected: ${correctedTranscript}`);
+        // Handle corrections - more permissive detection
+        // Allow updates at any step, not just when explicit correction words are used
+        const isPickupIndicator = /\b(pickup|pick up|from|picked up from|collect from|picking up)\b/i.test(correctedTranscript);
+        const isDestinationIndicator = /\b(destination|to|going to|drop off|dropoff|drop me|take me|heading to)\b/i.test(correctedTranscript);
+        
+        // If user explicitly mentions "pickup" or "destination" with an address, treat as update
+        const isExplicitUpdate = detection.isAddress && (isPickupIndicator || isDestinationIndicator);
+        const isExplicitCorrection = detection.isCorrection && detection.isAddress;
+        
+        if (isExplicitCorrection || (isExplicitUpdate && (booking.pickup || booking.destination))) {
+          log(`🔄 Update detected: correction=${detection.isCorrection}, explicit=${isExplicitUpdate}`);
           
-          const isPickupCorrection = /\b(pickup|pick up|from|picked up from)\b/i.test(correctedTranscript);
-          const isDestinationCorrection = /\b(destination|to|going to|drop off|dropoff)\b/i.test(correctedTranscript);
-          
-          // Extract the address (remove correction keywords)
-          const addressPart = correctedTranscript
-            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be|to amend|from|to)\b/gi, "")
+          // Extract the address (remove keywords but keep the core address)
+          let addressPart = correctedTranscript
+            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|pickup is|pickup should be|destination is|destination should be|to amend|pick up from|picked up from|collect from|drop off at|drop me at|take me to|heading to|going to|from|to)\b/gi, "")
             .trim();
           
-          if (isDestinationCorrection && !isPickupCorrection) {
+          // Clean up any leading/trailing punctuation
+          addressPart = addressPart.replace(/^[\s,]+|[\s,]+$/g, '').trim();
+          
+          if (isDestinationIndicator && !isPickupIndicator) {
             userTruth.destination = addressPart;
             booking.destination = addressPart;
-            log(`✅ Destination corrected to: ${addressPart}`);
-          } else {
+            log(`✅ Destination updated to: ${addressPart}`);
+          } else if (isPickupIndicator) {
             userTruth.pickup = addressPart;
             booking.pickup = addressPart;
-            log(`✅ Pickup corrected to: ${addressPart}`);
+            log(`✅ Pickup updated to: ${addressPart}`);
           }
           
-          currentStep = "summary";
-          
-          // Build summary with passenger word
-          const passengerWord = passengersToWord(booking.passengers || 1);
-          
-          if (openaiWs?.readyState === WebSocket.OPEN) {
-            openaiWs.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, ${booking.time}. Is that correct?"` }] }
-            }));
+          // If we have all required fields, go to summary; otherwise continue flow
+          if (booking.pickup && booking.destination && booking.passengers && booking.time) {
+            currentStep = "summary";
+            const passengerWord = passengersToWord(booking.passengers);
+            
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, ${booking.time}. Is that correct?"` }] }
+              }));
+            }
+          } else {
+            // Continue collecting missing info
+            const nextStep = !booking.pickup ? "pickup" : !booking.destination ? "destination" : !booking.passengers ? "passengers" : "time";
+            const nextQuestion = nextStep === "pickup" ? "Where would you like to be picked up from?" :
+                                 nextStep === "destination" ? "And where would you like to go?" :
+                                 nextStep === "passengers" ? "How many passengers?" : "When would you like to be picked up?";
+            
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[UPDATED] Got it. Now ask: "${nextQuestion}"` }] }
+              }));
+            }
           }
         }
-        else if (detection.isCorrection) {
-          log(`🔄 Correction detected (no address)`);
+        else if (detection.isCorrection && !detection.isAddress) {
+          log(`🔄 Correction intent (no address yet)`);
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
