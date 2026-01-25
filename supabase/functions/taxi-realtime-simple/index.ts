@@ -594,6 +594,60 @@ serve(async (req) => {
           log(`👤 User (corrected): ${corrected}`);
         }
 
+        // === CONFIRMATION DETECTION ===
+        if (currentStep === "summary") {
+          const lower = corrected.toLowerCase();
+          
+          // Lenient affirmative detection (handles typos like "yesy", "okkk")
+          const looksLikeYes = /^(y+e+s+|y+e+a+h*|y+u+p+|y+e+p+|sure|correct|right|absolutely|definitely|perfect)/i.test(lower.trim());
+          const looksLikeOk = /^(o+k+a*y*|go\s*ahead|book\s*(it|the|taxi)?|please|confirm)/i.test(lower.trim());
+          const isAffirmative = looksLikeYes || looksLikeOk || lower.includes("that's correct") || lower.includes("sounds good");
+          
+          if (isAffirmative) {
+            log(`✅ Confirmation detected: "${corrected}"`);
+            
+            // Inject system message forcing Ada to call book_taxi
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{
+                  type: "input_text",
+                  text: `[USER CONFIRMED BOOKING] The user has confirmed the booking. You MUST now call the book_taxi tool with action="request_quote" to get the fare. Use these EXACT values:
+- pickup: "${lastUserTruth.pickup || bookingState.pickup}"
+- destination: "${lastUserTruth.destination || bookingState.destination}"
+- passengers: ${lastUserTruth.passengers || bookingState.passengers}
+- pickup_time: "${lastUserTruth.time || bookingState.pickup_time}"
+
+Say "One moment please while I get your fare" then call the tool.`
+                }]
+              }
+            }));
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            return; // Don't process further
+          }
+          
+          // Check for negation
+          const looksLikeNo = /^(no+|nope|wrong|incorrect|change|actually|wait)/i.test(lower.trim());
+          if (looksLikeNo) {
+            log(`❌ Negation detected: "${corrected}"`);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{
+                  type: "input_text",
+                  text: "[USER WANTS CHANGES] The user said no to the summary. Ask them: 'What would you like to change?' Do NOT repeat the full summary."
+                }]
+              }
+            }));
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            return;
+          }
+        }
+
         // Capture user truth based on current step
         if (currentStep === "pickup") {
           lastUserTruth.pickup = corrected;
