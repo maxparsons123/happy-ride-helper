@@ -319,7 +319,35 @@ serve(async (req) => {
     if (currentIndex < steps.length - 1) {
       state.step = steps[currentIndex + 1];
       state.currentStepValidated = false;
+      
+      // When advancing to summary, inject the verified booking state
+      if (state.step === "summary") {
+        injectBookingSummary(state);
+      }
     }
+  }
+  
+  function injectBookingSummary(state: CallState) {
+    // Force Ada to use EXACT verified data, not her memory
+    const summaryInstruction = `[VERIFIED BOOKING DATA - USE EXACTLY AS WRITTEN]
+Pickup: ${state.pickup}
+Destination: ${state.destination}
+Passengers: ${state.passengers}
+Time: ${state.time}
+
+Now summarize this booking using ONLY the data above. Do not change or paraphrase the addresses. Ask for confirmation.`;
+
+    log(`📋 Injecting verified summary: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.time}`);
+    
+    openaiWs?.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: { 
+        type: "message", 
+        role: "system", 
+        content: [{ type: "input_text", text: summaryInstruction }] 
+      }
+    }));
+    openaiWs?.send(JSON.stringify({ type: "response.create" }));
   }
 
   function reAskCurrentQuestion(state: CallState) {
