@@ -1,6 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// VERSION: Spoken at start of call for identification
+const VERSION = "V2 1.3";
+
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
 const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL") || "";
@@ -224,7 +227,7 @@ Respond in the same language the caller speaks.
 Ask ONLY ONE question per response. NEVER combine questions.
 
 # GREETING (Say this FIRST when call starts)
-"Hello, and welcome to the Taxibot demo. I'm ADA, your taxi booking assistant. Where would you like to be picked up?"
+"Version ${VERSION}. Hello, and welcome to the Taxibot demo. I'm ADA, your taxi booking assistant. Where would you like to be picked up?"
 
 # BOOKING FLOW (Ask ONE at a time, in order - DO NOT SKIP STEPS)
 1. Get pickup location → then ask for destination
