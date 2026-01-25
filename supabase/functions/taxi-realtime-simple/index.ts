@@ -185,32 +185,143 @@ function getContextHintForStep(step: BookingStep): string | null {
   }
 }
 
+// === NEAREST PLACE DETECTION ===
+function extractNearestPlace(destination: string): string {
+  const lower = destination.toLowerCase();
+  
+  // Common "nearest X" patterns
+  const nearestPatterns = [
+    /nearest\s+(.+)/i,
+    /the\s+closest\s+(.+)/i,
+    /closest\s+(.+)/i,
+    /nearby\s+(.+)/i
+  ];
+  
+  for (const pattern of nearestPatterns) {
+    const match = lower.match(pattern);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  
+  return "";
+}
+
 // === WEBHOOK ===
+interface BookingPayload {
+  pickup: string;
+  destination: string;
+  passengers: number;
+  time?: string;
+  luggage?: string;
+  special_requests?: string;
+  vehicle_type?: string;
+}
+
+interface FullBookingState {
+  pickup: string;
+  destination: string;
+  passengers: number;
+  time: string;
+  fare: string;
+  eta: string;
+  luggage: string;
+  special_requests: string;
+  vehicle_type: string;
+}
+
 async function sendDispatchWebhook(
   callId: string,
+  callerPhone: string,
   action: string,
-  booking: { pickup: string; destination: string; passengers: number; time?: string },
+  booking: FullBookingState,
+  callbackUrl: string,
   log: (msg: string) => void
-): Promise<{ success: boolean; fare?: string; eta?: string; error?: string }> {
+): Promise<{ success: boolean; fare?: string; eta?: string; booking_ref?: string; error?: string }> {
+  
+  // Detect if destination is a "nearest X" request
+  const nearestPlace = extractNearestPlace(booking.destination);
+  
+  // Build the full BookTaxiResponse payload
+  const payload = {
+    // Core booking fields
+    pickup_location: booking.pickup,
+    dropoff_location: booking.destination,
+    pickup_time: booking.time || "now",
+    number_of_passengers: booking.passengers,
+    luggage: booking.luggage || "",
+    special_requests: booking.special_requests || "",
+    nearest_place: nearestPlace,
+    
+    // User details
+    usertelephone: callerPhone,
+    username: "", // Populated by dispatch if known
+    
+    // GPS (0 if not available)
+    userlat: 0,
+    userlon: 0,
+    
+    // Reference fields
+    reference_number: "",
+    jobid: "",
+    
+    // Raw JSON for debugging
+    Rawjson: JSON.stringify({
+      action,
+      call_id: callId,
+      pickup: booking.pickup,
+      destination: booking.destination,
+      passengers: booking.passengers,
+      time: booking.time
+    }),
+    
+    // Booking message
+    bookingmessage: action === "request_quote" 
+      ? "Quote requested" 
+      : action === "confirmed" 
+        ? "Booking confirmed" 
+        : "",
+    
+    // Ada-specific flags
+    isFromAda: true,
+    isQuoteOnly: action === "request_quote",
+    ada_call_id: callId,
+    vehicle_type: booking.vehicle_type || "",
+    vehicle_request: booking.vehicle_type || "",
+    
+    // Original addresses as spoken
+    callers_pickup: booking.pickup,
+    callers_dropoff: booking.destination,
+    
+    // Verification flags (false until verified)
+    pickup_verified: false,
+    dropoff_verified: false,
+    
+    // Fare/ETA (populated on response)
+    ada_estimated_fare: booking.fare || "",
+    ada_estimated_eta: booking.eta || "",
+    
+    // Webhook control fields
+    callback_url: callbackUrl,
+    call_id: callId,
+    action: action
+  };
+  
   if (!DISPATCH_WEBHOOK_URL) {
     log("⚠️ No DISPATCH_WEBHOOK_URL configured, using mock response");
+    log(`📦 Would send payload: ${JSON.stringify(payload, null, 2)}`);
     // Mock response for demo
-    return { success: true, fare: "£12.50", eta: "5 minutes" };
+    return { success: true, fare: "£12.50", eta: "5 minutes", booking_ref: "DEMO-" + Date.now() };
   }
 
   try {
     log(`📤 Sending webhook: ${action}`);
+    log(`📦 Payload: ${JSON.stringify(payload)}`);
+    
     const response = await fetch(DISPATCH_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action,
-        call_id: callId,
-        pickup: booking.pickup,
-        destination: booking.destination,
-        passengers: booking.passengers,
-        time: booking.time || "now"
-      })
+      body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
@@ -219,7 +330,12 @@ async function sendDispatchWebhook(
 
     const data = await response.json();
     log(`📥 Webhook response: ${JSON.stringify(data)}`);
-    return { success: true, fare: data.fare, eta: data.eta };
+    return { 
+      success: data.success !== false, 
+      fare: data.fare, 
+      eta: data.eta_minutes ? `${data.eta_minutes} minutes` : data.eta,
+      booking_ref: data.booking_ref
+    };
   } catch (error) {
     log(`❌ Webhook error: ${error}`);
     return { success: false, error: String(error) };
@@ -241,14 +357,17 @@ serve(async (req) => {
   let callId = "unknown";
   let callerPhone = "unknown";
   
-  // Booking state
-  let bookingState = {
+  // Booking state - full state
+  let bookingState: FullBookingState = {
     pickup: "",
     destination: "",
     passengers: 1,
     time: "now",
     fare: "",
-    eta: ""
+    eta: "",
+    luggage: "",
+    special_requests: "",
+    vehicle_type: ""
   };
   
   // Step tracking
@@ -274,7 +393,7 @@ serve(async (req) => {
       
       if (action === "request_quote") {
         currentStep = "awaiting_fare";
-        const result = await sendDispatchWebhook(callId, "request_quote", bookingState, log);
+        const result = await sendDispatchWebhook(callId, callerPhone, "request_quote", bookingState, "", log);
         
         if (result.success && result.fare) {
           bookingState.fare = result.fare;
@@ -314,7 +433,7 @@ serve(async (req) => {
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
         
       } else if (action === "confirmed") {
-        await sendDispatchWebhook(callId, "confirmed", bookingState, log);
+        const confirmResult = await sendDispatchWebhook(callId, callerPhone, "confirmed", bookingState, "", log);
         
         openaiWs?.send(JSON.stringify({
           type: "conversation.item.create",
