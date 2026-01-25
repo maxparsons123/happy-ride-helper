@@ -469,6 +469,15 @@ serve(async (req) => {
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
+  const safeJsonParse = (raw: string) => {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      log(`⚠️ JSON parse failed: ${(e as Error).message}. payload=${raw.slice(0, 200)}`);
+      return null;
+    }
+  };
+
   // Inject verified booking state before summary
   const injectVerifiedState = () => {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
@@ -507,7 +516,8 @@ CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucin
     };
 
     openaiWs.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      const msg = safeJsonParse(event.data);
+      if (!msg) return;
 
       // Session created - configure and trigger greeting
       if (msg.type === "session.created") {
@@ -587,7 +597,11 @@ ${SYSTEM_PROMPT}
           bytes[i] = binaryStr.charCodeAt(i);
         }
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(bytes.buffer);
+          try {
+            socket.send(bytes.buffer);
+          } catch (e) {
+            log(`❌ Failed to send audio to bridge: ${(e as Error).message}`);
+          }
         }
       }
 
@@ -697,12 +711,15 @@ ${SYSTEM_PROMPT}
       }
     };
 
-    openaiWs.onerror = (e) => log(`🔴 OpenAI WS Error: ${e}`);
-    openaiWs.onclose = () => log("⚪ OpenAI disconnected");
+     openaiWs.onerror = (e) => log(`🔴 OpenAI WS Error: ${JSON.stringify(e)}`);
+     openaiWs.onclose = (ev) =>
+       log(`⚪ OpenAI disconnected code=${ev.code} clean=${ev.wasClean} reason=${ev.reason || ""}`);
   };
 
   // Bridge connection
   socket.onopen = () => log("🚀 Bridge connected");
+
+  socket.onerror = (e) => log(`🔴 Bridge WS Error: ${JSON.stringify(e)}`);
 
   socket.onmessage = (event) => {
     // Binary audio from bridge (8kHz slin)
@@ -714,17 +731,26 @@ ${SYSTEM_PROMPT}
         
         // Upsample to 24kHz and send to OpenAI
         const pcm24k = pcm8kTo24k(pcm8k);
-        openaiWs.send(JSON.stringify({
-          type: "input_audio_buffer.append",
-          audio: arrayBufferToBase64(pcm24k)
-        }));
+        try {
+          openaiWs.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: arrayBufferToBase64(pcm24k)
+          }));
+        } catch (e) {
+          log(`❌ Failed to forward audio to OpenAI: ${(e as Error).message}`);
+        }
+      } else {
+        // Avoid crashing if we get audio before OpenAI is ready
+        log(`⚠️ Dropping inbound audio: OpenAI not open (state=${openaiWs?.readyState ?? "null"})`);
       }
       return;
     }
 
     // JSON control messages
     try {
-      const msg = JSON.parse(event.data);
+      const raw = typeof event.data === "string" ? event.data : "";
+      const msg = raw ? safeJsonParse(raw) : null;
+      if (!msg) return;
       
       if (msg.type === "init") {
         callId = msg.call_id || "unknown";
@@ -748,6 +774,7 @@ ${SYSTEM_PROMPT}
       }
       
       if (msg.type === "ping") {
+        log("🏓 Ping received → sending pong");
         socket.send(JSON.stringify({ type: "pong" }));
       }
     } catch {
@@ -755,8 +782,8 @@ ${SYSTEM_PROMPT}
     }
   };
 
-  socket.onclose = () => {
-    log("🔌 Bridge disconnected");
+  socket.onclose = (ev) => {
+    log(`🔌 Bridge disconnected code=${ev.code} clean=${ev.wasClean} reason=${ev.reason || ""}`);
     openaiWs?.close();
   };
 
