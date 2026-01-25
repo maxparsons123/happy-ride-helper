@@ -8,6 +8,16 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === BOOKING STATE ===
+interface BookingState {
+  pickup: string | null;
+  destination: string | null;
+  passengers: string | null;
+  time: string | null;
+  currentStep: "pickup" | "destination" | "passengers" | "time" | "summary" | "done";
+  lastUserTranscript: string | null;
+}
+
 // === SYSTEM PROMPT ===
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -91,6 +101,86 @@ function arrayBufferToBase64(buffer: Uint8Array): string {
   return btoa(binary);
 }
 
+// === STATE HELPERS ===
+
+function detectStepFromAdaTranscript(transcript: string): BookingState["currentStep"] | null {
+  const lower = transcript.toLowerCase();
+  
+  if (/where would you like to be picked up|pickup (location|address)|pick you up/i.test(lower)) {
+    return "pickup";
+  }
+  if (/where (would you like to go|are you going|is your destination)|destination/i.test(lower)) {
+    return "destination";
+  }
+  if (/how many (people|passengers)|travelling/i.test(lower)) {
+    return "passengers";
+  }
+  if (/when would you like|pickup time|what time|now or later/i.test(lower)) {
+    return "time";
+  }
+  if (/let me confirm|to confirm|summary|picking you up from/i.test(lower)) {
+    return "summary";
+  }
+  if (/taxi is booked|safe journey|whatsapp/i.test(lower)) {
+    return "done";
+  }
+  return null;
+}
+
+function extractPassengerCount(text: string): string | null {
+  const lower = text.toLowerCase().trim();
+  
+  // Number words
+  const wordMap: Record<string, string> = {
+    "one": "1", "two": "2", "to": "2", "too": "2",
+    "three": "3", "tree": "3", "free": "3",
+    "four": "4", "for": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8",
+    "nine": "9", "ten": "10"
+  };
+  
+  for (const [word, num] of Object.entries(wordMap)) {
+    if (lower === word || lower.startsWith(word + " ")) {
+      return num;
+    }
+  }
+  
+  // Digits
+  const digitMatch = lower.match(/^(\d+)/);
+  if (digitMatch) {
+    return digitMatch[1];
+  }
+  
+  // "just me" / "myself"
+  if (/just me|myself|alone|only me/.test(lower)) {
+    return "1";
+  }
+  
+  return null;
+}
+
+function extractTime(text: string): string | null {
+  const lower = text.toLowerCase().trim();
+  
+  if (/now|asap|as soon as|right now|straight away|immediately/.test(lower)) {
+    return "now";
+  }
+  
+  // Match times like "3pm", "3:30", "15:00"
+  const timeMatch = lower.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+  if (timeMatch) {
+    return timeMatch[1];
+  }
+  
+  // "in X minutes"
+  const inMinutes = lower.match(/in (\d+) minutes?/);
+  if (inMinutes) {
+    return `in ${inMinutes[1]} minutes`;
+  }
+  
+  return null;
+}
+
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -104,8 +194,42 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
+  
+  // Booking state tracking
+  const bookingState: BookingState = {
+    pickup: null,
+    destination: null,
+    passengers: null,
+    time: null,
+    currentStep: "pickup",
+    lastUserTranscript: null
+  };
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
+
+  // Inject verified booking state before summary
+  const injectVerifiedState = () => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    
+    const stateMsg = `[VERIFIED BOOKING DATA - USE THESE EXACT VALUES]
+Pickup: ${bookingState.pickup || "NOT PROVIDED"}
+Destination: ${bookingState.destination || "NOT PROVIDED"}
+Passengers: ${bookingState.passengers || "NOT PROVIDED"}
+Time: ${bookingState.time || "now"}
+
+CRITICAL: When summarizing, use ONLY the values above. Do not invent or hallucinate any addresses.`;
+
+    log(`📋 Injecting verified state: P=${bookingState.pickup}, D=${bookingState.destination}, Pax=${bookingState.passengers}, T=${bookingState.time}`);
+    
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "system",
+        content: [{ type: "input_text", text: stateMsg }]
+      }
+    }));
+  };
 
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
@@ -164,12 +288,69 @@ serve(async (req) => {
         }
       }
 
-      // Log transcripts
+      // Track Ada's questions to know current step
       if (msg.type === "response.audio_transcript.done") {
-        log(`🗣️ Ada: ${msg.transcript}`);
+        const transcript = msg.transcript || "";
+        log(`🗣️ Ada: ${transcript}`);
+        
+        const detectedStep = detectStepFromAdaTranscript(transcript);
+        if (detectedStep) {
+          const previousStep = bookingState.currentStep;
+          bookingState.currentStep = detectedStep;
+          log(`📍 Step detected: ${previousStep} → ${detectedStep}`);
+          
+          // If moving to summary, inject verified state
+          if (detectedStep === "summary" && previousStep !== "summary") {
+            injectVerifiedState();
+          }
+        }
       }
+
+      // Capture user responses and map to current step
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        log(`👤 User: ${msg.transcript}`);
+        const transcript = msg.transcript || "";
+        log(`👤 User: ${transcript}`);
+        bookingState.lastUserTranscript = transcript;
+        
+        // Map response to current step
+        switch (bookingState.currentStep) {
+          case "pickup":
+            if (transcript.trim().length > 2) {
+              bookingState.pickup = transcript.trim();
+              log(`✅ Saved pickup: ${bookingState.pickup}`);
+            }
+            break;
+            
+          case "destination":
+            if (transcript.trim().length > 2) {
+              bookingState.destination = transcript.trim();
+              log(`✅ Saved destination: ${bookingState.destination}`);
+            }
+            break;
+            
+          case "passengers":
+            const pax = extractPassengerCount(transcript);
+            if (pax) {
+              bookingState.passengers = pax;
+              log(`✅ Saved passengers: ${bookingState.passengers}`);
+            }
+            break;
+            
+          case "time":
+            const time = extractTime(transcript);
+            if (time) {
+              bookingState.time = time;
+              log(`✅ Saved time: ${bookingState.time}`);
+            } else if (transcript.trim().length > 0) {
+              // Default to "now" if they say anything
+              bookingState.time = "now";
+              log(`✅ Saved time (default): now`);
+            }
+            break;
+        }
+        
+        // Log current state
+        log(`📊 State: P=${bookingState.pickup || "?"} | D=${bookingState.destination || "?"} | Pax=${bookingState.passengers || "?"} | T=${bookingState.time || "?"}`);
       }
 
       // Log errors
@@ -217,6 +398,10 @@ serve(async (req) => {
       if (msg.type === "hangup") {
         log("👋 Hangup received");
         openaiWs?.close();
+      }
+      
+      if (msg.type === "ping") {
+        socket.send(JSON.stringify({ type: "pong" }));
       }
     } catch {
       // Ignore non-JSON
