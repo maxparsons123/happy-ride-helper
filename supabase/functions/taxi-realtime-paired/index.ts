@@ -2478,15 +2478,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     // Get language-specific greeting or fall back to English for auto-detect
     const langData = GREETINGS[sessionState.language] || GREETINGS["en"];
-    // Include version number at the start for identification
-    const versionAnnouncement = `Version ${VERSION}.`;
-    const greetingText = `${versionAnnouncement} ${langData.greeting} ${langData.pickupQuestion}`;
+    // Include version number at the start for identification - MUST be spoken
+    const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
     
     // For auto-detect mode, let the AI decide based on first user response
-    // CRITICAL: Tell Ada to NOT repeat the pickup question - she should say it ONCE only
+    // CRITICAL: Version MUST be spoken first, then the greeting
     const greetingInstruction = sessionState.language === "auto"
-      ? `Say EXACTLY this (do NOT skip or rephrase any part): "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again. If they respond in another language, switch to match them for your NEXT response.`
-      : `Say EXACTLY this (do NOT skip or add anything extra): "${greetingText}". Then WAIT for their response.`;
+      ? `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again.`
+      : `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". Then WAIT for their response.`;
+    
+    console.log(`[${callId}] 📢 Version: ${VERSION}, Greeting: ${greetingText}`);
     
     // Simple approach: just request a response with specific instructions
     openaiWs!.send(JSON.stringify({
