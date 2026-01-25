@@ -72,9 +72,10 @@ public partial class MainForm : Form
             {
                 // === LOCAL OPENAI SIP MODE ===
                 var apiKey = txtApiKey.Text.Trim();
-                if (string.IsNullOrEmpty(apiKey) || !apiKey.StartsWith("sk-"))
+                // Accept both sk- and sk-proj- format keys
+                if (string.IsNullOrEmpty(apiKey) || (!apiKey.StartsWith("sk-") && !apiKey.StartsWith("sk-proj-")))
                 {
-                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk-)", 
+                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk- or sk-proj-)", 
                         "API Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -151,9 +152,10 @@ public partial class MainForm : Form
             {
                 // === LOCAL OPENAI MODE ===
                 var apiKey = txtApiKey.Text.Trim();
-                if (string.IsNullOrEmpty(apiKey) || !apiKey.StartsWith("sk-"))
+                // Accept both sk- and sk-proj- format keys
+                if (string.IsNullOrEmpty(apiKey) || (!apiKey.StartsWith("sk-") && !apiKey.StartsWith("sk-proj-")))
                 {
-                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk-)", 
+                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk- or sk-proj-)", 
                         "API Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
