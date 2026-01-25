@@ -651,22 +651,23 @@ function computeNextStep(booking: SessionState["booking"], preSummaryAsked: bool
 }
 
 // Get instruction for next step based on what's needed
+// RULE: NO filler words (Got it, Great, OK). Just ask the next question directly.
 function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"]): string {
   switch (nextStep) {
     case "pickup":
-      return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
+      return "Ask: 'Where would you like to be picked up?' Wait for response.";
     case "destination":
-      return `Great, pickup is ${booking.pickup}. Now ask: 'And what is your destination?' Then wait for their response.`;
+      return "Ask: 'What is your destination?' Wait for response.";
     case "passengers":
-      return `Good, destination is ${booking.destination}. Now ask: 'How many passengers will be traveling?' Then wait for their response.`;
+      return "Ask: 'How many passengers?' Wait for response.";
     case "time":
-      return `Okay, ${booking.passengers} passenger(s). Now ask: 'When do you need the taxi - now or for a specific time?' Then wait for their response.`;
+      return "Ask: 'When do you need the taxi - now or a specific time?' Wait for response.";
     case "pre_summary":
-      return `All booking details collected! Before summarizing, ask: "Before I confirm the details, is there anything you'd like to change?" Wait for their response. If they say no or confirm everything is fine, then proceed to give the summary and call book_taxi with action='request_quote'.`;
+      return `All details collected. Ask: "Is there anything you'd like to change?" If no, call book_taxi with action='request_quote'.`;
     case "confirmation":
-      return `User confirmed no changes needed. Now give a brief summary and call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
+      return `Summarize briefly and call book_taxi with action='request_quote'. Booking: ${booking.pickup} to ${booking.destination}, ${booking.passengers} passengers, ${booking.pickupTime || "now"}`;
     default:
-      return "Continue the conversation naturally.";
+      return "Continue naturally.";
   }
 }
 
