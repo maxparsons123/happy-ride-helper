@@ -655,13 +655,17 @@ serve(async (req) => {
         callerPhone = msg.caller_phone || msg.caller || "unknown";
         
         if (callerPhone === "unknown" && callId && callId !== "unknown") {
-          // Asterisk embeds phone digits in the UUID suffix
+          // Asterisk embeds phone digits in the UUID suffix (zero-padded to 12 digits)
+          // Format: 00000000-0000-0000-0000-XXXXXXXXXXXX
+          // UK: 00447424993772, Dutch: 00316123456789, etc.
           const uuidMatch = callId.match(/^00000000-0000-0000-0000-(\d{12})$/);
           if (uuidMatch) {
             const phoneDigits = uuidMatch[1];
-            // Remove leading zeros and format as phone number
+            // Strip leading zeros - different countries have different lengths
+            // UK: 11-12 digits, NL: 10-11 digits, etc.
             const trimmed = phoneDigits.replace(/^0+/, "");
-            if (trimmed.length >= 10) {
+            // Valid phone numbers are typically 9-12 digits (after country code prefix)
+            if (trimmed.length >= 9) {
               callerPhone = "+" + trimmed;
               log(`📱 Phone extracted from UUID: ${callerPhone}`);
             }
