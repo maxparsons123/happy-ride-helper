@@ -39,6 +39,36 @@ function applySTTCorrections(text: string): string {
   return corrected;
 }
 
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenOverlapScore(a: string, b: string): number {
+  const na = normalizeForMatch(a);
+  const nb = normalizeForMatch(b);
+  if (!na || !nb) return 0;
+  const ta = new Set(na.split(" ").filter(Boolean));
+  const tb = new Set(nb.split(" ").filter(Boolean));
+  let overlap = 0;
+  for (const t of ta) if (tb.has(t)) overlap++;
+  const denom = Math.max(1, Math.min(ta.size, tb.size));
+  return overlap / denom;
+}
+
+function isLikelyEcho(echo: string, reference: string): boolean {
+  const ne = normalizeForMatch(echo);
+  const nr = normalizeForMatch(reference);
+  if (!ne || !nr) return false;
+  // Strong signals: contains the whole reference or vice versa
+  if (ne.includes(nr) || nr.includes(ne)) return true;
+  // Otherwise require strong token overlap
+  return tokenOverlapScore(ne, nr) >= 0.75;
+}
+
 // === TOOLS DEFINITION ===
 const TOOLS = [
   {
@@ -432,6 +462,13 @@ serve(async (req) => {
     special_requests: "",
     vehicle_type: ""
   };
+
+  // Last known user-provided values (used to validate any "Ada echo" extraction)
+  let lastUserTruth: { pickup: string; destination: string; passengers: number | null } = {
+    pickup: "",
+    destination: "",
+    passengers: null,
+  };
   
   // Step tracking
   let currentStep: BookingStep = "pickup";
@@ -584,7 +621,7 @@ serve(async (req) => {
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
-      // Track Ada's speech for step detection AND extract echoed values
+      // Track Ada's speech for step detection AND (optionally) extract echoed values
       if (msg.type === "response.audio_transcript.done") {
         const adaText = msg.transcript || "";
         log(`🗣️ Ada: ${adaText}`);
@@ -597,47 +634,67 @@ serve(async (req) => {
         contextInjected = false;
         
         // === EXTRACT ECHOED VALUES FROM ADA'S TRANSCRIPT ===
-        // Ada often echoes back what user said - use this as verification
-        const lower = adaText.toLowerCase();
-        
-        // Pattern: "picking you up from X" or "pickup is X" or "from X"
-        const pickupMatch = adaText.match(/(?:picking you up from|pickup (?:is|at)|collect you from|from)\s+([^,\.]+?)(?:\s*,|\s+and\s+|\s+to\s+|\s*\.|$)/i);
-        if (pickupMatch && pickupMatch[1]) {
-          const adaPickup = pickupMatch[1].trim();
-          // Only update if we don't have a value OR Ada's version is more complete
-          if (!bookingState.pickup || (adaPickup.length > bookingState.pickup.length && adaPickup.includes(bookingState.pickup.substring(0, 5)))) {
-            log(`🎯 Ada echoed PICKUP: "${adaPickup}" (was: "${bookingState.pickup}")`);
-            // If Ada's version contains our captured value, use Ada's (more complete)
-            if (!bookingState.pickup || adaPickup.toLowerCase().includes(bookingState.pickup.toLowerCase().substring(0, Math.min(5, bookingState.pickup.length)))) {
-              bookingState.pickup = adaPickup;
-              log(`📍 UPDATED PICKUP from Ada: "${adaPickup}"`);
+        // Ada sometimes repeats what the user said. We ONLY accept Ada "echo" updates when
+        // they strongly match something the user already provided (never let Ada invent state).
+        const allowEchoExtraction =
+          currentStep !== "summary" &&
+          currentStep !== "awaiting_fare" &&
+          currentStep !== "awaiting_final" &&
+          currentStep !== "done";
+
+        if (allowEchoExtraction) {
+          // PICKUP echo
+          const pickupMatch = adaText.match(
+            /(?:picking you up from|pickup (?:is|at)|collect you from)\s+([^,\.]+?)(?:\s*,|\s+and\s+|\s+to\s+|\s*\.|$)/i,
+          );
+          if (pickupMatch && pickupMatch[1]) {
+            const adaPickup = pickupMatch[1].trim();
+            const ref = lastUserTruth.pickup || bookingState.pickup;
+            if (ref && isLikelyEcho(adaPickup, ref) && adaPickup.length >= bookingState.pickup.length) {
+              if (adaPickup !== bookingState.pickup) {
+                log(`🎯 Ada echoed PICKUP (accepted): "${adaPickup}" (was: "${bookingState.pickup}")`);
+                bookingState.pickup = adaPickup;
+              }
+            } else {
+              log(
+                `🚫 Ignored Ada pickup echo: "${adaPickup}" (ref="${ref}")`,
+              );
             }
           }
-        }
-        
-        // Pattern: "going to X" or "destination is X" or "dropping off at X" or "to X"
-        const destMatch = adaText.match(/(?:going to|heading to|destination (?:is|at)|dropping (?:you )?off at|taking you to)\s+([^,\.]+?)(?:\s*,|\s+with\s+|\s*\.|$)/i);
-        if (destMatch && destMatch[1]) {
-          const adaDest = destMatch[1].trim();
-          // Only update if we don't have a value OR Ada's version is more complete
-          if (!bookingState.destination || (adaDest.length > bookingState.destination.length && adaDest.includes(bookingState.destination.substring(0, 5)))) {
-            log(`🎯 Ada echoed DESTINATION: "${adaDest}" (was: "${bookingState.destination}")`);
-            if (!bookingState.destination || adaDest.toLowerCase().includes(bookingState.destination.toLowerCase().substring(0, Math.min(5, bookingState.destination.length)))) {
-              bookingState.destination = adaDest;
-              log(`📍 UPDATED DESTINATION from Ada: "${adaDest}"`);
+
+          // DESTINATION echo
+          const destMatch = adaText.match(
+            /(?:going to|heading to|destination (?:is|at)|dropping (?:you )?off at|taking you to)\s+([^,\.]+?)(?:\s*,|\s+with\s+|\s*\.|$)/i,
+          );
+          if (destMatch && destMatch[1]) {
+            const adaDest = destMatch[1].trim();
+            const ref = lastUserTruth.destination || bookingState.destination;
+            if (ref && isLikelyEcho(adaDest, ref) && adaDest.length >= bookingState.destination.length) {
+              if (adaDest !== bookingState.destination) {
+                log(`🎯 Ada echoed DESTINATION (accepted): "${adaDest}" (was: "${bookingState.destination}")`);
+                bookingState.destination = adaDest;
+              }
+            } else {
+              log(
+                `🚫 Ignored Ada destination echo: "${adaDest}" (ref="${ref}")`,
+              );
             }
           }
-        }
-        
-        // Pattern: "X passengers" or "for X passengers" or "X people"
-        const passMatch = adaText.match(/(?:for\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:passenger|people|person)/i);
-        if (passMatch && passMatch[1]) {
-          const numWords: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-          const val = /^\d+$/.test(passMatch[1]) ? parseInt(passMatch[1]) : numWords[passMatch[1].toLowerCase()] || 1;
-          if (val !== bookingState.passengers) {
-            log(`🎯 Ada echoed PASSENGERS: ${val} (was: ${bookingState.passengers})`);
-            bookingState.passengers = val;
-            log(`📍 UPDATED PASSENGERS from Ada: ${val}`);
+
+          // PASSENGERS echo
+          const passMatch = adaText.match(
+            /(?:for\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:passenger|people|person)/i,
+          );
+          if (passMatch && passMatch[1]) {
+            const numWords: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+            const val = /^\d+$/.test(passMatch[1]) ? parseInt(passMatch[1]) : numWords[passMatch[1].toLowerCase()] || 1;
+            const ref = lastUserTruth.passengers ?? bookingState.passengers;
+            if (ref != null && val === ref) {
+              // nothing to do; we only use Ada to validate, not override
+              log(`🎯 Ada echoed PASSENGERS (validated): ${val}`);
+            } else {
+              log(`🚫 Ignored Ada passengers echo: ${val} (ref=${ref})`);
+            }
           }
         }
       }
@@ -691,6 +748,7 @@ serve(async (req) => {
           const cleaned = corrected.replace(/^(from|at|it's|my address is|pickup is)\s*/i, "").trim();
           if (cleaned.length > 2 && !/^(yes|no|yeah|ok|sure|please|thanks)/i.test(cleaned)) {
             bookingState.pickup = cleaned;
+            lastUserTruth.pickup = cleaned;
             log(`📍 CAPTURED PICKUP: "${cleaned}"`);
           }
         } else if (stepAtSpeechStart === "destination" && corrected.length > 2) {
@@ -698,6 +756,7 @@ serve(async (req) => {
           const cleaned = corrected.replace(/^(to|going to|heading to|destination is)\s*/i, "").trim();
           if (cleaned.length > 2 && !/^(yes|no|yeah|ok|sure|please|thanks)/i.test(cleaned)) {
             bookingState.destination = cleaned;
+            lastUserTruth.destination = cleaned;
             log(`📍 CAPTURED DESTINATION: "${cleaned}"`);
           }
         } else if (stepAtSpeechStart === "passengers") {
@@ -707,6 +766,7 @@ serve(async (req) => {
             const numWords: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
             const val = numMatch[1] ? parseInt(numMatch[1]) : numWords[numMatch[0].toLowerCase()] || 1;
             bookingState.passengers = val;
+            lastUserTruth.passengers = val;
             log(`📍 CAPTURED PASSENGERS: ${val}`);
           }
         }
@@ -752,12 +812,14 @@ When summarizing, say EXACTLY these addresses. DO NOT substitute or change them.
           if (/destination|going to|drop|heading/i.test(lowerText)) {
             if (newValue) {
               bookingState.destination = newValue;
+              lastUserTruth.destination = newValue;
               log(`📍 CORRECTION - NEW DESTINATION: "${newValue}"`);
             }
             correctionHint += `User is CORRECTING THE DESTINATION to "${newValue || corrected}". Say: "Updated to ${newValue || corrected}."`;
           } else if (/pickup|pick up|from|picked up/i.test(lowerText)) {
             if (newValue) {
               bookingState.pickup = newValue;
+              lastUserTruth.pickup = newValue;
               log(`📍 CORRECTION - NEW PICKUP: "${newValue}"`);
             }
             correctionHint += `User is CORRECTING THE PICKUP to "${newValue || corrected}". Say: "Updated to ${newValue || corrected}."`;
@@ -768,6 +830,7 @@ When summarizing, say EXACTLY these addresses. DO NOT substitute or change them.
             if (newValue) {
               // Default to destination if unclear
               bookingState.destination = newValue;
+              lastUserTruth.destination = newValue;
               log(`📍 CORRECTION - ASSUMED DESTINATION: "${newValue}"`);
             }
             correctionHint += `Update the booking field they are correcting to "${newValue}". Acknowledge with 'Updated to ${newValue}.'`;
