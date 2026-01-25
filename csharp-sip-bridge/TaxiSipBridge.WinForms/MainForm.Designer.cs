@@ -32,7 +32,7 @@ partial class MainForm
         {
             Text = "📞 SIP Configuration",
             Location = new Point(12, 12),
-            Size = new Size(710, 160),
+            Size = new Size(710, 190),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
@@ -70,15 +70,31 @@ partial class MainForm
             AudioCodecs.CurrentResamplerMode = (ResamplerMode)cmbResampler.SelectedIndex;
         };
 
-        // WebSocket URL
-        var lblWs = new Label { Text = "Ada URL:", Location = new Point(400, 88), Size = new Size(60, 23) };
-        txtWebSocketUrl = new TextBox { Location = new Point(465, 85), Size = new Size(130, 23) };
+        // === Local OpenAI Mode ===
+        chkLocalOpenAI = new CheckBox 
+        { 
+            Text = "🔒 Local OpenAI (Direct)", 
+            Location = new Point(400, 88), 
+            Size = new Size(160, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0, 123, 255)
+        };
+        chkLocalOpenAI.CheckedChanged += this.chkLocalOpenAI_CheckedChanged;
+
+        // OpenAI API Key (shown when Local mode is checked)
+        lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
+        txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(320, 23), UseSystemPasswordChar = true, Visible = false };
+        txtApiKey.PlaceholderText = "sk-...";
+
+        // WebSocket URL (hidden when Local mode is checked)
+        lblWs = new Label { Text = "Ada URL:", Location = new Point(400, 118), Size = new Size(60, 23) };
+        txtWebSocketUrl = new TextBox { Location = new Point(465, 115), Size = new Size(130, 23) };
 
         // Start SIP Button
         btnStartStop = new Button
         {
             Text = "▶ Start SIP",
-            Location = new Point(100, 120),
+            Location = new Point(100, 148),
             Size = new Size(140, 32),
             BackColor = Color.FromArgb(40, 167, 69),
             ForeColor = Color.White,
@@ -93,7 +109,7 @@ partial class MainForm
         btnMicTest = new Button
         {
             Text = "🎤 Test with Mic",
-            Location = new Point(260, 120),
+            Location = new Point(260, 148),
             Size = new Size(150, 32),
             BackColor = Color.FromArgb(0, 123, 255),
             ForeColor = Color.White,
@@ -109,6 +125,8 @@ partial class MainForm
             lblUser, txtSipUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
+            chkLocalOpenAI,
+            lblApiKey, txtApiKey,
             lblWs, txtWebSocketUrl,
             btnStartStop, btnMicTest
         });
@@ -117,7 +135,7 @@ partial class MainForm
         var grpStatus = new GroupBox
         {
             Text = "📊 Status",
-            Location = new Point(12, 180),
+            Location = new Point(12, 210),
             Size = new Size(710, 70),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
@@ -135,8 +153,8 @@ partial class MainForm
         var grpLogs = new GroupBox
         {
             Text = "📋 Logs & Transcripts",
-            Location = new Point(12, 258),
-            Size = new Size(710, 340),
+            Location = new Point(12, 288),
+            Size = new Size(710, 310),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
         };
 
@@ -201,9 +219,13 @@ partial class MainForm
     private TextBox txtSipUser;
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
+    private TextBox txtApiKey;
     private ComboBox cmbTransport;
     private ComboBox cmbAudioMode;
     private ComboBox cmbResampler;
+    private CheckBox chkLocalOpenAI;
+    private Label lblApiKey;
+    private Label lblWs;
     private Button btnStartStop;
     private Button btnMicTest;
     private Button btnClearLogs;
