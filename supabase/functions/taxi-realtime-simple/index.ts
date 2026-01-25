@@ -195,10 +195,13 @@ Ask ONLY ONE question per response. NEVER combine questions.
 - If large luggage mentioned, offer: "Would you like an estate or larger vehicle?"
 - If "no luggage" → proceed to time question
 
-# ADDRESS INTERPRETATION
-- "52-8" or "52 A" means "52A" (alphanumeric house number)
-- Always preserve full house numbers including letter suffixes
-- NEVER change house numbers - if you heard "32", say "32" not "28"
+# ADDRESS INTERPRETATION (STRICT - ALPHANUMERIC PRESERVATION)
+- "52-8", "52 A", "52 hey", or "fifty two a" MUST be interpreted as "52A"
+- ALPHANUMERIC SUFFIXES ARE PART OF THE NUMBER: 52A, 14B, 7C, 32A
+- NEVER strip the letter. If you hear a letter after a number, it is a house suffix
+- If the user says "52A" and your internal transcript says "52", you MUST prioritize "52A"
+- DO NOT NORMALIZE: "Flat 4, 52A David Road" must NOT become "52 David Road"
+- Examples: "7A" not "7", "32B" not "32", "10-12" stays "10-12"
 
 # CORRECTIONS
 - Listen for: "no", "actually", "change", "I meant"
@@ -210,6 +213,7 @@ Ask ONLY ONE question per response. NEVER combine questions.
 - After user confirms summary, you MUST call book_taxi(action="request_quote")
 - Only call book_taxi(action="confirmed") after user accepts the fare
 - NEVER invent or alter house numbers - repeat EXACTLY what customer said
+- If AI says "28" but user said "52A" - the user is ALWAYS correct
 `;
 
 // === AUDIO HELPERS ===
@@ -547,10 +551,35 @@ Wait for their YES or NO response.`;
       const action = args.action as string;
       
       // Build full addresses from strict schema fields
-      const pickupHouseNum = (args.pickup_house_number as string) || "";
+      let pickupHouseNum = (args.pickup_house_number as string) || "";
       const pickupStreet = (args.pickup_street as string) || "";
-      const destHouseNum = (args.destination_house_number as string) || "";
+      let destHouseNum = (args.destination_house_number as string) || "";
       const destStreet = (args.destination_street as string) || "";
+      
+      // === FINAL ALPHANUMERIC SANITY CHECK (Last Mile Safety) ===
+      // If AI extracted '52' but user actually said '52A', restore the alphanumeric version
+      const userPickupTruth = (lastUserTruth.pickup || "").toUpperCase();
+      const userDestTruth = (lastUserTruth.destination || "").toUpperCase();
+      
+      if (pickupHouseNum && /^\d+$/.test(pickupHouseNum)) {
+        // AI returned just digits, check if user said alphanumeric
+        const pattern = new RegExp(`(${pickupHouseNum}[A-Z])\\b`, "i");
+        const match = userPickupTruth.match(pattern);
+        if (match) {
+          log(`🛡️ Safety Triggered (Pickup): Restoring ${pickupHouseNum} -> ${match[1]}`);
+          pickupHouseNum = match[1];
+        }
+      }
+      
+      if (destHouseNum && /^\d+$/.test(destHouseNum)) {
+        // AI returned just digits, check if user said alphanumeric
+        const pattern = new RegExp(`(${destHouseNum}[A-Z])\\b`, "i");
+        const match = userDestTruth.match(pattern);
+        if (match) {
+          log(`🛡️ Safety Triggered (Destination): Restoring ${destHouseNum} -> ${match[1]}`);
+          destHouseNum = match[1];
+        }
+      }
       
       // Combine house number + street for full address
       const fullPickup = pickupHouseNum ? `${pickupHouseNum} ${pickupStreet}`.trim() : pickupStreet;
@@ -846,7 +875,11 @@ Wait for the customer's response:
           log(`👤 User: ${raw}`);
         }
         
-        // === CAPTURE ADDRESSES FROM USER SPEECH ===
+        // === ENHANCED USER TRUTH CAPTURE WITH ALPHANUMERIC DETECTION ===
+        // Regex to find numbers followed by letters (e.g., 52A, 7b, 32B)
+        const houseNumberPattern = /(\d+[a-zA-Z])\b/g;
+        const alphanumericMatches = corrected.match(houseNumberPattern);
+        
         // Based on current step, save what user said as the verified value
         if (stepAtSpeechStart === "pickup" && corrected.length > 2) {
           // Save the raw user input as pickup (if it looks like an address)
@@ -855,6 +888,9 @@ Wait for the customer's response:
             bookingState.pickup = cleaned;
             lastUserTruth.pickup = cleaned;
             log(`📍 CAPTURED PICKUP: "${cleaned}"`);
+            if (alphanumericMatches) {
+              log(`🏠 Found Alphanumeric Pickup Number: ${alphanumericMatches.join(', ')}`);
+            }
           }
         } else if (stepAtSpeechStart === "destination" && corrected.length > 2) {
           // Save the raw user input as destination
@@ -863,6 +899,9 @@ Wait for the customer's response:
             bookingState.destination = cleaned;
             lastUserTruth.destination = cleaned;
             log(`📍 CAPTURED DESTINATION: "${cleaned}"`);
+            if (alphanumericMatches) {
+              log(`🏠 Found Alphanumeric Destination Number: ${alphanumericMatches.join(', ')}`);
+            }
           }
         } else if (stepAtSpeechStart === "passengers") {
           // Try to extract passenger count
