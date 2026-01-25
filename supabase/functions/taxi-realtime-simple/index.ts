@@ -3,10 +3,6 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
-if (!OPENAI_API_KEY) {
-  console.warn("⚠️ OPENAI_API_KEY missing – TTS/STT will fail");
-}
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -64,6 +60,8 @@ When the caller wants to change or correct something they said:
 `;
 
 // === AUDIO HELPERS ===
+
+// Upsample 8kHz to 24kHz (linear interpolation)
 function pcm8kTo24k(pcm8k: Uint8Array): Uint8Array {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, Math.floor(pcm8k.byteLength / 2));
   const len24k = samples8k.length * 3;
@@ -93,20 +91,6 @@ function arrayBufferToBase64(buffer: Uint8Array): string {
   return btoa(binary);
 }
 
-// === STATE MANAGEMENT ===
-interface CallState {
-  callId: string;
-  step: "pickup" | "destination" | "passengers" | "time" | "summary" | "fare_confirm" | "done";
-  pickup: string | null;
-  destination: string | null;
-  passengers: number | null;
-  time: string | null;
-  currentStepValidated: boolean;
-  farewellSent: boolean;
-  awaitingConfirmation: boolean;
-  awaitingChange: boolean;
-}
-
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -119,33 +103,10 @@ serve(async (req) => {
 
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
-  let state: CallState | null = null;
+  let callId = "unknown";
+  let finalGoodbyePending = false;
 
-  // Track OpenAI response lifecycle to avoid "conversation already has active response".
-  let isResponseActive = false;
-  let deferredResponseCreate = false;
-
-  const log = (msg: string) => console.log(`[${state?.callId || "unknown"}] ${msg}`);
-
-  const safeResponseCreate = () => {
-    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
-    if (isResponseActive) {
-      deferredResponseCreate = true;
-      log("⏳ response.create deferred (active response in progress)");
-      return;
-    }
-    openaiWs.send(JSON.stringify({ type: "response.create" }));
-  };
-
-  const looksLikeAffirmative = (text: string) => {
-    const t = text.toLowerCase().trim();
-    return /^(yes|yeah|yep|yess|yesy|ok|okay|okkk|correct|that's correct|thats correct|right|go ahead|confirm|please do)/.test(t);
-  };
-
-  const looksLikeNegative = (text: string) => {
-    const t = text.toLowerCase().trim();
-    return /^(no|nope|nah|not correct|that's wrong|thats wrong|wrong)/.test(t);
-  };
+  const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
@@ -158,356 +119,90 @@ serve(async (req) => {
 
     openaiWs.onopen = () => {
       log("✅ OpenAI connected, configuring session...");
-      
-      openaiWs?.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          modalities: ["text", "audio"],
-          instructions: SYSTEM_PROMPT,
-          voice: "shimmer",
-          input_audio_format: "pcm16",
-          output_audio_format: "pcm16",
-          input_audio_transcription: { model: "whisper-1" },
-          // 🔑 Keep VAD for natural pacing, but enforce validation
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 800
-          }
-        }
-      }));
     };
 
     openaiWs.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
+      const msg = JSON.parse(event.data);
 
-        if (msg.type === "response.created") {
-          isResponseActive = true;
-        }
-
-        if (msg.type === "response.done") {
-          isResponseActive = false;
-          if (deferredResponseCreate) {
-            deferredResponseCreate = false;
-            log("▶️ Flushing deferred response.create");
-            // fire-and-forget
-            safeResponseCreate();
-          }
-        }
-
-        // Session configured - trigger greeting
-        if (msg.type === "session.updated") {
-          log("🎤 Session configured, triggering greeting");
-          safeResponseCreate();
-        }
-
-        // Handle user transcription
-        if (msg.type === "conversation.item.input_audio_transcription.completed") {
-          const rawText = msg.transcript?.trim();
-          if (!rawText || rawText.length < 2) return;
-
-          log(`👤 User: "${rawText}"`);
-
-          // Filter out dispatch echoes
-          const lower = rawText.toLowerCase();
-          if (/driver will be|price.*is.*\d+|book that/.test(lower)) return;
-
-          if (!state) return;
-
-          // Summary confirmation handling (this is where short "that's correct" needs to land)
-          if (state.step === "summary") {
-            // If caller confirms, close out immediately.
-            if (state.awaitingConfirmation && looksLikeAffirmative(lower)) {
-              log("✅ Confirmation detected");
-              state.awaitingConfirmation = false;
-              state.awaitingChange = false;
-              state.step = "done";
-
-              // Force verbatim closing script.
-              openaiWs?.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [
-                    {
-                      type: "input_text",
-                      text:
-                        "[POST-CONFIRMATION MODE] The caller has confirmed. Say exactly: 'Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!' Then stop.",
-                    },
-                  ],
-                },
-              }));
-              safeResponseCreate();
-              return;
-            }
-
-            // If caller rejects, ask what to change and enter change mode.
-            if (state.awaitingConfirmation && looksLikeNegative(lower)) {
-              log("↩️ Rejection detected; asking what to change");
-              state.awaitingConfirmation = false;
-              state.awaitingChange = true;
-
-              openaiWs?.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: "What would you like to change?" }],
-                },
-              }));
-              safeResponseCreate();
-              return;
-            }
-
-            // While awaitingChange, treat the next utterance as a correction attempt.
-            if (state.awaitingChange || /actually|no wait|change|i meant|not .+ it's|sorry, it's|let me correct/i.test(lower)) {
-              handleCorrection(rawText, state);
-              return;
-            }
-
-            // Otherwise ignore stray transcripts during summary.
-            return;
-          }
-
-          // Handle corrections (non-summary)
-          if (/actually|no wait|change|i meant|not .+ it's|sorry, it's|let me correct/i.test(lower)) {
-            handleCorrection(rawText, state);
-            return;
-          }
-
-          // Validate response for current step
-          if (!state.currentStepValidated) {
-            const isValid = validateResponseForStep(rawText, state.step);
-            
-            if (isValid) {
-              updateStateWithResponse(rawText, state.step, state);
-              state.currentStepValidated = true;
-              log(`✅ ${state.step} validated: ${rawText}`);
-              
-              // Move to next step
-              advanceToNextStep(state);
-              log(`➡️ Advanced to: ${state.step}`);
-            } else {
-              // Re-ask the same question
-              log(`❌ Invalid response for ${state.step}, re-asking`);
-              reAskCurrentQuestion(state);
-              return; // Prevent Ada from auto-responding
+      // Session created - configure and trigger greeting
+      if (msg.type === "session.created") {
+        log("📋 Session created, sending config");
+        
+        openaiWs?.send(JSON.stringify({
+          type: "session.update",
+          session: {
+            modalities: ["text", "audio"],
+            instructions: SYSTEM_PROMPT,
+            voice: "shimmer",
+            input_audio_format: "pcm16",
+            output_audio_format: "pcm16",
+            input_audio_transcription: { model: "whisper-1" },
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 800
             }
           }
-        }
+        }));
+      }
 
-        // Log Ada's speech
-        if (msg.type === "response.audio_transcript.done") {
-          log(`🗣️ Ada: ${msg.transcript}`);
-        }
+      // Session configured - trigger greeting
+      if (msg.type === "session.updated") {
+        log("🎤 Session configured, triggering greeting");
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+      }
 
-        // Forward audio to bridge
-        if (msg.type === "response.audio.delta" && msg.delta) {
-          const binaryStr = atob(msg.delta);
-          const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-          }
+      // Forward audio to bridge
+      if (msg.type === "response.audio.delta" && msg.delta) {
+        const binaryStr = atob(msg.delta);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(bytes.buffer);
+        }
+      }
+
+      // Log transcripts and detect goodbye
+      if (msg.type === "response.audio_transcript.done") {
+        const transcript = msg.transcript || "";
+        log(`🗣️ Ada: ${transcript}`);
+        
+        // Detect goodbye phrases to trigger clean hangup
+        if (/safe journey|have a great day|goodbye|thank you for (using|trying)|taxibot demo/i.test(transcript)) {
+          log("👋 Goodbye detected, will hang up after audio completes");
+          finalGoodbyePending = true;
+        }
+      }
+      
+      // When response is done, check if we should hang up
+      if (msg.type === "response.done" && finalGoodbyePending) {
+        log("✅ Final response complete, initiating hangup");
+        // Wait for audio to flush before closing
+        setTimeout(() => {
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(bytes.buffer);
+            socket.send(JSON.stringify({ type: "hangup", reason: "booking_complete" }));
           }
-        }
+          openaiWs?.close();
+          socket.close();
+        }, 500);
+      }
 
-        // Log errors
-        if (msg.type === "error") {
-          log(`❌ OpenAI error: ${JSON.stringify(msg.error)}`);
-        }
-      } catch (e) {
-        log(`⚠️ Error processing OpenAI message: ${e}`);
+      if (msg.type === "conversation.item.input_audio_transcription.completed") {
+        log(`👤 User: ${msg.transcript}`);
+      }
+
+      // Log errors
+      if (msg.type === "error") {
+        log(`❌ OpenAI error: ${JSON.stringify(msg.error)}`);
       }
     };
 
     openaiWs.onerror = (e) => log(`🔴 OpenAI WS Error: ${e}`);
     openaiWs.onclose = () => log("⚪ OpenAI disconnected");
   };
-
-  // === HELPER FUNCTIONS ===
-  function parsePassengers(text: string): number {
-    const lower = text.toLowerCase().trim();
-    
-    // Direct numbers
-    const numMatch = lower.match(/\d+/);
-    if (numMatch) {
-      const num = parseInt(numMatch[0]);
-      if (num > 0 && num <= 10) return num;
-    }
-    
-    // Number words and homophones
-    const words: Record<string, number> = {
-      "one": 1, "won": 1,
-      "two": 2, "to": 2, "too": 2,
-      "three": 3, "tree": 3, "free": 3,
-      "four": 4, "for": 4, "fore": 4,
-      "five": 5, "hive": 5,
-      "six": 6, "sex": 6,
-      "seven": 7,
-      "eight": 8, "ate": 8,
-      "nine": 9,
-      "ten": 10
-    };
-    
-    for (const [word, val] of Object.entries(words)) {
-      if (lower.includes(word)) return val;
-    }
-    
-    // Check for "just me" or "myself"
-    if (/just me|myself|alone|solo/i.test(lower)) return 1;
-    
-    return 0;
-  }
-
-  function validateResponseForStep(text: string, step: CallState["step"]): boolean {
-    const lower = text.toLowerCase();
-    
-    switch (step) {
-      case "pickup":
-      case "destination":
-        // Must be at least 4 chars and not sound like passenger count
-        return text.length > 3 && !/how many|passenger|people/i.test(lower);
-      case "passengers":
-        // Must parse to a valid passenger count
-        // Also reject if it looks like an address
-        if (/street|road|avenue|lane|drive|way|hotel|airport/i.test(lower)) {
-          return false;
-        }
-        return parsePassengers(text) > 0;
-      case "time":
-        return true; // Accept anything for time
-      default:
-        return false;
-    }
-  }
-
-  function updateStateWithResponse(text: string, step: CallState["step"], state: CallState) {
-    switch (step) {
-      case "pickup": 
-        state.pickup = text; 
-        break;
-      case "destination": 
-        state.destination = text; 
-        break;
-      case "passengers": 
-        state.passengers = parsePassengers(text); 
-        break;
-      case "time": 
-        state.time = text; 
-        break;
-    }
-  }
-
-  function advanceToNextStep(state: CallState) {
-    const steps: CallState["step"][] = ["pickup", "destination", "passengers", "time", "summary"];
-    const currentIndex = steps.indexOf(state.step);
-    if (currentIndex < steps.length - 1) {
-      state.step = steps[currentIndex + 1];
-      state.currentStepValidated = false;
-      
-      // When advancing to summary, inject the verified booking state
-      if (state.step === "summary") {
-        injectBookingSummary(state);
-      }
-    }
-  }
-  
-  function injectBookingSummary(state: CallState) {
-    // Force Ada to use EXACT verified data, not her memory
-    const summaryInstruction = `[VERIFIED BOOKING DATA - USE EXACTLY AS WRITTEN]
-Pickup: ${state.pickup}
-Destination: ${state.destination}
-Passengers: ${state.passengers}
-Time: ${state.time}
-
-Now summarize this booking using ONLY the data above. Do not change or paraphrase the addresses. Ask for confirmation.`;
-
-    log(`📋 Injecting verified summary: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.time}`);
-
-    state.awaitingConfirmation = true;
-    state.awaitingChange = false;
-    
-    openaiWs?.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: { 
-        type: "message", 
-        role: "system", 
-        content: [{ type: "input_text", text: summaryInstruction }] 
-      }
-    }));
-    safeResponseCreate();
-  }
-
-  function reAskCurrentQuestion(state: CallState) {
-    let question = "";
-    switch (state.step) {
-      case "pickup": question = "Where would you like to be picked up?"; break;
-      case "destination": question = "What is your destination?"; break;
-      case "passengers": question = "How many people will be travelling?"; break;
-      case "time": question = "When do you need the taxi?"; break;
-    }
-    
-    if (question) {
-      openaiWs?.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: { type: "message", role: "user", content: [{ type: "input_text", text: question }] }
-      }));
-      safeResponseCreate();
-    }
-  }
-
-  function handleCorrection(text: string, state: CallState) {
-    // Correction: try to detect which field is being corrected, especially in summary/change mode.
-    const lower = text.toLowerCase();
-    
-    // Extract new value (crude but effective for demo)
-    let newValue = text;
-    if (lower.includes("it's")) {
-      const parts = text.split(/it's\s+/i);
-      if (parts.length > 1) newValue = parts[1].trim();
-    } else if (lower.includes("actually")) {
-      const parts = text.split(/actually\s+/i);
-      if (parts.length > 1) newValue = parts[1].trim();
-    }
-    
-    // Decide target field
-    let targetStep: CallState["step"] = state.step;
-    if (state.step === "summary" || state.awaitingChange) {
-      if (/pick\s*up|pickup/.test(lower)) targetStep = "pickup";
-      else if (/destination|drop\s*off|dropoff/.test(lower)) targetStep = "destination";
-      else if (/passengers|people|travelling|traveling/.test(lower)) targetStep = "passengers";
-      else if (/time|now|asap|later/.test(lower)) targetStep = "time";
-    }
-
-    // Apply update
-    updateStateWithResponse(newValue, targetStep, state);
-    state.currentStepValidated = true;
-    state.awaitingChange = false;
-    log(`🔄 Correction applied: ${targetStep} = ${newValue}`);
-    
-    // Acknowledge and move on
-    const ackMsg = `Updated to ${newValue}.`;
-    openaiWs?.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: { type: "message", role: "user", content: [{ type: "input_text", text: ackMsg }] }
-    }));
-    safeResponseCreate();
-    
-    // After correction during/after summary, re-inject summary to confirm again.
-    if (state.step === "summary" || targetStep === "pickup" || targetStep === "destination" || targetStep === "passengers" || targetStep === "time") {
-      state.step = "summary";
-      injectBookingSummary(state);
-      return;
-    }
-
-    // Otherwise continue flow
-    advanceToNextStep(state);
-  }
 
   // Bridge connection
   socket.onopen = () => log("🚀 Bridge connected");
@@ -535,25 +230,14 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
       const msg = JSON.parse(event.data);
       
       if (msg.type === "init") {
-        state = {
-          callId: msg.call_id || "unknown",
-          step: "pickup",
-          pickup: null,
-          destination: null,
-          passengers: null,
-          time: null,
-          currentStepValidated: false,
-          farewellSent: false,
-          awaitingConfirmation: false,
-          awaitingChange: false,
-        };
+        callId = msg.call_id || "unknown";
         log(`📞 Call initialized`);
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
       }
       
       if (msg.type === "hangup") {
-        log("👋 Hangup received");
+        log("👋 Hangup received from bridge");
         openaiWs?.close();
       }
       
