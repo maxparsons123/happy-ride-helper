@@ -579,19 +579,15 @@ ${SYSTEM_PROMPT}
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
-      // Forward audio to bridge with outbound DSP
+      // Forward audio to bridge (raw passthrough - bridge handles downsampling)
       if (msg.type === "response.audio.delta" && msg.delta) {
         const binaryStr = atob(msg.delta);
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
         }
-        
-        // Apply outbound DSP for clearer Ada voice on telephony
-        const processedAudio = processAdaAudio(bytes);
-        
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(processedAudio.buffer);
+          socket.send(bytes.buffer);
         }
       }
 
