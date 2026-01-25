@@ -792,7 +792,7 @@ interface SessionState {
   quoteDelivered: boolean;
 }
 
-const ECHO_GUARD_MS = 250;
+const ECHO_GUARD_MS = 150; // Reduced for faster user response detection
 
 // Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
 // so Ada's initial greeting doesn't get cut off mid-sentence.
@@ -2537,10 +2537,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Optimized for reliable speech detection after greetings
-          threshold: 0.35,           // Lower = more sensitive (matches working pipeline)
-          prefix_padding_ms: 500,     // Capture start of words reliably
-          silence_duration_ms: 1000,  // Fast responses while tolerating pauses
+          // Ultra-sensitive for immediate response detection
+          threshold: 0.25,           // Very low = highly sensitive to quiet speech
+          prefix_padding_ms: 600,     // Extended padding to capture full start of words
+          silence_duration_ms: 800,   // Shorter silence = faster turn-taking
         },
         tools: TOOLS,
         tool_choice: "auto",
