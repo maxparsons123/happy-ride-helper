@@ -332,6 +332,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     Log("✅ Response done");
                     _responseActive = false;
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    
+                    // CRITICAL FIX: Signal turn continuation after greeting to prevent session collapse
+                    // SIP callers wait for greeting to finish before speaking, creating "dead air"
+                    // Committing the audio buffer tells OpenAI we're ready for user input
+                    if (_greetingSent && !_awaitingConfirmation)
+                    {
+                        await SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                        Log("🔄 Turn continuation signaled (SIP dead-air prevention)");
+                    }
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
@@ -377,8 +386,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_ws?.State != WebSocketState.Open) return;
 
-        // HD AUDIO OPTIMIZED SESSION CONFIG
-        // With 48kHz Opus from C# SIP Bridge, we can use more aggressive STT settings
+        // HD AUDIO OPTIMIZED SESSION CONFIG + SIP SILENCE TOLERANCE
+        // SIP callers wait for bot to finish before speaking, so we need extended silence tolerance
         var sessionUpdate = new
         {
             type = "session.update",
@@ -393,12 +402,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    // Lower threshold catches quiet speech and short words like "3", "4"
                     threshold = 0.4,
-                    // 500ms prefix captures the "prep breath" before words
                     prefix_padding_ms = 500,
-                    // 1000ms silence = end of turn (responsive but not premature)
-                    silence_duration_ms = 1000
+                    // 1200ms silence tolerance for SIP "dead air" after greeting
+                    silence_duration_ms = 1200
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -406,7 +413,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 HD Audio: VAD threshold=0.4, prefix=500ms (optimized for wideband)");
+        Log("🎧 HD Audio: VAD=0.4, silence=1200ms (SIP dead-air tolerant)");
         
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
