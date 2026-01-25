@@ -4,8 +4,10 @@ public partial class MainForm : Form
 {
     private SipAutoAnswer? _sipBridge;
     private AdaAudioClient? _micClient;
+    private OpenAIRealtimeClient? _localAiClient;
     private volatile bool _isRunning = false;
     private volatile bool _isMicMode = false;
+    private bool _useLocalOpenAI = false;
 
     public MainForm()
     {
@@ -21,9 +23,28 @@ public partial class MainForm : Form
         txtSipPassword.Text = "qwe70954504118";
         // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired";
+        txtApiKey.Text = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
         cmbResampler.SelectedIndex = 0; // NAudio (default)
+    }
+
+    private void chkLocalOpenAI_CheckedChanged(object? sender, EventArgs e)
+    {
+        _useLocalOpenAI = chkLocalOpenAI.Checked;
+        
+        // Show/hide relevant fields
+        lblApiKey.Visible = _useLocalOpenAI;
+        txtApiKey.Visible = _useLocalOpenAI;
+        lblWs.Visible = !_useLocalOpenAI;
+        txtWebSocketUrl.Visible = !_useLocalOpenAI;
+        
+        // Update button text
+        btnMicTest.Text = _useLocalOpenAI ? "🎤 Test Local AI" : "🎤 Test with Mic";
+        
+        AddLog(_useLocalOpenAI 
+            ? "🔒 Switched to LOCAL OpenAI mode (direct connection)" 
+            : "☁️ Switched to EDGE FUNCTION mode");
     }
 
     private void btnStartStop_Click(object sender, EventArgs e)
@@ -94,41 +115,175 @@ public partial class MainForm : Form
     {
         try
         {
-            _micClient = new AdaAudioClient(txtWebSocketUrl.Text.Trim());
-            _micClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
-            _micClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
-            _micClient.OnConnected += () => SafeInvoke(() =>
+            if (_useLocalOpenAI)
             {
-                SetStatus("🎤 Microphone Test - Speak to Ada!", Color.Green);
-                lblActiveCall.Text = "🎤 Mic Test Active";
-                lblActiveCall.ForeColor = Color.Green;
-            });
-            _micClient.OnDisconnected += () => SafeInvoke(() =>
-            {
-                SetStatus("Disconnected", Color.Gray);
-                StopMicMode();
-            });
+                // === LOCAL OPENAI MODE ===
+                var apiKey = txtApiKey.Text.Trim();
+                if (string.IsNullOrEmpty(apiKey) || !apiKey.StartsWith("sk-"))
+                {
+                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk-)", 
+                        "API Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-            await _micClient.ConnectAsync("mic-test");
-            _micClient.StartMicrophoneCapture();
+                _localAiClient = new OpenAIRealtimeClient(apiKey);
+                _localAiClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _localAiClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                _localAiClient.OnConnected += () => SafeInvoke(() =>
+                {
+                    SetStatus("🔒 Local OpenAI - Speak to Ada!", Color.Green);
+                    lblActiveCall.Text = "🎤 Local AI Active";
+                    lblActiveCall.ForeColor = Color.Green;
+                });
+                _localAiClient.OnDisconnected += () => SafeInvoke(() =>
+                {
+                    SetStatus("Disconnected", Color.Gray);
+                    StopMicMode();
+                });
+                _localAiClient.OnBookingUpdated += booking => SafeInvoke(() =>
+                {
+                    AddLog($"📦 Booking: {booking.Pickup} → {booking.Destination}, {booking.Passengers} pax");
+                });
+
+                await _localAiClient.ConnectAsync("mic-test");
+                
+                // Start microphone capture for local AI
+                StartLocalMicCapture();
+
+                AddLog("🔒 LOCAL MODE: Connected directly to OpenAI Realtime API");
+            }
+            else
+            {
+                // === EDGE FUNCTION MODE ===
+                _micClient = new AdaAudioClient(txtWebSocketUrl.Text.Trim());
+                _micClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _micClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                _micClient.OnConnected += () => SafeInvoke(() =>
+                {
+                    SetStatus("🎤 Microphone Test - Speak to Ada!", Color.Green);
+                    lblActiveCall.Text = "🎤 Mic Test Active";
+                    lblActiveCall.ForeColor = Color.Green;
+                });
+                _micClient.OnDisconnected += () => SafeInvoke(() =>
+                {
+                    SetStatus("Disconnected", Color.Gray);
+                    StopMicMode();
+                });
+
+                await _micClient.ConnectAsync("mic-test");
+                _micClient.StartMicrophoneCapture();
+
+                AddLog("☁️ EDGE FUNCTION MODE: Connected via Supabase");
+            }
 
             _isMicMode = true;
-            btnMicTest.Text = "⏹ Stop Mic";
+            btnMicTest.Text = "⏹ Stop";
             btnMicTest.BackColor = Color.FromArgb(220, 53, 69);
             btnStartStop.Enabled = false;
             SetConfigEnabled(false);
-
-            AddLog("🎤 Microphone test mode - speak to Ada!");
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to start mic: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show($"Failed to start: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             AddLog($"❌ Error: {ex.Message}");
         }
     }
 
+    private NAudio.Wave.WaveInEvent? _waveIn;
+    private System.Timers.Timer? _playbackTimer;
+
+    private void StartLocalMicCapture()
+    {
+        _waveIn = new NAudio.Wave.WaveInEvent
+        {
+            WaveFormat = new NAudio.Wave.WaveFormat(24000, 16, 1), // 24kHz PCM16 mono
+            BufferMilliseconds = 20
+        };
+
+        _waveIn.DataAvailable += async (s, e) =>
+        {
+            if (_localAiClient?.IsConnected == true && e.BytesRecorded > 0)
+            {
+                var buffer = new byte[e.BytesRecorded];
+                Buffer.BlockCopy(e.Buffer, 0, buffer, 0, e.BytesRecorded);
+                await _localAiClient.SendAudioAsync(buffer, 24000);
+            }
+        };
+
+        _waveIn.StartRecording();
+
+        // Start playback timer for outbound audio
+        _playbackTimer = new System.Timers.Timer(20);
+        _playbackTimer.Elapsed += PlaybackTimerElapsed;
+        _playbackTimer.Start();
+
+        AddLog("🎤 Microphone capture started (24kHz PCM16)");
+    }
+
+    private NAudio.Wave.WaveOutEvent? _waveOut;
+    private NAudio.Wave.BufferedWaveProvider? _waveProvider;
+
+    private void PlaybackTimerElapsed(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        if (_localAiClient == null) return;
+
+        var frame = _localAiClient.GetNextMuLawFrame();
+        if (frame == null) return;
+
+        // Decode µ-law to PCM and play
+        var pcm8k = AudioCodecs.MuLawDecode(frame);
+        var pcm48k = AudioCodecs.Resample(pcm8k, 8000, 48000); // Resample to speaker rate
+        var pcmBytes = AudioCodecs.ShortsToBytes(pcm48k);
+
+        if (_waveOut == null)
+        {
+            _waveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(48000, 16, 1))
+            {
+                BufferDuration = TimeSpan.FromSeconds(2),
+                DiscardOnBufferOverflow = true
+            };
+            _waveOut = new NAudio.Wave.WaveOutEvent();
+            _waveOut.Init(_waveProvider);
+            _waveOut.Play();
+        }
+
+        _waveProvider?.AddSamples(pcmBytes, 0, pcmBytes.Length);
+    }
+
     private void StopMicMode()
     {
+        // Stop local AI client
+        if (_localAiClient != null)
+        {
+            _localAiClient.Dispose();
+            _localAiClient = null;
+        }
+
+        // Stop microphone
+        if (_waveIn != null)
+        {
+            _waveIn.StopRecording();
+            _waveIn.Dispose();
+            _waveIn = null;
+        }
+
+        // Stop playback
+        if (_playbackTimer != null)
+        {
+            _playbackTimer.Stop();
+            _playbackTimer.Dispose();
+            _playbackTimer = null;
+        }
+
+        if (_waveOut != null)
+        {
+            _waveOut.Stop();
+            _waveOut.Dispose();
+            _waveOut = null;
+            _waveProvider = null;
+        }
+
+        // Stop edge function client
         if (_micClient != null)
         {
             _micClient.StopMicrophoneCapture();
@@ -137,7 +292,7 @@ public partial class MainForm : Form
         }
 
         _isMicMode = false;
-        btnMicTest.Text = "🎤 Test with Mic";
+        btnMicTest.Text = _useLocalOpenAI ? "🎤 Test Local AI" : "🎤 Test with Mic";
         btnMicTest.BackColor = Color.FromArgb(0, 123, 255);
         btnStartStop.Enabled = true;
         SetStatus("Ready", Color.Gray);
@@ -145,7 +300,7 @@ public partial class MainForm : Form
         lblActiveCall.Text = "No active call";
         lblActiveCall.ForeColor = Color.Gray;
 
-        AddLog("🎤 Microphone test stopped");
+        AddLog("🎤 Stopped");
     }
 
     private void Stop()
@@ -195,9 +350,11 @@ public partial class MainForm : Form
         txtSipUser.Enabled = enabled;
         txtSipPassword.Enabled = enabled;
         txtWebSocketUrl.Enabled = enabled;
+        txtApiKey.Enabled = enabled;
         cmbTransport.Enabled = enabled;
         cmbAudioMode.Enabled = enabled;
         cmbResampler.Enabled = enabled;
+        chkLocalOpenAI.Enabled = enabled;
     }
 
     private void AddLog(string message)
