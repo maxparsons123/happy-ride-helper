@@ -423,31 +423,36 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         var greeting = "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?";
 
-        // Add greeting to conversation
+        // For OpenAI Realtime API, we need to add a user message that prompts the greeting
+        // Then request a response which will generate audio
         var createMsg = new
         {
             type = "conversation.item.create",
             item = new
             {
                 type = "message",
-                role = "assistant",
-                content = new[] { new { type = "text", text = greeting } }
+                role = "user",
+                content = new[] { new { type = "input_text", text = "[SYSTEM: Call just connected. Greet the caller warmly and ask for their pickup location.]" } }
             }
         };
         
         await SendJsonAsync(createMsg);
 
-        // Trigger response to speak the greeting
+        // Request response with modalities including audio
         var responseCreate = new
         {
             type = "response.create",
-            response = new { instructions = $"Say exactly: \"{greeting}\"" }
+            response = new 
+            { 
+                modalities = new[] { "text", "audio" },
+                instructions = $"Greet the caller warmly. Say something like: \"{greeting}\""
+            }
         };
         
         await SendJsonAsync(responseCreate);
         
         _lastQuestionAsked = "pickup";
-        Log("🎤 Greeting sent");
+        Log("🎤 Greeting requested");
     }
 
     private async Task SendContextHintAsync(string userText)
