@@ -49,6 +49,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
     
     // Confirmation awareness - disable echo guard when waiting for yes/no
     private bool _awaitingConfirmation = false;
+    
+    // Audio buffer tracking - prevent "buffer too small" errors on commit
+    // OpenAI requires at least 100ms of audio before commit
+    private double _inputBufferedMs = 0;
+    private const double MIN_COMMIT_MS = 120; // Safety margin above 100ms requirement
 
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
@@ -154,6 +159,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Resample 8kHz → 24kHz
         var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+        // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
+        // durationMs = (bytes / 8000) * 1000
+        var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
+        _inputBufferedMs += durationMs;
 
         // Send as binary (33% more efficient than Base64)
         try
@@ -333,13 +343,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     _responseActive = false;
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     
-                    // CRITICAL FIX: Signal turn continuation after greeting to prevent session collapse
-                    // SIP callers wait for greeting to finish before speaking, creating "dead air"
-                    // Committing the audio buffer tells OpenAI we're ready for user input
+                    // Attempt turn continuation after greeting to prevent session collapse
+                    // BUT: Only commit if we have enough audio buffered (≥120ms)
+                    // SIP callers wait for greeting to finish, creating "dead air" with 0ms buffered
                     if (_greetingSent && !_awaitingConfirmation)
                     {
-                        await SendJsonAsync(new { type = "input_audio_buffer.commit" });
-                        Log("🔄 Turn continuation signaled (SIP dead-air prevention)");
+                        await CommitInputAudioIfReadyAsync();
                     }
                     break;
 
@@ -697,6 +706,34 @@ public class OpenAIRealtimeClient : IAudioAIClient
             WebSocketMessageType.Text,
             true,
             _cts?.Token ?? CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Safely commit the input audio buffer only if we have enough audio.
+    /// Prevents "buffer too small" errors when there's SIP dead-air after greeting.
+    /// OpenAI requires at least 100ms of audio before commit.
+    /// </summary>
+    private async Task CommitInputAudioIfReadyAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        // Don't commit if we don't have enough audio buffered
+        if (_inputBufferedMs < MIN_COMMIT_MS)
+        {
+            Log($"⏳ Skipping commit: only {_inputBufferedMs:F1}ms buffered (<{MIN_COMMIT_MS}ms) - waiting for user audio");
+            return;
+        }
+
+        try
+        {
+            await SendJsonAsync(new { type = "input_audio_buffer.commit" });
+            Log($"🔄 Turn continuation committed ({_inputBufferedMs:F1}ms buffered)");
+            _inputBufferedMs = 0; // Reset after commit
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Commit error: {ex.Message}");
+        }
     }
 
     private void ProcessAdaAudio(byte[] pcm24kBytes)
