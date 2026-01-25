@@ -24,14 +24,18 @@ function upsample8to16(raw8k: Uint8Array): Uint8Array {
 }
 
 /**
- * Downsample 16kHz to 8kHz for Asterisk playback
+ * Downsample 24kHz to 8kHz for Asterisk playback (3:1 ratio)
  */
-function downsample16to8(raw16k: Uint8Array): Uint8Array {
-  const samples16k = new Int16Array(raw16k.buffer, raw16k.byteOffset, raw16k.byteLength / 2);
-  const samples8k = new Int16Array(Math.floor(samples16k.length / 2));
+function downsample24to8(raw24k: Uint8Array): Uint8Array {
+  const samples24k = new Int16Array(raw24k.buffer, raw24k.byteOffset, raw24k.byteLength / 2);
+  const samples8k = new Int16Array(Math.floor(samples24k.length / 3));
   for (let i = 0; i < samples8k.length; i++) {
-    // Average adjacent samples for anti-aliasing
-    samples8k[i] = Math.round((samples16k[i * 2] + samples16k[i * 2 + 1]) / 2);
+    // Average 3 samples for anti-aliasing
+    const idx = i * 3;
+    const s0 = samples24k[idx] ?? 0;
+    const s1 = samples24k[idx + 1] ?? s0;
+    const s2 = samples24k[idx + 2] ?? s1;
+    samples8k[i] = Math.round((s0 + s1 + s2) / 3);
   }
   return new Uint8Array(samples8k.buffer);
 }
@@ -62,6 +66,23 @@ serve(async (req) => {
 
   const log = (msg: string) => console.log(`[${callUuid?.slice(0, 8) || "init"}] ${msg}`);
 
+  // Send text to OpenAI for TTS response
+  const sendTextForTTS = (text: string) => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    log(`🎤 SAY: "${text}"`);
+    
+    // Create a user message that prompts the assistant to speak
+    openaiWs.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: { 
+        type: "message", 
+        role: "user", 
+        content: [{ type: "input_text", text: `[SYSTEM: Say this to the caller] ${text}` }] 
+      }
+    }));
+    openaiWs.send(JSON.stringify({ type: "response.create" }));
+  };
+
   // --- 1. OpenAI Connection Logic ---
   const initOpenAI = () => {
     const url = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17";
@@ -74,18 +95,20 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       log("🟢 Connected to OpenAI Realtime API");
       
-      // Configure Session
+      // Configure Session with instructions for the conversation
       openaiWs?.send(JSON.stringify({
         type: "session.update",
         session: {
           modalities: ["text", "audio"],
           instructions: `You are Ada, a friendly taxi dispatcher for the Taxibot demo.
 
+START by greeting the caller and asking for their pickup location.
+
 BOOKING FLOW:
-1. Greet and ask for PICKUP location
-2. Ask for DESTINATION  
-3. Ask for PASSENGER COUNT
-4. Ask for TIME (now/ASAP or specific)
+1. First ask for PICKUP location
+2. Then ask for DESTINATION  
+3. Then ask for PASSENGER COUNT
+4. Then ask for TIME (now/ASAP or specific)
 5. Read back the summary and ask for confirmation
 6. On confirmation, say "Your taxi is booked! Driver will arrive shortly. Goodbye!"
 
@@ -93,7 +116,9 @@ RULES:
 - Ask ONE question at a time
 - Be concise and friendly
 - Speak at a relaxed pace
-- When user confirms, end the call politely`,
+- When user confirms, end the call politely
+
+Begin by greeting the caller now.`,
           voice: "shimmer",
           input_audio_format: "pcm16",
           output_audio_format: "pcm16",
@@ -102,7 +127,7 @@ RULES:
             type: "server_vad",
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 600 // Faster response
+            silence_duration_ms: 600
           }
         }
       }));
@@ -116,11 +141,9 @@ RULES:
         const audioData = Uint8Array.from(atob(msg.delta), c => c.charCodeAt(0));
         
         // Downsample 24kHz (OpenAI default) to 8kHz for Asterisk
-        // OpenAI sends 24kHz by default, we need 8kHz for slin
         const audio8k = downsample24to8(audioData);
         
         // --- 320-BYTE CHUNKING FOR ASTERISK ---
-        // Asterisk AudioSocket requires strict 320-byte frames for 8kHz slin (20ms)
         for (let i = 0; i < audio8k.length; i += 320) {
           const chunk = audio8k.slice(i, Math.min(i + 320, audio8k.length));
           
@@ -153,9 +176,18 @@ RULES:
         log(`👤 User: ${msg.transcript}`);
       }
       
-      // Session created - greet
+      // Session created - trigger initial greeting
       if (msg.type === "session.created") {
-        log("📋 Session created");
+        log("📋 Session created, triggering greeting");
+        // Trigger the AI to start speaking by sending response.create
+        setTimeout(() => {
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        }, 500);
+      }
+      
+      // Response done
+      if (msg.type === "response.done") {
+        log("🔊 Response complete");
       }
       
       // Error handling
@@ -182,14 +214,14 @@ RULES:
           .map(b => b.toString(16).padStart(2, '0'))
           .join('');
         log(`🆔 Call Session UUID: ${callUuid}`);
-        initOpenAI(); // Connect to AI once call is identified
+        initOpenAI();
       }
 
       // Handle Audio (0x10)
       else if (type === 0x10) {
         if (openaiWs?.readyState === WebSocket.OPEN) {
-          const rawPcm8k = buffer.slice(3); // Strip AudioSocket header
-          const pcm16k = upsample8to16(rawPcm8k); // Upsample for AI
+          const rawPcm8k = buffer.slice(3);
+          const pcm16k = upsample8to16(rawPcm8k);
           
           openaiWs.send(JSON.stringify({
             type: "input_audio_buffer.append",
@@ -222,20 +254,3 @@ RULES:
 
   return response;
 });
-
-/**
- * Downsample 24kHz to 8kHz for Asterisk playback (3:1 ratio)
- */
-function downsample24to8(raw24k: Uint8Array): Uint8Array {
-  const samples24k = new Int16Array(raw24k.buffer, raw24k.byteOffset, raw24k.byteLength / 2);
-  const samples8k = new Int16Array(Math.floor(samples24k.length / 3));
-  for (let i = 0; i < samples8k.length; i++) {
-    // Average 3 samples for anti-aliasing
-    const idx = i * 3;
-    const s0 = samples24k[idx] ?? 0;
-    const s1 = samples24k[idx + 1] ?? s0;
-    const s2 = samples24k[idx + 2] ?? s1;
-    samples8k[i] = Math.round((s0 + s1 + s2) / 3);
-  }
-  return new Uint8Array(samples8k.buffer);
-}
