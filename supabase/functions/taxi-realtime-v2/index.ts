@@ -127,8 +127,8 @@ type BookingStep = "greeting" | "pickup" | "destination" | "passengers" | "time"
 function detectStepFromTranscript(text: string, currentStep: BookingStep): { isAddress: boolean; isPassengerCount: boolean; isTime: boolean; isConfirmation: boolean; isCorrection: boolean } {
   const lower = text.toLowerCase();
   
-  // Correction detection
-  const isCorrection = /\b(actually|no wait|change|i meant|not .+, it's|sorry,? it's|let me correct)\b/i.test(text);
+  // Correction detection - includes "amend", "update", "modify"
+  const isCorrection = /\b(actually|no wait|change|i meant|not .+, it's|sorry,? it's|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be)\b/i.test(text);
   
   // Address patterns - street types, house numbers, landmarks
   const addressPatterns = /\b(road|street|avenue|lane|drive|close|way|crescent|place|court|grove|gardens|terrace|walk|hill|rise|view|park|green|square|mews|station|airport|hospital|hotel|pub|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|waitrose|mcdonald|costa|starbucks)\b/i;
@@ -575,14 +575,46 @@ serve(async (req) => {
         const detection = detectStepFromTranscript(correctedTranscript, currentStep);
         log(`📊 Step: ${currentStep}, Detection: ${JSON.stringify(detection)}`);
         
-        // Handle corrections
-        if (detection.isCorrection) {
-          log(`🔄 Correction detected`);
-          // Let the AI handle the correction naturally, but inject hint
+        // Handle corrections - extract address and update state
+        if (detection.isCorrection && detection.isAddress) {
+          log(`🔄 Correction with address detected: ${correctedTranscript}`);
+          
+          // Detect if it's a pickup or destination correction
+          const isPickupCorrection = /\b(pickup|pick up|from|picked up from)\b/i.test(correctedTranscript);
+          const isDestinationCorrection = /\b(destination|to|going to|drop off)\b/i.test(correctedTranscript);
+          
+          // Extract the address part (remove correction keywords)
+          const addressPart = correctedTranscript
+            .replace(/\b(actually|no wait|change|i meant|sorry|let me correct|amend|update|modify|the pickup is|pickup is|pickup should be|destination is|destination should be|to amend)\b/gi, "")
+            .trim();
+          
+          if (isDestinationCorrection && !isPickupCorrection) {
+            userTruth.destination = addressPart;
+            booking.destination = addressPart;
+            log(`✅ Destination corrected to: ${addressPart}`);
+          } else {
+            // Default to pickup correction
+            userTruth.pickup = addressPart;
+            booking.pickup = addressPart;
+            log(`✅ Pickup corrected to: ${addressPart}`);
+          }
+          
+          // Go back to summary to confirm changes
+          currentStep = "summary";
+          
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
-              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION] The user wants to change something. Listen carefully to what they want to update.` }] }
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger(s), ${booking.time}. Is that correct?"` }] }
+            }));
+          }
+        }
+        else if (detection.isCorrection) {
+          log(`🔄 Correction detected (no address)`);
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION] The user wants to change something. Ask: "What would you like to change?"` }] }
             }));
           }
         }
