@@ -85,11 +85,19 @@ When the caller asks about local events, things to do, attractions, or what's ha
 
 // === AUDIO HELPERS ===
 
-// DSP Settings for telephony clarity
-const DSP_CONFIG = {
+// DSP Settings for inbound telephony audio (user voice → OpenAI)
+const INBOUND_DSP = {
   volumeBoost: 2.5,        // Amplify quiet telephony audio
   preEmphasis: 0.97,       // Boost high frequencies for clearer consonants
   noiseGateThreshold: 50,  // RMS threshold for noise gate
+};
+
+// DSP Settings for outbound audio (Ada voice → telephony)
+const OUTBOUND_DSP = {
+  volumeBoost: 1.4,        // Slight boost for telephony clarity
+  deEmphasis: 0.95,        // Reduce harshness from AI voice
+  highShelfBoost: 1.15,    // Brighten voice for telephony
+  softLimitThreshold: 28000, // Prevent clipping on loud passages
 };
 
 // Apply volume boost with soft limiting
@@ -110,6 +118,41 @@ function applyPreEmphasis(samples: Int16Array, coefficient: number): void {
     const current = samples[i];
     samples[i] = Math.round(current - coefficient * prev);
     prev = current;
+  }
+}
+
+// De-emphasis filter (inverse of pre-emphasis) - smooths harsh frequencies
+function applyDeEmphasis(samples: Int16Array, coefficient: number): void {
+  let prev = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const current = samples[i] + coefficient * prev;
+    samples[i] = Math.round(current);
+    prev = current;
+  }
+}
+
+// High-shelf boost for brightness (simple 1-pole high-pass blend)
+function applyHighShelfBoost(samples: Int16Array, boost: number): void {
+  let prev = samples[0];
+  for (let i = 1; i < samples.length; i++) {
+    const current = samples[i];
+    const highFreq = current - prev;
+    samples[i] = Math.round(current + highFreq * (boost - 1));
+    prev = current;
+  }
+}
+
+// Soft limiter to prevent clipping on loud passages
+function applySoftLimiter(samples: Int16Array, threshold: number): void {
+  for (let i = 0; i < samples.length; i++) {
+    const sample = samples[i];
+    const absSample = Math.abs(sample);
+    if (absSample > threshold) {
+      // Soft knee compression above threshold
+      const excess = absSample - threshold;
+      const compressed = threshold + excess * 0.3;
+      samples[i] = Math.round(sample > 0 ? compressed : -compressed);
+    }
   }
 }
 
@@ -149,12 +192,31 @@ function applyNoiseGate(samples: Int16Array, threshold: number): void {
   }
 }
 
-// Full DSP pipeline: Volume -> Low-Pass -> Pre-Emphasis -> Noise Gate
-function processDSP(samples: Int16Array): void {
-  applyVolumeBoost(samples, DSP_CONFIG.volumeBoost);
+// Inbound DSP pipeline: Volume -> Low-Pass -> Pre-Emphasis -> Noise Gate
+function processInboundDSP(samples: Int16Array): void {
+  applyVolumeBoost(samples, INBOUND_DSP.volumeBoost);
   applyLowPass(samples);
-  applyPreEmphasis(samples, DSP_CONFIG.preEmphasis);
-  applyNoiseGate(samples, DSP_CONFIG.noiseGateThreshold);
+  applyPreEmphasis(samples, INBOUND_DSP.preEmphasis);
+  applyNoiseGate(samples, INBOUND_DSP.noiseGateThreshold);
+}
+
+// Outbound DSP pipeline: De-Emphasis -> High-Shelf -> Volume -> Soft Limiter
+function processOutboundDSP(samples: Int16Array): void {
+  applyDeEmphasis(samples, OUTBOUND_DSP.deEmphasis);
+  applyHighShelfBoost(samples, OUTBOUND_DSP.highShelfBoost);
+  applyVolumeBoost(samples, OUTBOUND_DSP.volumeBoost);
+  applySoftLimiter(samples, OUTBOUND_DSP.softLimitThreshold);
+}
+
+// Process outbound audio from OpenAI (24kHz PCM16)
+function processAdaAudio(audioBytes: Uint8Array): Uint8Array {
+  // Convert to Int16Array for DSP processing
+  const samples = new Int16Array(audioBytes.buffer, audioBytes.byteOffset, Math.floor(audioBytes.byteLength / 2));
+  
+  // Apply outbound DSP
+  processOutboundDSP(samples);
+  
+  return new Uint8Array(samples.buffer);
 }
 
 // Upsample 8kHz to 24kHz with DSP processing (high-quality linear interpolation)
@@ -162,7 +224,7 @@ function pcm8kTo24k(pcm8k: Uint8Array): Uint8Array {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, Math.floor(pcm8k.byteLength / 2));
   
   // Apply DSP before upsampling
-  processDSP(samples8k);
+  processInboundDSP(samples8k);
   
   const len24k = samples8k.length * 3;
   const samples24k = new Int16Array(len24k);
@@ -517,15 +579,19 @@ ${SYSTEM_PROMPT}
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
-      // Forward audio to bridge
+      // Forward audio to bridge with outbound DSP
       if (msg.type === "response.audio.delta" && msg.delta) {
         const binaryStr = atob(msg.delta);
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
         }
+        
+        // Apply outbound DSP for clearer Ada voice on telephony
+        const processedAudio = processAdaAudio(bytes);
+        
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(bytes.buffer);
+          socket.send(processedAudio.buffer);
         }
       }
 
