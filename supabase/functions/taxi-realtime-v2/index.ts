@@ -173,6 +173,14 @@ function getStepQuestion(step: BookingStep): string {
 // Parse passenger count from various spoken forms
 function parsePassengers(text: string): number | null {
   const lower = text.toLowerCase().trim();
+  
+  // Direct digit extraction first (handles "6", "6 passengers", etc.)
+  const digitMatch = lower.match(/\b(\d{1,2})\b/);
+  if (digitMatch) {
+    const num = parseInt(digitMatch[1]);
+    if (num >= 1 && num <= 10) return num;
+  }
+  
   const numberWords: Record<string, number> = {
     "one": 1, "won": 1, "just me": 1, "myself": 1, "alone": 1,
     "two": 2, "to": 2, "too": 2, "couple": 2,
@@ -182,16 +190,14 @@ function parsePassengers(text: string): number | null {
     "nine": 9, "ten": 10
   };
   
-  // Check word matches
-  for (const [word, num] of Object.entries(numberWords)) {
-    if (lower === word || lower.includes(word)) return num;
-  }
+  // Check for number words (exact match first)
+  if (numberWords[lower]) return numberWords[lower];
   
-  // Check digit
-  const digitMatch = lower.match(/^(\d{1,2})$/);
-  if (digitMatch) {
-    const num = parseInt(digitMatch[1]);
-    if (num >= 1 && num <= 10) return num;
+  // Check for number words within the text
+  for (const [word, num] of Object.entries(numberWords)) {
+    // Use word boundary to avoid partial matches
+    const regex = new RegExp(`\\b${word}\\b`, 'i');
+    if (regex.test(lower)) return num;
   }
   
   return null;
@@ -686,7 +692,12 @@ serve(async (req) => {
           if (openaiWs?.readyState === WebSocket.OPEN) {
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
-              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Time: ${timeValue}. NOW GIVE SUMMARY: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger(s), ${booking.time}. Is that correct?"` }] }
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Time: ${timeValue}. NOW GIVE SUMMARY using EXACTLY these values:
+- Pickup: "${booking.pickup}"
+- Destination: "${booking.destination}"  
+- Passengers: ${booking.passengers} (say this number EXACTLY)
+- Time: "${booking.time}"
+Say: "So that's from [pickup] to [destination], for ${booking.passengers} passengers, pickup ${booking.time}. Is that correct?"` }] }
             }));
           }
         }
