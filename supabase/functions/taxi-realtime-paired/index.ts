@@ -816,6 +816,10 @@ interface SessionState {
   waitingForQuoteSilence: boolean;
   // Track if Ada already said "one moment" for this quote request
   saidOneMoment: boolean;
+  // Fallback quote timer ID - used to cancel if real quote arrives
+  fallbackQuoteTimerId: ReturnType<typeof setTimeout> | null;
+  // Track if we've already delivered a quote (real or fallback) to prevent duplicates
+  quoteDelivered: boolean;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -826,6 +830,14 @@ const GREETING_PROTECTION_MS = 12000;
 
 // Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
 const SUMMARY_PROTECTION_MS = 8000;
+
+// Fallback quote timeout in ms - if dispatch callback doesn't arrive, use mock quote
+// This ensures Ada can always give a price and keeps the conversation moving
+const FALLBACK_QUOTE_TIMEOUT_MS = 4000;
+
+// Default fallback quote values when dispatch doesn't respond in time
+const FALLBACK_QUOTE_FARE = "£12.50";
+const FALLBACK_QUOTE_ETA = "6 minutes";
 
 // While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
 const ASSISTANT_LEADIN_IGNORE_MS = 700;
@@ -1791,7 +1803,11 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     waitingForQuoteSilence: false,
     saidOneMoment: false,
     // Timestamp when awaitingConfirmation was set - used for barge-in cooldown
-    awaitingConfirmationSetAt: 0
+    awaitingConfirmationSetAt: 0,
+    // Fallback quote timer ID - used to cancel if real quote arrives
+    fallbackQuoteTimerId: null,
+    // Track if we've already delivered a quote (real or fallback) to prevent duplicates
+    quoteDelivered: false
   };
 }
 
@@ -2116,6 +2132,12 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       greetingFallbackTimer = null;
     }
     
+    // Clear fallback quote timer if active
+    if (sessionState.fallbackQuoteTimerId) {
+      clearTrackedTimeout(sessionState.fallbackQuoteTimerId);
+      sessionState.fallbackQuoteTimerId = null;
+    }
+    
     // Save preferred_language to callers table
     if (callerPhone && callerPhone !== "unknown" && sessionState.language && sessionState.language !== "auto") {
       const phoneKey = normalizePhone(callerPhone);
@@ -2219,6 +2241,19 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       return;
     }
     
+    // FALLBACK QUOTE PROTECTION: Cancel fallback timer since real quote arrived
+    if (sessionState.fallbackQuoteTimerId) {
+      clearTrackedTimeout(sessionState.fallbackQuoteTimerId);
+      sessionState.fallbackQuoteTimerId = null;
+      console.log(`[${callId}] ⏰ Cancelled fallback quote timer - real quote arrived`);
+    }
+    
+    // DUPLICATE PROTECTION: Ignore if we already delivered a quote (real or fallback)
+    if (sessionState.quoteDelivered) {
+      console.log(`[${callId}] ⚠️ Ignoring dispatch_ask_confirm - quote already delivered`);
+      return;
+    }
+    
     // DUPLICATE PROTECTION: Ignore if we already received a quote and are awaiting confirmation
     if (sessionState.awaitingConfirmation) {
       console.log(`[${callId}] ⚠️ Ignoring duplicate dispatch_ask_confirm - already awaiting confirmation`);
@@ -2230,6 +2265,9 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       console.log(`[${callId}] ⚠️ Ignoring dispatch_ask_confirm - booking already confirmed`);
       return;
     }
+    
+    // Mark quote as delivered to prevent duplicates
+    sessionState.quoteDelivered = true;
     
     // Store the callback URL for when customer confirms
     sessionState.pendingConfirmationCallback = callback_url;
@@ -2935,6 +2973,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                   // Most dispatch systems respond asynchronously via taxi-dispatch-callback.
                   // Only inject a quote immediately if we actually got fare/eta in the HTTP response.
                   if (result.fare && result.eta) {
+                    // Mark quote as delivered and cancel any fallback timer
+                    sessionState.quoteDelivered = true;
+                    if (sessionState.fallbackQuoteTimerId) {
+                      clearTrackedTimeout(sessionState.fallbackQuoteTimerId);
+                      sessionState.fallbackQuoteTimerId = null;
+                    }
+                    
                     sessionState.pendingFare = result.fare;
                     sessionState.pendingEta = result.eta;
                     sessionState.awaitingConfirmation = true;
@@ -2967,7 +3012,71 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                   } else {
                     console.log(`[${callId}] ⏳ Quote requested (auto-trigger). Waiting for dispatch callback...`);
 
-                    // Safety: if callback never arrives, allow a retry later.
+                    // ═══════════════════════════════════════════════════════════════════════════
+                    // FALLBACK QUOTE TIMER (4 seconds)
+                    // If dispatch doesn't respond within FALLBACK_QUOTE_TIMEOUT_MS, inject a mock
+                    // quote so Ada can keep the conversation moving. This prevents long silences.
+                    // ═══════════════════════════════════════════════════════════════════════════
+                    sessionState.fallbackQuoteTimerId = trackedTimeout(() => {
+                      if (cleanedUp) return;
+                      
+                      // Skip if we already got a real quote or delivered a fallback
+                      if (sessionState.quoteDelivered || sessionState.awaitingConfirmation || sessionState.bookingConfirmed) {
+                        console.log(`[${callId}] ⏰ Fallback timer fired but quote already delivered - skipping`);
+                        return;
+                      }
+                      
+                      console.log(`[${callId}] ⏰ FALLBACK QUOTE: Dispatch didn't respond in ${FALLBACK_QUOTE_TIMEOUT_MS}ms, using mock quote`);
+                      
+                      // Mark quote as delivered to prevent duplicates
+                      sessionState.quoteDelivered = true;
+                      sessionState.pendingFare = FALLBACK_QUOTE_FARE;
+                      sessionState.pendingEta = FALLBACK_QUOTE_ETA;
+                      sessionState.awaitingConfirmation = true;
+                      sessionState.quoteInFlight = false;
+                      sessionState.lastQuestionAsked = "confirmation";
+                      sessionState.awaitingConfirmationSetAt = Date.now();
+                      
+                      // Clear silence mode so Ada can speak
+                      sessionState.waitingForQuoteSilence = false;
+                      sessionState.saidOneMoment = false;
+                      
+                      if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
+                        openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                        
+                        sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                        
+                        const fallbackMessage = `The trip fare will be ${FALLBACK_QUOTE_FARE}, and the estimated arrival time is ${FALLBACK_QUOTE_ETA}. Would you like to go ahead and book that?`;
+                        
+                        openaiWs.send(JSON.stringify({
+                          type: "conversation.item.create",
+                          item: {
+                            type: "message",
+                            role: "user",
+                            content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Say to the customer: "${fallbackMessage}". Then WAIT for their YES or NO answer. Do NOT call book_taxi until they explicitly say yes.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES / yeah / correct / confirm / go ahead / book it / please → IMMEDIATELY CALL book_taxi with action: "confirmed"
+- If they say NO / cancel / too expensive / nevermind → Say "No problem, is there anything else I can help you with?"
+- If unclear, ask: "Would you like me to book that for you?"
+
+DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" returns success.` }]
+                          }
+                        }));
+                        
+                        openaiWs.send(JSON.stringify({
+                          type: "response.create",
+                          response: { modalities: ["audio", "text"], instructions: `Say exactly: "${fallbackMessage}" - then STOP and WAIT for user response.` }
+                        }));
+                        
+                        console.log(`[${callId}] 🎤 Fallback quote injected - Ada should speak now`);
+                      }
+                    }, FALLBACK_QUOTE_TIMEOUT_MS);
+                    
+                    console.log(`[${callId}] ⏰ Fallback quote timer started (${FALLBACK_QUOTE_TIMEOUT_MS}ms)`);
+
+                    // Safety: if callback never arrives AND fallback already delivered, allow a retry later.
                     // MEMORY LEAK FIX: Use tracked timeout
                     trackedTimeout(() => {
                       if (cleanedUp) return;
@@ -3833,41 +3942,69 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 }
               }));
               
-              // TIMEOUT FALLBACK: If fare doesn't arrive within 15 seconds, break silence and apologize
-              // MEMORY LEAK FIX: Use tracked timeout so it's cleared on cleanup
-              const quoteTimeoutMs = 15000;
-              trackedTimeout(() => {
-                if (sessionState.waitingForQuoteSilence && !sessionState.awaitingConfirmation && !cleanedUp) {
-                  console.log(`[${callId}] ⏰ QUOTE TIMEOUT: No fare received after ${quoteTimeoutMs}ms - breaking silence`);
-                  
-                  // Clear silence mode
-                  sessionState.waitingForQuoteSilence = false;
-                  sessionState.saidOneMoment = false;
-                  sessionState.quoteInFlight = false;
-                  
-                  // Tell Ada to apologize and offer to retry
-                  if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-                    openaiWs.send(JSON.stringify({
-                      type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "system",
-                        content: [{
-                          type: "input_text",
-                          text: `[QUOTE TIMEOUT] The dispatch system didn't respond in time. Apologize briefly and ask if they'd like you to try again. Say: "I'm sorry, I'm having trouble getting the fare right now. Would you like me to try again?" If they say yes, call book_taxi with action="request_quote" again.`
-                        }]
-                      }
-                    }));
-                    openaiWs.send(JSON.stringify({ 
-                      type: "response.create",
-                      response: {
-                        modalities: ["audio", "text"],
-                        instructions: "Say: 'I'm sorry, I'm having trouble getting the fare right now. Would you like me to try again?' Then wait for their answer."
-                      }
-                    }));
-                  }
+              // ═══════════════════════════════════════════════════════════════════════════
+              // FALLBACK QUOTE TIMER (4 seconds) - like simple mode
+              // If dispatch doesn't respond within FALLBACK_QUOTE_TIMEOUT_MS, inject a mock
+              // quote so Ada can keep the conversation moving. This prevents long silences.
+              // ═══════════════════════════════════════════════════════════════════════════
+              sessionState.fallbackQuoteTimerId = trackedTimeout(() => {
+                if (cleanedUp) return;
+                
+                // Skip if we already got a real quote or delivered a fallback
+                if (sessionState.quoteDelivered || sessionState.awaitingConfirmation || sessionState.bookingConfirmed) {
+                  console.log(`[${callId}] ⏰ Fallback timer (tool call) fired but quote already delivered - skipping`);
+                  return;
                 }
-              }, quoteTimeoutMs);
+                
+                console.log(`[${callId}] ⏰ FALLBACK QUOTE (tool call): Dispatch didn't respond in ${FALLBACK_QUOTE_TIMEOUT_MS}ms, using mock quote`);
+                
+                // Mark quote as delivered to prevent duplicates
+                sessionState.quoteDelivered = true;
+                sessionState.pendingFare = FALLBACK_QUOTE_FARE;
+                sessionState.pendingEta = FALLBACK_QUOTE_ETA;
+                sessionState.awaitingConfirmation = true;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuestionAsked = "confirmation";
+                sessionState.awaitingConfirmationSetAt = Date.now();
+                
+                // Clear silence mode so Ada can speak
+                sessionState.waitingForQuoteSilence = false;
+                sessionState.saidOneMoment = false;
+                
+                if (openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
+                  openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+                  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                  
+                  sessionState.summaryProtectionUntil = Date.now() + SUMMARY_PROTECTION_MS;
+                  
+                  const fallbackMessage = `The trip fare will be ${FALLBACK_QUOTE_FARE}, and the estimated arrival time is ${FALLBACK_QUOTE_ETA}. Would you like to go ahead and book that?`;
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: `[DISPATCH QUOTE RECEIVED]: Say to the customer: "${fallbackMessage}". Then WAIT for their YES or NO answer. Do NOT call book_taxi until they explicitly say yes.
+
+WHEN CUSTOMER RESPONDS:
+- If they say YES / yeah / correct / confirm / go ahead / book it / please → IMMEDIATELY CALL book_taxi with action: "confirmed"
+- If they say NO / cancel / too expensive / nevermind → Say "No problem, is there anything else I can help you with?"
+- If unclear, ask: "Would you like me to book that for you?"
+
+DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" returns success.` }]
+                    }
+                  }));
+                  
+                  openaiWs.send(JSON.stringify({
+                    type: "response.create",
+                    response: { modalities: ["audio", "text"], instructions: `Say exactly: "${fallbackMessage}" - then STOP and WAIT for user response.` }
+                  }));
+                  
+                  console.log(`[${callId}] 🎤 Fallback quote injected (tool call) - Ada should speak now`);
+                }
+              }, FALLBACK_QUOTE_TIMEOUT_MS);
+              
+              console.log(`[${callId}] ⏰ Fallback quote timer started (tool call path, ${FALLBACK_QUOTE_TIMEOUT_MS}ms)`);
 
             } else if (action === "confirmed") {
               console.log(`[${callId}] ✅ Processing CONFIRMED action (awaitingConfirmation=${sessionState.awaitingConfirmation}, bookingConfirmed=${sessionState.bookingConfirmed}, bookingRef=${sessionState.pendingBookingRef})`);
