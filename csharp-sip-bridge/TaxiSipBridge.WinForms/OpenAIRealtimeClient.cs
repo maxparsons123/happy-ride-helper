@@ -227,8 +227,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
 
         // Track buffered duration for PCM24 path (covers browser/WebRTC scenarios)
-        var samples = audioToSend.Length / 2; // 2 bytes per sample
-        var durationMs = (double)samples * 1000.0 / 24000.0;
+        var sampleCount = audioToSend.Length / 2; // 2 bytes per sample
+        var durationMs = (double)sampleCount * 1000.0 / 24000.0;
         _inputBufferedMs += durationMs;
 
         var base64 = Convert.ToBase64String(audioToSend);
