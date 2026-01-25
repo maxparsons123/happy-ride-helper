@@ -629,7 +629,7 @@ serve(async (req) => {
         }
       }
 
-      // Log user transcript and handle corrections
+      // Log user transcript, capture addresses, and handle corrections
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const raw = msg.transcript || "";
         const corrected = applySTTCorrections(raw);
@@ -637,6 +637,55 @@ serve(async (req) => {
           log(`👤 User: ${raw} → [STT FIX] ${corrected}`);
         } else {
           log(`👤 User: ${raw}`);
+        }
+        
+        // === CAPTURE ADDRESSES FROM USER SPEECH ===
+        // Based on current step, save what user said as the verified value
+        if (stepAtSpeechStart === "pickup" && corrected.length > 2) {
+          // Save the raw user input as pickup (if it looks like an address)
+          const cleaned = corrected.replace(/^(from|at|it's|my address is|pickup is)\s*/i, "").trim();
+          if (cleaned.length > 2 && !/^(yes|no|yeah|ok|sure|please|thanks)/i.test(cleaned)) {
+            bookingState.pickup = cleaned;
+            log(`📍 CAPTURED PICKUP: "${cleaned}"`);
+          }
+        } else if (stepAtSpeechStart === "destination" && corrected.length > 2) {
+          // Save the raw user input as destination
+          const cleaned = corrected.replace(/^(to|going to|heading to|destination is)\s*/i, "").trim();
+          if (cleaned.length > 2 && !/^(yes|no|yeah|ok|sure|please|thanks)/i.test(cleaned)) {
+            bookingState.destination = cleaned;
+            log(`📍 CAPTURED DESTINATION: "${cleaned}"`);
+          }
+        } else if (stepAtSpeechStart === "passengers") {
+          // Try to extract passenger count
+          const numMatch = corrected.match(/(\d+)|one|two|three|four|five|six|seven|eight|nine|ten/i);
+          if (numMatch) {
+            const numWords: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+            const val = numMatch[1] ? parseInt(numMatch[1]) : numWords[numMatch[0].toLowerCase()] || 1;
+            bookingState.passengers = val;
+            log(`📍 CAPTURED PASSENGERS: ${val}`);
+          }
+        }
+        
+        // === INJECT VERIFIED STATE BEFORE SUMMARY ===
+        // When Ada is about to summarize, inject what we actually captured
+        if (currentStep === "summary" || currentStep === "time") {
+          const stateHint = `[VERIFIED BOOKING STATE - USE THESE EXACT VALUES]
+Pickup: "${bookingState.pickup || "NOT SET"}"
+Destination: "${bookingState.destination || "NOT SET"}"
+Passengers: ${bookingState.passengers}
+Time: ${bookingState.time}
+
+When summarizing, say EXACTLY these addresses. DO NOT substitute or change them.`;
+          
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "system",
+              content: [{ type: "input_text", text: stateHint }]
+            }
+          }));
+          log(`📋 Injected verified state for summary`);
         }
         
         // Detect corrections - user saying "no", "actually", "change", etc.
@@ -650,18 +699,33 @@ serve(async (req) => {
           // Extract what field and new value
           let correctionHint = `[CORRECTION DETECTED] User said: "${corrected}". `;
           
+          // Try to extract the new value from the correction
+          const newValueMatch = corrected.match(/(?:to|is|it's)\s+(.+?)(?:\s*please)?$/i);
+          const newValue = newValueMatch ? newValueMatch[1].trim() : "";
+          
           // Check what they're correcting
           if (/destination|going to|drop|heading/i.test(lowerText)) {
-            correctionHint += "User is CORRECTING THE DESTINATION. Extract the new destination from their words and update it immediately.";
-            bookingState.destination = ""; // Clear to force re-extraction
+            if (newValue) {
+              bookingState.destination = newValue;
+              log(`📍 CORRECTION - NEW DESTINATION: "${newValue}"`);
+            }
+            correctionHint += `User is CORRECTING THE DESTINATION to "${newValue || corrected}". Say: "Updated to ${newValue || corrected}."`;
           } else if (/pickup|pick up|from|picked up/i.test(lowerText)) {
-            correctionHint += "User is CORRECTING THE PICKUP. Extract the new pickup from their words and update it immediately.";
-            bookingState.pickup = ""; // Clear to force re-extraction
+            if (newValue) {
+              bookingState.pickup = newValue;
+              log(`📍 CORRECTION - NEW PICKUP: "${newValue}"`);
+            }
+            correctionHint += `User is CORRECTING THE PICKUP to "${newValue || corrected}". Say: "Updated to ${newValue || corrected}."`;
           } else if (/passenger/i.test(lowerText)) {
             correctionHint += "User is CORRECTING PASSENGER COUNT. Extract the new count.";
           } else {
-            // General correction - let AI figure it out
-            correctionHint += "Update the booking field they are correcting. Acknowledge with 'Updated to [new value].'";
+            // General correction - try to figure out which field from context
+            if (newValue) {
+              // Default to destination if unclear
+              bookingState.destination = newValue;
+              log(`📍 CORRECTION - ASSUMED DESTINATION: "${newValue}"`);
+            }
+            correctionHint += `Update the booking field they are correcting to "${newValue}". Acknowledge with 'Updated to ${newValue}.'`;
           }
           
           // Inject high-priority correction instruction
