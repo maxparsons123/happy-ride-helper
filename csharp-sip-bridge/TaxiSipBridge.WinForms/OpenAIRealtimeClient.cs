@@ -460,31 +460,22 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_greetingSent || _ws?.State != WebSocketState.Open) return;
         _greetingSent = true;
 
-        // Create a conversation item to trigger the greeting
-        // Just response.create alone doesn't give the model enough context
-        var triggerItem = new
+        // Use response.create with inline instructions - the proper way to trigger initial greeting
+        // This tells the model exactly what to do for this specific response
+        var responseCreate = new
         {
-            type = "conversation.item.create",
-            item = new
+            type = "response.create",
+            response = new
             {
-                type = "message",
-                role = "user",
-                content = new[] { new {
-                    type = "input_text",
-                    text = "[CALL CONNECTED - Greet the caller warmly and ask where they'd like to be picked up from]"
-                }}
+                modalities = new[] { "text", "audio" },
+                instructions = "Greet the caller warmly as Ada from the taxi company. Say something like 'Hello, this is Ada from taxi bookings. Where would you like to be picked up from?' Keep it brief and natural."
             }
         };
         
-        await SendJsonAsync(triggerItem);
-        await Task.Delay(50); // Small delay to ensure item is processed
-        
-        // Now request the response
-        var responseCreate = new { type = "response.create" };
         await SendJsonAsync(responseCreate);
         
         _lastQuestionAsked = "pickup";
-        Log("🎤 Greeting triggered with conversation item");
+        Log("🎤 Greeting triggered via response.create with instructions");
     }
 
     private async Task SendContextHintAsync(string userText)
