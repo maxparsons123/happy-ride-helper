@@ -3421,6 +3421,13 @@ Otherwise, say goodbye warmly and call end_call().`
                 sessionState.booking.destination = correction.address;
               }
               
+              // RESET CONFIRMATION FLOW: User made a change, so we need to re-confirm before getting fare
+              sessionState.preSummaryDone = false;
+              sessionState.lastQuestionAsked = "pre_summary"; // Go back to pre-summary
+              sessionState.awaitingConfirmation = false;
+              sessionState.quoteInFlight = false;
+              console.log(`[${callId}] 🔄 Resetting confirmation flow after correction`);
+              
               // Add to history with correction annotation
               sessionState.conversationHistory.push({
                 role: "user",
@@ -3428,7 +3435,7 @@ Otherwise, say goodbye warmly and call end_call().`
                 timestamp: Date.now()
               });
               
-              // Tell OpenAI about the correction so Ada acknowledges it
+              // Tell OpenAI about the correction so Ada acknowledges it and re-confirms
               openaiWs!.send(JSON.stringify({
                 type: "conversation.item.create",
                 item: {
@@ -3439,7 +3446,7 @@ Otherwise, say goodbye warmly and call end_call().`
                     text: `[ADDRESS CORRECTION] The user just corrected their ${correction.type} address to: "${correction.address}". 
                     
 IMPORTANT: Update your understanding. The ${correction.type} is now "${correction.address}" (not the previous value).
-DO NOT ask them to confirm this change - just acknowledge briefly and continue to the next step.
+Acknowledge the change briefly, then give an updated summary and ask: "Is there anything else you'd like to change?"
 Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${sessionState.booking.destination || "empty"}, passengers=${sessionState.booking.passengers ?? "empty"}, time=${sessionState.booking.pickupTime || "empty"}`
                   }]
                 }
@@ -3498,8 +3505,11 @@ Do NOT request the quote yet - wait for them to say yes.`
               }
               
               if (wantsChanges || looksLikeAddress) {
-                // User wants to change something - let normal flow handle it
-                console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something`);
+                // User wants to change something - reset confirmation flow
+                console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something - resetting flow`);
+                sessionState.preSummaryDone = false;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
                 // Don't break - let the normal transcript handling process the change
               }
             }
