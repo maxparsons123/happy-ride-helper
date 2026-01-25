@@ -3,6 +3,7 @@ namespace TaxiSipBridge;
 public partial class MainForm : Form
 {
     private SipAutoAnswer? _sipBridge;
+    private SipOpenAIBridge? _sipLocalBridge;  // For Local OpenAI mode
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
     private volatile bool _isRunning = false;
@@ -67,33 +68,66 @@ public partial class MainForm : Form
     {
         try
         {
-            // Validate config
-            var config = new SipAdaBridgeConfig
+            if (_useLocalOpenAI)
             {
-                SipServer = txtSipServer.Text.Trim(),
-                SipPort = int.Parse(txtSipPort.Text.Trim()),
-                SipUser = txtSipUser.Text.Trim(),
-                SipPassword = txtSipPassword.Text.Trim(),
-                AdaWsUrl = txtWebSocketUrl.Text.Trim(),
-                Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP,
-                AudioMode = (AudioMode)cmbAudioMode.SelectedIndex
-            };
+                // === LOCAL OPENAI SIP MODE ===
+                var apiKey = txtApiKey.Text.Trim();
+                if (string.IsNullOrEmpty(apiKey) || !apiKey.StartsWith("sk-"))
+                {
+                    MessageBox.Show("Please enter a valid OpenAI API key (starts with sk-)", 
+                        "API Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-            if (!config.IsValid(out var error))
-            {
-                MessageBox.Show(error, "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                _sipLocalBridge = new SipOpenAIBridge(
+                    apiKey,
+                    txtSipServer.Text.Trim(),
+                    int.Parse(txtSipPort.Text.Trim()),
+                    txtSipUser.Text.Trim(),
+                    txtSipPassword.Text.Trim(),
+                    cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP);
+
+                _sipLocalBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _sipLocalBridge.OnRegistered += () => SafeInvoke(() => SetStatus("🔒 LOCAL AI - Waiting for calls", Color.Green));
+                _sipLocalBridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
+                _sipLocalBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
+                _sipLocalBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
+                _sipLocalBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+
+                _sipLocalBridge.Start();
+                AddLog("🔒 SIP LOCAL AI mode started - Calls go directly to OpenAI");
             }
+            else
+            {
+                // === EDGE FUNCTION SIP MODE ===
+                var config = new SipAdaBridgeConfig
+                {
+                    SipServer = txtSipServer.Text.Trim(),
+                    SipPort = int.Parse(txtSipPort.Text.Trim()),
+                    SipUser = txtSipUser.Text.Trim(),
+                    SipPassword = txtSipPassword.Text.Trim(),
+                    AdaWsUrl = txtWebSocketUrl.Text.Trim(),
+                    Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP,
+                    AudioMode = (AudioMode)cmbAudioMode.SelectedIndex
+                };
 
-            _sipBridge = new SipAutoAnswer(config);
-            _sipBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
-            _sipBridge.OnRegistered += () => SafeInvoke(() => SetStatus("✓ Registered - Waiting for calls", Color.Green));
-            _sipBridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
-            _sipBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
-            _sipBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
-            _sipBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                if (!config.IsValid(out var error))
+                {
+                    MessageBox.Show(error, "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-            _sipBridge.Start();
+                _sipBridge = new SipAutoAnswer(config);
+                _sipBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _sipBridge.OnRegistered += () => SafeInvoke(() => SetStatus("☁️ EDGE FUNCTION - Waiting for calls", Color.Green));
+                _sipBridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
+                _sipBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
+                _sipBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
+                _sipBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+
+                _sipBridge.Start();
+                AddLog("☁️ SIP EDGE FUNCTION mode started - Calls go via Supabase");
+            }
 
             _isRunning = true;
             btnStartStop.Text = "⏹ Stop SIP";
@@ -101,8 +135,6 @@ public partial class MainForm : Form
             btnMicTest.Enabled = false;
             SetStatus("Starting SIP...", Color.Orange);
             SetConfigEnabled(false);
-
-            AddLog("🚕 SIP Auto-Answer mode started");
         }
         catch (Exception ex)
         {
@@ -305,11 +337,20 @@ public partial class MainForm : Form
 
     private void Stop()
     {
+        // Stop Edge Function bridge
         if (_sipBridge != null)
         {
             _sipBridge.Stop();
             _sipBridge.Dispose();
             _sipBridge = null;
+        }
+
+        // Stop Local OpenAI bridge
+        if (_sipLocalBridge != null)
+        {
+            _sipLocalBridge.Stop();
+            _sipLocalBridge.Dispose();
+            _sipLocalBridge = null;
         }
 
         _isRunning = false;
