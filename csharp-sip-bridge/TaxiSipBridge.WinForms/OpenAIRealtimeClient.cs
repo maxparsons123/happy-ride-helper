@@ -421,8 +421,24 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_greetingSent || _ws?.State != WebSocketState.Open) return;
         _greetingSent = true;
 
-        // Simply trigger a response - the system prompt already instructs Ada to greet
-        // Don't add any conversation items, just request a response
+        // Add a user message to start the conversation
+        var createMsg = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "user",
+                content = new[] { new { type = "input_text", text = "Hello" } }
+            }
+        };
+        
+        await SendJsonAsync(createMsg);
+        
+        // Small delay to ensure OpenAI processes the item.create
+        await Task.Delay(50);
+
+        // Now request a response - Ada will greet based on system prompt
         var responseCreate = new
         {
             type = "response.create"
@@ -431,7 +447,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         await SendJsonAsync(responseCreate);
         
         _lastQuestionAsked = "pickup";
-        Log("🎤 Greeting requested (response.create sent)");
+        Log("🎤 Greeting conversation started");
     }
 
     private async Task SendContextHintAsync(string userText)
