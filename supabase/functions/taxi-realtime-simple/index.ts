@@ -135,7 +135,7 @@ serve(async (req) => {
     openaiWs.onopen = () => {
       log("✅ OpenAI connected, configuring session...");
       
-      // Configure session with VAD DISABLED
+      // Configure session with server VAD
       openaiWs?.send(JSON.stringify({
         type: "session.update",
         session: {
@@ -145,8 +145,12 @@ serve(async (req) => {
           input_audio_format: "pcm16",
           output_audio_format: "pcm16",
           input_audio_transcription: { model: "whisper-1" },
-          // 🔑 CRITICAL: Disable VAD for turn-based control
-          turn_detection: null,
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 800
+          },
           tools: []
         }
       }));
