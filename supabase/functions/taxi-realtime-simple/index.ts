@@ -47,7 +47,9 @@ const TOOLS = [
         pickup: { type: "string", description: "Full pickup address exactly as spoken" },
         destination: { type: "string", description: "Full destination address exactly as spoken" },
         passengers: { type: "number", description: "Number of passengers (1-10)" },
-        time: { type: "string", description: "Pickup time (e.g., 'now', '3pm', 'in 10 minutes')" }
+        time: { type: "string", description: "Pickup time (e.g., 'now', '3pm', 'in 10 minutes')" },
+        luggage: { type: "string", description: "Luggage description (e.g., 'none', '2 suitcases', 'small bag')" },
+        vehicle_type: { type: "string", description: "Vehicle preference (e.g., 'standard', 'estate', 'mpv', 'executive')" }
       },
       required: ["action", "pickup", "destination", "passengers"]
     }
@@ -90,18 +92,33 @@ Ask ONLY ONE question per response. NEVER combine questions.
 1. Get pickup location
 2. Get destination
 3. Get number of passengers
-4. Get pickup time (default: now/ASAP)
-5. Summarize booking and ask for confirmation
-6. When user confirms, say "One moment please" and call book_taxi(action="request_quote")
-7. After receiving fare, tell user the fare and ask them to confirm
-8. When user accepts fare, call book_taxi(action="confirmed")
-9. Say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!" then call end_call
+4. Ask about luggage: "Will you have any luggage with you?"
+5. Get pickup time (default: now/ASAP)
+6. Summarize booking and ask for confirmation
+7. When user confirms, say "One moment please" and call book_taxi(action="request_quote")
+8. After receiving fare, tell user the fare and ask them to confirm
+9. When user accepts fare, call book_taxi(action="confirmed")
+10. Say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!" then call end_call
 
 # PASSENGERS (ANTI-STUCK RULE)
 - When asking for passengers, say: "How many passengers will be travelling?"
 - Accept digits or number words (one through ten)
 - Accept homophones: "to/too" → two, "for" → four, "tree/free/the/there" → three
 - If caller says something like an address, repeat: "How many passengers will be travelling?"
+
+# LUGGAGE HANDLING
+- Ask: "Will you have any luggage with you?"
+- Accept: "no/none", "just a small bag", "2 suitcases", "yes, lots of bags", etc.
+- If they mention large luggage (suitcases, golf clubs, pushchair, wheelchair), offer: "Would you like an estate or larger vehicle?"
+- Common luggage: none, small bag, suitcase(s), pushchair/pram, wheelchair, golf clubs
+- If "no luggage" or "just a handbag", set luggage to "none" and proceed
+
+# VEHICLE PREFERENCES
+- Standard: Default, 4 passengers, small boot
+- Estate: Larger boot for suitcases, golf clubs
+- MPV/People Carrier: 5-8 passengers, more luggage space
+- Executive: Premium vehicle for business travel
+- If caller requests a specific vehicle type, acknowledge: "I've noted you'd like an [vehicle_type]."
 
 # ADDRESS INTERPRETATION
 - "52-8" or "52 A" means "52A" (alphanumeric house number)
@@ -152,13 +169,15 @@ function arrayBufferToBase64(buffer: Uint8Array): string {
 }
 
 // === STEP DETECTION ===
-type BookingStep = "pickup" | "destination" | "passengers" | "time" | "summary" | "awaiting_fare" | "awaiting_final" | "done" | "unknown";
+type BookingStep = "pickup" | "destination" | "passengers" | "luggage" | "vehicle" | "time" | "summary" | "awaiting_fare" | "awaiting_final" | "done" | "unknown";
 
 function detectStepFromAdaTranscript(transcript: string): BookingStep {
   const lower = transcript.toLowerCase();
   if (/where would you like to be picked up|pickup (location|address)|pick you up/i.test(lower)) return "pickup";
   if (/where (would you like to go|are you going|is your destination)|heading to/i.test(lower)) return "destination";
   if (/how many (people|passengers)|travelling/i.test(lower)) return "passengers";
+  if (/luggage|bags?|suitcase|any bags/i.test(lower)) return "luggage";
+  if (/estate|mpv|people carrier|vehicle (type|preference)|larger vehicle/i.test(lower)) return "vehicle";
   if (/when would you like|pickup time|what time|now or later/i.test(lower)) return "time";
   if (/let me confirm|to confirm|summary|picking you up from/i.test(lower)) return "summary";
   if (/one moment|checking|getting.*fare/i.test(lower)) return "awaiting_fare";
@@ -174,6 +193,10 @@ function getContextHintForStep(step: BookingStep): string | null {
       return "[CONTEXT: User is providing DESTINATION ADDRESS. Listen for street names, house numbers, landmarks.]";
     case "passengers":
       return "[CONTEXT: User is providing PASSENGER COUNT. 'tree/free/the/there' = 3, 'to/too' = 2, 'for' = 4. Accept 1-10.]";
+    case "luggage":
+      return "[CONTEXT: User is describing LUGGAGE. Listen for: none, small bag, suitcase(s), pushchair, wheelchair, golf clubs.]";
+    case "vehicle":
+      return "[CONTEXT: User is choosing VEHICLE TYPE. Options: standard, estate, MPV/people carrier, executive.]";
     case "time":
       return "[CONTEXT: User is providing PICKUP TIME. 'now/asap' = immediately. Listen for times like '3pm'.]";
     case "summary":
@@ -390,6 +413,8 @@ serve(async (req) => {
       if (args.destination) bookingState.destination = args.destination as string;
       if (args.passengers) bookingState.passengers = args.passengers as number;
       if (args.time) bookingState.time = args.time as string;
+      if (args.luggage) bookingState.luggage = args.luggage as string;
+      if (args.vehicle_type) bookingState.vehicle_type = args.vehicle_type as string;
       
       if (action === "request_quote") {
         currentStep = "awaiting_fare";
