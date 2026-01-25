@@ -467,22 +467,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_greetingSent || _ws?.State != WebSocketState.Open) return;
         _greetingSent = true;
 
-        // Use response.create with inline instructions - the proper way to trigger initial greeting
-        // This tells the model exactly what to do for this specific response
+        // Match edge function approach: small delay for stability after session.updated
+        await Task.Delay(200);
+
+        // Clear any stale audio buffer before greeting (matches edge function)
+        await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+
+        // Use same approach as taxi-realtime-paired edge function:
+        // response.create with modalities (audio FIRST) and greeting instructions
         var responseCreate = new
         {
             type = "response.create",
             response = new
             {
-                modalities = new[] { "text", "audio" },
-                instructions = "Greet the caller warmly as Ada from the taxi company. Say something like 'Hello, this is Ada from taxi bookings. Where would you like to be picked up from?' Keep it brief and natural."
+                modalities = new[] { "audio", "text" },  // Audio first - prioritize voice output
+                instructions = "Greet the caller warmly. Say: 'Hello, this is Ada from taxi bookings. Where would you like to be picked up from?' Then WAIT for their response."
             }
         };
         
         await SendJsonAsync(responseCreate);
         
         _lastQuestionAsked = "pickup";
-        Log("🎤 Greeting triggered via response.create with instructions");
+        Log("🎤 Greeting triggered (edge function pattern: 200ms delay + audio-first modalities)");
     }
 
     private async Task SendContextHintAsync(string userText)
