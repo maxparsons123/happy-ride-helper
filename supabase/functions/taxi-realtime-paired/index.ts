@@ -3822,7 +3822,6 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             await updateLiveCall(sessionState);
             
             // Send tool result with EXPLICIT next step instruction
-            // NOTE: Do NOT send response.create after this - OpenAI auto-responds after function_call_output
             openaiWs!.send(JSON.stringify({
               type: "conversation.item.create",
               item: {
@@ -3837,8 +3836,8 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 })
               }
             }));
-            // REMOVED: openaiWs!.send(JSON.stringify({ type: "response.create" }));
-            // OpenAI Realtime API automatically generates a response after receiving function_call_output
+            // MUST send response.create after function_call_output to trigger Ada's response
+            openaiWs!.send(JSON.stringify({ type: "response.create" }))
             
           } else if (toolName === "book_taxi") {
             const action = String(toolArgs.action || "");
