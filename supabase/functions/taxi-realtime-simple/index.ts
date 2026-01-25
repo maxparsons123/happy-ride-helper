@@ -648,7 +648,26 @@ serve(async (req) => {
       
       if (msg.type === "init") {
         callId = msg.call_id || "unknown";
+        
+        // Try to get caller phone from multiple sources:
+        // 1. Explicit caller_phone/caller in init message
+        // 2. Extract from UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX (last 12 digits = phone)
         callerPhone = msg.caller_phone || msg.caller || "unknown";
+        
+        if (callerPhone === "unknown" && callId && callId !== "unknown") {
+          // Asterisk embeds phone digits in the UUID suffix
+          const uuidMatch = callId.match(/^00000000-0000-0000-0000-(\d{12})$/);
+          if (uuidMatch) {
+            const phoneDigits = uuidMatch[1];
+            // Remove leading zeros and format as phone number
+            const trimmed = phoneDigits.replace(/^0+/, "");
+            if (trimmed.length >= 10) {
+              callerPhone = "+" + trimmed;
+              log(`📱 Phone extracted from UUID: ${callerPhone}`);
+            }
+          }
+        }
+        
         log(`📞 Call initialized (caller: ${callerPhone})`);
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
