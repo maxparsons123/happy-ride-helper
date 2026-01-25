@@ -679,12 +679,14 @@ const TOOLS = [
 ];
 
 // Compute the next step based on current booking state (SERVER-DRIVEN SEQUENCE)
-function computeNextStep(booking: SessionState["booking"]): SessionState["lastQuestionAsked"] {
+function computeNextStep(booking: SessionState["booking"], preSummaryDone?: boolean): SessionState["lastQuestionAsked"] {
   if (!booking.pickup) return "pickup";
   if (!booking.destination) return "destination";
   // CRITICAL FIX: Check for null OR 0 OR undefined - passengers must be explicitly set to a valid count
   if (booking.passengers === null || booking.passengers === undefined || booking.passengers <= 0) return "passengers";
   if (!booking.pickupTime) return "time";
+  // PRE-SUMMARY: Ask user if they want to change anything before final confirmation
+  if (!preSummaryDone) return "pre_summary";
   return "confirmation";
 }
 
@@ -694,13 +696,15 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
     case "pickup":
       return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
     case "destination":
-      return `Great, pickup is ${booking.pickup}. Now ask: 'And what is your destination?' Then wait for their response.`;
+      return "What is your destination?";
     case "passengers":
-      return `Good, destination is ${booking.destination}. Now ask: 'How many passengers will be traveling?' Then wait for their response.`;
+      return "How many passengers will be traveling?";
     case "time":
-      return `Okay, ${booking.passengers} passenger(s). Now ask: 'When do you need the taxi - now or for a specific time?' Then wait for their response.`;
+      return "When do you need the taxi - now or for a specific time?";
+    case "pre_summary":
+      return `Give a quick recap: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger${booking.passengers === 1 ? '' : 's'}, ${booking.pickupTime || 'as soon as possible'}. Is there anything you'd like to change before I get you a quote?" Wait for their response.`;
     case "confirmation":
-      return `All details collected! Now give a brief summary and call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
+      return `User confirmed no changes needed. Now call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
     default:
       return "Continue the conversation naturally.";
   }
@@ -776,11 +780,11 @@ interface SessionState {
   };
   // USER TRUTH: Raw values from STT that override AI extraction
   userTruth: UserTruth;
-  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
+  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none";
   // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
   // This prevents the state machine from skipping steps when Ada's next question
   // arrives before the user's answer to the previous question
-  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none" | null;
+  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none" | null;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -825,6 +829,8 @@ interface SessionState {
   quoteDelivered: boolean;
   // Response guard: Queue for deferred response.create calls to prevent concurrent responses
   deferredResponsePayload: any | null;
+  // Pre-summary phase complete - user confirmed no changes needed
+  preSummaryDone: boolean;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -1815,6 +1821,8 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     quoteDelivered: false,
     // Response guard: Track OpenAI response state to prevent concurrent response.create calls
     deferredResponsePayload: null as any | null,
+    // Pre-summary phase complete - user confirmed no changes needed
+    preSummaryDone: false,
   };
 }
 
@@ -3441,6 +3449,57 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               break; // Correction handled, don't run normal context pairing
             }
             
+            // PRE-SUMMARY PHASE: Handle user response to "Is there anything you'd like to change?"
+            if (sessionState.lastQuestionAsked === "pre_summary" && !sessionState.preSummaryDone) {
+              const lowerText = userText.toLowerCase().trim();
+              const normalized = lowerText.replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+              
+              // Check for "no changes" responses (meaning they're happy with booking)
+              const noChangesPatterns = /^(no|nope|nah|no thanks|that's fine|that's good|all good|looks good|sounds good|perfect|great|correct|right|yes|yeah)\b/i;
+              const wantsNoChanges = noChangesPatterns.test(normalized);
+              
+              // Check for explicit change requests
+              const wantsChanges = /change|amend|actually|wait|hold on|wrong|incorrect/i.test(lowerText);
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              
+              console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, address=${looksLikeAddress}`);
+              
+              if (wantsNoChanges && !wantsChanges && !looksLikeAddress) {
+                // User confirmed no changes - proceed to get quote
+                console.log(`[${callId}] ✅ PRE-SUMMARY COMPLETE - User confirmed no changes`);
+                sessionState.preSummaryDone = true;
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[NO CHANGES NEEDED] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER CONFIRMED NO CHANGES] The user said "${userText}" - they're happy with the details.
+
+Now call book_taxi with action='request_quote' to get the fare estimate.
+Booking: pickup=${sessionState.booking.pickup}, destination=${sessionState.booking.destination}, passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "now"}`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                break;
+              }
+              
+              if (wantsChanges || looksLikeAddress) {
+                // User wants to change something - let normal flow handle it
+                console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something`);
+                // Don't break - let the normal transcript handling process the change
+              }
+            }
+            
             // CONFIRMATION PHASE: Handle user response to fare quote
             if (sessionState.awaitingConfirmation) {
               const lowerText = userText.toLowerCase().trim();
@@ -3660,7 +3719,7 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                 });
                 
                 // DUPLICATE QUESTION FIX: Check if Ada already asked the next question
-                const willAskNext = computeNextStep({ ...sessionState.booking, destination: userText });
+                const willAskNext = computeNextStep({ ...sessionState.booking, destination: userText }, sessionState.preSummaryDone);
                 if (willAskNext === sessionState.lastQuestionAsked) {
                   console.log(`[${callId}] ⏭️ SKIPPING response.create - Ada already asked "${willAskNext}"`);
                   openaiWs!.send(JSON.stringify({
@@ -3711,7 +3770,7 @@ Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userTex
                 // DUPLICATE QUESTION FIX: If Ada just asked for destination and we're routing pickup,
                 // DON'T trigger a new response - Ada already asked the right question (destination)
                 // Just let the tool call flow naturally without re-asking
-                const willAskNext = computeNextStep({ ...sessionState.booking, pickup: userText });
+                const willAskNext = computeNextStep({ ...sessionState.booking, pickup: userText }, sessionState.preSummaryDone);
                 if (willAskNext === sessionState.lastQuestionAsked) {
                   console.log(`[${callId}] ⏭️ SKIPPING response.create - Ada already asked "${willAskNext}"`);
                   // Just inject the system message for context, but don't trigger a new response
@@ -3839,7 +3898,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             }
             
             // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
-            const nextStep = computeNextStep(sessionState.booking);
+            const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
             sessionState.lastQuestionAsked = nextStep;
             const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking);
             
