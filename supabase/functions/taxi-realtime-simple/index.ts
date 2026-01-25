@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
+const DEMO_SIMPLE_MODE = Deno.env.get("DEMO_SIMPLE_MODE") === "true"; // Set to true to force demo journey
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -138,6 +139,32 @@ function applySTTCorrections(text: string): string {
     corrected = corrected.replace(pattern, replacement);
   }
   return corrected;
+}
+
+// === PASSENGER PARSING ===
+function parsePassengers(text: string): number {
+  const lower = text.toLowerCase().trim();
+  const num = parseInt(lower);
+  if (!isNaN(num) && num > 0 && num <= 10) return num;
+  
+  const words: Record<string, number> = {
+    "one": 1, "two": 2, "to": 2, "too": 2, "three": 3, "tree": 3,
+    "four": 4, "for": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10,
+    // Spanish
+    "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    // French  
+    "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5,
+    // German
+    "eins": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5,
+    // Polish
+    "jeden": 1, "dwa": 2, "trzy": 3, "cztery": 4, "pięć": 5,
+  };
+  
+  for (const [word, val] of Object.entries(words)) {
+    if (lower.includes(word)) return val;
+  }
+  return 0;
 }
 
 // === SYSTEM PROMPT BUILDER ===
@@ -280,6 +307,8 @@ serve(async (req) => {
   const lastUserTruth = {
     pickup: "",
     destination: "",
+    passengers: 1,
+    time: "ASAP",
   };
   
   // === BOOKING STATE ===
@@ -477,11 +506,27 @@ serve(async (req) => {
         }));
       }
 
-      // Session configured - trigger greeting
+      // Session configured - trigger greeting or demo summary
       if (msg.type === "session.updated") {
-        log("🎤 Session configured, triggering greeting");
-        currentStep = "pickup"; // After greeting, we're asking for pickup
-        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        if (DEMO_SIMPLE_MODE && currentStep === "summary") {
+          // Demo mode: Skip to summary with hardcoded journey
+          log("🎭 DEMO MODE: Injecting summary");
+          const summary = `Alright, let me quickly summarize your booking. You'd like to be picked up at ${lastUserTruth.pickup}, and travel to ${lastUserTruth.destination}. There will be ${lastUserTruth.passengers} person, and you'd like to be picked up ${lastUserTruth.time}. Is that correct?`;
+          
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "input_text", text: summary }]
+            }
+          }));
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        } else {
+          log("🎤 Session configured, triggering greeting");
+          currentStep = "pickup"; // After greeting, we're asking for pickup
+          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        }
       }
 
       // Forward audio to bridge
@@ -549,18 +594,26 @@ serve(async (req) => {
           log(`👤 User (corrected): ${corrected}`);
         }
 
+        // Capture user truth based on current step
         if (currentStep === "pickup") {
           lastUserTruth.pickup = corrected;
           if (matches) log(`🏠 Found Alphanumeric Pickup Number: ${matches.join(', ')}`);
         } else if (currentStep === "destination") {
           lastUserTruth.destination = corrected;
           if (matches) log(`🏠 Found Alphanumeric Destination Number: ${matches.join(', ')}`);
+        } else if (currentStep === "passengers") {
+          const pax = parsePassengers(corrected);
+          if (pax > 0) {
+            lastUserTruth.passengers = pax;
+            log(`👥 Passengers: ${pax}`);
+          }
+        } else if (currentStep === "time") {
+          lastUserTruth.time = corrected;
+          log(`⏰ Time: ${corrected}`);
         }
         
         // Log current user truth state
-        if (lastUserTruth.pickup || lastUserTruth.destination) {
-          log(`📋 User Truth: pickup="${lastUserTruth.pickup}" destination="${lastUserTruth.destination}"`);
-        }
+        log(`📋 User Truth: pickup="${lastUserTruth.pickup}" dest="${lastUserTruth.destination}" pax=${lastUserTruth.passengers} time="${lastUserTruth.time}"`);
       }
 
       // === TOOL CALL HANDLING ===
@@ -618,13 +671,32 @@ serve(async (req) => {
         log(`📞 Call initialized from ${callerPhone || "unknown"}`);
         log(`🌍 Detected locale: ${callerLocale.code} (${callerLocale.language})`);
         
+        // === DEMO MODE: Pre-fill with hardcoded journey ===
+        if (DEMO_SIMPLE_MODE) {
+          log("🎭 DEMO MODE: Using hardcoded journey for Max");
+          lastUserTruth.pickup = "52A David Road";
+          lastUserTruth.destination = "The Cozy Club";
+          lastUserTruth.passengers = 1;
+          lastUserTruth.time = "ASAP";
+          bookingState.pickup = lastUserTruth.pickup;
+          bookingState.destination = lastUserTruth.destination;
+          bookingState.passengers = lastUserTruth.passengers;
+          bookingState.pickup_time = lastUserTruth.time;
+          currentStep = "summary";
+          
+          // Connect OpenAI, then after session is ready, inject summary
+          connectOpenAI();
+          socket.send(JSON.stringify({ type: "ready" }));
+          return;
+        }
+        
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
       }
       
       if (msg.type === "hangup") {
         log("👋 Hangup received");
-        log(`📋 Final User Truth: pickup="${lastUserTruth.pickup}" destination="${lastUserTruth.destination}"`);
+        log(`📋 Final User Truth: pickup="${lastUserTruth.pickup}" dest="${lastUserTruth.destination}" pax=${lastUserTruth.passengers}`);
         openaiWs?.close();
       }
     } catch {
