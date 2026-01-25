@@ -704,6 +704,15 @@ serve(async (req) => {
               booking.pickup = addressPart;
             }
             
+            // IMMEDIATELY persist the correction to database
+            await supabase.from("live_calls").update({ 
+              pickup: booking.pickup, 
+              destination: booking.destination, 
+              passengers: booking.passengers,
+              booking_step: currentStep
+            }).eq("call_id", callId);
+            log(`💾 Correction persisted to DB: pickup="${booking.pickup}", destination="${booking.destination}"`);
+            
             // Always go back to summary after an update if we have all fields
             if (booking.pickup && booking.destination && booking.passengers && booking.time) {
               currentStep = "summary";
@@ -717,7 +726,7 @@ serve(async (req) => {
 - Destination: "${booking.destination}"
 - Passengers: ${passengerWord}
 - Time: "${booking.time}"
-Say: "So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
+Say: "Let me update that. So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
                 }));
               }
             } else {
