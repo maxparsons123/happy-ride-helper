@@ -11,21 +11,27 @@ const corsHeaders = {
 
 // === STT CORRECTIONS ===
 const STT_CORRECTIONS: Record<string, string> = {
+  // House number corrections
   "52-8": "52A", "52 8": "52A", "528": "52A", "52 a": "52A",
   "52-a": "52A", "fifty two a": "52A", "fifty-two a": "52A",
   "52 hey": "52A", "52 eh": "52A", "52 age": "52A",
   "7-8": "7A", "7 8": "7A", "78": "7A", "7 a": "7A",
   "seven a": "7A", "7-a": "7A",
-  "david rohn": "David Road", "david rhone": "David Road",
-  "roswell": "Russell", "russel": "Russell",
+  // Street name corrections
+  "david rohn": "David Road", "david rhone": "David Road", "david rose": "David Road",
+  "roswell street": "Russell Street", "russel street": "Russell Street",
+  // Local place names
+  "sweet spots": "Sweetspot", "sweet spot": "Sweetspot",
 };
 
 function applySTTCorrections(text: string): string {
   let corrected = text;
   for (const [wrong, right] of Object.entries(STT_CORRECTIONS)) {
-    const regex = new RegExp(wrong, "gi");
+    // Use word boundaries to prevent partial matches
+    const regex = new RegExp(`\\b${wrong}\\b`, "gi");
     corrected = corrected.replace(regex, right);
   }
+  // Join numbers with following single letters (e.g., "52 A" -> "52A")
   corrected = corrected.replace(/(\d+)\s+([A-Za-z])(?=\s|$)/g, "$1$2");
   return corrected;
 }
