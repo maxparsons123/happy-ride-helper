@@ -226,6 +226,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
             audioToSend = pcmData;
         }
 
+        // Track buffered duration for PCM24 path (covers browser/WebRTC scenarios)
+        var samples = audioToSend.Length / 2; // 2 bytes per sample
+        var durationMs = (double)samples * 1000.0 / 24000.0;
+        _inputBufferedMs += durationMs;
+
         var base64 = Convert.ToBase64String(audioToSend);
         var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
 
@@ -351,7 +356,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     break;
 
                 case "input_audio_buffer.speech_stopped":
-                    Log("🎤 User stopped speaking");
+                    // VAD-driven commit - this is the proper way to commit for telephony
+                    Log($"🎤 VAD stopped — attempting commit ({_inputBufferedMs:F1}ms)");
+                    await CommitInputAudioIfReadyAsync();
                     break;
 
                 case "response.created":
@@ -365,13 +372,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     Log("✅ Response done");
                     _responseActive = false;
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _inputBufferedMs = 0; // Reset buffer tracking after response
                     
-                    // Attempt turn continuation after greeting to prevent session collapse
-                    // BUT: Only commit if we have enough audio buffered (≥120ms)
-                    // SIP callers wait for greeting to finish, creating "dead air" with 0ms buffered
+                    // DO NOT commit after greeting — SIP callers wait silently.
+                    // Wait for VAD speech_stopped instead.
                     if (_greetingSent && !_awaitingConfirmation)
                     {
-                        await CommitInputAudioIfReadyAsync();
+                        Log("⏳ Waiting for VAD/user speech — not committing turn after greeting");
                     }
                     break;
 
