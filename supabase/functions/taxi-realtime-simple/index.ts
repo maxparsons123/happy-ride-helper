@@ -265,8 +265,12 @@ async function sendDispatchWebhook(
   // Detect if destination is a "nearest X" request
   const nearestPlace = extractNearestPlace(booking.destination);
   
-  // Build the full BookTaxiResponse payload
+  // Build the payload matching C# HandleAdaIncoming expectations
   const payload = {
+    // Fields that C# checks for routing (ada_pickup triggers booking webhook)
+    ada_pickup: booking.pickup,
+    ada_destination: booking.destination,
+    
     // Core booking fields
     pickup_location: booking.pickup,
     dropoff_location: booking.destination,
@@ -278,7 +282,7 @@ async function sendDispatchWebhook(
     
     // User details
     usertelephone: callerPhone,
-    username: "", // Populated by dispatch if known
+    username: "",
     
     // GPS (0 if not available)
     userlat: 0,
@@ -287,6 +291,7 @@ async function sendDispatchWebhook(
     // Reference fields
     reference_number: "",
     jobid: "",
+    job_id: "",
     
     // Raw JSON for debugging
     Rawjson: JSON.stringify({
@@ -309,6 +314,8 @@ async function sendDispatchWebhook(
     isFromAda: true,
     isQuoteOnly: action === "request_quote",
     ada_call_id: callId,
+    call_id: callId,
+    action: action,
     vehicle_type: booking.vehicle_type || "",
     vehicle_request: booking.vehicle_type || "",
     
@@ -316,7 +323,7 @@ async function sendDispatchWebhook(
     callers_pickup: booking.pickup,
     callers_dropoff: booking.destination,
     
-    // Verification flags (false until verified)
+    // Verification flags
     pickup_verified: false,
     dropoff_verified: false,
     
@@ -324,10 +331,8 @@ async function sendDispatchWebhook(
     ada_estimated_fare: booking.fare || "",
     ada_estimated_eta: booking.eta || "",
     
-    // Webhook control fields
-    callback_url: callbackUrl,
-    call_id: callId,
-    action: action
+    // Webhook control
+    callback_url: callbackUrl
   };
   
   if (!DISPATCH_WEBHOOK_URL) {
