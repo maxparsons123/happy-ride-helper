@@ -823,6 +823,8 @@ interface SessionState {
   fallbackQuoteTimerId: ReturnType<typeof setTimeout> | null;
   // Track if we've already delivered a quote (real or fallback) to prevent duplicates
   quoteDelivered: boolean;
+  // Response guard: Queue for deferred response.create calls to prevent concurrent responses
+  deferredResponsePayload: any | null;
 }
 
 const ECHO_GUARD_MS = 250;
@@ -1810,7 +1812,9 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     // Fallback quote timer ID - used to cancel if real quote arrives
     fallbackQuoteTimerId: null,
     // Track if we've already delivered a quote (real or fallback) to prevent duplicates
-    quoteDelivered: false
+    quoteDelivered: false,
+    // Response guard: Track OpenAI response state to prevent concurrent response.create calls
+    deferredResponsePayload: null as any | null,
   };
 }
 
@@ -1844,6 +1848,26 @@ NEVER swap fields. Trust the question context.
   }
   
   return messages;
+}
+
+// SAFE RESPONSE CREATE: Prevents "conversation_already_has_active_response" errors
+// If a response is already in progress, queue the new one for later
+function safeResponseCreate(
+  openaiWs: WebSocket,
+  sessionState: SessionState,
+  callId: string,
+  payload?: any
+) {
+  if (sessionState.openAiResponseActive) {
+    console.log(`[${callId}] ⏸️  Response already active - queueing new response.create`);
+    sessionState.deferredResponsePayload = payload ? { type: "response.create", response: payload } : { type: "response.create" };
+    return;
+  }
+  
+  // Send immediately
+  const msg = payload ? { type: "response.create", response: payload } : { type: "response.create" };
+  openaiWs.send(JSON.stringify(msg));
+  console.log(`[${callId}] ✅ response.create sent`);
 }
 
 // Update live_calls table with current state
@@ -2490,13 +2514,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     console.log(`[${callId}] 📢 Version: ${VERSION}, Greeting: ${greetingText}`);
     
     // Simple approach: just request a response with specific instructions
-    openaiWs!.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["audio", "text"],  // Audio first - prioritize voice output
-        instructions: greetingInstruction
-      }
-    }));
+    safeResponseCreate(openaiWs!, sessionState, callId, {
+      modalities: ["audio", "text"],  // Audio first - prioritize voice output
+      instructions: greetingInstruction
+    });
     
     sessionState.lastQuestionAsked = "pickup";
     console.log(`[${callId}] ✅ Greeting sent - will NOT retry`);
@@ -3414,7 +3435,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   }]
                 }
               }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              safeResponseCreate(openaiWs!, sessionState, callId);
               
               await updateLiveCall(sessionState);
               break; // Correction handled, don't run normal context pairing
@@ -3502,7 +3523,7 @@ Do NOT cancel abruptly - be polite and offer further assistance.`
                     }]
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 
                 sessionState.awaitingConfirmation = false;
                 sessionState.quoteInFlight = false;
@@ -3536,7 +3557,7 @@ Current booking: pickup="${sessionState.booking.pickup}", destination="${session
                     }]
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
               
@@ -3555,7 +3576,7 @@ Ask clearly: "Would you like me to book that taxi for you?"`
                   }]
                 }
               }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
+              safeResponseCreate(openaiWs!, sessionState, callId);
               break;
             }
 
@@ -3617,7 +3638,7 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                     }]
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break; // Don't run normal context pairing
               }
             }
@@ -3655,7 +3676,7 @@ Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userTex
                     }]
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
               
@@ -3685,7 +3706,7 @@ Current state: pickup=NOW "${userText}"`
                     }]
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
             }
@@ -3801,7 +3822,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 })
               }
             }));
-            openaiWs!.send(JSON.stringify({ type: "response.create" }));
+            safeResponseCreate(openaiWs!, sessionState, callId);
             
           } else if (toolName === "book_taxi") {
             const action = String(toolArgs.action || "");
@@ -3863,7 +3884,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                     output: JSON.stringify({ success: false, status: "ignored", reason: "already_confirmed" })
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
 
@@ -3877,7 +3898,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                     output: JSON.stringify({ success: true, status: "pending", message: "Quote already requested. Please wait." })
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
 
@@ -3896,7 +3917,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                     })
                   }
                 }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
                 break;
               }
 
@@ -4362,6 +4383,16 @@ Do NOT skip any part. Say ALL of it warmly.]`
           // A response finished (text-only or otherwise). Clear active flag and flush any queued goodbye.
           sessionState.openAiResponseActive = false;
           sessionState.openAiSpeechStartedAt = 0;
+          
+          // Flush any deferred response.create that was queued during the active response
+          if (sessionState.deferredResponsePayload && openaiWs && openaiWs.readyState === WebSocket.OPEN && !cleanedUp) {
+            const queued = sessionState.deferredResponsePayload;
+            sessionState.deferredResponsePayload = null;
+            console.log(`[${callId}] 🚀 Flushing deferred response.create (on response.done)`);
+            openaiWs.send(JSON.stringify(queued));
+            sessionState.openAiResponseActive = true; // New response now active
+            break; // Don't process pendingPostConfirmResponse in same cycle
+          }
 
           if (
             sessionState.pendingPostConfirmResponse &&
