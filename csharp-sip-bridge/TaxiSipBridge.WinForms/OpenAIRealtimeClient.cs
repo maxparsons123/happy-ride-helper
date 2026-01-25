@@ -431,7 +431,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             {
                 type = "message",
                 role = "assistant",
-                content = new[] { new { type = "output_text", text = greeting } }
+                content = new[] { new { type = "text", text = greeting } }
             }
         };
         
