@@ -8,6 +8,32 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === STT CORRECTIONS ===
+// Fix common Whisper mishearings for alphanumeric addresses
+const STT_CORRECTIONS: Record<string, string> = {
+  // 52A variations
+  "52-8": "52A", "52 8": "52A", "528": "52A", "52 a": "52A",
+  "52-a": "52A", "fifty two a": "52A", "fifty-two a": "52A",
+  "52 hey": "52A", "52 eh": "52A", "52 age": "52A",
+  // 7A variations
+  "7-8": "7A", "7 8": "7A", "78": "7A", "7 a": "7A",
+  "seven a": "7A", "7-a": "7A",
+  // Common road name mishearings
+  "david rohn": "David Road", "david rhone": "David Road",
+  "roswell": "Russell", "russel": "Russell",
+};
+
+function applySTTCorrections(text: string): string {
+  let corrected = text;
+  for (const [wrong, right] of Object.entries(STT_CORRECTIONS)) {
+    const regex = new RegExp(wrong, "gi");
+    corrected = corrected.replace(regex, right);
+  }
+  // Also join numbers with trailing letters: "52 A" → "52A"
+  corrected = corrected.replace(/(\d+)\s+([A-Za-z])(?=\s|$)/g, "$1$2");
+  return corrected;
+}
+
 // === SYSTEM PROMPT ===
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -39,9 +65,14 @@ Ask ONLY ONE question per response. NEVER combine questions.
 # PASSENGERS (ANTI-STUCK RULE)
 - Only move past the passengers step if the caller clearly provides a passenger count.
 - Accept digits (e.g. "3") or clear number words (one, two, three, four, five, six, seven, eight, nine, ten).
-- Also accept common telephony homophones: "to/too" → two, "for" → four, "tree" → three.
+- Also accept common telephony homophones: "to/too" → two, "for" → four, "tree/free" → three.
 - If the caller says something that sounds like an address/place (street/road/avenue/hotel/etc.) while you are asking for passengers, DO NOT advance.
 - Instead, repeat exactly: "How many people will be travelling?"
+
+# ADDRESS INTERPRETATION (CRITICAL)
+- When you hear a number followed by a letter sound (like "52 A" or "52-8"), treat it as an alphanumeric house number (52A).
+- Common mishearings: "52-8" means "52A", "7-8" means "7A", etc.
+- Always preserve the full house number including any letter suffix.
 
 # CORRECTIONS & CHANGES (CRITICAL)
 When the caller wants to change or correct something they said:
@@ -138,8 +169,8 @@ serve(async (req) => {
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
+              threshold: 0.3,        // Lower to catch short words like "three"
+              prefix_padding_ms: 500, // More padding to capture word onset
               silence_duration_ms: 800
             }
           }
@@ -169,7 +200,13 @@ serve(async (req) => {
         log(`🗣️ Ada: ${msg.transcript}`);
       }
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        log(`👤 User: ${msg.transcript}`);
+        const raw = msg.transcript;
+        const corrected = applySTTCorrections(raw);
+        if (raw !== corrected) {
+          log(`👤 User: ${raw} → [STT FIX] ${corrected}`);
+        } else {
+          log(`👤 User: ${raw}`);
+        }
       }
 
       // Log errors
