@@ -290,51 +290,51 @@ function pcm16ToBase64(pcm: Int16Array): string {
 // Multilingual greetings - keyed by ISO 639-1 language code
 const GREETINGS: Record<string, { greeting: string; pickupQuestion: string }> = {
   en: {
-    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant.",
+    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started.",
     pickupQuestion: "Where would you like to be picked up?"
   },
   es: {
-    greeting: "Hola, bienvenido a la demostración de Taxibot. Soy Ada, tu asistente de reservas de taxi.",
+    greeting: "Hola, bienvenido a la demostración de Taxibot. Soy Ada, tu asistente de reservas de taxi. Estoy aquí para hacer que reservar un taxi sea rápido y fácil para ti. Así que, empecemos.",
     pickupQuestion: "¿Dónde le gustaría que le recojamos?"
   },
   fr: {
-    greeting: "Bonjour et bienvenue sur la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi.",
+    greeting: "Bonjour et bienvenue sur la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour vous faciliter la réservation. Alors, commençons.",
     pickupQuestion: "Où souhaitez-vous être pris en charge?"
   },
   de: {
-    greeting: "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin.",
+    greeting: "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Taxibuchung schnell und einfach zu machen. Also, fangen wir an.",
     pickupQuestion: "Wo möchten Sie abgeholt werden?"
   },
   it: {
-    greeting: "Ciao e benvenuto alla demo di Taxibot. Sono Ada, la tua assistente per le prenotazioni taxi.",
+    greeting: "Ciao e benvenuto alla demo di Taxibot. Sono Ada, la tua assistente per le prenotazioni taxi. Sono qui per rendere la prenotazione di un taxi facile e veloce. Quindi, iniziamo.",
     pickupQuestion: "Dove desidera essere prelevato?"
   },
   pt: {
-    greeting: "Olá e bem-vindo à demonstração do Taxibot. Sou a Ada, sua assistente de reservas de táxi.",
+    greeting: "Olá e bem-vindo à demonstração do Taxibot. Sou a Ada, sua assistente de reservas de táxi. Estou aqui para tornar a reserva de táxi rápida e fácil para você. Então, vamos começar.",
     pickupQuestion: "Onde gostaria de ser apanhado?"
   },
   nl: {
-    greeting: "Hallo en welkom bij de Taxibot demo. Ik ben Ada, je taxi-reserveringsassistent.",
+    greeting: "Hallo en welkom bij de Taxibot demo. Ik ben Ada, je taxi-reserveringsassistent. Ik ben hier om het boeken van een taxi snel en gemakkelijk te maken. Laten we beginnen.",
     pickupQuestion: "Waar wilt u opgehaald worden?"
   },
   pl: {
-    greeting: "Cześć i witaj w demo Taxibot. Jestem Ada, twoja asystentka rezerwacji taksówek.",
+    greeting: "Cześć i witaj w demo Taxibot. Jestem Ada, twoja asystentka rezerwacji taksówek. Jestem tutaj, aby ułatwić ci rezerwację taksówki. Więc zaczynajmy.",
     pickupQuestion: "Gdzie chciałbyś być odebrany?"
   },
   ar: {
-    greeting: "مرحباً بك في عرض تاكسي بوت التجريبي. أنا آدا، مساعدتك لحجز التاكسي.",
+    greeting: "مرحباً بك في عرض تاكسي بوت التجريبي. أنا آدا، مساعدتك لحجز التاكسي. أنا هنا لجعل حجز التاكسي سريعاً وسهلاً. لنبدأ.",
     pickupQuestion: "من أين تريد أن نأخذك؟"
   },
   hi: {
-    greeting: "नमस्ते और टैक्सीबॉट डेमो में आपका स्वागत है। मैं एडा हूं, आपकी टैक्सी बुकिंग सहायक।",
+    greeting: "नमस्ते और टैक्सीबॉट डेमो में आपका स्वागत है। मैं एडा हूं, आपकी टैक्सी बुकिंग सहायक। मैं यहां टैक्सी बुक करना आपके लिए जल्दी और आसान बनाने के लिए हूं। तो, चलिए शुरू करते हैं।",
     pickupQuestion: "आप कहाँ से पिकअप होना चाहेंगे?"
   },
   ur: {
-    greeting: "سلام اور ٹیکسی بوٹ ڈیمو میں خوش آمدید۔ میں آڈا ہوں، آپ کی ٹیکسی بکنگ اسسٹنٹ۔",
+    greeting: "سلام اور ٹیکسی بوٹ ڈیمو میں خوش آمدید۔ میں آڈا ہوں، آپ کی ٹیکسی بکنگ اسسٹنٹ۔ میں یہاں آپ کے لیے ٹیکسی بک کرنا آسان بنانے کے لیے ہوں۔ تو، چلیں شروع کرتے ہیں۔",
     pickupQuestion: "آپ کہاں سے اٹھائے جانا چاہتے ہیں؟"
   },
   auto: {
-    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant.",
+    greeting: "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started.",
     pickupQuestion: "Where would you like to be picked up?"
   }
 };
@@ -498,86 +498,127 @@ function buildSystemPrompt(language: string): string {
   return `
 # IDENTITY
 You are Ada, the professional taxi booking assistant for the Taxibot demo.
-Voice: Warm, clear, professionally casual.
+Voice: Warm, clear, professionally casual. Speak at a SLOWER, relaxed pace - not rushed.
 
 ${langInstruction}
 
-# GREETING (Say this FIRST when call starts)
-"Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. Where would you like to be picked up?"
+# SPEAKING STYLE
+- Speak slowly and clearly, with natural pauses between sentences.
+- Do not rush through your responses.
+- Take your time with each word, especially addresses and numbers.
+- Use a calm, measured pace that is easy to understand over the phone.
 
-# BOOKING FLOW (Ask ONE at a time, in order)
-1. Get pickup location
-2. Get destination  
-3. Get number of passengers
-4. Get pickup time (default: now/ASAP)
-5. Before summary, ask: "Before I confirm the details, is there anything you'd like to change?"
-6. Summarize booking and ask for confirmation
-7. If confirmed, get price quote and complete booking
+# 🛑 CRITICAL LOGIC GATE: THE CHECKLIST
+You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [Time].
+- You are FORBIDDEN from moving to the 'Booking Summary' until ALL 4 items are specifically provided by the user.
+- If a detail is missing, ask for it.
 
-# ONE QUESTION RULE
-Ask ONLY ONE question per response. NEVER combine questions.
+# 🚨 ONE QUESTION RULE (CRITICAL)
+- Ask ONLY ONE question per response. NEVER combine questions.
+- WRONG: "Where would you like to be picked up and where are you going?"
+- WRONG: "How many passengers and when do you need it?"
+- RIGHT: "Where would you like to be picked up?" [wait for answer]
+- RIGHT: "And what is your destination?" [wait for answer]
+- Wait for a user response before asking the next question.
 
-# PASSENGERS (ANTI-STUCK RULE)
-- Only move past the passengers step if the caller clearly provides a passenger count.
-- Accept digits (e.g. "3") or clear number words (one, two, three, four, five, six, seven, eight, nine, ten).
-- Also accept common telephony homophones: "to/too" → two, "for" → four, "tree" → three.
-- If the caller says something that sounds like an address/place (street/road/avenue/hotel/etc.) while you are asking for passengers, DO NOT advance.
-- Instead, repeat exactly: "How many people will be travelling?"
+# 🎯 SERVER-DRIVEN SEQUENCE (CRITICAL)
+The server tracks the booking flow. When you call sync_booking_data:
+- The server will tell you what to ask NEXT in the tool response
+- ALWAYS follow the server's "instruction" field - it tells you exactly what to ask
+- NEVER skip ahead or guess what to ask next
+- Trust the server's next_step instruction completely
 
-# CORRECTIONS & CHANGES (CRITICAL)
-When the caller wants to change or correct something they said:
-- Listen for: "actually", "no wait", "change", "I meant", "not X, it's Y", "sorry, it's", "let me correct"
-- IMMEDIATELY update your understanding with the new information
-- Acknowledge briefly: "Updated to [new value]." then continue the flow
-- If they correct during the summary, say "Let me update that" and give a NEW summary with the corrected info
-- NEVER ignore corrections - always act on them
+# PHASE 1: THE WELCOME (Play immediately)
+Greet the caller warmly in the appropriate language.
 
-# RULES
-- Do NOT say "Got it" or "Great" before asking the next question
-- Do NOT repeat or confirm individual answers mid-flow
-- After each answer, immediately ask the NEXT question
-- Only summarize at the end before confirmation
-- If caller says "no" to the summary, ask "What would you like to change?"
-- Accept ANY address as-is - do NOT ask for house numbers, postcodes, or more details
-- Accept business names, landmarks, and partial addresses immediately
+# PHASE 2: SEQUENTIAL GATHERING (Strict Order - SERVER CONTROLLED)
+The server controls this sequence. After each user answer:
+1. Call sync_booking_data with ONLY the field the user just answered
+2. Read the server's response for "instruction" 
+3. Do EXACTLY what the instruction says
+4. Wait for the user's response before continuing
 
-# SUMMARY PHASE
-When all 4 items are collected AND pre-summary check is done:
-- Summarize: pickup, destination, passengers, time
-- Ask if this is correct
-- If user says no, ask what they want to change, then give NEW summary
+🚨 CRITICAL: NEVER ASK USER TO CONFIRM/REPEAT AN ADDRESS 🚨
+🚫 DO NOT ask "Could you please confirm the pickup address?"
+🚫 DO NOT ask "Could you confirm the destination?"
+🚫 DO NOT ask "Is that the correct address?"
+🚫 DO NOT confirm or repeat back each answer individually (except passengers).
+🚫 DO NOT combine multiple questions into one sentence.
+✅ For addresses: move immediately to the next question with no filler.
+✅ For passengers: briefly acknowledge then ask about time.
+✅ Save full confirmations for the Summary phase.
+✅ ACCEPT ANY ADDRESS AS-IS - do NOT ask for house numbers, postcodes, or more details.
+✅ Accept business names, landmarks, partial addresses, and place names immediately.
 
-# PRICING (After summary confirmed)
-When user confirms summary:
-1. Say "Let me check the fare for you" 
-2. Call book_taxi(action='request_quote')
-3. WAIT for dispatch response - do NOT make up prices
-4. State the exact fare and ETA from dispatch
-5. Ask if they want to proceed
+# PHASE 3: THE SUMMARY (Gate Keeper)
+Only after the checklist is 100% complete, summarize the booking in the caller's language:
+Pickup address, destination address, number of passengers, pickup time. Ask if correct.
 
-# BOOKING COMPLETION
-If user confirms the fare:
-1. Say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!"
-2. Call book_taxi(action='confirmed')
-3. Call end_call()
+# PHASE 4: PRICING (State Lock)
+🚨🚨🚨 MANDATORY FUNCTION CALL 🚨🚨🚨
+When user confirms summary with 'Yes', you MUST:
+1. Say you're checking the price (in the caller's language)
+2. IMMEDIATELY call the book_taxi function with action='request_quote'
+3. You CANNOT check the price without calling book_taxi(action='request_quote')
+4. If you don't call the function, you will NEVER get a price
 
-If user declines:
-1. Call cancel_booking
+⚠️ THE FUNCTION CALL IS REQUIRED - speaking alone is not enough!
+The book_taxi(action='request_quote') function sends the request to dispatch.
+Without calling it, there is no way to get a price quote.
+
+After calling book_taxi(action='request_quote'):
+→ Say you're checking (one moment please) in caller's language
+→ Then STOP TALKING COMPLETELY.
+→ WAIT IN COMPLETE SILENCE until you receive a [DISPATCH QUOTE RECEIVED] message.
+→ Do NOT make up any prices. Do NOT estimate any ETAs. Do NOT guess.
+
+🚨🚨🚨 ABSOLUTE PRICING PROHIBITION 🚨🚨🚨
+- You have ZERO knowledge of fares, prices, or costs.
+- You CANNOT calculate, estimate, or guess any price.
+- You MUST wait for the external dispatch system to provide the price.
+- The ONLY way you will know a price is when you receive a [DISPATCH QUOTE RECEIVED] message.
+- Until that message arrives, you know NOTHING about the fare.
+
+Once you receive [DISPATCH QUOTE RECEIVED] with the ACTUAL price:
+State the exact fare and ETA from dispatch, ask if they want to proceed. Do NOT repeat addresses.
+
+# PHASE 5: DISPATCH & CLOSE - WAIT FOR EXPLICIT CONFIRMATION
+After asking if they want to book, WAIT for user response:
+
+IF USER SAYS YES:
+1. Confirm you're booking, mention WhatsApp confirmation
+2. IMMEDIATELY call book_taxi(action='confirmed')
+3. Say goodbye and call end_call()
+
+IF USER SAYS NO:
+1. IMMEDIATELY call cancel_booking
 2. Ask if there's anything else you can help with
+3. If user says no again, say goodbye and call end_call()
 
 # CANCELLATION
 If user says "cancel", "never mind", "forget it":
-- Call cancel_booking
-- Ask if there's anything else you can help with
+→ CALL cancel_booking
+Ask if there's anything else you can help with.
 
 # NAME HANDLING
-If caller says their name → Call save_customer_name
+If caller says their name → CALL save_customer_name
 
-# SERVER-DRIVEN SEQUENCE
-The server tracks the booking flow. When you call sync_booking_data:
-- The server will tell you what to ask NEXT in the tool response
-- ALWAYS follow the server's "instruction" field
-- NEVER skip ahead or guess what to ask next
+# GUARDRAILS
+❌ NEVER state a price or ETA unless the tool returns that exact value.
+❌ NEVER use placeholders - always ask for specifics.
+❌ NEVER move to Summary until all 4 checklist items are filled.
+❌ NEVER repeat addresses after the summary is confirmed.
+❌ NEVER ask for house numbers, postcodes, or more details on ANY address.
+✅ Accept ANY address exactly as spoken.
+✅ Move to the next question immediately after receiving any address.
+
+# CONTEXT PAIRING (CRITICAL - SERVER ENFORCED)
+When the user responds, the server injects context telling you which field they just answered.
+- The system message will say "You asked for: PICKUP" or "You asked for: DESTINATION" etc.
+- Call sync_booking_data with ONLY that specific field
+- The server response will contain "instruction" - ALWAYS follow it exactly
+- Example: Server says "instruction": "Ask for destination" → You ask for destination
+NEVER guess what to ask next. ALWAYS wait for the server's instruction.
 `;
 }
 
@@ -638,36 +679,30 @@ const TOOLS = [
 ];
 
 // Compute the next step based on current booking state (SERVER-DRIVEN SEQUENCE)
-// Added "pre_summary" step to give users a chance to make changes before final summary
-function computeNextStep(booking: SessionState["booking"], preSummaryAsked: boolean = false): SessionState["lastQuestionAsked"] {
+function computeNextStep(booking: SessionState["booking"]): SessionState["lastQuestionAsked"] {
   if (!booking.pickup) return "pickup";
   if (!booking.destination) return "destination";
   // CRITICAL FIX: Check for null OR 0 OR undefined - passengers must be explicitly set to a valid count
   if (booking.passengers === null || booking.passengers === undefined || booking.passengers <= 0) return "passengers";
   if (!booking.pickupTime) return "time";
-  // NEW: Ask user if they want to change anything before giving summary
-  if (!preSummaryAsked) return "pre_summary";
   return "confirmation";
 }
 
 // Get instruction for next step based on what's needed
-// RULE: NO filler words (Got it, Great, OK). Just ask the next question directly.
 function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"]): string {
   switch (nextStep) {
     case "pickup":
-      return "Ask: 'Where would you like to be picked up?' Wait for response.";
+      return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
     case "destination":
-      return "Ask: 'What is your destination?' Wait for response.";
+      return `Great, pickup is ${booking.pickup}. Now ask: 'And what is your destination?' Then wait for their response.`;
     case "passengers":
-      return "Ask: 'How many passengers?' Wait for response.";
+      return `Good, destination is ${booking.destination}. Now ask: 'How many passengers will be traveling?' Then wait for their response.`;
     case "time":
-      return "Ask: 'When do you need the taxi - now or a specific time?' Wait for response.";
-    case "pre_summary":
-      return `All details collected. Ask: "Is there anything you'd like to change?" If no, call book_taxi with action='request_quote'.`;
+      return `Okay, ${booking.passengers} passenger(s). Now ask: 'When do you need the taxi - now or for a specific time?' Then wait for their response.`;
     case "confirmation":
-      return `Summarize briefly and call book_taxi with action='request_quote'. Booking: ${booking.pickup} to ${booking.destination}, ${booking.passengers} passengers, ${booking.pickupTime || "now"}`;
+      return `All details collected! Now give a brief summary and call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
     default:
-      return "Continue naturally.";
+      return "Continue the conversation naturally.";
   }
 }
 
@@ -741,13 +776,11 @@ interface SessionState {
   };
   // USER TRUTH: Raw values from STT that override AI extraction
   userTruth: UserTruth;
-  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none";
+  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
   // This prevents the state machine from skipping steps when Ada's next question
   // arrives before the user's answer to the previous question
-  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none" | null;
-  // Track if we've asked the pre-summary check question
-  preSummaryAsked: boolean;
+  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none" | null;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -792,7 +825,7 @@ interface SessionState {
   quoteDelivered: boolean;
 }
 
-const ECHO_GUARD_MS = 150; // Reduced for faster user response detection
+const ECHO_GUARD_MS = 250;
 
 // Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
 // so Ada's initial greeting doesn't get cut off mid-sentence.
@@ -1201,13 +1234,6 @@ const STT_CORRECTIONS: Record<string, string> = {
   "5208 david": "52A David",
   "five two a david": "52A David",
   "fifty two a david": "52A David",
-  
-  // 52→62 mishearings (common telephony confusion)
-  "62a david road": "52A David Road",
-  "62a david": "52A David",
-  "62 a david": "52A David",
-  "sixty two a david": "52A David",
-  "sixty two a": "52A",
 };
 
 // Pre-compiled regex pattern for O(1) STT correction lookups
@@ -1758,7 +1784,6 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     },
     lastQuestionAsked: "none",
     questionTypeAtSpeechStart: null, // RACE CONDITION FIX: Snapshot question when user starts speaking
-    preSummaryAsked: false, // Track if we've asked the pre-summary check
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -2438,10 +2463,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   let greetingSent = false;
   let greetingAudioReceived = false; // Track if we actually got audio for the greeting
   let greetingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-  // Some SIP/AudioSocket bridges can drop the very first outbound audio burst.
-  // To guarantee the caller hears the build identifier, we repeat it once at the
-  // start of the *first real* assistant reply after the caller speaks.
-  let versionPrefixPending = true;
   // Monitoring: throttle DB inserts for audio playback in the LiveCalls panel
   let monitorAiChunkCount = 0;
   
@@ -2457,11 +2478,14 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     // Get language-specific greeting or fall back to English for auto-detect
     const langData = GREETINGS[sessionState.language] || GREETINGS["en"];
-    // Build the complete greeting - greeting + pickup question
+    // Include version number at the start for identification - MUST be spoken
     const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
     
-    // CRITICAL: Use explicit word-for-word instruction to prevent AI from paraphrasing
-    const greetingInstruction = `Say EXACTLY these words, word-for-word: "${greetingText}" Then WAIT silently for the caller to respond. Do NOT add anything else. Do NOT paraphrase.`;
+    // For auto-detect mode, let the AI decide based on first user response
+    // CRITICAL: Version MUST be spoken first, then the greeting
+    const greetingInstruction = sessionState.language === "auto"
+      ? `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again.`
+      : `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". Then WAIT for their response.`;
     
     console.log(`[${callId}] 📢 Version: ${VERSION}, Greeting: ${greetingText}`);
     
@@ -2469,7 +2493,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs!.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        modalities: ["audio", "text"],  // Audio first - prioritize voice output
         instructions: greetingInstruction
       }
     }));
@@ -2537,10 +2561,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Ultra-sensitive for immediate response detection
-          threshold: 0.25,           // Very low = highly sensitive to quiet speech
-          prefix_padding_ms: 600,     // Extended padding to capture full start of words
-          silence_duration_ms: 800,   // Shorter silence = faster turn-taking
+          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
         },
         tools: TOOLS,
         tool_choice: "auto",
@@ -2624,10 +2648,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           console.error(`[${callId}] ❌ OpenAI error:`, JSON.stringify(data));
           // Forward real errors to client so bridge can handle appropriately
           if (socket.readyState === WebSocket.OPEN) {
-            const msg = data?.error
-              ? `${data.error?.code || "unknown"}: ${data.error?.message || "Unknown OpenAI error"}`
-              : "Unknown OpenAI error";
-            socket.send(JSON.stringify({ type: "error", message: msg }));
+            socket.send(JSON.stringify({ type: "error", message: data.error?.message || "Unknown OpenAI error" }));
           }
           break;
 
@@ -2668,16 +2689,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 created_at: new Date().toISOString(),
               });
             }
-          }
-          break;
-
-        case "response.audio.done":
-          // CRITICAL: Clear the input audio buffer after Ada finishes speaking
-          // This flushes any TTS echo or background noise captured during her speech
-          // so it doesn't contaminate the user's next utterance transcription
-          console.log(`[${callId}] 🧹 Clearing audio buffer after AI speech to prevent echo`);
-          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
           }
           break;
 
@@ -3125,14 +3136,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 /when would you like/i,
                 /now or later/i
               ],
-              pre_summary: [
-                /before I confirm/i,
-                /anything you.d like to change/i,
-                /anything you would like to change/i,
-                /is there anything to change/i,
-                /want to change anything/i,
-                /any changes/i
-              ],
               confirmation: [
                 /would you like to go ahead/i,
                 /like me to book/i,
@@ -3198,10 +3201,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "conversation.item.input_audio_transcription.completed":
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
-            // One-time version prefix safety-net: ensure the caller hears the version.
-            // We inject this as a system instruction before the model produces the next reply.
-            // REMOVED: Version prefix safety-net - no longer announcing version
-
             const rawText = data.transcript.trim();
             // Apply alphanumeric corrections for house numbers (e.g., "52 A" → "52A")
             const alphanumericCorrected = applyAlphanumericCorrections(rawText);
@@ -3259,121 +3258,6 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (userTruthUpdated) {
               await updateLiveCall(sessionState);
               console.log(`[${callId}] 💾 User Truth persisted immediately`);
-              // NOTE: No extra system message injection here - OpenAI's natural response flow
-              // will use the tool via sync_booking_data. The tool result includes next step instruction.
-            }
-            
-            // === INLINE CORRECTION DETECTION (ANTI-HALLUCINATION) ===
-            // Detect "change pickup to X" or "pickup is X" and extract X directly from transcript
-            // This prevents AI from hallucinating by combining old + new addresses
-            const lower = userText.toLowerCase();
-            
-            // Patterns that indicate a direct correction with new value
-            const pickupChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?pick\s*-?\s*up\s+(?:to|two|is|should be|as)\s+(.+)/i) 
-              || lower.match(/pick\s*-?\s*up\s+(?:from|at)\s+(.+)/i)
-              || lower.match(/(?:actually|no,?\s*)?(?:it'?s?|its)\s+(.+?)(?:\s+for\s+pick\s*-?\s*up)?$/i);
-            
-            const destChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?destination\s+(?:to|two|is|should be|as)\s+(.+)/i)
-              || lower.match(/(?:going|go)\s+(?:to|two)\s+(.+)/i)
-              || lower.match(/drop\s*-?\s*off\s+(?:at|to|two)\s+(.+)/i);
-            
-            if (pickupChangeMatch) {
-              const newPickup = pickupChangeMatch[1].trim()
-                .replace(/^(to|two|at|is)\s+/i, '')
-                .replace(/\s+please$/i, '');  // Remove trailing "please"
-              console.log(`[${callId}] 🔧 INLINE CORRECTION: pickup extracted = "${newPickup}"`);
-              sessionState.userTruth.pickup = newPickup;
-              sessionState.booking.pickup = newPickup;
-              await updateLiveCall(sessionState);
-              
-              // Inject explicit instruction to use EXACTLY this value
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[CORRECTION CAPTURED] User changed pickup to EXACTLY: "${newPickup}". Use this EXACT value - do NOT add house numbers or modify it. Acknowledge: "Updated pickup to ${newPickup}." then ask if anything else needs changing.`
-                  }]
-                }
-              }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              break;
-            }
-            
-            if (destChangeMatch) {
-              const newDest = destChangeMatch[1].trim()
-                .replace(/^(to|two|at|is)\s+/i, '')
-                .replace(/\s+please$/i, '');  // Remove trailing "please"
-              console.log(`[${callId}] 🔧 INLINE CORRECTION: destination extracted = "${newDest}"`);
-              sessionState.userTruth.destination = newDest;
-              sessionState.booking.destination = newDest;
-              await updateLiveCall(sessionState);
-              
-              openaiWs!.send(JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "system",
-                  content: [{
-                    type: "input_text",
-                    text: `[CORRECTION CAPTURED] User changed destination to EXACTLY: "${newDest}". Use this EXACT value - do NOT modify it. Acknowledge: "Updated destination to ${newDest}." then ask if anything else needs changing.`
-                  }]
-                }
-              }));
-              openaiWs!.send(JSON.stringify({ type: "response.create" }));
-              break;
-            }
-            
-            // === PRE-SUMMARY RESPONSE DETECTION ===
-            // Handle user's response to "Is there anything you'd like to change?"
-            if (effectiveQuestionType === "pre_summary" || sessionState.lastQuestionAsked === "pre_summary") {
-              // User says NO (nothing to change) - proceed to summary
-              const noChangesNeeded = /^(no+|nope|nothing|all good|that.s fine|fine|correct|sounds good|all correct|no changes|no thank|not at all)/i.test(lower.trim());
-              // User wants to make changes
-              const wantsToChange = /^(yes|yeah|actually|change|update|wait|hold on|one thing|the pickup|the destination|passengers)/i.test(lower.trim());
-              
-              if (noChangesNeeded && !wantsToChange) {
-                console.log(`[${callId}] ✅ PRE-SUMMARY: User confirmed no changes needed`);
-                sessionState.preSummaryAsked = true;
-                const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryAsked);
-                sessionState.lastQuestionAsked = nextStep;
-                
-                // Inject instruction to give summary
-                openaiWs!.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{
-                      type: "input_text",
-                      text: `[NO CHANGES NEEDED] The user confirmed they don't want to change anything. 
-Now give a BRIEF summary of their booking and then call book_taxi with action='request_quote' to get the fare.
-Booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}", passengers=${sessionState.booking.passengers}, time="${sessionState.booking.pickupTime || "now"}"`
-                    }]
-                  }
-                }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                break; // Don't process further
-              }
-              
-              if (wantsToChange && !noChangesNeeded) {
-                console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to make changes`);
-                openaiWs!.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{
-                      type: "input_text",
-                      text: `[USER WANTS CHANGES] The user said "${userText}". Ask them: "What would you like to change?" and wait for their answer.`
-                    }]
-                  }
-                }));
-                openaiWs!.send(JSON.stringify({ type: "response.create" }));
-                break;
-              }
             }
             
             // === SUMMARY PHASE CONFIRMATION DETECTION (from simple) ===
@@ -3895,7 +3779,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             }
             
             // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
-            const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryAsked);
+            const nextStep = computeNextStep(sessionState.booking);
             sessionState.lastQuestionAsked = nextStep;
             const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking);
             
@@ -3917,8 +3801,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 })
               }
             }));
-            // MUST send response.create after function_call_output to trigger Ada's response
-            openaiWs!.send(JSON.stringify({ type: "response.create" }))
+            openaiWs!.send(JSON.stringify({ type: "response.create" }));
             
           } else if (toolName === "book_taxi") {
             const action = String(toolArgs.action || "");
@@ -4881,13 +4764,9 @@ Do NOT skip any part. Say ALL of it warmly.]`
                   }));
                 }
                 
-                // Compute what step we're on based on restored state using computeNextStep
+                // Compute what step we're on based on restored state
                 if (sessionState.awaitingConfirmation || sessionState.bookingConfirmed) {
                   sessionState.lastQuestionAsked = "confirmation";
-                  sessionState.preSummaryAsked = true; // Already past pre-summary if confirming
-                } else if (sessionState.booking.pickupTime) {
-                  // All 4 fields collected - need pre-summary check
-                  sessionState.lastQuestionAsked = computeNextStep(sessionState.booking, sessionState.preSummaryAsked);
                 } else if (sessionState.booking.passengers !== null) {
                   sessionState.lastQuestionAsked = "time";
                 } else if (sessionState.booking.destination) {
