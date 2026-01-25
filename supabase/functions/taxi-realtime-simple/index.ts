@@ -169,9 +169,9 @@ serve(async (req) => {
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.3,        // Lower to catch short words like "three"
-              prefix_padding_ms: 500, // More padding to capture word onset
-              silence_duration_ms: 800
+              threshold: 0.5,         // Default sensitivity
+              prefix_padding_ms: 500, // Catch start of short words
+              silence_duration_ms: 1000 // Wait 1 second before responding
             }
           }
         }));
