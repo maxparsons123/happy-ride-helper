@@ -125,6 +125,37 @@ function arrayBufferToBase64(buffer: Uint8Array): string {
   return btoa(binary);
 }
 
+// === STEP-AWARE CONTEXT HINTS ===
+type BookingStep = "pickup" | "destination" | "passengers" | "time" | "summary" | "done" | "unknown";
+
+function detectStepFromAdaTranscript(transcript: string): BookingStep {
+  const lower = transcript.toLowerCase();
+  if (/where would you like to be picked up|pickup (location|address)|pick you up/i.test(lower)) return "pickup";
+  if (/where (would you like to go|are you going|is your destination)|heading to/i.test(lower)) return "destination";
+  if (/how many (people|passengers)|travelling/i.test(lower)) return "passengers";
+  if (/when would you like|pickup time|what time|now or later/i.test(lower)) return "time";
+  if (/let me confirm|to confirm|summary|picking you up from/i.test(lower)) return "summary";
+  if (/taxi is booked|safe journey|whatsapp/i.test(lower)) return "done";
+  return "unknown";
+}
+
+function getContextHintForStep(step: BookingStep): string | null {
+  switch (step) {
+    case "pickup":
+      return "[CONTEXT: User is providing their PICKUP ADDRESS. Listen for street names, house numbers, landmarks.]";
+    case "destination":
+      return "[CONTEXT: User is providing their DESTINATION ADDRESS. Listen for street names, house numbers, landmarks.]";
+    case "passengers":
+      return "[CONTEXT: User is providing PASSENGER COUNT. Interpret number words: 'tree/free/the/there' = 3, 'to/too' = 2, 'for' = 4. Accept 1-10.]";
+    case "time":
+      return "[CONTEXT: User is providing PICKUP TIME. 'now/asap/straight away' = immediately. Listen for times like '3pm' or 'in 10 minutes'.]";
+    case "summary":
+      return "[CONTEXT: User is CONFIRMING or CORRECTING the booking. 'yes/yeah/correct' = confirmed. 'no/change/actually' = needs correction.]";
+    default:
+      return null;
+  }
+}
+
 // === MAIN HANDLER ===
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -138,6 +169,11 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
+  
+  // Step tracking
+  let currentStep: BookingStep = "pickup";
+  let stepAtSpeechStart: BookingStep = "pickup";
+  let contextInjected = false;
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
@@ -186,6 +222,53 @@ serve(async (req) => {
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
+      // Track Ada's question to know what step we're on
+      if (msg.type === "response.audio_transcript.done") {
+        const adaText = msg.transcript || "";
+        log(`🗣️ Ada: ${adaText}`);
+        
+        const detected = detectStepFromAdaTranscript(adaText);
+        if (detected !== "unknown") {
+          currentStep = detected;
+          log(`📍 Step detected: ${currentStep}`);
+        }
+        contextInjected = false; // Reset for next user turn
+      }
+
+      // User speech started - inject context hint
+      if (msg.type === "input_audio_buffer.speech_started") {
+        stepAtSpeechStart = currentStep;
+        log(`🎙️ Speech started (step: ${stepAtSpeechStart})`);
+        
+        // Inject context hint for this step
+        if (!contextInjected) {
+          const hint = getContextHintForStep(stepAtSpeechStart);
+          if (hint) {
+            log(`💡 Injecting context: ${hint}`);
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{ type: "input_text", text: hint }]
+              }
+            }));
+            contextInjected = true;
+          }
+        }
+      }
+
+      // Log user transcript with STT corrections
+      if (msg.type === "conversation.item.input_audio_transcription.completed") {
+        const raw = msg.transcript;
+        const corrected = applySTTCorrections(raw);
+        if (raw !== corrected) {
+          log(`👤 User: ${raw} → [STT FIX] ${corrected}`);
+        } else {
+          log(`👤 User: ${raw}`);
+        }
+      }
+
       // Forward audio to bridge (raw 24kHz PCM16)
       if (msg.type === "response.audio.delta" && msg.delta) {
         const binaryStr = atob(msg.delta);
@@ -195,20 +278,6 @@ serve(async (req) => {
         }
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(bytes.buffer);
-        }
-      }
-
-      // Log transcripts
-      if (msg.type === "response.audio_transcript.done") {
-        log(`🗣️ Ada: ${msg.transcript}`);
-      }
-      if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        const raw = msg.transcript;
-        const corrected = applySTTCorrections(raw);
-        if (raw !== corrected) {
-          log(`👤 User: ${raw} → [STT FIX] ${corrected}`);
-        } else {
-          log(`👤 User: ${raw}`);
         }
       }
 
