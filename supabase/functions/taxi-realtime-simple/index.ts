@@ -279,33 +279,68 @@ function detectStepFromAdaTranscript(transcript: string): BookingState["currentS
   return null;
 }
 
+// Detect if text looks like an address (to reject during passengers step)
+function looksLikeAddress(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Address keywords
+  if (/\b(street|road|avenue|lane|drive|way|place|court|close|crescent|square|hill|park|terrace|gardens|grove|bridge|station|airport|hotel|hospital|centre|center|mall|university|school)\b/i.test(lower)) {
+    return true;
+  }
+  // House number + word pattern (e.g., "52A David", "7 Russell")
+  if (/^\d+[a-z]?\s+[a-z]/i.test(lower)) {
+    return true;
+  }
+  return false;
+}
+
 function extractPassengerCount(text: string): string | null {
   const lower = text.toLowerCase().trim();
+  
+  // GUARD: Reject if this looks like an address
+  if (looksLikeAddress(text)) {
+    console.log(`[PAX] Rejected address-like input: "${text}"`);
+    return null;
+  }
   
   // Number words
   const wordMap: Record<string, string> = {
     "one": "1", "two": "2", "to": "2", "too": "2",
-    "three": "3", "tree": "3", "free": "3",
+    "three": "3", "tree": "3", "free": "3", "thre": "3",
     "four": "4", "for": "4", "five": "5",
     "six": "6", "seven": "7", "eight": "8",
     "nine": "9", "ten": "10"
   };
   
+  // Check for exact match or word at start
   for (const [word, num] of Object.entries(wordMap)) {
-    if (lower === word || lower.startsWith(word + " ")) {
+    if (lower === word || lower.startsWith(word + " ") || lower.startsWith(word + ".")) {
       return num;
     }
   }
   
-  // Digits
-  const digitMatch = lower.match(/^(\d+)/);
-  if (digitMatch) {
+  // Check for word anywhere in short responses (< 20 chars to avoid false positives)
+  if (lower.length < 20) {
+    for (const [word, num] of Object.entries(wordMap)) {
+      if (lower.includes(word)) {
+        return num;
+      }
+    }
+  }
+  
+  // Digits only (but not if part of address like "52A")
+  const digitMatch = lower.match(/^(\d{1,2})$/);
+  if (digitMatch && parseInt(digitMatch[1]) <= 20) {
     return digitMatch[1];
   }
   
   // "just me" / "myself"
-  if (/just me|myself|alone|only me/.test(lower)) {
+  if (/just me|myself|alone|only me|just one/.test(lower)) {
     return "1";
+  }
+  
+  // "couple" / "us two"
+  if (/couple|us two|the two of us/.test(lower)) {
+    return "2";
   }
   
   return null;
@@ -589,6 +624,23 @@ ${SYSTEM_PROMPT}
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
+      // === VAD/TURN DIAGNOSTICS ===
+      if (msg.type === "input_audio_buffer.speech_started") {
+        log("🎙️ VAD: Speech started");
+      }
+      if (msg.type === "input_audio_buffer.speech_stopped") {
+        log("🎙️ VAD: Speech stopped");
+      }
+      if (msg.type === "input_audio_buffer.committed") {
+        log("🎙️ VAD: Audio committed");
+      }
+      if (msg.type === "response.created") {
+        log("📤 Response: Ada starting to respond");
+      }
+      if (msg.type === "response.done") {
+        log("📤 Response: Ada finished responding");
+      }
+
       // Forward audio to bridge (raw passthrough - bridge handles downsampling)
       if (msg.type === "response.audio.delta" && msg.delta) {
         const binaryStr = atob(msg.delta);
@@ -650,6 +702,8 @@ ${SYSTEM_PROMPT}
             if (pax) {
               bookingState.passengers = pax;
               log(`✅ Saved passengers: ${bookingState.passengers}`);
+            } else {
+              log(`⚠️ Rejected passengers input (looks like address or invalid): "${transcript}"`);
             }
             break;
             
