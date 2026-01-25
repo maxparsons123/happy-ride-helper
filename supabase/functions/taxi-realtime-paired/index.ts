@@ -4323,6 +4323,26 @@ Do NOT skip any part. Say ALL of it warmly.]`
             callerPhone = data.phone;
             sessionState.callerPhone = data.phone; // Update session state too!
             console.log(`[${callId}] 📱 Phone updated: ${callerPhone}`);
+          } else if (data.caller_phone && data.caller_phone !== "unknown") {
+            // Also accept caller_phone field
+            callerPhone = data.caller_phone;
+            sessionState.callerPhone = data.caller_phone;
+            console.log(`[${callId}] 📱 Phone from caller_phone: ${callerPhone}`);
+          } else if (callerPhone === "unknown" && callId) {
+            // Fallback: extract phone from Asterisk UUID format
+            // Format: 00000000-0000-0000-0000-XXXXXXXXXXXX (last 12 digits = padded phone)
+            const uuidMatch = callId.match(/^00000000-0000-0000-0000-(\d{12})$/);
+            if (uuidMatch) {
+              const phoneDigits = uuidMatch[1];
+              // Strip leading zeros - different countries have different lengths
+              // UK: 11-12 digits, NL: 10-11 digits, etc.
+              const trimmed = phoneDigits.replace(/^0+/, "");
+              if (trimmed.length >= 9) {
+                callerPhone = "+" + trimmed;
+                sessionState.callerPhone = callerPhone;
+                console.log(`[${callId}] 📱 Phone extracted from UUID: ${callerPhone}`);
+              }
+            }
           }
 
           if (data.inbound_format && (data.inbound_format === "ulaw" || data.inbound_format === "slin" || data.inbound_format === "slin16")) {
