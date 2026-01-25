@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.WebSockets;
 using System.Net.Http;
 using System.Text;
@@ -110,9 +111,31 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
         
-        var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
+        // Resolve api.openai.com to IP address for reliable connection
+        const string openAiHost = "api.openai.com";
+        string resolvedIp = openAiHost;
         
-        Log($"🔌 Connecting to OpenAI Realtime: {_model}");
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(openAiHost);
+            if (addresses.Length > 0)
+            {
+                // Prefer IPv4 for compatibility
+                var ipv4 = addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                resolvedIp = (ipv4 ?? addresses[0]).ToString();
+                Log($"📡 Resolved {openAiHost} → {resolvedIp}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ DNS resolution failed, using hostname: {ex.Message}");
+        }
+        
+        // For WebSocket with TLS, we must use the original hostname for SNI
+        // The DNS resolution is for logging/debugging - ClientWebSocket handles the rest
+        var uri = new Uri($"wss://{openAiHost}/v1/realtime?model={_model}");
+        
+        Log($"🔌 Connecting to OpenAI Realtime: {_model} (IP: {resolvedIp})");
         
         try
         {
