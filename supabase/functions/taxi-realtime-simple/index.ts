@@ -553,7 +553,7 @@ ${SYSTEM_PROMPT}
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.4,              // Lower threshold to catch quieter short words
+              threshold: 0.3,              // Very sensitive - catches quiet/short words
               prefix_padding_ms: 500,      // Rewind 500ms to catch start of "three", "yes", etc.
               silence_duration_ms: 1000    // Wait 1 second of silence before responding
             },
