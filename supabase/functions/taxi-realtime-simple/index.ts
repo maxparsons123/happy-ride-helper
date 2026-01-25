@@ -650,24 +650,29 @@ serve(async (req) => {
         callId = msg.call_id || "unknown";
         
         // Try to get caller phone from multiple sources:
-        // 1. Explicit caller_phone/caller in init message
-        // 2. Extract from UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX (last 12 digits = phone)
-        callerPhone = msg.caller_phone || msg.caller || "unknown";
+        // 1. Explicit phone/caller_phone/caller in init message
+        // 2. Extract from UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX
+        // 3. Extract from paired format: paired-XXXXXXXXXXX (timestamp + phone embedded)
+        callerPhone = msg.phone || msg.caller_phone || msg.caller || "unknown";
         
         if (callerPhone === "unknown" && callId && callId !== "unknown") {
-          // Asterisk embeds phone digits in the UUID suffix (zero-padded to 12 digits)
-          // Format: 00000000-0000-0000-0000-XXXXXXXXXXXX
-          // UK: 00447424993772, Dutch: 00316123456789, etc.
+          // Try UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX
           const uuidMatch = callId.match(/^00000000-0000-0000-0000-(\d{12})$/);
           if (uuidMatch) {
             const phoneDigits = uuidMatch[1];
-            // Strip leading zeros - different countries have different lengths
-            // UK: 11-12 digits, NL: 10-11 digits, etc.
             const trimmed = phoneDigits.replace(/^0+/, "");
-            // Valid phone numbers are typically 9-12 digits (after country code prefix)
             if (trimmed.length >= 9) {
               callerPhone = "+" + trimmed;
               log(`📱 Phone extracted from UUID: ${callerPhone}`);
+            }
+          }
+          
+          // Try paired format: paired-XXXXXXXXXXX (last 9-12 digits are phone)
+          if (callerPhone === "unknown") {
+            const pairedMatch = callId.match(/^paired-\d+$/);
+            if (pairedMatch) {
+              // The callId suffix contains timestamp, phone might be in the message
+              log(`📱 Paired call detected, phone from init message: ${msg.phone || "not provided"}`);
             }
           }
         }
@@ -680,6 +685,15 @@ serve(async (req) => {
       if (msg.type === "hangup") {
         log("👋 Hangup received");
         openaiWs?.close();
+      }
+      
+      // Handle phone update from bridge (sent after MSG_UUID from Asterisk)
+      if (msg.type === "update_phone") {
+        const newPhone = msg.phone || msg.user_phone;
+        if (newPhone && newPhone !== "unknown") {
+          callerPhone = newPhone.startsWith("+") ? newPhone : "+" + newPhone;
+          log(`📱 Phone updated: ${callerPhone}`);
+        }
       }
     } catch {
       // Ignore non-JSON
