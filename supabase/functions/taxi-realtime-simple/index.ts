@@ -220,12 +220,11 @@ function processAdaAudio(audioBytes: Uint8Array): Uint8Array {
   return new Uint8Array(samples.buffer);
 }
 
-// Upsample 8kHz to 24kHz with DSP processing (high-quality linear interpolation)
+// Upsample 8kHz to 24kHz (clean passthrough - no DSP)
 function pcm8kTo24k(pcm8k: Uint8Array): Uint8Array {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, Math.floor(pcm8k.byteLength / 2));
   
-  // Apply DSP before upsampling
-  processInboundDSP(samples8k);
+  // No DSP - pass raw audio to Whisper for best STT accuracy
   
   const len24k = samples8k.length * 3;
   const samples24k = new Int16Array(len24k);
