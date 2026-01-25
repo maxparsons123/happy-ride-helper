@@ -2663,6 +2663,16 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           }
           break;
 
+        case "response.audio.done":
+          // CRITICAL: Clear the input audio buffer after Ada finishes speaking
+          // This flushes any TTS echo or background noise captured during her speech
+          // so it doesn't contaminate the user's next utterance transcription
+          console.log(`[${callId}] 🧹 Clearing audio buffer after AI speech to prevent echo`);
+          if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+          }
+          break;
+
         case "response.audio_transcript.delta":
           // Track what Ada is saying and check for price hallucination
           if (data.delta) {
