@@ -8,6 +8,56 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === LOCALE DETECTION ===
+interface CallerLocale {
+  code: string;
+  language: string;
+  greeting: string;
+  taxiWord: string;
+  currency: string;
+  currencySymbol: string;
+}
+
+const LOCALE_MAP: Record<string, CallerLocale> = {
+  "+44": { code: "GB", language: "English", greeting: "Hello", taxiWord: "taxi", currency: "GBP", currencySymbol: "£" },
+  "+1": { code: "US", language: "English", greeting: "Hello", taxiWord: "cab", currency: "USD", currencySymbol: "$" },
+  "+33": { code: "FR", language: "French", greeting: "Bonjour", taxiWord: "taxi", currency: "EUR", currencySymbol: "€" },
+  "+34": { code: "ES", language: "Spanish", greeting: "Hola", taxiWord: "taxi", currency: "EUR", currencySymbol: "€" },
+  "+49": { code: "DE", language: "German", greeting: "Hallo", taxiWord: "Taxi", currency: "EUR", currencySymbol: "€" },
+  "+39": { code: "IT", language: "Italian", greeting: "Ciao", taxiWord: "taxi", currency: "EUR", currencySymbol: "€" },
+  "+48": { code: "PL", language: "Polish", greeting: "Cześć", taxiWord: "taksówka", currency: "PLN", currencySymbol: "zł" },
+  "+31": { code: "NL", language: "Dutch", greeting: "Hallo", taxiWord: "taxi", currency: "EUR", currencySymbol: "€" },
+  "+351": { code: "PT", language: "Portuguese", greeting: "Olá", taxiWord: "táxi", currency: "EUR", currencySymbol: "€" },
+  "+353": { code: "IE", language: "English", greeting: "Hello", taxiWord: "taxi", currency: "EUR", currencySymbol: "€" },
+  "+46": { code: "SE", language: "Swedish", greeting: "Hej", taxiWord: "taxi", currency: "SEK", currencySymbol: "kr" },
+  "+47": { code: "NO", language: "Norwegian", greeting: "Hei", taxiWord: "taxi", currency: "NOK", currencySymbol: "kr" },
+  "+45": { code: "DK", language: "Danish", greeting: "Hej", taxiWord: "taxa", currency: "DKK", currencySymbol: "kr" },
+  "+358": { code: "FI", language: "Finnish", greeting: "Hei", taxiWord: "taksi", currency: "EUR", currencySymbol: "€" },
+  "+61": { code: "AU", language: "English", greeting: "G'day", taxiWord: "taxi", currency: "AUD", currencySymbol: "$" },
+  "+64": { code: "NZ", language: "English", greeting: "Hello", taxiWord: "taxi", currency: "NZD", currencySymbol: "$" },
+  "+81": { code: "JP", language: "Japanese", greeting: "こんにちは", taxiWord: "タクシー", currency: "JPY", currencySymbol: "¥" },
+  "+86": { code: "CN", language: "Chinese", greeting: "你好", taxiWord: "出租车", currency: "CNY", currencySymbol: "¥" },
+  "+91": { code: "IN", language: "Hindi", greeting: "नमस्ते", taxiWord: "taxi", currency: "INR", currencySymbol: "₹" },
+  "+971": { code: "AE", language: "Arabic", greeting: "مرحبا", taxiWord: "taxi", currency: "AED", currencySymbol: "د.إ" },
+};
+
+const DEFAULT_LOCALE: CallerLocale = { 
+  code: "GB", language: "English", greeting: "Hello", taxiWord: "taxi", currency: "GBP", currencySymbol: "£" 
+};
+
+function detectLocaleFromPhone(phone: string | undefined): CallerLocale {
+  if (!phone) return DEFAULT_LOCALE;
+  
+  // Try longest prefixes first (e.g., +353 before +33)
+  const sortedPrefixes = Object.keys(LOCALE_MAP).sort((a, b) => b.length - a.length);
+  for (const prefix of sortedPrefixes) {
+    if (phone.startsWith(prefix)) {
+      return LOCALE_MAP[prefix];
+    }
+  }
+  return DEFAULT_LOCALE;
+}
+
 // === STT CORRECTIONS ===
 const STT_CORRECTIONS: [RegExp, string][] = [
   // Alphanumeric house numbers - join number + letter
@@ -34,8 +84,9 @@ function applySTTCorrections(text: string): string {
   return corrected;
 }
 
-// === SYSTEM PROMPT ===
-const SYSTEM_PROMPT = `
+// === SYSTEM PROMPT BUILDER ===
+function buildSystemPrompt(locale: CallerLocale): string {
+  return `
 # IDENTITY
 You are ADA, the professional taxi booking assistant for the Taxibot demo.
 Voice: Warm, clear, professionally casual.
@@ -45,8 +96,21 @@ Voice: Warm, clear, professionally casual.
 - Insert natural pauses between sentences
 - Pronounce addresses clearly
 
-# LANGUAGE
-Respond in the same language the caller speaks.
+# MULTILINGUAL SUPPORT (CRITICAL)
+- Your initial greeting is in English, but IMMEDIATELY detect the caller's language from their first response
+- If they speak Spanish, switch to Spanish for ALL subsequent responses
+- If they speak French, switch to French for ALL subsequent responses
+- If they speak Polish, switch to Polish for ALL subsequent responses
+- If they speak German, switch to German for ALL subsequent responses
+- If they speak any other language, respond in THAT language
+- Once you detect their language, ALL questions, confirmations, and summaries must be in their language
+- NEVER switch back to English unless they speak English
+
+# CALLER LOCALE INFO
+- Detected region: ${locale.code}
+- Native greeting: "${locale.greeting}"
+- Local word for taxi: "${locale.taxiWord}"
+- Currency: ${locale.currency} (${locale.currencySymbol})
 
 # ONE QUESTION RULE
 Ask ONLY ONE question per response. NEVER combine questions.
@@ -55,12 +119,12 @@ Ask ONLY ONE question per response. NEVER combine questions.
 "Hello, and welcome to the Taxibot demo. I'm ADA, your taxi booking assistant. Where would you like to be picked up?"
 
 # BOOKING FLOW (Ask ONE at a time, in order - NO mid-flow recaps)
-1. Get pickup location → just ask "Where would you like to go?"
-2. Get destination → just ask "How many passengers?"  
-3. Get number of passengers → ask "When would you like the taxi?"
+1. Get pickup location → just ask "Where would you like to go?" (or equivalent in their language)
+2. Get destination → just ask "How many passengers?" (or equivalent in their language)
+3. Get number of passengers → ask "When would you like the taxi?" (or equivalent in their language)
 4. Get pickup time (default: now/ASAP)
-5. Summarize booking and ask for confirmation
-6. If confirmed, say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!"
+5. Summarize booking and ask for confirmation (IN THEIR LANGUAGE)
+6. If confirmed, say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!" (IN THEIR LANGUAGE)
 
 # ADDRESS INTERPRETATION (STRICT)
 - "52-8", "52 A", or "52 hey" MUST be interpreted as "52A".
@@ -74,7 +138,7 @@ Ask ONLY ONE question per response. NEVER combine questions.
 - NEVER substitute, invent, or "correct" what they said
 - If they say "52A David Road" - your summary says "52A David Road" (NOT "32A", NOT "52", NOT "28")
 - House numbers are SACRED - NEVER alter or hallucinate them
-- If unsure, ask: "Could you repeat that address for me?"
+- If unsure, ask: "Could you repeat that address for me?" (in their language)
 
 # COMMON WHISPER MISHEARINGS (Important)
 These are how the speech recognition often hears addresses - interpret them correctly:
@@ -86,16 +150,16 @@ These are how the speech recognition often hears addresses - interpret them corr
 
 # PASSENGERS (ANTI-STUCK RULE)
 - Only move past the passengers step if the caller clearly provides a passenger count.
-- Accept digits (e.g. "3") or clear number words (one, two, three, four, five, six, seven, eight, nine, ten).
+- Accept digits (e.g. "3") or clear number words in ANY language (uno, dos, tres, un, deux, trois, eins, zwei, drei, etc.)
 - Also accept common telephony homophones: "to/too" → two, "for" → four, "tree" → three.
 - If the caller says something that sounds like an address/place while you are asking for passengers, DO NOT advance.
-- Instead, repeat exactly: "How many people will be travelling?"
+- Instead, repeat exactly: "How many people will be travelling?" (in their language)
 
 # CORRECTIONS & CHANGES
 When the caller wants to change or correct something:
-- Listen for: "actually", "no wait", "change", "I meant", "sorry, it's"
+- Listen for correction words in any language: "actually", "no wait", "change", "I meant", "sorry, it's", "en realidad", "non", "nein", etc.
 - IMMEDIATELY update with the new information
-- Acknowledge briefly: "Updated to [new value]." then continue
+- Acknowledge briefly: "Updated to [new value]." (in their language) then continue
 - NEVER ignore corrections
 
 # RULES
@@ -103,7 +167,9 @@ When the caller wants to change or correct something:
 - After each answer, immediately ask the NEXT question (no recaps)
 - Only summarize at the end before confirmation
 - In the summary, use the EXACT addresses the caller gave you - never invent or alter
+- ALWAYS respond in the caller's detected language after their first response
 `;
+}
 
 // === AUDIO HELPERS ===
 
@@ -150,6 +216,8 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
+  let callerPhone: string | undefined;
+  let callerLocale: CallerLocale = DEFAULT_LOCALE;
   
   // === USER TRUTH TRACKING ===
   let currentStep: "greeting" | "pickup" | "destination" | "passengers" | "time" | "summary" | "done" = "greeting";
@@ -163,6 +231,7 @@ serve(async (req) => {
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
     log("🔌 Connecting to OpenAI...");
+    log(`🌍 Caller locale: ${callerLocale.code} (${callerLocale.language})`);
     
     openaiWs = new WebSocket(
       "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17",
@@ -180,11 +249,13 @@ serve(async (req) => {
       if (msg.type === "session.created") {
         log("📋 Session created, sending config");
         
+        const systemPrompt = buildSystemPrompt(callerLocale);
+        
         openaiWs?.send(JSON.stringify({
           type: "session.update",
           session: {
             modalities: ["text", "audio"],
-            instructions: SYSTEM_PROMPT,
+            instructions: systemPrompt,
             voice: "shimmer",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
@@ -223,17 +294,36 @@ serve(async (req) => {
         const adaText = msg.transcript || "";
         log(`🗣️ Ada: ${adaText}`);
         
-        // Detect step progression from Ada's questions
+        // Detect step progression from Ada's questions (multilingual keywords)
         const lower = adaText.toLowerCase();
-        if (lower.includes("where would you like to go") || lower.includes("destination")) {
+        // English + Spanish + French + German + Polish destination keywords
+        if (lower.includes("where would you like to go") || lower.includes("destination") ||
+            lower.includes("adónde") || lower.includes("où voulez-vous aller") || 
+            lower.includes("wohin") || lower.includes("dokąd")) {
           currentStep = "destination";
-        } else if (lower.includes("how many") || lower.includes("passengers")) {
+        // Passenger keywords
+        } else if (lower.includes("how many") || lower.includes("passengers") ||
+                   lower.includes("cuántos") || lower.includes("pasajeros") ||
+                   lower.includes("combien") || lower.includes("passagers") ||
+                   lower.includes("wie viele") || lower.includes("ilu")) {
           currentStep = "passengers";
-        } else if (lower.includes("when would you") || lower.includes("pickup time")) {
+        // Time keywords
+        } else if (lower.includes("when would you") || lower.includes("pickup time") ||
+                   lower.includes("cuándo") || lower.includes("quelle heure") ||
+                   lower.includes("wann") || lower.includes("kiedy")) {
           currentStep = "time";
-        } else if (lower.includes("confirm") || lower.includes("summary")) {
+        // Summary keywords
+        } else if (lower.includes("confirm") || lower.includes("summary") ||
+                   lower.includes("confirmar") || lower.includes("resumen") ||
+                   lower.includes("confirmer") || lower.includes("résumé") ||
+                   lower.includes("bestätigen") || lower.includes("potwierdzić")) {
           currentStep = "summary";
-        } else if (lower.includes("taxi is booked") || lower.includes("safe journey")) {
+        // Booking done keywords
+        } else if (lower.includes("taxi is booked") || lower.includes("safe journey") ||
+                   lower.includes("taxi está reservado") || lower.includes("buen viaje") ||
+                   lower.includes("taxi est réservé") || lower.includes("bon voyage") ||
+                   lower.includes("taxi ist gebucht") || lower.includes("gute fahrt") ||
+                   lower.includes("taksówka jest zamówiona") || lower.includes("szczęśliwej podróży")) {
           currentStep = "done";
         }
       }
@@ -303,7 +393,12 @@ serve(async (req) => {
       
       if (msg.type === "init") {
         callId = msg.call_id || "unknown";
-        log(`📞 Call initialized`);
+        callerPhone = msg.caller_phone || msg.caller_id;
+        callerLocale = detectLocaleFromPhone(callerPhone);
+        
+        log(`📞 Call initialized from ${callerPhone || "unknown"}`);
+        log(`🌍 Detected locale: ${callerLocale.code} (${callerLocale.language})`);
+        
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
       }
