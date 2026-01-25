@@ -301,11 +301,12 @@ const GREETING_PROTECTION_MS = 2000; // Reduced from 3000ms
 const SUMMARY_PROTECTION_MS = 6000; // Reduced from 8000ms
 const ASSISTANT_LEADIN_IGNORE_MS = 500; // Reduced from 700ms
 
-// RMS thresholds for audio quality (aligned with paired mode)
-const RMS_NOISE_FLOOR = 650;   // Below = background noise, skip
-const RMS_BARGE_IN_MIN = 800;  // Minimum for barge-in during Ada speech
-const RMS_BARGE_IN_MAX = 25000; // Above = likely echo/clipping
-const RMS_ECHO_CEILING = 20000; // Hard ceiling for echo detection
+// RMS thresholds for audio quality - DESKTOP OPTIMIZED (much lower for mic input)
+// Desktop/mic audio typically has much lower RMS than telephony
+const RMS_NOISE_FLOOR = 20;    // Very low - desktop mics are quieter than phones
+const RMS_BARGE_IN_MIN = 50;   // Lower for desktop barge-in detection
+const RMS_BARGE_IN_MAX = 30000; // Higher ceiling for desktop audio
+const RMS_ECHO_CEILING = 25000; // Hard ceiling for echo detection
 
 // Audio diagnostics tracking
 interface AudioDiagnostics {
