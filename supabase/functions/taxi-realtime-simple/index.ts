@@ -1,8 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.89.0";
 
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL") || "";
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -751,6 +754,60 @@ serve(async (req) => {
         log(`📞 Call initialized (caller: ${callerPhone})`);
         connectOpenAI();
         socket.send(JSON.stringify({ type: "ready" }));
+        
+        // === SUBSCRIBE TO DISPATCH CHANNEL ===
+        // Listen for fare callbacks from external dispatch system
+        if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+          const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+          const dispatchChannel = supabase.channel(`dispatch_${callId}`);
+          
+          dispatchChannel.on("broadcast", { event: "dispatch_ask_confirm" }, async (payload: any) => {
+            const { message, fare, eta, eta_minutes, callback_url, booking_ref } = payload.payload || {};
+            log(`📥 DISPATCH ask_confirm: fare=${fare}, eta=${eta_minutes || eta}, message="${message}"`);
+            
+            if (!message || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+              log("⚠️ Cannot process dispatch - no message or OpenAI not connected");
+              return;
+            }
+            
+            // Store fare/eta in booking state
+            bookingState.fare = fare ? `£${fare}` : "";
+            bookingState.eta = eta_minutes ? `${eta_minutes} minutes` : (eta || "");
+            currentStep = "awaiting_final";
+            
+            // Inject the fare message as a system instruction
+            const fareInstruction = `[DISPATCH CALLBACK RECEIVED]
+Fare: ${bookingState.fare}
+ETA: ${bookingState.eta}
+Booking Ref: ${booking_ref || "pending"}
+
+SAY EXACTLY THIS TO THE CUSTOMER (verbatim):
+"${message}"
+
+After speaking, wait for them to say YES or NO.
+- If YES: call book_taxi(action="confirmed")
+- If NO: ask what they'd like to change`;
+            
+            openaiWs?.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "system",
+                content: [{ type: "input_text", text: fareInstruction }]
+              }
+            }));
+            
+            // Trigger Ada to speak
+            openaiWs?.send(JSON.stringify({ type: "response.create" }));
+            log("✅ Fare instruction injected, triggering Ada response");
+          });
+          
+          dispatchChannel.subscribe((status) => {
+            log(`📡 Dispatch channel status: ${status}`);
+          });
+          
+          log(`📡 Subscribed to dispatch channel: dispatch_${callId}`);
+        }
       }
       
       if (msg.type === "hangup") {
