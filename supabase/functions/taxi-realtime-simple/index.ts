@@ -65,7 +65,9 @@ Ask ONLY ONE question per response. NEVER combine questions.
 # PASSENGERS (ANTI-STUCK RULE)
 - Only move past the passengers step if the caller clearly provides a passenger count.
 - Accept digits (e.g. "3") or clear number words (one, two, three, four, five, six, seven, eight, nine, ten).
-- Also accept common telephony homophones: "to/too" → two, "for" → four, "tree/free" → three.
+- Also accept common telephony homophones: "to/too" → two, "for" → four, "tree/free/the/there" → three.
+- NUMBER LOGIC: If the user says "tree", "free", "the", or "there" during the passenger count, interpret it as the number 3.
+- Always look for phonetic matches for numbers 1-10.
 - If the caller says something that sounds like an address/place (street/road/avenue/hotel/etc.) while you are asking for passengers, DO NOT advance.
 - Instead, repeat exactly: "How many people will be travelling?"
 
@@ -169,8 +171,8 @@ serve(async (req) => {
             input_audio_transcription: { model: "whisper-1" },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,         // Default sensitivity
-              prefix_padding_ms: 500, // Catch start of short words
+              threshold: 0.3,          // Lowered to catch quiet "th" sounds
+              prefix_padding_ms: 600,  // Extra padding to catch word onset
               silence_duration_ms: 1000 // Wait 1 second before responding
             }
           }
