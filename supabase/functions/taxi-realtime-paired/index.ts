@@ -2463,6 +2463,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
   let greetingSent = false;
   let greetingAudioReceived = false; // Track if we actually got audio for the greeting
   let greetingFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  // Some SIP/AudioSocket bridges can drop the very first outbound audio burst.
+  // To guarantee the caller hears the build identifier, we repeat it once at the
+  // start of the *first real* assistant reply after the caller speaks.
+  let versionPrefixPending = true;
   // Monitoring: throttle DB inserts for audio playback in the LiveCalls panel
   let monitorAiChunkCount = 0;
   
@@ -2648,7 +2652,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           console.error(`[${callId}] ❌ OpenAI error:`, JSON.stringify(data));
           // Forward real errors to client so bridge can handle appropriately
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "error", message: data.error?.message || "Unknown OpenAI error" }));
+            const msg = data?.error
+              ? `${data.error?.code || "unknown"}: ${data.error?.message || "Unknown OpenAI error"}`
+              : "Unknown OpenAI error";
+            socket.send(JSON.stringify({ type: "error", message: msg }));
           }
           break;
 
@@ -3201,6 +3208,27 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         case "conversation.item.input_audio_transcription.completed":
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
+            // One-time version prefix safety-net: ensure the caller hears the version.
+            // We inject this as a system instruction before the model produces the next reply.
+            if (versionPrefixPending && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+              versionPrefixPending = false;
+              try {
+                openaiWs.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[VERSION ANNOUNCEMENT] Start your NEXT spoken reply with exactly: "Version ${VERSION}." Then continue normally. Do this ONLY ONCE.`,
+                    }],
+                  },
+                }));
+              } catch (e) {
+                console.error(`[${callId}] Failed to inject version prefix instruction:`, e);
+              }
+            }
+
             const rawText = data.transcript.trim();
             // Apply alphanumeric corrections for house numbers (e.g., "52 A" → "52A")
             const alphanumericCorrected = applyAlphanumericCorrections(rawText);
