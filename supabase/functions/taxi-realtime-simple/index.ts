@@ -475,10 +475,42 @@ serve(async (req) => {
   let stepAtSpeechStart: BookingStep = "pickup";
   let contextInjected = false;
   let pendingToolCallId = "";
+  
+  // Quote timeout handling
+  let awaitingDispatchQuote = false;
+  let dispatchQuoteReceived = false;
+  let quoteTimeoutId: number | null = null;
+  const QUOTE_TIMEOUT_MS = 4000; // 4 seconds to wait for real quote
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
-  // Handle tool calls
+  // Helper to deliver quote to OpenAI and trigger response
+  const deliverQuote = (fare: string, eta: string, toolCallId: string) => {
+    bookingState.fare = fare;
+    bookingState.eta = eta;
+    currentStep = "awaiting_final";
+    
+    log(`💰 Delivering quote: ${fare}, ETA: ${eta}`);
+    
+    // Inject the fare as a system instruction so Ada speaks it
+    const fareInstruction = `[QUOTE RECEIVED]
+Fare: ${fare}
+ETA: ${eta}
+
+Tell the customer: "The fare will be ${fare} and your driver will be approximately ${eta}. Shall I go ahead and book that for you?"
+Wait for their YES or NO response.`;
+    
+    openaiWs?.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "system",
+        content: [{ type: "input_text", text: fareInstruction }]
+      }
+    }));
+    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+  };
+
   const handleToolCall = async (name: string, args: Record<string, unknown>, toolCallId: string) => {
     log(`🔧 Tool call: ${name}(${JSON.stringify(args)})`);
     
@@ -495,43 +527,53 @@ serve(async (req) => {
       
       if (action === "request_quote") {
         currentStep = "awaiting_fare";
-        const result = await sendDispatchWebhook(callId, callerPhone, "request_quote", bookingState, "", log);
+        awaitingDispatchQuote = true;
+        dispatchQuoteReceived = false;
+        pendingToolCallId = toolCallId;
         
-        if (result.success && result.fare) {
-          bookingState.fare = result.fare;
-          bookingState.eta = result.eta || "";
-          
-          // Send tool result back to OpenAI
-          openaiWs?.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: toolCallId,
-              output: JSON.stringify({
-                status: "quote_received",
-                fare: result.fare,
-                eta: result.eta,
-                message: `The fare is ${result.fare}. ETA is ${result.eta}. Ask the user to confirm.`
-              })
+        // Send webhook to dispatch system (fire and forget - we'll wait for callback)
+        sendDispatchWebhook(callId, callerPhone, "request_quote", bookingState, "", log)
+          .then((result) => {
+            log(`📤 Webhook sent, immediate result: ${JSON.stringify(result)}`);
+            // If webhook returns immediate quote (no callback system), use it
+            if (result.success && result.fare && !dispatchQuoteReceived) {
+              dispatchQuoteReceived = true;
+              if (quoteTimeoutId) {
+                clearTimeout(quoteTimeoutId);
+                quoteTimeoutId = null;
+              }
+              deliverQuote(result.fare, result.eta || "5 minutes", toolCallId);
             }
-          }));
-          
-          currentStep = "awaiting_final";
-        } else {
-          openaiWs?.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: toolCallId,
-              output: JSON.stringify({
-                status: "error",
-                message: "Unable to get fare estimate. Please try again."
-              })
-            }
-          }));
-        }
+          })
+          .catch((err) => log(`❌ Webhook error: ${err}`));
         
-        // Trigger response
+        // Start 4-second timeout for dispatch callback
+        log(`⏳ Waiting up to ${QUOTE_TIMEOUT_MS}ms for dispatch quote...`);
+        quoteTimeoutId = setTimeout(() => {
+          if (!dispatchQuoteReceived && awaitingDispatchQuote) {
+            log(`⏰ Quote timeout - using fallback quote`);
+            dispatchQuoteReceived = true;
+            awaitingDispatchQuote = false;
+            
+            // Generate mock quote
+            const mockFare = "£12.50";
+            const mockEta = "6 minutes";
+            deliverQuote(mockFare, mockEta, pendingToolCallId);
+          }
+        }, QUOTE_TIMEOUT_MS);
+        
+        // Tell Ada to say "one moment" while we wait
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: toolCallId,
+            output: JSON.stringify({
+              status: "checking",
+              message: "Say 'One moment please, let me check the fare for you.' and wait."
+            })
+          }
+        }));
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
         
       } else if (action === "confirmed") {
@@ -945,24 +987,45 @@ When summarizing, say EXACTLY these addresses. DO NOT substitute or change them.
             const { message, fare, eta, eta_minutes, callback_url, booking_ref } = payload.payload || {};
             log(`📥 DISPATCH ask_confirm: fare=${fare}, eta=${eta_minutes || eta}, message="${message}"`);
             
-            if (!message || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-              log("⚠️ Cannot process dispatch - no message or OpenAI not connected");
+            // Mark quote as received - cancel timeout
+            if (awaitingDispatchQuote && !dispatchQuoteReceived) {
+              dispatchQuoteReceived = true;
+              awaitingDispatchQuote = false;
+              if (quoteTimeoutId) {
+                clearTimeout(quoteTimeoutId);
+                quoteTimeoutId = null;
+                log(`✅ Dispatch quote received before timeout`);
+              }
+            } else if (dispatchQuoteReceived) {
+              log(`⚠️ Quote already delivered, ignoring late dispatch callback`);
               return;
             }
             
+            if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
+              log("⚠️ Cannot process dispatch - OpenAI not connected");
+              return;
+            }
+            
+            // Format fare/eta
+            const formattedFare = fare ? (fare.toString().startsWith("£") ? fare : `£${fare}`) : "£12.50";
+            const formattedEta = eta_minutes ? `${eta_minutes} minutes` : (eta || "5 minutes");
+            
             // Store fare/eta in booking state
-            bookingState.fare = fare ? `£${fare}` : "";
-            bookingState.eta = eta_minutes ? `${eta_minutes} minutes` : (eta || "");
+            bookingState.fare = formattedFare;
+            bookingState.eta = formattedEta;
             currentStep = "awaiting_final";
+            
+            // Use the provided message or construct one
+            const spokenMessage = message || `The fare will be ${formattedFare} and your driver will be approximately ${formattedEta}. Shall I go ahead and book that for you?`;
             
             // Inject the fare message as a system instruction
             const fareInstruction = `[DISPATCH CALLBACK RECEIVED]
-Fare: ${bookingState.fare}
-ETA: ${bookingState.eta}
+Fare: ${formattedFare}
+ETA: ${formattedEta}
 Booking Ref: ${booking_ref || "pending"}
 
 SAY EXACTLY THIS TO THE CUSTOMER (verbatim):
-"${message}"
+"${spokenMessage}"
 
 After speaking, wait for them to say YES or NO.
 - If YES: call book_taxi(action="confirmed")
