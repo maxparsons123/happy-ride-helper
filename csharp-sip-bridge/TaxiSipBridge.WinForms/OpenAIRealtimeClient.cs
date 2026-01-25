@@ -751,46 +751,62 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     private static object[] GetTools() => new object[]
     {
-        new {
-            type = "function",
-            name = "sync_booking_data",
-            description = "Save user answers to the correct field.",
-            parameters = new {
-                type = "object",
-                properties = new {
-                    pickup = new { type = "string", description = "Pickup address" },
-                    destination = new { type = "string", description = "Destination address" },
-                    passengers = new { type = "integer", description = "Number of passengers" },
-                    pickup_time = new { type = "string", description = "Pickup time" },
-                    last_question_asked = new { 
-                        type = "string", 
-                        @enum = new[] { "pickup", "destination", "passengers", "time", "confirmation", "none" },
-                        description = "What question you are about to ask NEXT"
+        new Dictionary<string, object>
+        {
+            ["type"] = "function",
+            ["name"] = "sync_booking_data",
+            ["description"] = "Save user answers to the correct field.",
+            ["parameters"] = new Dictionary<string, object>
+            {
+                ["type"] = "object",
+                ["properties"] = new Dictionary<string, object>
+                {
+                    ["pickup"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Pickup address" },
+                    ["destination"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Destination address" },
+                    ["passengers"] = new Dictionary<string, object> { ["type"] = "integer", ["description"] = "Number of passengers" },
+                    ["pickup_time"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Pickup time" },
+                    ["last_question_asked"] = new Dictionary<string, object>
+                    {
+                        ["type"] = "string",
+                        ["enum"] = new[] { "pickup", "destination", "passengers", "time", "confirmation", "none" },
+                        ["description"] = "What question you are about to ask NEXT"
                     }
                 }
             }
         },
-        new {
-            type = "function",
-            name = "book_taxi",
-            description = "Request quote or confirm booking.",
-            parameters = new {
-                type = "object",
-                properties = new {
-                    action = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                    pickup = new { type = "string" },
-                    destination = new { type = "string" },
-                    passengers = new { type = "integer", minimum = 1 },
-                    time = new { type = "string" }
+        new Dictionary<string, object>
+        {
+            ["type"] = "function",
+            ["name"] = "book_taxi",
+            ["description"] = "Request quote or confirm booking.",
+            ["parameters"] = new Dictionary<string, object>
+            {
+                ["type"] = "object",
+                ["properties"] = new Dictionary<string, object>
+                {
+                    ["action"] = new Dictionary<string, object>
+                    {
+                        ["type"] = "string",
+                        ["enum"] = new[] { "request_quote", "confirmed" }
+                    },
+                    ["pickup"] = new Dictionary<string, object> { ["type"] = "string" },
+                    ["destination"] = new Dictionary<string, object> { ["type"] = "string" },
+                    ["passengers"] = new Dictionary<string, object> { ["type"] = "integer", ["minimum"] = 1 },
+                    ["time"] = new Dictionary<string, object> { ["type"] = "string" }
                 },
-                required = new[] { "action" }
+                ["required"] = new[] { "action" }
             }
         },
-        new {
-            type = "function",
-            name = "end_call",
-            description = "Disconnect the call after goodbye.",
-            parameters = new { type = "object", properties = new { } }
+        new Dictionary<string, object>
+        {
+            ["type"] = "function",
+            ["name"] = "end_call",
+            ["description"] = "Disconnect the call after goodbye.",
+            ["parameters"] = new Dictionary<string, object>
+            {
+                ["type"] = "object",
+                ["properties"] = new Dictionary<string, object>()
+            }
         }
     };
 
