@@ -43,6 +43,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _waitingForQuote = false;
     private bool _responseActive = false;
     
+    // Retry logic for transient OpenAI errors
+    private int _greetingRetryCount = 0;
+    private const int MAX_GREETING_RETRIES = 3;
+    private bool _pendingGreetingRetry = false;
+    
     // Echo guard timing - REDUCED for confirmation responsiveness
     // 300ms is enough to filter Ada's echo but not block quick "Yes!" responses
     private const int ECHO_GUARD_MS = 300;
@@ -406,6 +411,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     {
                         var msg = err.TryGetProperty("message", out var m) ? m.GetString() : "Unknown error";
                         Log($"❌ OpenAI error: {msg}");
+                        
+                        // Retry greeting on transient server errors
+                        if (msg?.Contains("server had an error") == true || msg?.Contains("retry") == true)
+                        {
+                            await HandleTransientErrorRetryAsync();
+                        }
                     }
                     break;
 
@@ -465,9 +476,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_greetingSent || _ws?.State != WebSocketState.Open) return;
         _greetingSent = true;
+        _greetingRetryCount = 0;
 
         // Match edge function: 200ms delay for stability after session.updated
         await Task.Delay(200);
+
+        await SendGreetingRequestAsync();
+    }
+
+    private async Task SendGreetingRequestAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
 
         _lastQuestionAsked = "pickup";
 
@@ -486,7 +505,30 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         await SendJsonAsync(responseCreate);
         
-        Log("🎤 Greeting triggered (matches taxi-realtime-desktop: text+audio modalities)");
+        Log($"🎤 Greeting triggered (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})");
+    }
+
+    private async Task HandleTransientErrorRetryAsync()
+    {
+        _greetingRetryCount++;
+        
+        if (_greetingRetryCount >= MAX_GREETING_RETRIES)
+        {
+            Log($"❌ Max retries ({MAX_GREETING_RETRIES}) reached - giving up");
+            return;
+        }
+
+        // Exponential backoff: 500ms, 1000ms, 2000ms
+        var delayMs = 500 * (1 << (_greetingRetryCount - 1));
+        Log($"🔄 Retrying in {delayMs}ms (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})...");
+        
+        await Task.Delay(delayMs);
+        
+        if (_ws?.State != WebSocketState.Open) return;
+        
+        // Clear any stale state and retry
+        await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+        await SendGreetingRequestAsync();
     }
 
     private async Task SendContextHintAsync(string userText)
