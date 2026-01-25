@@ -8,6 +8,32 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === STT CORRECTIONS ===
+const STT_CORRECTIONS: [RegExp, string][] = [
+  // Alphanumeric house numbers - join number + letter
+  [/(\d+)\s*[-–]\s*([a-zA-Z])\b/g, "$1$2"],  // "52-A" or "52 - A" → "52A"
+  [/(\d+)\s+([a-zA-Z])\b/g, "$1$2"],          // "52 A" → "52A"
+  [/(\d+)\s*hey\b/gi, "$1A"],                 // "52 hey" → "52A"
+  [/(\d+)\s*a\b/gi, "$1A"],                   // "52 a" → "52A"
+  [/(\d+)\s*be\b/gi, "$1B"],                  // "7 be" → "7B"
+  [/(\d+)\s*bee\b/gi, "$1B"],                 // "7 bee" → "7B"
+  [/(\d+)\s*see\b/gi, "$1C"],                 // "14 see" → "14C"
+  
+  // Common street name mishearings
+  [/\bDavid Rose\b/gi, "David Road"],
+  [/\bDavid Rohn\b/gi, "David Road"],
+  [/\bRussel\b/gi, "Russell"],
+  [/\bRoswell\b/gi, "Russell"],
+];
+
+function applySTTCorrections(text: string): string {
+  let corrected = text;
+  for (const [pattern, replacement] of STT_CORRECTIONS) {
+    corrected = corrected.replace(pattern, replacement);
+  }
+  return corrected;
+}
+
 // === SYSTEM PROMPT ===
 const SYSTEM_PROMPT = `
 # IDENTITY
@@ -36,11 +62,17 @@ Ask ONLY ONE question per response. NEVER combine questions.
 5. Summarize booking and ask for confirmation
 6. If confirmed, say "Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!"
 
+# ADDRESS INTERPRETATION (STRICT)
+- "52-8", "52 A", or "52 hey" MUST be interpreted as "52A".
+- ALPHANUMERIC SUFFIXES ARE PART OF THE NUMBER: 52A, 14B, 7C.
+- NEVER strip the letter. If you hear a letter after a number, it is a house suffix.
+- If the user says "52A" and your internal transcript says "52", you MUST prioritize the alphanumeric version "52A".
+- DO NOT NORMALIZE: "Flat 4, 52A David Road" must not become "52 David Road".
+
 # ZERO-PARAPHRASE RULE (CRITICAL - MOST IMPORTANT)
 - When the customer gives you an address - you MUST use it EXACTLY as heard in your summary
 - NEVER substitute, invent, or "correct" what they said
 - If they say "52A David Road" - your summary says "52A David Road" (NOT "32A", NOT "52", NOT "28")
-- If you hear "52-8" or "52 8" or "52 hey" - that means "52A" (alphanumeric house number)
 - House numbers are SACRED - NEVER alter or hallucinate them
 - If unsure, ask: "Could you repeat that address for me?"
 
@@ -118,6 +150,13 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
+  
+  // === USER TRUTH TRACKING ===
+  let currentStep: "greeting" | "pickup" | "destination" | "passengers" | "time" | "summary" | "done" = "greeting";
+  const lastUserTruth = {
+    pickup: "",
+    destination: "",
+  };
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
@@ -163,6 +202,7 @@ serve(async (req) => {
       // Session configured - trigger greeting
       if (msg.type === "session.updated") {
         log("🎤 Session configured, triggering greeting");
+        currentStep = "pickup"; // After greeting, we're asking for pickup
         openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
@@ -178,12 +218,52 @@ serve(async (req) => {
         }
       }
 
-      // Log transcripts
+      // Log Ada's responses and track step progression
       if (msg.type === "response.audio_transcript.done") {
-        log(`🗣️ Ada: ${msg.transcript}`);
+        const adaText = msg.transcript || "";
+        log(`🗣️ Ada: ${adaText}`);
+        
+        // Detect step progression from Ada's questions
+        const lower = adaText.toLowerCase();
+        if (lower.includes("where would you like to go") || lower.includes("destination")) {
+          currentStep = "destination";
+        } else if (lower.includes("how many") || lower.includes("passengers")) {
+          currentStep = "passengers";
+        } else if (lower.includes("when would you") || lower.includes("pickup time")) {
+          currentStep = "time";
+        } else if (lower.includes("confirm") || lower.includes("summary")) {
+          currentStep = "summary";
+        } else if (lower.includes("taxi is booked") || lower.includes("safe journey")) {
+          currentStep = "done";
+        }
       }
+
+      // === ENHANCED USER TRUTH CAPTURE ===
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        log(`👤 User: ${msg.transcript}`);
+        const raw = msg.transcript || "";
+        const corrected = applySTTCorrections(raw);
+        
+        // Regex to find numbers followed by letters (e.g., 52A, 7B)
+        const houseNumberPattern = /(\d+[a-zA-Z])\b/g;
+        const matches = corrected.match(houseNumberPattern);
+
+        log(`👤 User (raw): ${raw}`);
+        if (corrected !== raw) {
+          log(`👤 User (corrected): ${corrected}`);
+        }
+
+        if (currentStep === "pickup") {
+          lastUserTruth.pickup = corrected;
+          if (matches) log(`🏠 Found Alphanumeric Pickup Number: ${matches.join(', ')}`);
+        } else if (currentStep === "destination") {
+          lastUserTruth.destination = corrected;
+          if (matches) log(`🏠 Found Alphanumeric Destination Number: ${matches.join(', ')}`);
+        }
+        
+        // Log current user truth state
+        if (lastUserTruth.pickup || lastUserTruth.destination) {
+          log(`📋 User Truth: pickup="${lastUserTruth.pickup}" destination="${lastUserTruth.destination}"`);
+        }
       }
 
       // Log errors
@@ -230,6 +310,7 @@ serve(async (req) => {
       
       if (msg.type === "hangup") {
         log("👋 Hangup received");
+        log(`📋 Final User Truth: pickup="${lastUserTruth.pickup}" destination="${lastUserTruth.destination}"`);
         openaiWs?.close();
       }
     } catch {
