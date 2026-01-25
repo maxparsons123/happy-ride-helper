@@ -85,9 +85,85 @@ When the caller asks about local events, things to do, attractions, or what's ha
 
 // === AUDIO HELPERS ===
 
-// Upsample 8kHz to 24kHz (linear interpolation)
+// DSP Settings for telephony clarity
+const DSP_CONFIG = {
+  volumeBoost: 2.5,        // Amplify quiet telephony audio
+  preEmphasis: 0.97,       // Boost high frequencies for clearer consonants
+  noiseGateThreshold: 50,  // RMS threshold for noise gate
+};
+
+// Apply volume boost with soft limiting
+function applyVolumeBoost(samples: Int16Array, boost: number): void {
+  for (let i = 0; i < samples.length; i++) {
+    let sample = samples[i] * boost;
+    // Soft limiter to prevent clipping
+    if (sample > 32767) sample = 32767;
+    else if (sample < -32768) sample = -32768;
+    samples[i] = Math.round(sample);
+  }
+}
+
+// Pre-emphasis filter to boost high frequencies (clearer consonants)
+function applyPreEmphasis(samples: Int16Array, coefficient: number): void {
+  let prev = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const current = samples[i];
+    samples[i] = Math.round(current - coefficient * prev);
+    prev = current;
+  }
+}
+
+// 3-tap low-pass filter to prevent aliasing before upsampling
+function applyLowPass(samples: Int16Array): void {
+  const weights = [0.25, 0.5, 0.25];
+  let prev1 = samples[0];
+  let prev2 = samples[0];
+  
+  for (let i = 0; i < samples.length; i++) {
+    const current = samples[i];
+    const filtered = prev2 * weights[0] + prev1 * weights[1] + current * weights[2];
+    prev2 = prev1;
+    prev1 = current;
+    samples[i] = Math.round(filtered);
+  }
+}
+
+// Calculate RMS for noise gate
+function calculateRMS(samples: Int16Array): number {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    sum += samples[i] * samples[i];
+  }
+  return Math.sqrt(sum / samples.length);
+}
+
+// Apply soft noise gate with fade
+function applyNoiseGate(samples: Int16Array, threshold: number): void {
+  const rms = calculateRMS(samples);
+  if (rms < threshold) {
+    // Soft fade to reduce noise without harsh cutoff
+    const fadeAmount = rms / threshold;
+    for (let i = 0; i < samples.length; i++) {
+      samples[i] = Math.round(samples[i] * fadeAmount * fadeAmount);
+    }
+  }
+}
+
+// Full DSP pipeline: Volume -> Low-Pass -> Pre-Emphasis -> Noise Gate
+function processDSP(samples: Int16Array): void {
+  applyVolumeBoost(samples, DSP_CONFIG.volumeBoost);
+  applyLowPass(samples);
+  applyPreEmphasis(samples, DSP_CONFIG.preEmphasis);
+  applyNoiseGate(samples, DSP_CONFIG.noiseGateThreshold);
+}
+
+// Upsample 8kHz to 24kHz with DSP processing (high-quality linear interpolation)
 function pcm8kTo24k(pcm8k: Uint8Array): Uint8Array {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, Math.floor(pcm8k.byteLength / 2));
+  
+  // Apply DSP before upsampling
+  processDSP(samples8k);
+  
   const len24k = samples8k.length * 3;
   const samples24k = new Int16Array(len24k);
   
