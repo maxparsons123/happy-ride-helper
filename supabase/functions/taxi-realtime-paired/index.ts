@@ -703,6 +703,63 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
   }
 }
 
+// === ALPHANUMERIC STT CORRECTIONS (from simple) ===
+// These fix common Whisper mishearings for house numbers with letter suffixes
+const ALPHANUMERIC_STT_CORRECTIONS: [RegExp, string][] = [
+  // Alphanumeric house numbers - join number + letter
+  [/(\d+)\s*[-–]\s*([a-zA-Z])\b/g, "$1$2"],  // "52-A" or "52 - A" → "52A"
+  [/(\d+)\s+([a-zA-Z])\b/g, "$1$2"],          // "52 A" → "52A"
+  [/(\d+)\s*hey\b/gi, "$1A"],                 // "52 hey" → "52A"
+  [/(\d+)\s*a\b/gi, "$1A"],                   // "52 a" → "52A"
+  [/(\d+)\s*be\b/gi, "$1B"],                  // "7 be" → "7B"
+  [/(\d+)\s*bee\b/gi, "$1B"],                 // "7 bee" → "7B"
+  [/(\d+)\s*see\b/gi, "$1C"],                 // "14 see" → "14C"
+];
+
+function applyAlphanumericCorrections(text: string): string {
+  let corrected = text;
+  for (const [pattern, replacement] of ALPHANUMERIC_STT_CORRECTIONS) {
+    corrected = corrected.replace(pattern, replacement);
+  }
+  return corrected;
+}
+
+// === PASSENGER PARSING (multilingual from simple) ===
+function parsePassengersFromText(text: string): number {
+  const lower = text.toLowerCase().trim();
+  const num = parseInt(lower);
+  if (!isNaN(num) && num > 0 && num <= 10) return num;
+  
+  const words: Record<string, number> = {
+    "one": 1, "two": 2, "to": 2, "too": 2, "three": 3, "tree": 3,
+    "four": 4, "for": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10,
+    // Spanish
+    "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    // French  
+    "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5,
+    // German
+    "eins": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5,
+    // Polish
+    "jeden": 1, "dwa": 2, "trzy": 3, "cztery": 4, "pięć": 5,
+  };
+  
+  for (const [word, val] of Object.entries(words)) {
+    if (lower.includes(word)) return val;
+  }
+  return 0;
+}
+
+// === USER TRUTH STATE ===
+// Parallel state that captures raw STT output before AI processing
+// This is the "ground truth" that overrides AI-extracted values
+interface UserTruth {
+  pickup: string;
+  destination: string;
+  passengers: number;
+  time: string;
+}
+
 // Session state interface
 interface SessionState {
   callId: string;
@@ -714,6 +771,8 @@ interface SessionState {
     passengers: number | null;
     pickupTime: string | null;
   };
+  // USER TRUTH: Raw values from STT that override AI extraction
+  userTruth: UserTruth;
   lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "confirmation" | "none";
   // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
   // This prevents the state machine from skipping steps when Ada's next question
@@ -1700,6 +1759,13 @@ function createSessionState(callId: string, callerPhone: string, language: strin
       destination: null,
       passengers: null,
       pickupTime: null
+    },
+    // USER TRUTH: Parallel state capturing raw STT before AI processing
+    userTruth: {
+      pickup: "",
+      destination: "",
+      passengers: 1,
+      time: "ASAP"
     },
     lastQuestionAsked: "none",
     questionTypeAtSpeechStart: null, // RACE CONDITION FIX: Snapshot question when user starts speaking
@@ -3014,8 +3080,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // User finished speaking - this is the KEY context pairing moment
           if (data.transcript) {
             const rawText = data.transcript.trim();
+            // Apply alphanumeric corrections for house numbers (e.g., "52 A" → "52A")
+            const alphanumericCorrected = applyAlphanumericCorrections(rawText);
             // Apply STT corrections for common telephony mishearings
-            const userText = correctTranscript(rawText);
+            const userText = correctTranscript(alphanumericCorrected);
             if (userText !== rawText) {
               console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
             }
@@ -3024,6 +3092,107 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (isPhantomHallucination(userText)) {
               console.log(`[${callId}] 👻 Filtered phantom hallucination: "${userText}"`);
               break;
+            }
+            
+            // RACE CONDITION FIX: Use the snapshotted question type instead of current state
+            // This handles cases where Ada has already asked the next question before user's answer arrived
+            const effectiveQuestionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionAsked;
+            console.log(`[${callId}] 👤 User (effective question: "${effectiveQuestionType}", current: "${sessionState.lastQuestionAsked}"): "${userText}"`);
+            
+            // Clear the snapshot after using it
+            sessionState.questionTypeAtSpeechStart = null;
+            
+            // === USER TRUTH CAPTURE (from simple) ===
+            // Capture raw corrected STT output BEFORE any AI processing
+            // This provides "ground truth" that overrides AI-extracted values
+            if (effectiveQuestionType === "pickup") {
+              sessionState.userTruth.pickup = userText;
+              console.log(`[${callId}] 📌 User Truth: pickup = "${userText}"`);
+            } else if (effectiveQuestionType === "destination") {
+              sessionState.userTruth.destination = userText;
+              console.log(`[${callId}] 📌 User Truth: destination = "${userText}"`);
+            } else if (effectiveQuestionType === "passengers") {
+              const pax = parsePassengersFromText(userText);
+              if (pax > 0) {
+                sessionState.userTruth.passengers = pax;
+                console.log(`[${callId}] 📌 User Truth: passengers = ${pax}`);
+              }
+            } else if (effectiveQuestionType === "time") {
+              sessionState.userTruth.time = userText;
+              console.log(`[${callId}] 📌 User Truth: time = "${userText}"`);
+            }
+            
+            // === SUMMARY PHASE CONFIRMATION DETECTION (from simple) ===
+            // Enhanced detection that forces system message injection when user confirms
+            if (effectiveQuestionType === "confirmation" || sessionState.awaitingConfirmation || sessionState.lastQuestionAsked === "confirmation") {
+              const lower = userText.toLowerCase();
+              
+              // Lenient affirmative detection (handles typos like "yesy", "okkk")
+              const looksLikeYes = /^(y+e+s+|y+e+a+h*|y+u+p+|y+e+p+|sure|correct|right|absolutely|definitely|perfect)/i.test(lower.trim());
+              const looksLikeOk = /^(o+k+a*y*|go\s*ahead|book\s*(it|the|taxi)?|please|confirm)/i.test(lower.trim());
+              const isAffirmative = looksLikeYes || looksLikeOk || lower.includes("that's correct") || lower.includes("sounds good");
+              
+              // Check for negation
+              const looksLikeNo = /^(no+|nope|wrong|incorrect|change|actually|wait)/i.test(lower.trim());
+              
+              if (isAffirmative && !looksLikeNo) {
+                console.log(`[${callId}] ✅ FORCED CONFIRMATION detected: "${userText}"`);
+                
+                // Use User Truth values if available, fall back to booking state
+                const pickup = sessionState.userTruth.pickup || sessionState.booking.pickup || "";
+                const destination = sessionState.userTruth.destination || sessionState.booking.destination || "";
+                const passengers = sessionState.userTruth.passengers || sessionState.booking.passengers || 1;
+                const time = sessionState.userTruth.time || sessionState.booking.pickupTime || "ASAP";
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[BOOKING CONFIRMATION] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                // Inject FORCED system message to call book_taxi
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER CONFIRMED BOOKING] The user said "${userText}" which is a clear YES.
+
+🚨 IMMEDIATELY call book_taxi with action="${sessionState.awaitingConfirmation ? "confirmed" : "request_quote"}" to ${sessionState.awaitingConfirmation ? "complete the booking" : "get the fare"}.
+Use these EXACT values from User Truth:
+- pickup: "${pickup}"
+- destination: "${destination}"
+- passengers: ${passengers}
+- pickup_time: "${time}"
+
+${sessionState.awaitingConfirmation ? 
+  "Say 'Perfect, booking your taxi now' then call book_taxi({ action: 'confirmed' })" : 
+  "Say 'One moment please while I get your fare' then call book_taxi({ action: 'request_quote' })"}`
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break; // Don't process further
+              }
+              
+              if (looksLikeNo && !isAffirmative) {
+                console.log(`[${callId}] ❌ Negation detected: "${userText}"`);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: "[USER WANTS CHANGES] The user said no to the summary. Ask them: 'What would you like to change?' Do NOT repeat the full summary."
+                    }]
+                  }
+                }));
+                openaiWs!.send(JSON.stringify({ type: "response.create" }));
+                break;
+              }
             }
             
             // POST-CONFIRMATION GUARD: After booking is confirmed, enter open conversation mode
@@ -3062,14 +3231,6 @@ Otherwise, say goodbye warmly and call end_call().`
                 break; // Don't process further
               }
             }
-            
-            // RACE CONDITION FIX: Use the snapshotted question type instead of current state
-            // This handles cases where Ada has already asked the next question before user's answer arrived
-            const effectiveQuestionType = sessionState.questionTypeAtSpeechStart || sessionState.lastQuestionAsked;
-            console.log(`[${callId}] 👤 User (effective question: "${effectiveQuestionType}", current: "${sessionState.lastQuestionAsked}"): "${userText}"`);
-            
-            // Clear the snapshot after using it
-            sessionState.questionTypeAtSpeechStart = null;
             
             // DETECT ADDRESS CORRECTIONS (e.g., "It's 52A David Road", "No, it should be...")
             const correction = detectAddressCorrection(
@@ -3507,20 +3668,36 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
           } else if (toolName === "book_taxi") {
             const action = String(toolArgs.action || "");
 
-            const resolvedPickup = toolArgs.pickup ? String(toolArgs.pickup) : sessionState.booking.pickup;
-            const resolvedDestination = toolArgs.destination ? String(toolArgs.destination) : sessionState.booking.destination;
-            const resolvedPassengers = (toolArgs.passengers !== undefined)
-              ? Number(toolArgs.passengers)
-              : sessionState.booking.passengers;
-            const resolvedPickupTime = toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime;
+            // USER TRUTH PRIORITY: Use captured STT values over AI-extracted values
+            // This prevents hallucinations from corrupting addresses
+            const resolvedPickup = sessionState.userTruth.pickup || toolArgs.pickup ? String(toolArgs.pickup) : sessionState.booking.pickup;
+            const resolvedDestination = sessionState.userTruth.destination || toolArgs.destination ? String(toolArgs.destination) : sessionState.booking.destination;
+            const resolvedPassengers = sessionState.userTruth.passengers > 0 
+              ? sessionState.userTruth.passengers 
+              : (toolArgs.passengers !== undefined ? Number(toolArgs.passengers) : sessionState.booking.passengers);
+            const resolvedPickupTime = sessionState.userTruth.time || toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime;
+
+            // Log User Truth override
+            if (sessionState.userTruth.pickup && sessionState.userTruth.pickup !== toolArgs.pickup) {
+              console.log(`[${callId}] 📌 User Truth override: pickup "${toolArgs.pickup}" → "${sessionState.userTruth.pickup}"`);
+            }
+            if (sessionState.userTruth.destination && sessionState.userTruth.destination !== toolArgs.destination) {
+              console.log(`[${callId}] 📌 User Truth override: destination "${toolArgs.destination}" → "${sessionState.userTruth.destination}"`);
+            }
+
+            // Use User Truth for final values
+            const finalPickup = sessionState.userTruth.pickup || resolvedPickup;
+            const finalDestination = sessionState.userTruth.destination || resolvedDestination;
+            const finalPassengers = sessionState.userTruth.passengers > 0 ? sessionState.userTruth.passengers : resolvedPassengers;
+            const finalTime = sessionState.userTruth.time || resolvedPickupTime || "ASAP";
 
             // Persist any provided details so subsequent tool calls (e.g. confirmed) include full booking info
-            if (resolvedPickup) sessionState.booking.pickup = resolvedPickup;
-            if (resolvedDestination) sessionState.booking.destination = resolvedDestination;
-            if (resolvedPassengers !== null && !Number.isNaN(resolvedPassengers)) {
-              sessionState.booking.passengers = resolvedPassengers;
+            if (finalPickup) sessionState.booking.pickup = finalPickup;
+            if (finalDestination) sessionState.booking.destination = finalDestination;
+            if (finalPassengers !== null && !Number.isNaN(finalPassengers)) {
+              sessionState.booking.passengers = finalPassengers;
             }
-            if (resolvedPickupTime) sessionState.booking.pickupTime = resolvedPickupTime;
+            if (finalTime) sessionState.booking.pickupTime = finalTime;
 
             // Prevent sending incomplete payloads (these cause duplicate/garbage quotes downstream)
             const missing: string[] = [];
