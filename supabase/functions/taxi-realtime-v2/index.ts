@@ -439,10 +439,14 @@ serve(async (req) => {
   // State
   const booking: { pickup?: string; destination?: string; passengers?: number; time?: string; luggage?: string; special_requests?: string } = {};
   const transcripts: Array<{ role: string; text: string; timestamp: string }> = [];
+  const MAX_TRANSCRIPTS = 50; // Prevent unbounded growth
   let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  let endCallTimer: ReturnType<typeof setTimeout> | null = null;
+  let sessionTimer: ReturnType<typeof setTimeout> | null = null;
   let quoteDelivered = false;
   let inboundFormat: "ulaw" | "slin" | null = null;
   let currentStep: BookingStep = "greeting";
+  let isCleanedUp = false;
   
   // Track what the user actually said (for hallucination prevention)
   const userTruth: { pickup?: string; destination?: string; passengers?: number; time?: string } = {};
@@ -450,9 +454,39 @@ serve(async (req) => {
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
   const cleanup = () => {
-    if (fallbackTimer) clearTimeout(fallbackTimer);
-    openaiWs?.close();
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    
+    // Clear all timers
+    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+    if (endCallTimer) { clearTimeout(endCallTimer); endCallTimer = null; }
+    if (sessionTimer) { clearTimeout(sessionTimer); sessionTimer = null; }
+    
+    // Close OpenAI WebSocket and clear handlers
+    if (openaiWs) {
+      openaiWs.onopen = null;
+      openaiWs.onmessage = null;
+      openaiWs.onerror = null;
+      openaiWs.onclose = null;
+      if (openaiWs.readyState === WebSocket.OPEN || openaiWs.readyState === WebSocket.CONNECTING) {
+        openaiWs.close();
+      }
+      openaiWs = null;
+    }
+    
+    // Clear transcript array
+    transcripts.length = 0;
+    
+    log("🧹 Cleanup complete");
   };
+  
+  // Session watchdog - max 5 minutes per call
+  const MAX_SESSION_MS = 5 * 60 * 1000;
+  sessionTimer = setTimeout(() => {
+    log("⏰ Session timeout reached");
+    cleanup();
+    if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Session timeout");
+  }, MAX_SESSION_MS);
 
   // Tool handler
   const handleToolCall = async (name: string, args: Record<string, unknown>, toolCallId: string) => {
@@ -532,7 +566,11 @@ serve(async (req) => {
         item: { type: "function_call_output", call_id: toolCallId, output: JSON.stringify({ status: "ending" }) }
       }));
       
-      setTimeout(() => { socket.close(); cleanup(); }, 3000);
+      // Store timer reference so it can be cleared during cleanup
+      endCallTimer = setTimeout(() => { 
+        if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Call ended"); 
+        cleanup(); 
+      }, 3000);
     }
   };
 
@@ -579,9 +617,10 @@ serve(async (req) => {
         if (socket.readyState === WebSocket.OPEN) socket.send(bytes.buffer);
       }
 
-      // Log transcripts
+      // Log transcripts with limit
       if (msg.type === "response.audio_transcript.done" && msg.transcript) {
         log(`🗣️ Ada: ${msg.transcript}`);
+        if (transcripts.length >= MAX_TRANSCRIPTS) transcripts.shift(); // Remove oldest
         transcripts.push({ role: "assistant", text: msg.transcript, timestamp: new Date().toISOString() });
         supabase.from("live_calls").update({ transcripts, pickup: booking.pickup, destination: booking.destination, passengers: booking.passengers }).eq("call_id", callId);
       }
@@ -596,6 +635,7 @@ serve(async (req) => {
           log(`👤 User: ${rawTranscript}`);
         }
         
+        if (transcripts.length >= MAX_TRANSCRIPTS) transcripts.shift(); // Remove oldest
         transcripts.push({ role: "user", text: correctedTranscript, timestamp: new Date().toISOString() });
         
         // Detect what the user provided
