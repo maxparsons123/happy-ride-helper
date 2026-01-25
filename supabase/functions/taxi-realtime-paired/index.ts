@@ -2537,10 +2537,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
         },
         turn_detection: {
           type: "server_vad",
-          // Optimized for taxi calls: 1000ms balances snappy responses with road noise tolerance
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 1000, // Reduced from 1200ms for faster responses
+          // Optimized for reliable speech detection after greetings
+          threshold: 0.35,           // Lower = more sensitive (matches working pipeline)
+          prefix_padding_ms: 500,     // Capture start of words reliably
+          silence_duration_ms: 1000,  // Fast responses while tolerating pauses
         },
         tools: TOOLS,
         tool_choice: "auto",
