@@ -121,7 +121,83 @@ function applyAddressCorrections(text: string): string {
   return corrected;
 }
 
-// === SYSTEM PROMPT (Clean, focused - from minimal version) ===
+// === STEP TRACKING ===
+type BookingStep = "greeting" | "pickup" | "destination" | "passengers" | "time" | "summary" | "quote" | "confirmed";
+
+function detectStepFromTranscript(text: string, currentStep: BookingStep): { isAddress: boolean; isPassengerCount: boolean; isTime: boolean; isConfirmation: boolean; isCorrection: boolean } {
+  const lower = text.toLowerCase();
+  
+  // Correction detection
+  const isCorrection = /\b(actually|no wait|change|i meant|not .+, it's|sorry,? it's|let me correct)\b/i.test(text);
+  
+  // Address patterns - street types, house numbers, landmarks
+  const addressPatterns = /\b(road|street|avenue|lane|drive|close|way|crescent|place|court|grove|gardens|terrace|walk|hill|rise|view|park|green|square|mews|station|airport|hospital|hotel|pub|supermarket|tesco|asda|sainsbury|morrisons|aldi|lidl|waitrose|mcdonald|costa|starbucks)\b/i;
+  const hasHouseNumber = /\b\d+[a-z]?\b/i.test(text);
+  const isAddress = addressPatterns.test(text) || (hasHouseNumber && text.length > 5);
+  
+  // Passenger count patterns
+  const passengerPatterns = /^(one|two|three|four|five|six|seven|eight|nine|ten|1|2|3|4|5|6|7|8|9|10|just me|myself|alone|couple|to|too|tree|free|for|fore)$/i;
+  const isPassengerCount = passengerPatterns.test(lower.trim()) || /^\d{1,2}$/.test(lower.trim());
+  
+  // Time patterns
+  const timePatterns = /\b(now|asap|immediately|straight away|right now|in \d+ minutes?|at \d|half past|quarter|o'clock|morning|afternoon|evening|tonight|tomorrow|later)\b/i;
+  const isTime = timePatterns.test(text);
+  
+  // Confirmation patterns
+  const yesPatterns = /\b(yes|yeah|yep|yup|correct|right|exactly|perfect|sure|ok|okay|book it|go ahead|confirm|that's right|sounds good)\b/i;
+  const noPatterns = /\b(no|nope|wrong|incorrect|change|wait|hold on|actually)\b/i;
+  const isConfirmation = (yesPatterns.test(text) || noPatterns.test(text)) && currentStep === "summary";
+  
+  return { isAddress, isPassengerCount, isTime, isConfirmation, isCorrection };
+}
+
+function getNextStep(currentStep: BookingStep, booking: { pickup?: string; destination?: string; passengers?: number; time?: string }): BookingStep {
+  if (!booking.pickup) return "pickup";
+  if (!booking.destination) return "destination";
+  if (!booking.passengers) return "passengers";
+  if (!booking.time) return "time";
+  return "summary";
+}
+
+function getStepQuestion(step: BookingStep): string {
+  switch (step) {
+    case "pickup": return "Where would you like to be picked up from?";
+    case "destination": return "And where would you like to go?";
+    case "passengers": return "How many passengers will be travelling?";
+    case "time": return "When would you like to be picked up?";
+    case "summary": return "Please summarize the booking and ask for confirmation.";
+    default: return "";
+  }
+}
+
+// Parse passenger count from various spoken forms
+function parsePassengers(text: string): number | null {
+  const lower = text.toLowerCase().trim();
+  const numberWords: Record<string, number> = {
+    "one": 1, "won": 1, "just me": 1, "myself": 1, "alone": 1,
+    "two": 2, "to": 2, "too": 2, "couple": 2,
+    "three": 3, "tree": 3, "free": 3,
+    "four": 4, "for": 4, "fore": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "ate": 8,
+    "nine": 9, "ten": 10
+  };
+  
+  // Check word matches
+  for (const [word, num] of Object.entries(numberWords)) {
+    if (lower === word || lower.includes(word)) return num;
+  }
+  
+  // Check digit
+  const digitMatch = lower.match(/^(\d{1,2})$/);
+  if (digitMatch) {
+    const num = parseInt(digitMatch[1]);
+    if (num >= 1 && num <= 10) return num;
+  }
+  
+  return null;
+}
+
+// === SYSTEM PROMPT (with step awareness) ===
 const SYSTEM_PROMPT = `
 # IDENTITY
 You are ADA, the professional taxi booking assistant for the Taxibot demo.
@@ -141,15 +217,21 @@ Ask ONLY ONE question per response. NEVER combine questions.
 # GREETING (Say this FIRST when call starts)
 "Hello, and welcome to the Taxibot demo. I'm ADA, your taxi booking assistant. Where would you like to be picked up?"
 
-# BOOKING FLOW (Ask ONE at a time, in order)
-1. Get pickup location
-2. Get destination  
-3. Get number of passengers
-4. Get pickup time (default: now/ASAP)
+# BOOKING FLOW (Ask ONE at a time, in order - DO NOT SKIP STEPS)
+1. Get pickup location → then ask for destination
+2. Get destination → then ask for passengers  
+3. Get number of passengers → then ask for time
+4. Get pickup time (default: now/ASAP) → then give summary
 5. Summarize booking and ask for confirmation
 6. If confirmed, call the book_taxi tool with action="request_quote" and say "One moment please"
 7. Wait for the fare quote, then present it to the user
 8. If user accepts, call book_taxi with action="confirmed", thank them and call end_call
+
+# CRITICAL: NEVER SKIP STEPS
+- After pickup, you MUST ask for destination
+- After destination, you MUST ask for passengers
+- After passengers, you MUST ask for time
+- Follow system hints about the current step
 
 # HOUSE NUMBERS (CRITICAL)
 - Callers may say house numbers as compound words: "twelve fourteen" = 1214, "twenty three" = 23
@@ -329,6 +411,10 @@ serve(async (req) => {
   let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   let quoteDelivered = false;
   let inboundFormat: "ulaw" | "slin" | null = null;
+  let currentStep: BookingStep = "greeting";
+  
+  // Track what the user actually said (for hallucination prevention)
+  const userTruth: { pickup?: string; destination?: string; passengers?: number; time?: string } = {};
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
@@ -477,17 +563,127 @@ serve(async (req) => {
         
         transcripts.push({ role: "user", text: correctedTranscript, timestamp: new Date().toISOString() });
         
-        // Inject corrected transcript as context hint if it differs
-        if (correctedTranscript !== rawTranscript && openaiWs?.readyState === WebSocket.OPEN) {
-          openaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: { 
-              type: "message", 
-              role: "system", 
-              content: [{ type: "input_text", text: `[ADDRESS CORRECTION] The user said: "${correctedTranscript}"` }] 
-            }
-          }));
+        // Detect what the user provided
+        const detection = detectStepFromTranscript(correctedTranscript, currentStep);
+        log(`📊 Step: ${currentStep}, Detection: ${JSON.stringify(detection)}`);
+        
+        // Handle corrections
+        if (detection.isCorrection) {
+          log(`🔄 Correction detected`);
+          // Let the AI handle the correction naturally, but inject hint
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION] The user wants to change something. Listen carefully to what they want to update.` }] }
+            }));
+          }
         }
+        // Save data based on current step and advance
+        else if (currentStep === "greeting" || currentStep === "pickup") {
+          if (detection.isAddress) {
+            userTruth.pickup = correctedTranscript;
+            booking.pickup = correctedTranscript;
+            currentStep = "destination";
+            log(`✅ Pickup saved: ${correctedTranscript}, next: destination`);
+            
+            // Inject step hint
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Pickup received: "${correctedTranscript}". NOW ASK: "And where would you like to go?" - Do NOT ask about passengers yet.` }] }
+              }));
+            }
+          }
+        }
+        else if (currentStep === "destination") {
+          if (detection.isAddress) {
+            userTruth.destination = correctedTranscript;
+            booking.destination = correctedTranscript;
+            currentStep = "passengers";
+            log(`✅ Destination saved: ${correctedTranscript}, next: passengers`);
+            
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Destination received: "${correctedTranscript}". NOW ASK: "How many passengers will be travelling?"` }] }
+              }));
+            }
+          }
+        }
+        else if (currentStep === "passengers") {
+          const parsed = parsePassengers(correctedTranscript);
+          if (parsed) {
+            userTruth.passengers = parsed;
+            booking.passengers = parsed;
+            currentStep = "time";
+            log(`✅ Passengers saved: ${parsed}, next: time`);
+            
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] ${parsed} passenger(s). NOW ASK: "When would you like to be picked up?" (Accept "now" or "ASAP")` }] }
+              }));
+            }
+          } else if (detection.isAddress) {
+            // User gave an address when we asked for passengers - don't advance
+            log(`⚠️ Address given during passengers step, repeating question`);
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[REPEAT] That sounded like an address. Ask again: "How many passengers will be travelling?"` }] }
+              }));
+            }
+          }
+        }
+        else if (currentStep === "time") {
+          // Accept most responses as time, default to "now"
+          const timeValue = detection.isTime ? correctedTranscript : "now";
+          userTruth.time = timeValue;
+          booking.time = timeValue;
+          currentStep = "summary";
+          log(`✅ Time saved: ${timeValue}, next: summary`);
+          
+          if (openaiWs?.readyState === WebSocket.OPEN) {
+            openaiWs.send(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Time: ${timeValue}. NOW GIVE SUMMARY: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger(s), ${booking.time}. Is that correct?"` }] }
+            }));
+          }
+        }
+        else if (currentStep === "summary") {
+          // Check for confirmation
+          const yesPatterns = /\b(yes|yeah|yep|yup|correct|right|exactly|perfect|sure|ok|okay|book it|go ahead|confirm|that's right|sounds good)\b/i;
+          const noPatterns = /\b(no|nope|wrong|incorrect|change|wait|hold on)\b/i;
+          
+          if (yesPatterns.test(correctedTranscript) && !noPatterns.test(correctedTranscript)) {
+            log(`✅ User confirmed booking`);
+            currentStep = "quote";
+            
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CONFIRMED] User said YES. Say "One moment please" and call book_taxi with action="request_quote", pickup="${userTruth.pickup}", destination="${userTruth.destination}", passengers=${userTruth.passengers}, time="${userTruth.time}"` }] }
+              }));
+            }
+          } else if (noPatterns.test(correctedTranscript)) {
+            log(`🔄 User wants to change something`);
+            if (openaiWs?.readyState === WebSocket.OPEN) {
+              openaiWs.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CHANGE] User wants to change something. Ask: "What would you like to change?"` }] }
+              }));
+            }
+          }
+        }
+        
+        // Update database
+        supabase.from("live_calls").update({ 
+          transcripts, 
+          pickup: booking.pickup, 
+          destination: booking.destination, 
+          passengers: booking.passengers,
+          booking_step: currentStep
+        }).eq("call_id", callId);
       }
 
       // Handle tool calls
