@@ -653,22 +653,23 @@ serve(async (req) => {
         // 1. Explicit phone/caller_phone/caller in init message
         // 2. Extract from UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX
         // 3. Extract from paired format: paired-XXXXXXXXXXX (timestamp + phone embedded)
-        callerPhone = msg.phone || msg.caller_phone || msg.caller || "unknown";
+        let rawPhone = msg.phone || msg.caller_phone || msg.caller || "unknown";
         
-        if (callerPhone === "unknown" && callId && callId !== "unknown") {
+        if (rawPhone === "unknown" && callId && callId !== "unknown") {
           // Try UUID format: 00000000-0000-0000-0000-XXXXXXXXXXXX
           const uuidMatch = callId.match(/^00000000-0000-0000-0000-(\d{12})$/);
           if (uuidMatch) {
             const phoneDigits = uuidMatch[1];
-            const trimmed = phoneDigits.replace(/^0+/, "");
-            if (trimmed.length >= 9) {
-              callerPhone = "+" + trimmed;
-              log(`📱 Phone extracted from UUID: ${callerPhone}`);
+            rawPhone = phoneDigits.replace(/^0+/, "");
+            if (rawPhone.length >= 9) {
+              log(`📱 Phone extracted from UUID: ${rawPhone}`);
+            } else {
+              rawPhone = "unknown";
             }
           }
           
           // Try paired format: paired-XXXXXXXXXXX (last 9-12 digits are phone)
-          if (callerPhone === "unknown") {
+          if (rawPhone === "unknown") {
             const pairedMatch = callId.match(/^paired-\d+$/);
             if (pairedMatch) {
               // The callId suffix contains timestamp, phone might be in the message
@@ -676,6 +677,11 @@ serve(async (req) => {
             }
           }
         }
+        
+        // Format for WhatsApp: remove + and leading zeros
+        callerPhone = rawPhone !== "unknown" 
+          ? String(rawPhone).replace(/^\+/, "").replace(/^0+/, "")
+          : "unknown";
         
         log(`📞 Call initialized (caller: ${callerPhone})`);
         connectOpenAI();
@@ -689,9 +695,10 @@ serve(async (req) => {
       
       // Handle phone update from bridge (sent after MSG_UUID from Asterisk)
       if (msg.type === "update_phone") {
-        const newPhone = msg.phone || msg.user_phone;
-        if (newPhone && newPhone !== "unknown") {
-          callerPhone = newPhone.startsWith("+") ? newPhone : "+" + newPhone;
+        const rawPhone = msg.phone || msg.user_phone;
+        if (rawPhone && rawPhone !== "unknown") {
+          // Format for WhatsApp: remove + and leading zeros
+          callerPhone = String(rawPhone).replace(/^\+/, "").replace(/^0+/, "");
           log(`📱 Phone updated: ${callerPhone}`);
         }
       }
