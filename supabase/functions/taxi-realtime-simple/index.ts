@@ -170,8 +170,9 @@ serve(async (req) => {
         const transcript = msg.transcript || "";
         log(`🗣️ Ada: ${transcript}`);
         
-        // Detect goodbye phrases to trigger clean hangup
-        if (/safe journey|have a great day|goodbye|thank you for (using|trying)|taxibot demo/i.test(transcript)) {
+        // Detect goodbye phrases to trigger clean hangup (NOT the greeting!)
+        // Only match farewell phrases that indicate booking complete
+        if (/safe journey|have a (great|good) (day|trip)|goodbye|thank you for (using|trying)/i.test(transcript)) {
           log("👋 Goodbye detected, will hang up after audio completes");
           finalGoodbyePending = true;
         }
