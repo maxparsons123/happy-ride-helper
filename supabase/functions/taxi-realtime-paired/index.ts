@@ -3269,16 +3269,18 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             const lower = userText.toLowerCase();
             
             // Patterns that indicate a direct correction with new value
-            const pickupChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?pick\s*-?\s*up\s+(?:to|is|should be|as)\s+(.+)/i) 
+            const pickupChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?pick\s*-?\s*up\s+(?:to|two|is|should be|as)\s+(.+)/i) 
               || lower.match(/pick\s*-?\s*up\s+(?:from|at)\s+(.+)/i)
               || lower.match(/(?:actually|no,?\s*)?(?:it'?s?|its)\s+(.+?)(?:\s+for\s+pick\s*-?\s*up)?$/i);
             
-            const destChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?destination\s+(?:to|is|should be|as)\s+(.+)/i)
-              || lower.match(/(?:going|go)\s+to\s+(.+)/i)
-              || lower.match(/drop\s*-?\s*off\s+(?:at|to)\s+(.+)/i);
+            const destChangeMatch = lower.match(/(?:change|update|make|set)?\s*(?:the\s+)?destination\s+(?:to|two|is|should be|as)\s+(.+)/i)
+              || lower.match(/(?:going|go)\s+(?:to|two)\s+(.+)/i)
+              || lower.match(/drop\s*-?\s*off\s+(?:at|to|two)\s+(.+)/i);
             
             if (pickupChangeMatch) {
-              const newPickup = pickupChangeMatch[1].trim().replace(/^(to|at|is)\s+/i, '');
+              const newPickup = pickupChangeMatch[1].trim()
+                .replace(/^(to|two|at|is)\s+/i, '')
+                .replace(/\s+please$/i, '');  // Remove trailing "please"
               console.log(`[${callId}] 🔧 INLINE CORRECTION: pickup extracted = "${newPickup}"`);
               sessionState.userTruth.pickup = newPickup;
               sessionState.booking.pickup = newPickup;
@@ -3301,7 +3303,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             }
             
             if (destChangeMatch) {
-              const newDest = destChangeMatch[1].trim().replace(/^(to|at|is)\s+/i, '');
+              const newDest = destChangeMatch[1].trim()
+                .replace(/^(to|two|at|is)\s+/i, '')
+                .replace(/\s+please$/i, '');  // Remove trailing "please"
               console.log(`[${callId}] 🔧 INLINE CORRECTION: destination extracted = "${newDest}"`);
               sessionState.userTruth.destination = newDest;
               sessionState.booking.destination = newDest;
