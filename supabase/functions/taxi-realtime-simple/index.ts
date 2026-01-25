@@ -69,7 +69,8 @@ function isLikelyEcho(echo: string, reference: string): boolean {
   return tokenOverlapScore(ne, nr) >= 0.75;
 }
 
-// === TOOLS DEFINITION (STRICT MODE) ===
+// === TOOLS DEFINITION ===
+// Note: OpenAI Realtime API doesn't support 'strict' parameter - enforce via descriptions
 const TOOLS = [
   {
     type: "function",
@@ -116,10 +117,8 @@ const TOOLS = [
           description: "Vehicle preference (e.g., 'standard', 'estate', 'mpv', 'executive')" 
         }
       },
-      required: ["action", "pickup_house_number", "pickup_street", "destination_house_number", "destination_street", "passengers", "time", "luggage", "vehicle_type"],
-      additionalProperties: false
-    },
-    strict: true
+      required: ["action", "pickup_house_number", "pickup_street", "destination_house_number", "destination_street", "passengers", "time", "luggage", "vehicle_type"]
+    }
   },
   {
     type: "function",
@@ -134,10 +133,8 @@ const TOOLS = [
           description: "Reason for ending the call"
         }
       },
-      required: ["reason"],
-      additionalProperties: false
-    },
-    strict: true
+      required: ["reason"]
+    }
   }
 ];
 
