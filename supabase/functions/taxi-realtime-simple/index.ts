@@ -104,7 +104,6 @@ serve(async (req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
   let callId = "unknown";
-  let finalGoodbyePending = false;
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
@@ -165,32 +164,10 @@ serve(async (req) => {
         }
       }
 
-      // Log transcripts and detect goodbye
+      // Log transcripts
       if (msg.type === "response.audio_transcript.done") {
-        const transcript = msg.transcript || "";
-        log(`🗣️ Ada: ${transcript}`);
-        
-        // Detect goodbye phrases to trigger clean hangup (NOT the greeting!)
-        // Only match farewell phrases that indicate booking complete
-        if (/safe journey|have a (great|good) (day|trip)|goodbye|thank you for (using|trying)/i.test(transcript)) {
-          log("👋 Goodbye detected, will hang up after audio completes");
-          finalGoodbyePending = true;
-        }
+        log(`🗣️ Ada: ${msg.transcript}`);
       }
-      
-      // When response is done, check if we should hang up
-      if (msg.type === "response.done" && finalGoodbyePending) {
-        log("✅ Final response complete, initiating hangup");
-        // Wait for audio to flush before closing
-        setTimeout(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "hangup", reason: "booking_complete" }));
-          }
-          openaiWs?.close();
-          socket.close();
-        }, 500);
-      }
-
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         log(`👤 User: ${msg.transcript}`);
       }
@@ -238,12 +215,8 @@ serve(async (req) => {
       }
       
       if (msg.type === "hangup") {
-        log("👋 Hangup received from bridge");
+        log("👋 Hangup received");
         openaiWs?.close();
-      }
-      
-      if (msg.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
       }
     } catch {
       // Ignore non-JSON
