@@ -704,7 +704,8 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
     case "pre_summary":
       return `Give a quick recap: "So that's from ${booking.pickup} to ${booking.destination}, ${booking.passengers} passenger${booking.passengers === 1 ? '' : 's'}, ${booking.pickupTime || 'as soon as possible'}. Is there anything you'd like to change before I get you a quote?" Wait for their response.`;
     case "confirmation":
-      return `User confirmed no changes needed. Now call book_taxi with action='request_quote' to get the fare. Booking: pickup=${booking.pickup}, destination=${booking.destination}, passengers=${booking.passengers}, time=${booking.pickupTime || "now"}`;
+      // This is the "Shall I get you a price?" phase - user hasn't agreed to get quote yet
+      return `Ask the user: "Great! Shall I get you a price for this journey?" and wait for their response.`;
     default:
       return "Continue the conversation naturally.";
   }
@@ -3465,9 +3466,10 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, address=${looksLikeAddress}`);
               
               if (wantsNoChanges && !wantsChanges && !looksLikeAddress) {
-                // User confirmed no changes - proceed to get quote
-                console.log(`[${callId}] ✅ PRE-SUMMARY COMPLETE - User confirmed no changes`);
+                // User confirmed no changes - NOW ask if they want a quote
+                console.log(`[${callId}] ✅ PRE-SUMMARY: No changes needed - asking for quote confirmation`);
                 sessionState.preSummaryDone = true;
+                sessionState.lastQuestionAsked = "confirmation"; // Move to confirmation step
                 
                 sessionState.conversationHistory.push({
                   role: "user",
@@ -3475,6 +3477,7 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                   timestamp: Date.now()
                 });
                 
+                // Ask user if they want to proceed with getting a quote - DON'T auto-request yet
                 openaiWs!.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: {
@@ -3484,8 +3487,9 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
                       type: "input_text",
                       text: `[USER CONFIRMED NO CHANGES] The user said "${userText}" - they're happy with the details.
 
-Now call book_taxi with action='request_quote' to get the fare estimate.
-Booking: pickup=${sessionState.booking.pickup}, destination=${sessionState.booking.destination}, passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "now"}`
+Now ask them: "Great! Shall I get you a price for this journey?"
+Wait for their confirmation before calling book_taxi(request_quote).
+Do NOT request the quote yet - wait for them to say yes.`
                     }]
                   }
                 }));
@@ -3497,6 +3501,78 @@ Booking: pickup=${sessionState.booking.pickup}, destination=${sessionState.booki
                 // User wants to change something - let normal flow handle it
                 console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something`);
                 // Don't break - let the normal transcript handling process the change
+              }
+            }
+            
+            // QUOTE REQUEST PHASE: Handle user response to "Shall I get you a price?"
+            // This is BEFORE the quote is requested - user must say "yes" to trigger quote
+            if (sessionState.lastQuestionAsked === "confirmation" && sessionState.preSummaryDone && !sessionState.awaitingConfirmation && !sessionState.quoteInFlight) {
+              const lowerText = userText.toLowerCase().trim();
+              const normalized = lowerText.replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+              
+              const affirmativePatterns = /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|please|that's fine|perfect|great|do it|yes please|absolutely|definitely)\b/i;
+              const isAffirmative = affirmativePatterns.test(normalized);
+              
+              const negativePatterns = /^(no|nope|nah|cancel|nevermind|never mind|forget it)\b/i;
+              const isNegative = negativePatterns.test(normalized);
+              
+              console.log(`[${callId}] 💰 QUOTE REQUEST CHECK: "${userText}" → affirmative=${isAffirmative}, negative=${isNegative}`);
+              
+              if (isAffirmative) {
+                // User said YES to getting a quote - NOW request the fare
+                console.log(`[${callId}] ✅ USER AGREED TO GET QUOTE - calling request_quote`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[AGREED TO QUOTE] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER AGREED TO GET QUOTE] The user said "${userText}" - they want a price.
+
+Now call book_taxi with action='request_quote' to get the fare estimate.
+Say "One moment while I check that for you" then call the tool.
+Booking: pickup=${sessionState.booking.pickup}, destination=${sessionState.booking.destination}, passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "now"}`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                break;
+              }
+              
+              if (isNegative) {
+                // User said NO to getting quote
+                console.log(`[${callId}] ❌ USER DECLINED QUOTE with: "${userText}"`);
+                
+                sessionState.conversationHistory.push({
+                  role: "user",
+                  content: `[DECLINED QUOTE] ${userText}`,
+                  timestamp: Date.now()
+                });
+                
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[USER DECLINED QUOTE] The user said "${userText}" - they don't want to proceed.
+                      
+Say: "No problem. Is there anything else I can help you with today?"
+Be polite and offer further assistance.`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                break;
               }
             }
             
