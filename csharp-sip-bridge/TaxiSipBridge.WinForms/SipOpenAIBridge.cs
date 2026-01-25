@@ -81,8 +81,26 @@ public class SipOpenAIBridge : IDisposable
         }
 
         // Set up SIP registration
+        // Resolve domain name to IP if needed
+        IPAddress serverIp;
+        if (!IPAddress.TryParse(_sipServer, out serverIp!))
+        {
+            try
+            {
+                var addresses = Dns.GetHostAddresses(_sipServer);
+                serverIp = addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    ?? throw new Exception($"Could not resolve {_sipServer}");
+                Log($"📡 Resolved {_sipServer} → {serverIp}");
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ DNS resolution failed for {_sipServer}: {ex.Message}");
+                throw;
+            }
+        }
+
         var regUri = new SIPURI(_sipUser, _sipServer, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp);
-        var serverUri = new SIPURI(SIPSchemesEnum.sip, new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(_sipServer), _sipPort));
+        var serverUri = new SIPURI(SIPSchemesEnum.sip, new SIPEndPoint(SIPProtocolsEnum.udp, serverIp, _sipPort));
 
         _regUserAgent = new SIPRegistrationUserAgent(_sipTransport, _sipUser, _sipPassword, _sipServer, 120);
 
