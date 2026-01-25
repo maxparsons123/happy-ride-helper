@@ -103,6 +103,8 @@ interface CallState {
   time: string | null;
   currentStepValidated: boolean;
   farewellSent: boolean;
+  awaitingConfirmation: boolean;
+  awaitingChange: boolean;
 }
 
 // === MAIN HANDLER ===
@@ -119,7 +121,31 @@ serve(async (req) => {
   let openaiWs: WebSocket | null = null;
   let state: CallState | null = null;
 
+  // Track OpenAI response lifecycle to avoid "conversation already has active response".
+  let isResponseActive = false;
+  let deferredResponseCreate = false;
+
   const log = (msg: string) => console.log(`[${state?.callId || "unknown"}] ${msg}`);
+
+  const safeResponseCreate = () => {
+    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    if (isResponseActive) {
+      deferredResponseCreate = true;
+      log("⏳ response.create deferred (active response in progress)");
+      return;
+    }
+    openaiWs.send(JSON.stringify({ type: "response.create" }));
+  };
+
+  const looksLikeAffirmative = (text: string) => {
+    const t = text.toLowerCase().trim();
+    return /^(yes|yeah|yep|yess|yesy|ok|okay|okkk|correct|that's correct|thats correct|right|go ahead|confirm|please do)/.test(t);
+  };
+
+  const looksLikeNegative = (text: string) => {
+    const t = text.toLowerCase().trim();
+    return /^(no|nope|nah|not correct|that's wrong|thats wrong|wrong)/.test(t);
+  };
 
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
@@ -157,10 +183,24 @@ serve(async (req) => {
       try {
         const msg = JSON.parse(event.data);
 
+        if (msg.type === "response.created") {
+          isResponseActive = true;
+        }
+
+        if (msg.type === "response.done") {
+          isResponseActive = false;
+          if (deferredResponseCreate) {
+            deferredResponseCreate = false;
+            log("▶️ Flushing deferred response.create");
+            // fire-and-forget
+            safeResponseCreate();
+          }
+        }
+
         // Session configured - trigger greeting
         if (msg.type === "session.updated") {
           log("🎤 Session configured, triggering greeting");
-          openaiWs?.send(JSON.stringify({ type: "response.create" }));
+          safeResponseCreate();
         }
 
         // Handle user transcription
@@ -176,15 +216,65 @@ serve(async (req) => {
 
           if (!state) return;
 
-          // Handle corrections first
-          if (/actually|no wait|change|I meant|not .+ it's|sorry, it's|let me correct/i.test(lower)) {
-            handleCorrection(rawText, state);
+          // Summary confirmation handling (this is where short "that's correct" needs to land)
+          if (state.step === "summary") {
+            // If caller confirms, close out immediately.
+            if (state.awaitingConfirmation && looksLikeAffirmative(lower)) {
+              log("✅ Confirmation detected");
+              state.awaitingConfirmation = false;
+              state.awaitingChange = false;
+              state.step = "done";
+
+              // Force verbatim closing script.
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [
+                    {
+                      type: "input_text",
+                      text:
+                        "[POST-CONFIRMATION MODE] The caller has confirmed. Say exactly: 'Your taxi is booked! You'll receive updates via WhatsApp. Have a safe journey!' Then stop.",
+                    },
+                  ],
+                },
+              }));
+              safeResponseCreate();
+              return;
+            }
+
+            // If caller rejects, ask what to change and enter change mode.
+            if (state.awaitingConfirmation && looksLikeNegative(lower)) {
+              log("↩️ Rejection detected; asking what to change");
+              state.awaitingConfirmation = false;
+              state.awaitingChange = true;
+
+              openaiWs?.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: "What would you like to change?" }],
+                },
+              }));
+              safeResponseCreate();
+              return;
+            }
+
+            // While awaitingChange, treat the next utterance as a correction attempt.
+            if (state.awaitingChange || /actually|no wait|change|i meant|not .+ it's|sorry, it's|let me correct/i.test(lower)) {
+              handleCorrection(rawText, state);
+              return;
+            }
+
+            // Otherwise ignore stray transcripts during summary.
             return;
           }
 
-          // Skip validation if we're in summary/fare_confirm (handled by Ada's logic)
-          if (state.step === "summary" || state.step === "fare_confirm") {
-            // Let Ada handle these naturally
+          // Handle corrections (non-summary)
+          if (/actually|no wait|change|i meant|not .+ it's|sorry, it's|let me correct/i.test(lower)) {
+            handleCorrection(rawText, state);
             return;
           }
 
@@ -338,6 +428,9 @@ Time: ${state.time}
 Now summarize this booking using ONLY the data above. Do not change or paraphrase the addresses. Ask for confirmation.`;
 
     log(`📋 Injecting verified summary: P=${state.pickup}, D=${state.destination}, Pax=${state.passengers}, T=${state.time}`);
+
+    state.awaitingConfirmation = true;
+    state.awaitingChange = false;
     
     openaiWs?.send(JSON.stringify({
       type: "conversation.item.create",
@@ -347,7 +440,7 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
         content: [{ type: "input_text", text: summaryInstruction }] 
       }
     }));
-    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    safeResponseCreate();
   }
 
   function reAskCurrentQuestion(state: CallState) {
@@ -364,12 +457,12 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
         type: "conversation.item.create",
         item: { type: "message", role: "user", content: [{ type: "input_text", text: question }] }
       }));
-      openaiWs?.send(JSON.stringify({ type: "response.create" }));
+      safeResponseCreate();
     }
   }
 
   function handleCorrection(text: string, state: CallState) {
-    // Simple correction: assume they're correcting the current field
+    // Correction: try to detect which field is being corrected, especially in summary/change mode.
     const lower = text.toLowerCase();
     
     // Extract new value (crude but effective for demo)
@@ -382,10 +475,20 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
       if (parts.length > 1) newValue = parts[1].trim();
     }
     
-    // Update current field
-    updateStateWithResponse(newValue, state.step, state);
+    // Decide target field
+    let targetStep: CallState["step"] = state.step;
+    if (state.step === "summary" || state.awaitingChange) {
+      if (/pick\s*up|pickup/.test(lower)) targetStep = "pickup";
+      else if (/destination|drop\s*off|dropoff/.test(lower)) targetStep = "destination";
+      else if (/passengers|people|travelling|traveling/.test(lower)) targetStep = "passengers";
+      else if (/time|now|asap|later/.test(lower)) targetStep = "time";
+    }
+
+    // Apply update
+    updateStateWithResponse(newValue, targetStep, state);
     state.currentStepValidated = true;
-    log(`🔄 Correction applied: ${state.step} = ${newValue}`);
+    state.awaitingChange = false;
+    log(`🔄 Correction applied: ${targetStep} = ${newValue}`);
     
     // Acknowledge and move on
     const ackMsg = `Updated to ${newValue}.`;
@@ -393,9 +496,16 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
       type: "conversation.item.create",
       item: { type: "message", role: "user", content: [{ type: "input_text", text: ackMsg }] }
     }));
-    openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    safeResponseCreate();
     
-    // Advance to next step
+    // After correction during/after summary, re-inject summary to confirm again.
+    if (state.step === "summary" || targetStep === "pickup" || targetStep === "destination" || targetStep === "passengers" || targetStep === "time") {
+      state.step = "summary";
+      injectBookingSummary(state);
+      return;
+    }
+
+    // Otherwise continue flow
     advanceToNextStep(state);
   }
 
@@ -434,6 +544,8 @@ Now summarize this booking using ONLY the data above. Do not change or paraphras
           time: null,
           currentStepValidated: false,
           farewellSent: false,
+          awaitingConfirmation: false,
+          awaitingChange: false,
         };
         log(`📞 Call initialized`);
         connectOpenAI();
