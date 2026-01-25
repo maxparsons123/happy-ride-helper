@@ -498,15 +498,14 @@ function buildSystemPrompt(language: string): string {
   return `
 # IDENTITY
 You are Ada, the professional taxi booking assistant for the Taxibot demo.
-Voice: Warm, clear, professionally casual. Speak at a SLOWER, relaxed pace - not rushed.
+Voice: Warm, clear, professionally casual.
 
 ${langInstruction}
 
 # SPEAKING STYLE
-- Speak slowly and clearly, with natural pauses between sentences.
-- Do not rush through your responses.
-- Take your time with each word, especially addresses and numbers.
-- Use a calm, measured pace that is easy to understand over the phone.
+- Speak clearly and at a natural, conversational pace.
+- Do not drag out words or pause excessively.
+- Be efficient but not rushed - aim for natural speech rhythm.
 
 # 🛑 CRITICAL LOGIC GATE: THE CHECKLIST
 You have a mental checklist of 4 items: [Pickup], [Destination], [Passengers], [Time].
@@ -2524,10 +2523,10 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
     
     // For auto-detect mode, let the AI decide based on first user response
-    // CRITICAL: Version MUST be spoken first, then the greeting
+    // REMOVED: Version announcement - no longer needed
     const greetingInstruction = sessionState.language === "auto"
-      ? `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again.`
-      : `FIRST say "Version ${VERSION}" clearly, then say: "${greetingText}". Then WAIT for their response.`;
+      ? `Say: "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again.`
+      : `Say: "${greetingText}". Then WAIT for their response.`;
     
     console.log(`[${callId}] 📢 Version: ${VERSION}, Greeting: ${greetingText}`);
     
@@ -3256,24 +3255,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           if (data.transcript) {
             // One-time version prefix safety-net: ensure the caller hears the version.
             // We inject this as a system instruction before the model produces the next reply.
-            if (versionPrefixPending && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-              versionPrefixPending = false;
-              try {
-                openaiWs.send(JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "system",
-                    content: [{
-                      type: "input_text",
-                      text: `[VERSION ANNOUNCEMENT] Start your NEXT spoken reply with exactly: "Version ${VERSION}." Then continue normally. Do this ONLY ONCE.`,
-                    }],
-                  },
-                }));
-              } catch (e) {
-                console.error(`[${callId}] Failed to inject version prefix instruction:`, e);
-              }
-            }
+            // REMOVED: Version prefix safety-net - no longer announcing version
 
             const rawText = data.transcript.trim();
             // Apply alphanumeric corrections for house numbers (e.g., "52 A" → "52A")
