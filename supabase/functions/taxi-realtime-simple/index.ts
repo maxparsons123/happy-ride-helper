@@ -2,12 +2,68 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 // === CONFIGURATION ===
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const DISPATCH_WEBHOOK_URL = Deno.env.get("DISPATCH_WEBHOOK_URL");
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// === DISPATCH WEBHOOK ===
+interface DispatchPayload {
+  call_id: string;
+  caller_phone: string;
+  action: "request_quote" | "confirmed" | "cancelled";
+  pickup: string;
+  destination: string;
+  passengers?: number;
+  pickup_time?: string;
+  locale?: string;
+  currency?: string;
+}
+
+interface DispatchResponse {
+  success: boolean;
+  fare?: string;
+  eta_minutes?: number;
+  booking_ref?: string;
+  message?: string;
+  error?: string;
+}
+
+async function sendDispatchWebhook(
+  payload: DispatchPayload,
+  log: (msg: string) => void
+): Promise<DispatchResponse> {
+  if (!DISPATCH_WEBHOOK_URL) {
+    log("⚠️ DISPATCH_WEBHOOK_URL not configured, skipping webhook");
+    return { success: false, error: "Webhook not configured" };
+  }
+
+  try {
+    log(`📤 Sending dispatch webhook: ${payload.action}`);
+    log(`   Payload: ${JSON.stringify(payload)}`);
+
+    const response = await fetch(DISPATCH_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      log(`❌ Dispatch webhook failed: ${response.status} - ${errorText}`);
+      return { success: false, error: `HTTP ${response.status}` };
+    }
+
+    const result = await response.json() as DispatchResponse;
+    log(`📥 Dispatch response: ${JSON.stringify(result)}`);
+    return result;
+  } catch (error) {
+    log(`❌ Dispatch webhook error: ${error}`);
+    return { success: false, error: String(error) };
+  }
+}
 // === LOCALE DETECTION ===
 interface CallerLocale {
   code: string;
@@ -225,8 +281,124 @@ serve(async (req) => {
     pickup: "",
     destination: "",
   };
+  
+  // === BOOKING STATE ===
+  const bookingState = {
+    pickup: "",
+    destination: "",
+    passengers: 1,
+    pickup_time: "now",
+    confirmed: false,
+    fare: "",
+    eta_minutes: 0,
+    booking_ref: "",
+  };
 
   const log = (msg: string) => console.log(`[${callId}] ${msg}`);
+  
+  // === TOOL CALL HANDLER ===
+  const handleToolCall = async (toolName: string, args: Record<string, unknown>, toolCallId: string) => {
+    log(`🔧 Tool call: ${toolName} with args: ${JSON.stringify(args)}`);
+    
+    if (toolName === "book_taxi") {
+      const action = args.action as string;
+      
+      // Update booking state from args
+      if (args.pickup) bookingState.pickup = String(args.pickup);
+      if (args.destination) bookingState.destination = String(args.destination);
+      if (args.passengers) bookingState.passengers = Number(args.passengers);
+      if (args.pickup_time) bookingState.pickup_time = String(args.pickup_time);
+      
+      // Use user truth if available (more accurate)
+      if (lastUserTruth.pickup) bookingState.pickup = lastUserTruth.pickup;
+      if (lastUserTruth.destination) bookingState.destination = lastUserTruth.destination;
+      
+      log(`📋 Booking state: ${JSON.stringify(bookingState)}`);
+      
+      if (action === "request_quote") {
+        // Send webhook to get fare quote
+        const result = await sendDispatchWebhook({
+          call_id: callId,
+          caller_phone: callerPhone || "",
+          action: "request_quote",
+          pickup: bookingState.pickup,
+          destination: bookingState.destination,
+          passengers: bookingState.passengers,
+          pickup_time: bookingState.pickup_time,
+          locale: callerLocale.code,
+          currency: callerLocale.currency,
+        }, log);
+        
+        if (result.success && result.fare) {
+          bookingState.fare = result.fare;
+          bookingState.eta_minutes = result.eta_minutes || 0;
+          
+          // Return fare to Ada
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: toolCallId,
+              output: JSON.stringify({
+                success: true,
+                fare: result.fare,
+                eta_minutes: result.eta_minutes,
+                message: `Fare is ${result.fare}, ETA ${result.eta_minutes} minutes`,
+              }),
+            },
+          }));
+        } else {
+          openaiWs?.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: toolCallId,
+              output: JSON.stringify({
+                success: false,
+                message: "Unable to get fare quote at this time",
+              }),
+            },
+          }));
+        }
+        
+        // Trigger Ada to speak the result
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+        
+      } else if (action === "confirmed") {
+        // Send final booking confirmation
+        const result = await sendDispatchWebhook({
+          call_id: callId,
+          caller_phone: callerPhone || "",
+          action: "confirmed",
+          pickup: bookingState.pickup,
+          destination: bookingState.destination,
+          passengers: bookingState.passengers,
+          pickup_time: bookingState.pickup_time,
+          locale: callerLocale.code,
+          currency: callerLocale.currency,
+        }, log);
+        
+        bookingState.confirmed = true;
+        if (result.booking_ref) bookingState.booking_ref = result.booking_ref;
+        
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: toolCallId,
+            output: JSON.stringify({
+              success: result.success,
+              booking_ref: result.booking_ref || "DEMO-" + Date.now(),
+              message: "Booking confirmed",
+            }),
+          },
+        }));
+        
+        // Trigger Ada to speak confirmation
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
+      }
+    }
+  };
 
   // Connect to OpenAI Realtime
   const connectOpenAI = () => {
@@ -265,7 +437,42 @@ serve(async (req) => {
               threshold: 0.5,
               prefix_padding_ms: 300,
               silence_duration_ms: 800
-            }
+            },
+            tools: [
+              {
+                type: "function",
+                name: "book_taxi",
+                description: "Book a taxi or request a fare quote. Use action='request_quote' after user confirms the summary to get fare. Use action='confirmed' after user accepts the fare.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    action: {
+                      type: "string",
+                      enum: ["request_quote", "confirmed"],
+                      description: "request_quote = get fare after summary confirmed. confirmed = final booking after fare accepted."
+                    },
+                    pickup: {
+                      type: "string",
+                      description: "EXACT pickup address as spoken by user. Include house numbers with letters (e.g., 52A)."
+                    },
+                    destination: {
+                      type: "string",
+                      description: "EXACT destination address as spoken by user. Include house numbers with letters."
+                    },
+                    passengers: {
+                      type: "number",
+                      description: "Number of passengers"
+                    },
+                    pickup_time: {
+                      type: "string",
+                      description: "Pickup time. Default 'now' for ASAP."
+                    }
+                  },
+                  required: ["action", "pickup", "destination"]
+                }
+              }
+            ],
+            tool_choice: "auto"
           }
         }));
       }
@@ -353,6 +560,18 @@ serve(async (req) => {
         // Log current user truth state
         if (lastUserTruth.pickup || lastUserTruth.destination) {
           log(`📋 User Truth: pickup="${lastUserTruth.pickup}" destination="${lastUserTruth.destination}"`);
+        }
+      }
+
+      // === TOOL CALL HANDLING ===
+      if (msg.type === "response.function_call_arguments.done") {
+        const toolName = msg.name;
+        const toolCallId = msg.call_id;
+        try {
+          const args = JSON.parse(msg.arguments || "{}");
+          handleToolCall(toolName, args, toolCallId);
+        } catch (e) {
+          log(`❌ Failed to parse tool arguments: ${e}`);
         }
       }
 
