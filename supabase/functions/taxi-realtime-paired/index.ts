@@ -3259,6 +3259,27 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (userTruthUpdated) {
               await updateLiveCall(sessionState);
               console.log(`[${callId}] 💾 User Truth persisted immediately`);
+              
+              // CRITICAL: Inject system instruction to force tool call BEFORE Ada speaks
+              // This prevents race condition where Ada asks next question before tool executes
+              const fieldToSync = effectiveQuestionType;
+              const valueToSync = effectiveQuestionType === "pickup" ? sessionState.userTruth.pickup :
+                                 effectiveQuestionType === "destination" ? sessionState.userTruth.destination :
+                                 effectiveQuestionType === "passengers" ? sessionState.userTruth.passengers :
+                                 sessionState.userTruth.time;
+              
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[SYSTEM] User answered ${fieldToSync}: "${valueToSync}". You MUST call sync_booking_data with ${fieldToSync}="${valueToSync}" NOW before speaking. Do NOT ask the next question yet - wait for tool result.`
+                  }]
+                }
+              }));
+              openaiWs!.send(JSON.stringify({ type: "response.create" }));
             }
             
             // === PRE-SUMMARY RESPONSE DETECTION ===
