@@ -604,6 +604,33 @@ class TaxiBridge:
     async def run(self) -> None:
         peer = self.writer.get_extra_info("peername")
         logger.info("[%s] 📞 New call from %s", self.state.call_id, peer)
+        
+        # Wait for UUID message from Asterisk first (contains phone number)
+        # Asterisk sends MSG_UUID as the first message with the call UUID
+        try:
+            header = await asyncio.wait_for(self.reader.readexactly(3), timeout=2.0)
+            msg_type = header[0]
+            msg_len = struct.unpack(">H", header[1:3])[0]
+            payload = await self.reader.readexactly(msg_len)
+            
+            if msg_type == MSG_UUID:
+                # UUID is sent as raw bytes, convert to hex string
+                raw_hex = payload.hex()
+                logger.info("[%s] 📋 Received Asterisk UUID: %s", self.state.call_id, raw_hex)
+                
+                # Extract phone from last 12 hex chars (zero-padded phone number)
+                if len(raw_hex) >= 12:
+                    phone_digits = raw_hex[-12:]
+                    # Strip leading zeros for WhatsApp format
+                    trimmed = phone_digits.lstrip("0")
+                    if len(trimmed) >= 9:
+                        self.state.phone = trimmed
+                        logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] ⚠️ No UUID message received, continuing without phone", self.state.call_id)
+        except Exception as e:
+            logger.warning("[%s] ⚠️ Error reading UUID: %s", self.state.call_id, e)
+        
         playback_task = asyncio.create_task(self.queue_to_asterisk())
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         try:
@@ -613,27 +640,20 @@ class TaxiBridge:
                         await self.stop_call("WebSocket connection failed")
                         break
                 if not self.state.init_sent and self.ws:
-                    # Extract phone from UUID if it matches Asterisk format:
-                    # 00000000-0000-0000-0000-XXXXXXXXXXXX where last 12 digits = padded phone
-                    caller_phone = "unknown"
-                    if self.state.call_id.startswith("00000000-0000-0000-0000-"):
-                        phone_digits = self.state.call_id[-12:]  # Last 12 characters
-                        trimmed = phone_digits.lstrip("0")  # Remove leading zeros
-                        if len(trimmed) >= 9:  # Valid phone length (NL=10, UK=11, etc.)
-                            caller_phone = "+" + trimmed
-                            logger.info("[%s] 📱 Phone from UUID: %s", self.state.call_id, caller_phone)
+                    # Use phone extracted from UUID or "unknown"
+                    caller_phone = self.state.phone if self.state.phone != "Unknown" else "unknown"
                     
                     # We resample all audio to 24kHz before sending, so report that
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
                         "phone": caller_phone,
-                        "caller_phone": caller_phone,  # Also send as caller_phone for compatibility
+                        "caller_phone": caller_phone,
                         "user_phone": caller_phone,
                         "addressTtsSplicing": True,
                         "eager_init": True,
-                        "inbound_format": "slin16",  # 16-bit PCM
-                        "inbound_sample_rate": RATE_AI,  # Already resampled to 24kHz
+                        "inbound_format": "slin16",
+                        "inbound_sample_rate": RATE_AI,
                     }
                     await self.ws.send(json.dumps(payload))
                     self.state.init_sent = True
@@ -718,17 +738,22 @@ class TaxiBridge:
                 msg_len = struct.unpack(">H", header[1:3])[0]
                 payload = await self.reader.readexactly(msg_len)
                 if msg_type == MSG_UUID:
+                    # UUID might be sent again, update phone if not already set
                     raw_hex = payload.hex()
                     if len(raw_hex) >= 12:
-                        self.state.phone = raw_hex[-12:]
-                        logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
-                        if self.ws and self.state.ws_connected:
-                            await self.ws.send(json.dumps({
-                                "type": "update_phone",
-                                "call_id": self.state.call_id,
-                                "phone": self.state.phone,
-                                "user_phone": self.state.phone,
-                            }))
+                        phone_digits = raw_hex[-12:]
+                        trimmed = phone_digits.lstrip("0")
+                        if len(trimmed) >= 9 and self.state.phone == "Unknown":
+                            self.state.phone = trimmed
+                            logger.info("[%s] 👤 Phone (late): %s", self.state.call_id, self.state.phone)
+                            # Send update to edge function
+                            if self.ws and self.state.ws_connected:
+                                await self.ws.send(json.dumps({
+                                    "type": "update_phone",
+                                    "call_id": self.state.call_id,
+                                    "phone": self.state.phone,
+                                    "user_phone": self.state.phone,
+                                }))
                 elif msg_type == MSG_AUDIO:
                     if msg_len != self.state.ast_frame_bytes or self.state.ast_codec != "opus":
                         await self._detect_format(msg_len, payload)
