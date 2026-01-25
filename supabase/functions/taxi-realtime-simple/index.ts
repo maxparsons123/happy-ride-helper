@@ -86,10 +86,11 @@ When the caller asks about local events, things to do, attractions, or what's ha
 // === AUDIO HELPERS ===
 
 // DSP Settings for inbound telephony audio (user voice → OpenAI)
+// NOTE: Gentle settings to avoid distorting audio for Whisper STT
 const INBOUND_DSP = {
-  volumeBoost: 2.5,        // Amplify quiet telephony audio
-  preEmphasis: 0.97,       // Boost high frequencies for clearer consonants
-  noiseGateThreshold: 50,  // RMS threshold for noise gate
+  volumeBoost: 1.5,        // Gentle boost (was 2.5 - too aggressive)
+  preEmphasis: 0.5,        // Light pre-emphasis (was 0.97 - too harsh)
+  noiseGateThreshold: 30,  // Lower threshold to preserve quiet speech
 };
 
 // DSP Settings for outbound audio (Ada voice → telephony)
