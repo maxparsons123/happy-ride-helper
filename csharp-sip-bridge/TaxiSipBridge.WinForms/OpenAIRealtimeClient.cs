@@ -425,14 +425,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_ws?.State != WebSocketState.Open) return;
 
-        // HD AUDIO OPTIMIZED SESSION CONFIG + SIP SILENCE TOLERANCE
-        // SIP callers wait for bot to finish before speaking, so we need extended silence tolerance
+        // EXACT MATCH to taxi-realtime-desktop edge function settings
+        // See: supabase/functions/taxi-realtime-desktop/index.ts lines 693-707
         var sessionUpdate = new
         {
             type = "session.update",
             session = new
             {
-                modalities = new[] { "text", "audio" },
+                modalities = new[] { "text", "audio" },  // Text first (matches edge function)
                 instructions = _systemPrompt,
                 voice = _voice,
                 input_audio_format = "pcm16",
@@ -441,10 +441,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,
-                    prefix_padding_ms = 500,
-                    // 1200ms silence tolerance for SIP "dead air" after greeting
-                    silence_duration_ms = 1200
+                    threshold = 0.3,           // Matches edge function (desktop-optimized, lower threshold)
+                    prefix_padding_ms = 400,   // Matches edge function
+                    silence_duration_ms = 800  // Matches edge function (desktop mics have cleaner audio)
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -452,7 +451,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 HD Audio: VAD=0.4, silence=1200ms (SIP dead-air tolerant)");
+        Log("🎧 Config: VAD=0.3, prefix=400ms, silence=800ms (matches taxi-realtime-desktop)");
         
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
@@ -467,28 +466,27 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_greetingSent || _ws?.State != WebSocketState.Open) return;
         _greetingSent = true;
 
-        // Match edge function approach: small delay for stability after session.updated
+        // Match edge function: 200ms delay for stability after session.updated
         await Task.Delay(200);
 
-        // Clear any stale audio buffer before greeting (matches edge function)
-        await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+        _lastQuestionAsked = "pickup";
 
-        // Use same approach as taxi-realtime-paired edge function:
-        // response.create with modalities (audio FIRST) and greeting instructions
+        // EXACT MATCH to taxi-realtime-desktop edge function (lines 664-672)
+        // Uses response.create with modalities ["text", "audio"] and inline instructions
+        // DO NOT pre-create an assistant message - let the model generate it with audio
         var responseCreate = new
         {
             type = "response.create",
             response = new
             {
-                modalities = new[] { "audio", "text" },  // Audio first - prioritize voice output
-                instructions = "Greet the caller warmly. Say: 'Hello, this is Ada from taxi bookings. Where would you like to be picked up from?' Then WAIT for their response."
+                modalities = new[] { "text", "audio" },  // Text first (matches edge function exactly)
+                instructions = "IMPORTANT: You are starting a new taxi booking call. Greet the customer warmly and ask for their pickup location. Say: 'Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?' Do NOT call any tools yet - just greet the user and wait for their response."
             }
         };
         
         await SendJsonAsync(responseCreate);
         
-        _lastQuestionAsked = "pickup";
-        Log("🎤 Greeting triggered (edge function pattern: 200ms delay + audio-first modalities)");
+        Log("🎤 Greeting triggered (matches taxi-realtime-desktop: text+audio modalities)");
     }
 
     private async Task SendContextHintAsync(string userText)
