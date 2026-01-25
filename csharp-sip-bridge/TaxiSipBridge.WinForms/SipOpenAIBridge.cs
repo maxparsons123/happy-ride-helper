@@ -103,7 +103,7 @@ public class SipOpenAIBridge : IDisposable
 
         // Create user agent for handling calls
         _userAgent = new SIPUserAgent(_sipTransport, null);
-        _userAgent.ServerCallCancelled += () => Log("📞 Call cancelled by remote");
+        _userAgent.ServerCallCancelled += (uas, cancelReq) => Log("📞 Call cancelled by remote");
 
         // Listen for incoming calls
         _sipTransport.SIPTransportRequestReceived += OnSipRequestReceived;
