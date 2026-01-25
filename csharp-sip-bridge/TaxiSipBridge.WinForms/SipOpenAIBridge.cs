@@ -92,9 +92,9 @@ public class SipOpenAIBridge : IDisposable
             OnRegistered?.Invoke();
         };
 
-        _regUserAgent.RegistrationFailed += (uri, resp, err) =>
+        _regUserAgent.RegistrationFailed += (uri, resp) =>
         {
-            var errMsg = err ?? resp?.ReasonPhrase ?? "Unknown error";
+            var errMsg = resp?.ReasonPhrase ?? "Registration failed";
             Log($"❌ Registration failed: {errMsg}");
             OnRegistrationFailed?.Invoke(errMsg);
         };
@@ -103,7 +103,7 @@ public class SipOpenAIBridge : IDisposable
 
         // Create user agent for handling calls
         _userAgent = new SIPUserAgent(_sipTransport, null);
-        _userAgent.ServerCallCancelled += (uas) => Log("📞 Call cancelled by remote");
+        _userAgent.ServerCallCancelled += () => Log("📞 Call cancelled by remote");
 
         // Listen for incoming calls
         _sipTransport.SIPTransportRequestReceived += OnSipRequestReceived;
