@@ -3,6 +3,17 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // --- Configuration ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
+if (!OPENAI_API_KEY) {
+  console.error("❌ OPENAI_API_KEY environment variable is not set.");
+}
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+
+type TransportMode = "unknown" | "audiosocket" | "bridge";
+
 // === AUDIO PROTOCOL HELPERS ===
 
 /**
@@ -23,17 +34,30 @@ function wrapAudioSocketFrame(pcmData: Uint8Array): Uint8Array {
 }
 
 /**
- * Downsamples OpenAI's 24kHz to Asterisk's 8kHz
+ * Decode OpenAI base64 PCM16 into bytes
  */
-function resample24to8(base64Audio: string): Uint8Array {
+function decodeBase64ToBytes(base64Audio: string): Uint8Array {
   const binary = atob(base64Audio);
-  const pcm24k = new Int16Array(new Uint8Array(Array.from(binary, c => c.charCodeAt(0))).buffer);
-  
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * Downsample 24kHz PCM16 to 8kHz PCM16 for AudioSocket (3:1)
+ */
+function downsamplePcm24to8(pcm24kBytes: Uint8Array): Uint8Array {
+  const pcm24k = new Int16Array(
+    pcm24kBytes.buffer,
+    pcm24kBytes.byteOffset,
+    Math.floor(pcm24kBytes.byteLength / 2),
+  );
+
   const outputLen = Math.floor(pcm24k.length / 3);
   const pcm8k = new Int16Array(outputLen);
-  
   for (let i = 0; i < outputLen; i++) {
-    pcm8k[i] = pcm24k[i * 3]; // Simple decimation for performance
+    // simple decimation; AudioSocket callers typically already band-limited
+    pcm8k[i] = pcm24k[i * 3];
   }
   return new Uint8Array(pcm8k.buffer);
 }
@@ -41,22 +65,33 @@ function resample24to8(base64Audio: string): Uint8Array {
 // === MAIN HANDLER ===
 
 serve(async (req) => {
+  // CORS preflight (some WS clients still send OPTIONS)
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("Expected WebSocket", { status: 426 });
   }
 
   const { socket: asteriskSocket, response } = Deno.upgradeWebSocket(req);
   let openaiWs: WebSocket | null = null;
+  let mode: TransportMode = "unknown";
+  let didInitOpenAi = false;
+  let callId = "init";
+
+  const log = (msg: string) => console.log(`[${callId}] ${msg}`);
 
   // --- OpenAI Realtime Connection ---
   const connectToOpenAI = () => {
+    if (didInitOpenAi) return;
+    didInitOpenAi = true;
+
     openaiWs = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17`,
       ["realtime", `openai-insecure-api-key.${OPENAI_API_KEY}`, "openai-beta.realtime-v1"]
     );
 
     openaiWs.onopen = () => {
-      console.log("✅ Connected to OpenAI Realtime");
+      log("✅ Connected to OpenAI Realtime");
       openaiWs?.send(JSON.stringify({
         type: "session.update",
         session: {
@@ -94,91 +129,173 @@ RULES:
     openaiWs.onmessage = (event) => {
       const msg = JSON.parse(event.data);
 
-      // CRITICAL: Audio routing to Asterisk
+      // CRITICAL: Audio routing to client
       if (msg.type === "response.audio.delta" && msg.delta) {
-        // 1. Downsample from OpenAI (24k) to Asterisk (8k)
-        const pcm8k = resample24to8(msg.delta);
-        
-        // 2. Wrap in AudioSocket Header (0x10)
-        const frame = wrapAudioSocketFrame(pcm8k);
-        
-        // 3. Send to Asterisk
-        if (asteriskSocket.readyState === WebSocket.OPEN) {
+        const pcm24kBytes = decodeBase64ToBytes(msg.delta);
+
+        if (asteriskSocket.readyState !== WebSocket.OPEN) return;
+
+        // If we're talking to the Python bridge (or any WS bridge), it expects raw PCM16 bytes.
+        if (mode === "bridge" || mode === "unknown") {
+          asteriskSocket.send(pcm24kBytes.buffer);
+          return;
+        }
+
+        // If we're talking directly to Asterisk AudioSocket, it expects 0x10+len framing + 8kHz PCM16 frames.
+        if (mode === "audiosocket") {
+          const pcm8k = downsamplePcm24to8(pcm24kBytes);
+          const frame = wrapAudioSocketFrame(pcm8k);
           asteriskSocket.send(frame);
         }
       }
       
       // Session created - trigger greeting
       if (msg.type === "session.created") {
-        console.log("📋 Session created, triggering greeting");
-        setTimeout(() => {
-          openaiWs?.send(JSON.stringify({ type: "response.create" }));
-        }, 500);
+        log("📋 Session created, sending greeting");
+        // Ensure an initial assistant utterance exists.
+        openaiWs?.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Hello! Where would you like to be picked up?" }],
+          },
+        }));
+        openaiWs?.send(JSON.stringify({ type: "response.create" }));
       }
 
       // Logging
       if (msg.type === "response.audio_transcript.done") {
-        console.log("💬 Ada:", msg.transcript);
+        log(`💬 Ada: ${msg.transcript}`);
       }
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
-        console.log("👤 User:", msg.transcript);
+        log(`👤 User: ${msg.transcript}`);
       }
       if (msg.type === "error") {
-        console.log("❌ OpenAI error:", JSON.stringify(msg.error));
+        log(`❌ OpenAI error: ${JSON.stringify(msg.error)}`);
       }
     };
 
-    openaiWs.onerror = (e) => console.error("🔴 OpenAI WS Error:", e);
-    openaiWs.onclose = () => console.log("⚪ OpenAI Connection Closed");
+    openaiWs.onerror = (e) => log(`🔴 OpenAI WS Error: ${e}`);
+    openaiWs.onclose = () => log("⚪ OpenAI Connection Closed");
   };
 
   // --- Asterisk (Incoming) Message Handling ---
-  asteriskSocket.onopen = () => console.log("🚀 Asterisk AudioSocket Connected");
+  asteriskSocket.onopen = () => log("🚀 Client WebSocket connected");
 
   asteriskSocket.onmessage = (event) => {
-    if (event.data instanceof ArrayBuffer) {
-      const data = new Uint8Array(event.data);
-      const type = data[0];
+    // Text control (Python bridge typically sends JSON like {type:"init"})
+    if (typeof event.data === "string") {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg?.type === "init") {
+          mode = "bridge";
+          callId = msg.call_id || callId;
+          log("🧩 Detected BRIDGE mode (init JSON)");
+          connectToOpenAI();
+        }
+        if (msg?.type === "hangup") {
+          log("👋 Hangup received (bridge)");
+          openaiWs?.close();
+          asteriskSocket.close();
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
 
-      // 0x01 = UUID (Handshake)
+    // Binary audio
+    if (!(event.data instanceof ArrayBuffer)) return;
+    const data = new Uint8Array(event.data);
+
+    // Heuristic: AudioSocket frames always have a 3-byte header with known type.
+    const maybeType = data[0];
+    const looksLikeAudioSocket =
+      (maybeType === 0x01 || maybeType === 0x10 || maybeType === 0x00 || maybeType === 0x03 || maybeType === 0xff) &&
+      data.length >= 3;
+
+    if (looksLikeAudioSocket && mode === "unknown") {
+      mode = "audiosocket";
+      log("🧩 Detected AUDIOSOCKET mode (binary header)");
+    }
+
+    // AudioSocket path
+    if (mode === "audiosocket") {
+      const type = data[0];
       if (type === 0x01) {
-        const uuid = Array.from(data.slice(3, 19)).map(b => b.toString(16).padStart(2, '0')).join('');
-        console.log("📞 Call Connected, UUID:", uuid);
+        // UUID is 16 raw bytes in many setups; we log it but also connect OpenAI immediately.
+        const uuidHex = Array.from(data.slice(3, 19))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+        callId = uuidHex || callId;
+        log(`📞 Call Connected (UUID ${uuidHex})`);
         connectToOpenAI();
+        return;
       }
 
-      // 0x10 = Audio (User speaking)
       if (type === 0x10 && openaiWs?.readyState === WebSocket.OPEN) {
-        const audioPayload = data.slice(3); // Strip 3-byte header
-        
-        // OpenAI expects 16kHz or 24kHz. Since Asterisk is 8kHz, 
-        // we "upsample" by doubling samples to reach 16kHz.
-        const pcm8k = new Int16Array(audioPayload.buffer, audioPayload.byteOffset, audioPayload.byteLength / 2);
+        const audioPayload = data.slice(3);
+        // For now, we forward the 8kHz PCM16 as a crude 16kHz by duplication (same as before).
+        const pcm8k = new Int16Array(audioPayload.buffer, audioPayload.byteOffset, Math.floor(audioPayload.byteLength / 2));
         const pcm16k = new Int16Array(pcm8k.length * 2);
         for (let i = 0; i < pcm8k.length; i++) {
           pcm16k[i * 2] = pcm8k[i];
           pcm16k[i * 2 + 1] = pcm8k[i];
         }
-
-        openaiWs.send(JSON.stringify({
-          type: "input_audio_buffer.append",
-          audio: btoa(String.fromCharCode(...new Uint8Array(pcm16k.buffer)))
-        }));
+        const bytes16k = new Uint8Array(pcm16k.buffer);
+        openaiWs.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: arrayBufferToBase64(bytes16k),
+          }),
+        );
+        return;
       }
-      
-      // 0x00 = Hangup
+
       if (type === 0x00) {
-        console.log("👋 Call Finished");
+        log("👋 Call Finished (audiosocket)");
         openaiWs?.close();
         asteriskSocket.close();
+      }
+
+      return;
+    }
+
+    // Bridge path (binary = raw PCM16 already, likely 24kHz)
+    if (mode === "bridge" || mode === "unknown") {
+      // If we didn't get init JSON first, still attempt bridge mode.
+      if (mode === "unknown") {
+        mode = "bridge";
+        log("🧩 Assuming BRIDGE mode (binary audio without AudioSocket header)");
+        connectToOpenAI();
+      }
+
+      if (openaiWs?.readyState === WebSocket.OPEN) {
+        openaiWs.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: arrayBufferToBase64(data),
+          }),
+        );
       }
     }
   };
 
   asteriskSocket.onclose = () => {
-    console.log("🔌 Bridge Closed");
+    log("🔌 Client disconnected");
     openaiWs?.close();
   };
 
   return response;
 });
+
+/**
+ * Converts Uint8Array audio to Base64 for OpenAI
+ */
+function arrayBufferToBase64(buffer: Uint8Array): string {
+  let binary = "";
+  const bytes = buffer;
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
