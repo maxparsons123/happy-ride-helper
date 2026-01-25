@@ -2449,14 +2449,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     
     // Get language-specific greeting or fall back to English for auto-detect
     const langData = GREETINGS[sessionState.language] || GREETINGS["en"];
-    // Include version number at the start for identification - MUST be spoken
+    // Build the complete greeting - greeting + pickup question
     const greetingText = `${langData.greeting} ${langData.pickupQuestion}`;
     
-    // For auto-detect mode, let the AI decide based on first user response
-    // REMOVED: Version announcement - no longer needed
-    const greetingInstruction = sessionState.language === "auto"
-      ? `Say: "${greetingText}". After this greeting, WAIT for the caller to respond. Do NOT repeat the pickup question again.`
-      : `Say: "${greetingText}". Then WAIT for their response.`;
+    // CRITICAL: Use explicit word-for-word instruction to prevent AI from paraphrasing
+    const greetingInstruction = `Say EXACTLY these words, word-for-word: "${greetingText}" Then WAIT silently for the caller to respond. Do NOT add anything else. Do NOT paraphrase.`;
     
     console.log(`[${callId}] 📢 Version: ${VERSION}, Greeting: ${greetingText}`);
     
@@ -2464,7 +2461,7 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
     openaiWs!.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],  // Audio first - prioritize voice output
+        modalities: ["audio", "text"],
         instructions: greetingInstruction
       }
     }));
