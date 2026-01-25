@@ -1,0 +1,347 @@
+using System.Net;
+using SIPSorcery.Media;
+using SIPSorcery.Net;
+using SIPSorcery.SIP;
+using SIPSorcery.SIP.App;
+using SIPSorceryMedia.Abstractions;
+
+namespace TaxiSipBridge;
+
+/// <summary>
+/// Bridge between SIPSorcery and OpenAIRealtimeClient for local AI processing.
+/// Handles SIP call setup, RTP audio, and routes audio to/from OpenAI directly.
+/// </summary>
+public class SipOpenAIBridge : IDisposable
+{
+    private readonly string _apiKey;
+    private readonly string _sipServer;
+    private readonly int _sipPort;
+    private readonly string _sipUser;
+    private readonly string _sipPassword;
+    private readonly SipTransportType _transportType;
+
+    private SIPTransport? _sipTransport;
+    private SIPRegistrationUserAgent? _regUserAgent;
+    private SIPUserAgent? _userAgent;
+    private VoIPMediaSession? _mediaSession;
+    private AdaAudioSource? _adaAudioSource;
+    private OpenAIRealtimeClient? _aiClient;
+    private CancellationTokenSource? _callCts;
+
+    private volatile bool _disposed;
+    private volatile bool _isInCall;
+    private string? _currentCallId;
+
+    // Flush initial RTP packets to avoid stale audio
+    private const int FLUSH_PACKETS = 25;
+    private int _inboundPacketCount;
+    private bool _inboundFlushComplete;
+
+    public event Action<string>? OnLog;
+    public event Action? OnRegistered;
+    public event Action<string>? OnRegistrationFailed;
+    public event Action<string, string>? OnCallStarted;
+    public event Action<string>? OnCallEnded;
+    public event Action<string>? OnTranscript;
+
+    public SipOpenAIBridge(
+        string apiKey,
+        string sipServer,
+        int sipPort,
+        string sipUser,
+        string sipPassword,
+        SipTransportType transportType = SipTransportType.UDP)
+    {
+        _apiKey = apiKey;
+        _sipServer = sipServer;
+        _sipPort = sipPort;
+        _sipUser = sipUser;
+        _sipPassword = sipPassword;
+        _transportType = transportType;
+    }
+
+    public void Start()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(SipOpenAIBridge));
+
+        Log("🚀 Starting SIP-OpenAI Bridge...");
+
+        _sipTransport = new SIPTransport();
+
+        // Add appropriate channel based on transport type
+        if (_transportType == SipTransportType.TCP)
+        {
+            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 0)));
+            Log("📡 Using TCP transport");
+        }
+        else
+        {
+            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
+            Log("📡 Using UDP transport");
+        }
+
+        // Set up SIP registration
+        var regUri = new SIPURI(_sipUser, _sipServer, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp);
+        var serverUri = new SIPURI(SIPSchemesEnum.sip, new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(_sipServer), _sipPort));
+
+        _regUserAgent = new SIPRegistrationUserAgent(_sipTransport, _sipUser, _sipPassword, _sipServer, 120);
+
+        _regUserAgent.RegistrationSuccessful += (uri) =>
+        {
+            Log($"✅ Registered as {_sipUser}@{_sipServer}");
+            OnRegistered?.Invoke();
+        };
+
+        _regUserAgent.RegistrationFailed += (uri, resp, err) =>
+        {
+            var errMsg = err ?? resp?.ReasonPhrase ?? "Unknown error";
+            Log($"❌ Registration failed: {errMsg}");
+            OnRegistrationFailed?.Invoke(errMsg);
+        };
+
+        _regUserAgent.Start();
+
+        // Create user agent for handling calls
+        _userAgent = new SIPUserAgent(_sipTransport, null);
+        _userAgent.ServerCallCancelled += (uas) => Log("📞 Call cancelled by remote");
+
+        // Listen for incoming calls
+        _sipTransport.SIPTransportRequestReceived += OnSipRequestReceived;
+
+        Log("📞 Listening for incoming calls...");
+    }
+
+    private async Task OnSipRequestReceived(
+        SIPEndPoint localSipEndPoint,
+        SIPEndPoint remoteEndPoint,
+        SIPRequest sipRequest)
+    {
+        if (sipRequest.Method == SIPMethodsEnum.INVITE)
+        {
+            await HandleIncomingCall(sipRequest);
+        }
+        else if (sipRequest.Method == SIPMethodsEnum.BYE)
+        {
+            Log("📕 BYE received");
+            await EndCallAsync();
+            var okResponse = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+            await _sipTransport!.SendResponseAsync(okResponse);
+        }
+    }
+
+    private async Task HandleIncomingCall(SIPRequest inviteRequest)
+    {
+        if (_disposed || _isInCall)
+        {
+            Log("⚠️ Rejecting call - already in a call or disposed");
+            var busyResponse = SIPResponse.GetResponse(inviteRequest, SIPResponseStatusCodesEnum.BusyHere, null);
+            await _sipTransport!.SendResponseAsync(busyResponse);
+            return;
+        }
+
+        _isInCall = true;
+        _currentCallId = Guid.NewGuid().ToString("N")[..8];
+        _callCts = new CancellationTokenSource();
+        _inboundPacketCount = 0;
+        _inboundFlushComplete = false;
+
+        var caller = inviteRequest.Header.From.FromURI.User ?? "unknown";
+        Log($"📞 [{_currentCallId}] Incoming call from {caller}");
+        OnCallStarted?.Invoke(_currentCallId, caller);
+
+        try
+        {
+            // Create AdaAudioSource for outbound audio (AI → SIP)
+            _adaAudioSource = new AdaAudioSource(AudioMode.Standard, 80);
+            _adaAudioSource.OnDebugLog += msg => Log(msg);
+
+            // Create VoIPMediaSession with our custom audio source
+            var mediaEndPoints = new MediaEndPoints
+            {
+                AudioSource = _adaAudioSource,
+                AudioSink = null // We handle inbound audio manually
+            };
+
+            _mediaSession = new VoIPMediaSession(mediaEndPoints);
+            _mediaSession.AcceptRtpFromAny = true;
+
+            // Hook up RTP receiver for inbound audio (SIP → AI)
+            _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
+
+            // Accept the call
+            var uas = _userAgent!.AcceptCall(inviteRequest);
+
+            // Send 180 Ringing
+            try
+            {
+                var ringing = SIPResponse.GetResponse(inviteRequest, SIPResponseStatusCodesEnum.Ringing, null);
+                await _sipTransport!.SendResponseAsync(ringing);
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Failed to send ringing: {ex.Message}");
+            }
+
+            await Task.Delay(200);
+
+            // Answer the call
+            bool answered = await _userAgent.Answer(uas, _mediaSession);
+            if (!answered)
+            {
+                Log($"❌ [{_currentCallId}] Failed to answer call");
+                await CleanupCall();
+                return;
+            }
+
+            // Start media session
+            await _mediaSession.Start();
+            Log($"✅ [{_currentCallId}] Call answered, RTP started");
+
+            // Connect to OpenAI Realtime API
+            _aiClient = new OpenAIRealtimeClient(_apiKey);
+            _aiClient.OnLog += msg => Log(msg);
+            _aiClient.OnTranscript += t =>
+            {
+                Log($"💬 {t}");
+                OnTranscript?.Invoke(t);
+            };
+            _aiClient.OnPcm24Audio += OnAiAudioReceived;
+            _aiClient.OnCallEnded += async () => await EndCallAsync();
+
+            await _aiClient.ConnectAsync(caller, _callCts.Token);
+            Log($"🤖 [{_currentCallId}] Connected to OpenAI Realtime API");
+
+            // Handle call hangup
+            _userAgent.OnCallHungup += (dialogue) =>
+            {
+                Log($"📕 [{_currentCallId}] Remote hung up");
+                _ = EndCallAsync();
+            };
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ [{_currentCallId}] Error: {ex.Message}");
+            await CleanupCall();
+        }
+    }
+
+    private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    {
+        if (mediaType != SDPMediaTypesEnum.audio || _aiClient == null || !_aiClient.IsConnected)
+            return;
+
+        _inboundPacketCount++;
+
+        // Flush initial packets to avoid stale audio
+        if (!_inboundFlushComplete)
+        {
+            if (_inboundPacketCount <= FLUSH_PACKETS)
+            {
+                if (_inboundPacketCount == 1)
+                    Log($"🧹 Flushing first {FLUSH_PACKETS} inbound packets...");
+                return;
+            }
+            _inboundFlushComplete = true;
+            Log("✅ Inbound flush complete");
+        }
+
+        var payload = rtpPacket.Payload;
+        if (payload == null || payload.Length == 0) return;
+
+        // Send µ-law audio to OpenAI (it handles decoding/resampling)
+        _ = _aiClient.SendMuLawAsync(payload);
+    }
+
+    private void OnAiAudioReceived(byte[] pcm24kBytes)
+    {
+        if (_disposed || _adaAudioSource == null) return;
+
+        // Feed PCM24 audio to AdaAudioSource - it handles:
+        // - Resampling 24kHz → 8kHz
+        // - G.711 µ-law encoding
+        // - RTP frame pacing (20ms timer)
+        _adaAudioSource.EnqueuePcm24(pcm24kBytes);
+    }
+
+    public async Task EndCallAsync()
+    {
+        if (!_isInCall) return;
+
+        var callId = _currentCallId;
+        Log($"📞 [{callId}] Ending call...");
+
+        try { _callCts?.Cancel(); } catch { }
+
+        // Hang up SIP
+        try { _userAgent?.Hangup(); } catch { }
+
+        await CleanupCall();
+
+        if (callId != null)
+            OnCallEnded?.Invoke(callId);
+    }
+
+    private async Task CleanupCall()
+    {
+        _isInCall = false;
+
+        // Disconnect AI
+        if (_aiClient != null)
+        {
+            try { await _aiClient.DisconnectAsync(); } catch { }
+            _aiClient.Dispose();
+            _aiClient = null;
+        }
+
+        // Close media session
+        if (_mediaSession != null)
+        {
+            try { _mediaSession.Close("Call ended"); } catch { }
+            _mediaSession.Dispose();
+            _mediaSession = null;
+        }
+
+        // Dispose audio source
+        if (_adaAudioSource != null)
+        {
+            _adaAudioSource.Dispose();
+            _adaAudioSource = null;
+        }
+
+        _callCts?.Dispose();
+        _callCts = null;
+        _currentCallId = null;
+    }
+
+    public void Stop()
+    {
+        Log("🛑 Stopping SIP-OpenAI Bridge...");
+
+        _ = EndCallAsync();
+
+        try { _regUserAgent?.Stop(); } catch { }
+        try { _sipTransport?.Shutdown(); } catch { }
+
+        Log("✅ Bridge stopped");
+    }
+
+    private void Log(string message)
+    {
+        if (_disposed) return;
+        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {message}");
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        Stop();
+
+        _regUserAgent = null;
+        _userAgent = null;
+        _sipTransport = null;
+
+        GC.SuppressFinalize(this);
+    }
+}
