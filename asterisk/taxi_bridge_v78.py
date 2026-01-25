@@ -613,12 +613,23 @@ class TaxiBridge:
                         await self.stop_call("WebSocket connection failed")
                         break
                 if not self.state.init_sent and self.ws:
+                    # Extract phone from UUID if it matches Asterisk format:
+                    # 00000000-0000-0000-0000-XXXXXXXXXXXX where last 12 digits = padded phone
+                    caller_phone = "unknown"
+                    if self.state.call_id.startswith("00000000-0000-0000-0000-"):
+                        phone_digits = self.state.call_id[-12:]  # Last 12 characters
+                        trimmed = phone_digits.lstrip("0")  # Remove leading zeros
+                        if len(trimmed) >= 9:  # Valid phone length (NL=10, UK=11, etc.)
+                            caller_phone = "+" + trimmed
+                            logger.info("[%s] 📱 Phone from UUID: %s", self.state.call_id, caller_phone)
+                    
                     # We resample all audio to 24kHz before sending, so report that
                     payload = {
                         "type": "init",
                         "call_id": self.state.call_id,
-                        "phone": "unknown",
-                        "user_phone": "unknown",
+                        "phone": caller_phone,
+                        "caller_phone": caller_phone,  # Also send as caller_phone for compatibility
+                        "user_phone": caller_phone,
                         "addressTtsSplicing": True,
                         "eager_init": True,
                         "inbound_format": "slin16",  # 16-bit PCM
@@ -626,7 +637,7 @@ class TaxiBridge:
                     }
                     await self.ws.send(json.dumps(payload))
                     self.state.init_sent = True
-                    logger.info("[%s] 🚀 Eager init (slin16 @ %dHz)", self.state.call_id, RATE_AI)
+                    logger.info("[%s] 🚀 Eager init (slin16 @ %dHz, phone: %s)", self.state.call_id, RATE_AI, caller_phone)
                 ast_task = asyncio.create_task(self.asterisk_to_ai())
                 ai_task = asyncio.create_task(self.ai_to_queue())
                 done, pending = await asyncio.wait({ast_task, ai_task}, return_when=asyncio.FIRST_COMPLETED)
