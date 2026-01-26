@@ -8,7 +8,55 @@
  */
 
 // VERSION: Spoken at start of call for identification
-const VERSION = "Paired 2.1";
+const VERSION = "Paired 2.2";
+
+// ---------------------------------------------------------------------------
+// STT Echo/Garbage Detection
+// Rejects values that are clearly Ada's own prompts being captured by STT
+// ---------------------------------------------------------------------------
+const ADA_PROMPT_PHRASES = [
+  "address", "street name", "passenger", "pickup", "destination", "where would you like",
+  "going to", "how many", "what time", "when do you need", "let me confirm",
+  "so that's", "from", "welcome to", "taxibot", "booking assistant",
+  "quick and easy", "get started", "anything you'd like to change",
+  "get you a quote", "shall i", "is there anything"
+];
+
+function isLikelyAdaEcho(value: string): boolean {
+  if (!value || value.length < 5) return false;
+  
+  const lower = value.toLowerCase();
+  
+  // Count how many Ada-prompt phrases appear in the value
+  let matchCount = 0;
+  for (const phrase of ADA_PROMPT_PHRASES) {
+    if (lower.includes(phrase)) matchCount++;
+  }
+  
+  // If 2+ Ada phrases found, it's likely echo
+  if (matchCount >= 2) return true;
+  
+  // Specific known garbage patterns
+  if (lower.includes("addresses, street names")) return true;
+  if (lower.includes("passenger count")) return true;
+  if (lower.includes("welcome to chile")) return true; // STT mishearing
+  
+  return false;
+}
+
+// Validate and clean address before storing
+function validateAddress(value: string | null | undefined, callId: string): string | null {
+  if (!value) return null;
+  
+  const trimmed = String(value).trim();
+  
+  if (isLikelyAdaEcho(trimmed)) {
+    console.log(`[${callId}] 🚫 REJECTED Ada echo garbage: "${trimmed.substring(0, 50)}..."`);
+    return null;
+  }
+  
+  return trimmed;
+}
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -4388,20 +4436,27 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             
             // Validate and update ONLY the expected field
             // ALSO update userTruth with Ada's extracted address (cleaner than raw STT)
+            // CRITICAL: Validate addresses to reject STT echo garbage
             if (expectedField === "pickup" && toolArgs.pickup) {
-              const extractedPickup = String(toolArgs.pickup);
-              sessionState.booking.pickup = extractedPickup;
-              // Update userTruth with Ada's extraction - it's usually cleaner than raw STT
-              // (e.g., "pick me up from 52A David Road please" → "52A David Road")
-              sessionState.userTruth.pickup = extractedPickup;
-              console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}"`);
-              fieldUpdated = "pickup";
+              const extractedPickup = validateAddress(String(toolArgs.pickup), callId);
+              if (extractedPickup) {
+                sessionState.booking.pickup = extractedPickup;
+                sessionState.userTruth.pickup = extractedPickup;
+                console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}"`);
+                fieldUpdated = "pickup";
+              } else {
+                console.log(`[${callId}] ⚠️ Pickup rejected as garbage, asking again`);
+              }
             } else if (expectedField === "destination" && toolArgs.destination) {
-              const extractedDest = String(toolArgs.destination);
-              sessionState.booking.destination = extractedDest;
-              sessionState.userTruth.destination = extractedDest;
-              console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}"`);
-              fieldUpdated = "destination";
+              const extractedDest = validateAddress(String(toolArgs.destination), callId);
+              if (extractedDest) {
+                sessionState.booking.destination = extractedDest;
+                sessionState.userTruth.destination = extractedDest;
+                console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}"`);
+                fieldUpdated = "destination";
+              } else {
+                console.log(`[${callId}] ⚠️ Destination rejected as garbage, asking again`);
+              }
             } else if (expectedField === "passengers" && toolArgs.passengers !== undefined) {
               const extractedPax = Number(toolArgs.passengers);
               sessionState.booking.passengers = extractedPax;
@@ -4415,18 +4470,22 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             } else {
               // AI tried to update wrong field - still accept but log warning
               console.log(`[${callId}] ⚠️ sync_booking_data: expected ${expectedField} but got`, toolArgs);
-              // Fall back to accepting whatever field was provided
+              // Fall back to accepting whatever field was provided (with validation)
               if (toolArgs.pickup) { 
-                const val = String(toolArgs.pickup);
-                sessionState.booking.pickup = val; 
-                sessionState.userTruth.pickup = val;
-                fieldUpdated = "pickup"; 
+                const val = validateAddress(String(toolArgs.pickup), callId);
+                if (val) {
+                  sessionState.booking.pickup = val; 
+                  sessionState.userTruth.pickup = val;
+                  fieldUpdated = "pickup"; 
+                }
               }
               else if (toolArgs.destination) { 
-                const val = String(toolArgs.destination);
-                sessionState.booking.destination = val; 
-                sessionState.userTruth.destination = val;
-                fieldUpdated = "destination"; 
+                const val = validateAddress(String(toolArgs.destination), callId);
+                if (val) {
+                  sessionState.booking.destination = val; 
+                  sessionState.userTruth.destination = val;
+                  fieldUpdated = "destination"; 
+                }
               }
               else if (toolArgs.passengers !== undefined) { 
                 const val = Number(toolArgs.passengers);
@@ -4442,48 +4501,71 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
               }
             }
             
-            // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
-            const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
-            sessionState.lastQuestionAsked = nextStep;
-            
-            // Get the value that was just captured for recitation
-            // CRITICAL: Use userTruth (raw STT after corrections) NOT Ada's extraction
-            // This prevents hallucinations like "Dover Street" when user said "David Road"
-            let justCapturedValue: string | undefined;
-            if (fieldUpdated === "pickup") justCapturedValue = sessionState.userTruth.pickup || sessionState.booking.pickup || undefined;
-            else if (fieldUpdated === "destination") justCapturedValue = sessionState.userTruth.destination || sessionState.booking.destination || undefined;
-            else if (fieldUpdated === "passengers") justCapturedValue = String(sessionState.userTruth.passengers || sessionState.booking.passengers);
-            else if (fieldUpdated === "time") justCapturedValue = sessionState.userTruth.time || sessionState.booking.pickupTime || undefined;
-            
-            // Pass userTruth for accurate summary (prevents address hallucinations)
-            // Also pass just-captured field/value for ADDRESS RECITATION
-            const nextInstruction = getNextStepInstruction(
-              nextStep, 
-              sessionState.booking, 
-              sessionState.userTruth,
-              fieldUpdated || undefined,
-              justCapturedValue
-            );
-            
-            console.log(`[${callId}] 📊 Booking updated (${fieldUpdated}):`, sessionState.booking, `| Next: ${nextStep}`);
-            await updateLiveCall(sessionState);
-            
-            // Send tool result with EXPLICIT next step instruction
-            openaiWs!.send(JSON.stringify({
-              type: "conversation.item.create",
-              item: {
-                type: "function_call_output",
-                call_id: data.call_id,
-                output: JSON.stringify({ 
-                  success: true, 
-                  field_saved: fieldUpdated,
-                  current_state: sessionState.booking,
-                  next_step: nextStep,
-                  instruction: nextInstruction
-                })
-              }
-            }));
-            safeResponseCreate(openaiWs!, sessionState, callId);
+            // If validation rejected the value (garbage), ask the same question again
+            if (!fieldUpdated && expectedField && ["pickup", "destination"].includes(expectedField)) {
+              console.log(`[${callId}] 🔄 Re-asking for ${expectedField} (garbage was rejected)`);
+              
+              const retryInstruction = expectedField === "pickup"
+                ? "I didn't quite catch that. Where would you like to be picked up from?"
+                : "Sorry, could you repeat that? Where would you like to go to?";
+              
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({ 
+                    success: false, 
+                    error: "Invalid input - please ask again",
+                    instruction: retryInstruction
+                  })
+                }
+              }));
+              safeResponseCreate(openaiWs!, sessionState, callId);
+            } else {
+              // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
+              const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
+              sessionState.lastQuestionAsked = nextStep;
+              
+              // Get the value that was just captured for recitation
+              // CRITICAL: Use userTruth (raw STT after corrections) NOT Ada's extraction
+              // This prevents hallucinations like "Dover Street" when user said "David Road"
+              let justCapturedValue: string | undefined;
+              if (fieldUpdated === "pickup") justCapturedValue = sessionState.userTruth.pickup || sessionState.booking.pickup || undefined;
+              else if (fieldUpdated === "destination") justCapturedValue = sessionState.userTruth.destination || sessionState.booking.destination || undefined;
+              else if (fieldUpdated === "passengers") justCapturedValue = String(sessionState.userTruth.passengers || sessionState.booking.passengers);
+              else if (fieldUpdated === "time") justCapturedValue = sessionState.userTruth.time || sessionState.booking.pickupTime || undefined;
+              
+              // Pass userTruth for accurate summary (prevents address hallucinations)
+              // Also pass just-captured field/value for ADDRESS RECITATION
+              const nextInstruction = getNextStepInstruction(
+                nextStep, 
+                sessionState.booking, 
+                sessionState.userTruth,
+                fieldUpdated || undefined,
+                justCapturedValue
+              );
+              
+              console.log(`[${callId}] 📊 Booking updated (${fieldUpdated}):`, sessionState.booking, `| Next: ${nextStep}`);
+              await updateLiveCall(sessionState);
+              
+              // Send tool result with EXPLICIT next step instruction
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: data.call_id,
+                  output: JSON.stringify({ 
+                    success: true, 
+                    field_saved: fieldUpdated,
+                    current_state: sessionState.booking,
+                    next_step: nextStep,
+                    instruction: nextInstruction
+                  })
+                }
+              }));
+              safeResponseCreate(openaiWs!, sessionState, callId);
+            }
             
           } else if (toolName === "book_taxi") {
             const action = String(toolArgs.action || "");
