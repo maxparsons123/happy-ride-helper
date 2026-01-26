@@ -180,9 +180,10 @@ public class SipOpenAIBridge : IDisposable
         try
         {
             // Create AdaAudioSource for outbound audio (AI → SIP)
-            // Use JitterBuffer mode with 120ms buffer to smooth OpenAI's bursty audio delivery
-            _adaAudioSource = new AdaAudioSource(AudioMode.JitterBuffer, 120);
+            // Use JitterBuffer mode with 80ms buffer + enhanced DSP (limiter, crossfade, interpolation)
+            _adaAudioSource = new AdaAudioSource(AudioMode.JitterBuffer, 80);
             _adaAudioSource.OnDebugLog += msg => Log(msg);
+            _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
             // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints
