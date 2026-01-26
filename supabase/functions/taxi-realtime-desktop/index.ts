@@ -133,6 +133,116 @@ function pcm16ToBase64(pcm: Int16Array): string {
   return bytesToBase64(bytes);
 }
 
+// ---------------------------------------------------------------------------
+// Outbound Audio DSP - Matches C# AdaAudioSource DSP
+// ---------------------------------------------------------------------------
+const LIMITER_THRESHOLD = 28000;
+const LIMITER_CEILING = 32000;
+const FADE_IN_SAMPLES = 80;
+const CROSSFADE_SAMPLES = 40;
+
+interface OutboundDspState {
+  limiterGain: number;
+  lastOutputSample: number;
+  needsFadeIn: boolean;
+  isFirstPacket: boolean;
+}
+
+function createOutboundDspState(): OutboundDspState {
+  return {
+    limiterGain: 1.0,
+    lastOutputSample: 0,
+    needsFadeIn: true,
+    isFirstPacket: true
+  };
+}
+
+/**
+ * Apply soft-knee limiter to prevent clipping while preserving dynamics.
+ * Matches C# AdaAudioSource.ApplySoftLimiter()
+ */
+function applySoftLimiter(samples: Int16Array, state: OutboundDspState): void {
+  if (samples.length === 0) return;
+
+  // Find peak
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const abs = Math.abs(samples[i]);
+    if (abs > peak) peak = abs;
+  }
+
+  // Below threshold - slowly recover gain
+  if (peak < LIMITER_THRESHOLD) {
+    state.limiterGain = Math.min(1.0, state.limiterGain + 0.01);
+    return;
+  }
+
+  // Calculate target gain
+  const targetGain = LIMITER_CEILING / peak;
+  const alpha = peak > LIMITER_CEILING ? 0.3 : 0.05;
+  state.limiterGain = state.limiterGain * (1 - alpha) + targetGain * alpha;
+
+  // Apply gain and soft-knee compression
+  for (let i = 0; i < samples.length; i++) {
+    let sample = samples[i] * state.limiterGain;
+
+    if (Math.abs(sample) > LIMITER_THRESHOLD) {
+      const sign = sample >= 0 ? 1 : -1;
+      const abs = Math.abs(sample);
+      const over = (abs - LIMITER_THRESHOLD) / (LIMITER_CEILING - LIMITER_THRESHOLD);
+      const compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * Math.tanh(over);
+      sample = sign * compressed;
+    }
+
+    samples[i] = Math.max(-32768, Math.min(32767, Math.round(sample)));
+  }
+}
+
+/**
+ * Apply fade-in on first audio packet to prevent clicks.
+ */
+function applyFadeIn(samples: Int16Array, state: OutboundDspState): void {
+  if (!state.needsFadeIn || samples.length === 0) return;
+  
+  const fadeLen = Math.min(FADE_IN_SAMPLES, samples.length);
+  for (let i = 0; i < fadeLen; i++) {
+    const gain = i / fadeLen;
+    samples[i] = Math.round(samples[i] * gain);
+  }
+  state.needsFadeIn = false;
+}
+
+/**
+ * Apply crossfade from previous sample to prevent inter-packet clicks.
+ */
+function applyCrossfade(samples: Int16Array, state: OutboundDspState): void {
+  if (state.isFirstPacket || samples.length < CROSSFADE_SAMPLES) {
+    state.isFirstPacket = false;
+    return;
+  }
+
+  const fadeLen = Math.min(CROSSFADE_SAMPLES, samples.length);
+  for (let i = 0; i < fadeLen; i++) {
+    const t = i / fadeLen;
+    samples[i] = Math.round(state.lastOutputSample * (1 - t) + samples[i] * t);
+  }
+}
+
+/**
+ * Full outbound DSP pipeline - apply all processing.
+ * Modifies samples in place.
+ */
+function processOutboundAudio(samples: Int16Array, state: OutboundDspState): void {
+  applyFadeIn(samples, state);
+  applySoftLimiter(samples, state);
+  applyCrossfade(samples, state);
+  
+  // Track last sample for next crossfade
+  if (samples.length > 0) {
+    state.lastOutputSample = samples[samples.length - 1];
+  }
+}
+
 // Multilingual greetings
 const GREETINGS: Record<string, { greeting: string; pickupQuestion: string }> = {
   en: {
@@ -293,6 +403,8 @@ interface SessionState {
   // Desktop bridge specific
   audioPacketsReceived: number;
   audioPacketsSent: number;
+  // Outbound DSP state
+  outboundDsp: OutboundDspState;
 }
 
 // Timing constants - DESKTOP OPTIMIZED (reduced guards for cleaner audio path)
@@ -386,7 +498,8 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     waitingForQuoteSilence: false,
     saidOneMoment: false,
     audioPacketsReceived: 0,
-    audioPacketsSent: 0
+    audioPacketsSent: 0,
+    outboundDsp: createOutboundDspState()
   };
 }
 
@@ -717,12 +830,28 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
           if (data.delta) {
             if (!sessionState.openAiResponseActive) {
               sessionState.openAiSpeechStartedAt = Date.now();
+              // Reset DSP fade-in for new response
+              sessionState.outboundDsp.needsFadeIn = true;
+              sessionState.outboundDsp.isFirstPacket = true;
             }
             sessionState.openAiResponseActive = true;
             sessionState.audioPacketsSent++;
             
             if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: "audio", audio: data.delta }));
+              // Decode base64 → PCM16 for DSP processing
+              const binaryStr = atob(data.delta);
+              const bytes = new Uint8Array(binaryStr.length);
+              for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+              
+              // Apply outbound DSP (limiter, fade-in, crossfade)
+              const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+              processOutboundAudio(pcm, sessionState.outboundDsp);
+              
+              // Re-encode to base64
+              const processedBytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+              const processedBase64 = bytesToBase64(processedBytes);
+              
+              socket.send(JSON.stringify({ type: "audio", audio: processedBase64 }));
             }
           }
           break;
