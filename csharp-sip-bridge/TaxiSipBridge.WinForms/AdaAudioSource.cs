@@ -40,6 +40,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _lastFrameWasSilence = true;
     private short[]? _lastAudioFrame; // Keep last frame for interpolation
 
+    // Soft-knee limiter to prevent clipping
+    private float _limiterGain = 1.0f;
+    private const float LIMITER_THRESHOLD = 28000f;
+    private const float LIMITER_CEILING = 32000f;
+
     // Audio mode configuration
     private AudioMode _audioMode = AudioMode.Standard;
     private int _jitterBufferMs = 80; // Increased default for better buffering
@@ -290,7 +295,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
                         audioFrame = fixedFrame;
                     }
-                    
+
+                    // Apply soft-knee limiter to prevent clipping
+                    ApplySoftLimiter(audioFrame);
+
                     // If we were in silence, crossfade from last sample to new audio
                     if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
                     {
@@ -327,18 +335,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         SendSilence();
                         return;
                     }
-                }
-            }
-
-            // Apply inter-frame crossfade to prevent clicks at frame boundaries
-            if (audioFrame.Length > 0 && !_lastFrameWasSilence)
-            {
-                // Blend first 8 samples with previous frame's last sample
-                int blendLen = Math.Min(8, audioFrame.Length);
-                for (int i = 0; i < blendLen; i++)
-                {
-                    float t = (float)(i + 1) / (blendLen + 1);
-                    audioFrame[i] = (short)(_prevFrameLastSample * (1 - t) + audioFrame[i] * t);
                 }
             }
 
@@ -393,36 +389,62 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz is exactly 3:1 decimation
-        // Use a 7-tap Sinc-based low-pass filter for better anti-aliasing
-        if (pcm24.Length < 7) return new short[pcm24.Length / 3];
+        if (pcm24.Length < 3) return Array.Empty<short>();
 
         int outLen = pcm24.Length / 3;
         var output = new short[outLen];
 
-        // 7-tap low-pass FIR coefficients (normalized Sinc window)
-        // Cutoff at ~3.5kHz to prevent aliasing at 8kHz output
-        float[] h = { 0.05f, 0.15f, 0.30f, 0.50f, 0.30f, 0.15f, 0.05f };
-        float sum = 1.5f; // Normalization factor
-
         for (int i = 0; i < outLen; i++)
         {
             int center = i * 3;
-            float acc = 0;
-            
-            for (int j = -3; j <= 3; j++)
-            {
-                int idx = center + j;
-                if (idx >= 0 && idx < pcm24.Length)
-                {
-                    acc += pcm24[idx] * h[j + 3];
-                }
-            }
-            
-            output[i] = (short)Math.Clamp(acc / sum, short.MinValue, short.MaxValue);
+            int s0 = pcm24[center];
+            int s1 = center + 1 < pcm24.Length ? pcm24[center + 1] : s0;
+            int s2 = center + 2 < pcm24.Length ? pcm24[center + 2] : s1;
+            output[i] = (short)((s0 * 2 + s1 * 2 + s2) / 5);
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Soft-knee limiter prevents clipping while preserving dynamics
+    /// </summary>
+    private void ApplySoftLimiter(short[] samples)
+    {
+        if (samples.Length == 0) return;
+
+        float peak = 0;
+        foreach (var sample in samples)
+        {
+            float abs = Math.Abs(sample);
+            if (abs > peak) peak = abs;
+        }
+
+        if (peak < LIMITER_THRESHOLD)
+        {
+            _limiterGain = Math.Min(1.0f, _limiterGain + 0.01f);
+            return;
+        }
+
+        float targetGain = LIMITER_CEILING / peak;
+        float alpha = peak > LIMITER_CEILING ? 0.3f : 0.05f;
+        _limiterGain = _limiterGain * (1 - alpha) + targetGain * alpha;
+
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float sample = samples[i] * _limiterGain;
+            
+            if (Math.Abs(sample) > LIMITER_THRESHOLD)
+            {
+                float sign = Math.Sign(sample);
+                float abs = Math.Abs(sample);
+                float over = (abs - LIMITER_THRESHOLD) / (LIMITER_CEILING - LIMITER_THRESHOLD);
+                float compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * (float)Math.Tanh(over);
+                sample = sign * compressed;
+            }
+            
+            samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+        }
     }
 
     /// <summary>
