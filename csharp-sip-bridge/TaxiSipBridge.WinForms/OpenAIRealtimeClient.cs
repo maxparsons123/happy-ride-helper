@@ -475,9 +475,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.3,           // Matches edge function (desktop-optimized, lower threshold)
-                    prefix_padding_ms = 400,   // Matches edge function
-                    silence_duration_ms = 800  // Matches edge function (desktop mics have cleaner audio)
+                    threshold = 0.4,           // Raised for telephony (reduces false triggers from line noise)
+                    prefix_padding_ms = 500,   // More padding to catch start of speech
+                    silence_duration_ms = 1200 // INCREASED for telephony - gives users time to respond
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -485,7 +485,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 Config: VAD=0.3, prefix=400ms, silence=800ms (matches taxi-realtime-desktop)");
+        Log("🎧 Config: VAD=0.4, prefix=500ms, silence=1200ms (telephony-optimized)");
         
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
