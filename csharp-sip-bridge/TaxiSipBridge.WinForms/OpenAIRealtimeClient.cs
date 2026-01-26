@@ -493,6 +493,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     if (doc.RootElement.TryGetProperty("error", out var err))
                     {
                         var msg = err.TryGetProperty("message", out var m) ? m.GetString() : "Unknown error";
+                        
+                        // Ignore "buffer too small" errors - these happen when VAD triggers on background noise
+                        if (msg?.Contains("buffer too small") == true)
+                        {
+                            // Don't log as error - just noise from background audio
+                            break;
+                        }
+                        
                         Log($"❌ OpenAI error: {msg}");
                         
                         // Retry greeting on transient server errors
@@ -535,9 +543,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.25,          // LOWERED for telephony - more sensitive to quiet speech
-                    prefix_padding_ms = 500,   // Captures start of speech
-                    silence_duration_ms = 1200 // Long wait for user to respond
+                    threshold = 0.4,           // Raised to reduce false triggers from background noise
+                    prefix_padding_ms = 400,   // Reduced slightly for better responsiveness
+                    silence_duration_ms = 1000 // Standard wait for user to respond
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -545,7 +553,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 Config: VAD=0.25, prefix=500ms, silence=1200ms, volume=2.5x (telephony-optimized)");
+        Log("🎧 Config: VAD=0.4, prefix=400ms, silence=1000ms, volume=2.5x (telephony-optimized)");
         
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
