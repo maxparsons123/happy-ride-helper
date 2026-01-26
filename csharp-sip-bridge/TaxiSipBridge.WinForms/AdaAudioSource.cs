@@ -27,6 +27,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer
     private const int FADE_IN_SAMPLES = 80;
     private const int CROSSFADE_SAMPLES = 40;
+    
+    // Soft-knee limiter settings (from edge function DSP)
+    private const int LIMITER_THRESHOLD = 28000;
+    private const int LIMITER_CEILING = 32000;
+    private float _limiterGain = 1.0f;
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
@@ -238,6 +243,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     audioFrame = fixedFrame;
                 }
 
+                // Apply soft-knee limiter (from edge function DSP - prevents clipping)
+                ApplySoftLimiter(audioFrame);
+
                 // Crossfade from last frame for smooth transitions
                 if (_lastAudioFrame != null && audioFrame.Length > CROSSFADE_SAMPLES)
                 {
@@ -313,6 +321,52 @@ public class AdaAudioSource : IAudioSource, IDisposable
             short currSample = currentFrame[i];
 
             currentFrame[i] = (short)(prevSample * (1.0f - t) + currSample * t);
+        }
+    }
+
+    /// <summary>
+    /// Apply soft-knee limiter to prevent clipping while preserving dynamics.
+    /// Matches edge function DSP: taxi-realtime-desktop applySoftLimiter().
+    /// </summary>
+    private void ApplySoftLimiter(short[] samples)
+    {
+        if (samples.Length == 0) return;
+
+        // Find peak
+        int peak = 0;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            int abs = Math.Abs(samples[i]);
+            if (abs > peak) peak = abs;
+        }
+
+        // Below threshold - slowly recover gain
+        if (peak < LIMITER_THRESHOLD)
+        {
+            _limiterGain = Math.Min(1.0f, _limiterGain + 0.01f);
+            return;
+        }
+
+        // Calculate target gain
+        float targetGain = (float)LIMITER_CEILING / peak;
+        float alpha = peak > LIMITER_CEILING ? 0.3f : 0.05f;
+        _limiterGain = _limiterGain * (1 - alpha) + targetGain * alpha;
+
+        // Apply gain and soft-knee compression
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float sample = samples[i] * _limiterGain;
+
+            if (Math.Abs(sample) > LIMITER_THRESHOLD)
+            {
+                float sign = sample >= 0 ? 1 : -1;
+                float abs = Math.Abs(sample);
+                float over = (abs - LIMITER_THRESHOLD) / (float)(LIMITER_CEILING - LIMITER_THRESHOLD);
+                float compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * (float)Math.Tanh(over);
+                sample = sign * compressed;
+            }
+
+            samples[i] = (short)Math.Clamp(Math.Round(sample), short.MinValue, short.MaxValue);
         }
     }
 
