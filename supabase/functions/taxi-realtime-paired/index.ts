@@ -4144,7 +4144,7 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                       role: "system",
                       content: [{
                         type: "input_text",
-                        text: `[DESTINATION CAPTURED] User said "${userText}" as destination. Call sync_booking_data(destination="${userText}"). Do NOT re-ask - you already asked the next question.`
+                        text: `[DESTINATION CAPTURED] User said "${userText}" as destination. EXTRACT the actual address from their speech (remove "going to", "I want to go to", "please", etc.) and call sync_booking_data with the extracted destination. Do NOT re-ask - you already asked the next question.`
                       }]
                     }
                   }));
@@ -4161,10 +4161,10 @@ Current booking: pickup=${sessionState.booking.pickup || "empty"}, destination=$
                       type: "input_text",
                       text: `[LATE DESTINATION ANSWER] The user just said "${userText}" which is their DESTINATION (they were answering your previous question).
 
-Call sync_booking_data with destination="${userText}" to save it.
+EXTRACT the actual address from their speech (remove conversational phrases like "going to", "I want to go to", "please", etc.) and call sync_booking_data with the extracted destination.
 Then ask: "How many passengers will be traveling?" (since we now need passengers).
 
-Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userText}", passengers=NOT SET`
+Current state: pickup=${sessionState.booking.pickup}, destination=EXTRACTING, passengers=NOT SET`
                     }]
                   }
                 }));
@@ -4196,7 +4196,7 @@ Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userTex
                       role: "system",
                       content: [{
                         type: "input_text",
-                        text: `[PICKUP CAPTURED] User said "${userText}" as pickup. Call sync_booking_data(pickup="${userText}"). Do NOT re-ask for destination - you already asked.`
+                        text: `[PICKUP CAPTURED] User said "${userText}" as pickup. EXTRACT the actual address from their speech (remove "pick me up from", "I'm at", "please", etc.) and call sync_booking_data with the extracted pickup. Do NOT re-ask for destination - you already asked.`
                       }]
                     }
                   }));
@@ -4212,10 +4212,10 @@ Current state: pickup=${sessionState.booking.pickup}, destination=NOW "${userTex
                       type: "input_text",
                       text: `[LATE PICKUP ANSWER] The user just said "${userText}" which is their PICKUP address.
 
-Call sync_booking_data with pickup="${userText}" to save it.
+EXTRACT the actual address from their speech (remove conversational phrases like "pick me up from", "I'm at", "from", "please", etc.) and call sync_booking_data with the extracted pickup.
 Then continue with the next question based on what's missing.
 
-Current state: pickup=NOW "${userText}"`
+Current state: pickup=EXTRACTING`
                     }]
                   }
                 }));
@@ -4243,6 +4243,27 @@ Current state: pickup=NOW "${userText}"`
             };
             const toolField = fieldMapping[expectedField] || expectedField;
             
+            // Extract the actual address/value from user's natural speech
+            // e.g. "pick me up from 52A David Road please" → "52A David Road"
+            const extractionHint = expectedField === "pickup" || expectedField === "destination"
+              ? `EXTRACT the actual address from the user's speech. Remove conversational phrases like "pick me up from", "I'm at", "going to", "please", "thanks", etc.
+For example:
+- "pick me up from 52A David Road please" → extract "52A David Road"
+- "I'm at the train station" → extract "train station" or "the train station"
+- "going to Heathrow Airport terminal 5" → extract "Heathrow Airport terminal 5"
+- "from my house at 7 Russell Street" → extract "7 Russell Street"`
+              : expectedField === "passengers"
+              ? `EXTRACT the number from the user's speech.
+For example:
+- "there's three of us" → extract 3
+- "just me" → extract 1
+- "two passengers" → extract 2`
+              : `EXTRACT the time from the user's speech.
+For example:
+- "in about 10 minutes" → extract "in 10 minutes" or "10 minutes"
+- "as soon as possible" → extract "ASAP" or "now"
+- "at 3pm" → extract "3pm"`;
+            
             const contextPrompt = {
               type: "conversation.item.create",
               item: {
@@ -4255,8 +4276,9 @@ You asked for: ${expectedField.toUpperCase()}
 User said: "${userText}"
 
 🚨 REQUIRED ACTION:
-Call sync_booking_data with ONLY the "${toolField}" field set to this answer.
-Example: sync_booking_data({ ${toolField}: "${userText}" })
+${extractionHint}
+
+Call sync_booking_data with ONLY the "${toolField}" field set to the EXTRACTED value (not the raw speech).
 
 ⚠️ DO NOT put this in any other field. The server will tell you what to ask next.
 
