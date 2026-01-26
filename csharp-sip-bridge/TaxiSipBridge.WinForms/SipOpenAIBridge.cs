@@ -205,7 +205,7 @@ public class SipOpenAIBridge : IDisposable
                         // Detailed Opus parameters if present
                         var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f => 
                             f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
-                        if (opusFormat.Value != null)
+                        if (!opusFormat.Value.IsEmpty())
                         {
                             Log($"🔍 [{_currentCallId}] Remote Opus: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={opusFormat.Value.Channels()}, fmtp={opusFormat.Value.Fmtp ?? "none"}");
                         }
