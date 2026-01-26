@@ -193,12 +193,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
         var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
         _inputBufferedMs += durationMs;
 
-        // Send as binary (33% more efficient than Base64)
+        // Send as JSON text (matches edge function expectation)
+        // Edge function expects: { type: "input_audio_buffer.append", audio: "base64..." }
+        var base64 = Convert.ToBase64String(pcmBytes);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+        
         try
         {
             await _ws.SendAsync(
-                new ArraySegment<byte>(pcmBytes),
-                WebSocketMessageType.Binary,
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
                 true,
                 _cts?.Token ?? CancellationToken.None);
         }
