@@ -6,18 +6,9 @@ using System.Threading.Tasks;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using NAudio.Dsp;
+using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
-
-/// <summary>
-/// Audio playback mode for AdaAudioSource.
-/// </summary>
-public enum AudioMode
-{
-    Standard,       // Use NAudio WDL resampler (professional quality)
-    JitterBuffer,   // Add jitter buffer before playback
-    TestTone        // Send 440Hz test tone instead of audio
-}
 
 /// <summary>
 /// Custom audio source that receives PCM audio from Ada (WebSocket) and provides
@@ -284,8 +275,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 int outBufferLen = (int)Math.Ceiling(floatInput.Length * targetRate / 24000.0) + 64;
                 var floatOutput = new float[outBufferLen];
 
-                int inUsed = 0;
-                int outProduced = _resampler.ResampleOut(floatOutput, 0, floatOutput.Length, floatInput, ref inUsed);
+                int inNeeded = _resampler.ResamplePrepare(floatInput.Length, 1, out float[] inBuffer);
+                Array.Copy(floatInput, inBuffer, Math.Min(floatInput.Length, inNeeded));
+                int outProduced = _resampler.ResampleOut(floatOutput, 0, floatOutput.Length, 1);
 
                 // 4. Convert back to short[]
                 audioFrame = new short[samplesNeeded];
