@@ -965,36 +965,30 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // 16kHz MODE: 24kHz → 16kHz (3:2 ratio)
-        // For every 3 input samples, output 2 samples using linear interpolation
-        int outputLen = (pcm24k.Length * 2) / 3;
-        var pcm16k = new short[outputLen];
+        // 8kHz MODE: 24kHz → 8kHz (3:1 ratio) using weighted linear interpolation
+        // G.711 µ-law is fundamentally an 8kHz codec - cannot use higher sample rates
+        int outputLen = pcm24k.Length / 3;
+        var pcm8k = new short[outputLen];
         
         for (int i = 0; i < outputLen; i++)
         {
-            // Position in source at 1.5x rate
-            float srcPos = i * 1.5f;
-            int srcIdx = (int)srcPos;
-            float frac = srcPos - srcIdx;
-            
-            if (srcIdx + 1 < pcm24k.Length)
+            int srcIdx = i * 3;
+            // Weighted blend: 25% first, 50% middle, 25% last for smoother decimation
+            if (srcIdx + 2 < pcm24k.Length)
             {
-                // Linear interpolation between samples
-                int interpolated = (int)(pcm24k[srcIdx] * (1 - frac) + pcm24k[srcIdx + 1] * frac);
-                pcm16k[i] = (short)Math.Clamp(interpolated, short.MinValue, short.MaxValue);
+                int blended = (pcm24k[srcIdx] + pcm24k[srcIdx + 1] * 2 + pcm24k[srcIdx + 2]) / 4;
+                pcm8k[i] = (short)Math.Clamp(blended, short.MinValue, short.MaxValue);
             }
-            else if (srcIdx < pcm24k.Length)
+            else
             {
-                pcm16k[i] = pcm24k[srcIdx];
+                pcm8k[i] = pcm24k[srcIdx];
             }
         }
 
-        // Encode to µ-law
-        var ulaw = AudioCodecs.MuLawEncode(pcm16k);
+        // Encode to µ-law (8-bit companded)
+        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        // Split into 10ms frames (160 bytes) for correct playback speed
-        // SIP plays at 8kHz, so 160 bytes = 20ms playback
-        // Sending every 10ms = 2x speed compensation for 16kHz content
+        // Split into 20ms frames (160 bytes @ 8kHz µ-law)
         for (int i = 0; i < ulaw.Length; i += 160)
         {
             int len = Math.Min(160, ulaw.Length - i);
