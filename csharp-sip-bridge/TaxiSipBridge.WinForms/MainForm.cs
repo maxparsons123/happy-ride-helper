@@ -6,9 +6,12 @@ public partial class MainForm : Form
     private SipOpenAIBridge? _sipLocalBridge;  // For Local OpenAI mode
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
+    private SimliAvatarClient? _simliClient;
+    private SimliAvatarForm? _simliForm;
     private volatile bool _isRunning = false;
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
+    private bool _useSimliAvatar = false;
 
     public MainForm()
     {
@@ -25,9 +28,30 @@ public partial class MainForm : Form
         // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
         txtApiKey.Text = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
+        txtSimliApiKey.Text = Environment.GetEnvironmentVariable("SIMLI_API_KEY") ?? "";
+        txtSimliFaceId.Text = "default"; // Default Simli face
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
         cmbResampler.SelectedIndex = 0; // NAudio (default)
+    }
+
+    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e)
+    {
+        _useSimliAvatar = chkSimliAvatar.Checked;
+        
+        // Show/hide Simli config fields
+        lblSimliApiKey.Visible = _useSimliAvatar;
+        txtSimliApiKey.Visible = _useSimliAvatar;
+        lblSimliFaceId.Visible = _useSimliAvatar;
+        txtSimliFaceId.Visible = _useSimliAvatar;
+        
+        // Move buttons down when Simli is enabled
+        btnStartStop.Location = new Point(btnStartStop.Location.X, _useSimliAvatar ? 178 : 148);
+        btnMicTest.Location = new Point(btnMicTest.Location.X, _useSimliAvatar ? 178 : 148);
+        
+        AddLog(_useSimliAvatar 
+            ? "🎭 Simli avatar ENABLED - Ada will have a face!" 
+            : "🎭 Simli avatar disabled");
     }
 
     private void chkLocalOpenAI_CheckedChanged(object? sender, EventArgs e)
@@ -148,6 +172,12 @@ public partial class MainForm : Form
     {
         try
         {
+            // Start Simli avatar if enabled
+            if (_useSimliAvatar)
+            {
+                await StartSimliAvatarAsync();
+            }
+
             if (_useLocalOpenAI)
             {
                 // === LOCAL OPENAI MODE ===
@@ -181,6 +211,20 @@ public partial class MainForm : Form
                 {
                     AddLog($"📦 Booking: {booking.Pickup} → {booking.Destination}, {booking.Passengers} pax");
                 });
+                
+                // Wire up Simli avatar to receive AI audio
+                if (_simliClient != null)
+                {
+                    _localAiClient.OnPcm24Audio += async data =>
+                    {
+                        if (_simliClient?.IsConnected == true)
+                        {
+                            await _simliClient.SendPcm24AudioAsync(data);
+                        }
+                    };
+                    _localAiClient.OnAdaSpeaking += msg => _simliForm?.SetSpeaking(true);
+                    _localAiClient.OnResponseStarted += () => _simliForm?.SetSpeaking(true);
+                }
 
                 await _localAiClient.ConnectAsync("mic-test");
                 
@@ -206,6 +250,20 @@ public partial class MainForm : Form
                     SetStatus("Disconnected", Color.Gray);
                     StopMicMode();
                 });
+                
+                // Wire up Simli avatar to receive AI audio
+                if (_simliClient != null)
+                {
+                    _micClient.OnPcm24Audio += async data =>
+                    {
+                        if (_simliClient?.IsConnected == true)
+                        {
+                            await _simliClient.SendPcm24AudioAsync(data);
+                        }
+                    };
+                    _micClient.OnAdaSpeaking += msg => _simliForm?.SetSpeaking(true);
+                    _micClient.OnResponseStarted += () => _simliForm?.SetSpeaking(true);
+                }
 
                 await _micClient.ConnectAsync("mic-test");
                 _micClient.StartMicrophoneCapture();
@@ -223,6 +281,64 @@ public partial class MainForm : Form
         {
             MessageBox.Show($"Failed to start: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             AddLog($"❌ Error: {ex.Message}");
+        }
+    }
+
+    private async Task StartSimliAvatarAsync()
+    {
+        var simliKey = txtSimliApiKey.Text.Trim();
+        var faceId = txtSimliFaceId.Text.Trim();
+        
+        if (string.IsNullOrEmpty(simliKey))
+        {
+            AddLog("⚠️ Simli API key not set - avatar disabled");
+            return;
+        }
+
+        _simliClient = new SimliAvatarClient(simliKey, faceId);
+        _simliClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+        _simliClient.OnVideoFrame += frame => _simliForm?.UpdateVideoFrame(frame);
+        _simliClient.OnConnected += () => SafeInvoke(() =>
+        {
+            AddLog("🎭 Simli avatar connected!");
+        });
+        _simliClient.OnDisconnected += () => SafeInvoke(() =>
+        {
+            AddLog("🎭 Simli avatar disconnected");
+            _simliForm?.SetStatus("Disconnected");
+        });
+
+        // Show avatar window
+        _simliForm = new SimliAvatarForm();
+        _simliForm.Show();
+        _simliForm.SetStatus("Connecting...");
+
+        try
+        {
+            await _simliClient.ConnectAsync();
+            _simliForm.SetStatus("Ready");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"🎭 Simli connection failed: {ex.Message}");
+            _simliForm?.SetStatus("Connection failed");
+        }
+    }
+
+    private void StopSimliAvatar()
+    {
+        if (_simliClient != null)
+        {
+            _ = _simliClient.DisconnectAsync();
+            _simliClient.Dispose();
+            _simliClient = null;
+        }
+
+        if (_simliForm != null)
+        {
+            _simliForm.Close();
+            _simliForm.Dispose();
+            _simliForm = null;
         }
     }
 
@@ -289,6 +405,9 @@ public partial class MainForm : Form
 
     private void StopMicMode()
     {
+        // Stop Simli avatar
+        StopSimliAvatar();
+
         // Stop local AI client
         if (_localAiClient != null)
         {

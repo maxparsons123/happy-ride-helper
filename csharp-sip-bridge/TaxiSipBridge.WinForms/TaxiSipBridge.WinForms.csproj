@@ -43,6 +43,8 @@
     <Compile Include="AIClientFactory.cs" />
     <Compile Include="OpenAIRealtimeClient.cs" />
     <Compile Include="PassthroughWebhook.cs" />
+    <Compile Include="SimliAvatarClient.cs" />
+    <Compile Include="SimliAvatarForm.cs" />
   </ItemGroup>
 
 </Project>
