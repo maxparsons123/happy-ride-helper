@@ -343,15 +343,19 @@ public class SipOpenAIBridge : IDisposable
             // Debug: Log UAS state before answer
             Log($"🔍 [{_currentCallId}] UAS state before Answer: Dialogue={uas.SIPDialogue?.CallId ?? "null"}, TransactionId={uas.ClientTransaction?.TransactionId}");
             
-            // Debug: Log media session SDP capabilities
+            // Debug: Log media session SDP capabilities (with channels)
             var localSdp = _mediaSession.CreateOffer(null);
             if (localSdp != null)
             {
                 var audioMedia = localSdp.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
                 if (audioMedia != null)
                 {
-                    Log($"🔍 [{_currentCallId}] Local SDP audio formats: {string.Join(", ", audioMedia.MediaFormats.Values.Select(f => $"{f.Name()}@{f.ClockRate()}"))}");
+                    Log($"🔍 [{_currentCallId}] Local SDP audio formats: {string.Join(", ", audioMedia.MediaFormats.Select(f => $"{f.Value.Name()}@{f.Value.ClockRate()}ch{f.Value.Channels()}(PT{f.Key})"))}");
                 }
+            }
+            else
+            {
+                Log($"⚠️ [{_currentCallId}] CreateOffer returned null");
             }
             
             bool answered = false;
@@ -371,6 +375,24 @@ public class SipOpenAIBridge : IDisposable
                 {
                     answered = await answerTask;
                     Log($"🔍 [{_currentCallId}] Answer() returned: {answered}");
+                    
+                    // If answer failed, try to log any SIP error info from the transaction
+                    if (!answered)
+                    {
+                        try
+                        {
+                            var txFinalResp = uas.ClientTransaction?.TransactionFinalResponse;
+                            if (txFinalResp != null)
+                            {
+                                Log($"⚠️ [{_currentCallId}] SIP final response: {(int)txFinalResp.Status} {txFinalResp.ReasonPhrase}");
+                            }
+                            else
+                            {
+                                Log($"⚠️ [{_currentCallId}] No SIP final response available from transaction");
+                            }
+                        }
+                        catch { /* logging only */ }
+                    }
                 }
             }
             catch (Exception ex)
