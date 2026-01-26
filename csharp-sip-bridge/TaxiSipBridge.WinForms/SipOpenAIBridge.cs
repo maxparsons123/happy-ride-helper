@@ -180,31 +180,72 @@ public class SipOpenAIBridge : IDisposable
 
         try
         {
+            // Parse remote SDP to detect available wideband codecs
+            bool remoteOffersOpus = false;
+            bool remoteOffersG722 = false;
+            try
+            {
+                var sdpBody = inviteRequest.Body;
+                if (!string.IsNullOrEmpty(sdpBody))
+                {
+                    var sdp = SDP.ParseSDPDescription(sdpBody);
+                    var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
+                    if (audioMedia != null)
+                    {
+                        remoteOffersOpus = audioMedia.MediaFormats.Any(f => 
+                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
+                        remoteOffersG722 = audioMedia.MediaFormats.Any(f => 
+                            f.Value.Name()?.Equals("G722", StringComparison.OrdinalIgnoreCase) == true);
+                        
+                        var codecs = audioMedia.MediaFormats
+                            .Select(f => $"{f.Value.Name()}({f.Key})")
+                            .ToList();
+                        Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
+                        
+                        if (remoteOffersOpus)
+                            Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
+                        else if (remoteOffersG722)
+                            Log($"🎧 [{_currentCallId}] G.722 available - 16kHz wideband");
+                        else
+                            Log($"📞 [{_currentCallId}] Narrowband only (G.711 8kHz)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ SDP parse error: {ex.Message}");
+            }
+
             // Create AdaAudioSource for outbound audio (AI → SIP)
             // Use JitterBuffer mode with 200ms buffer for smoother playback
             _adaAudioSource = new AdaAudioSource(AudioMode.JitterBuffer, 200);
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
-            // Create VoIPMediaSession with our custom audio source and Opus encoder
-            var opusEncoder = new OpusAudioEncoder();
+            // Restrict formats to prefer wideband when available
+            if (remoteOffersOpus)
+            {
+                // Force Opus only - highest quality 48kHz
+                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
+                Log($"🎯 [{_currentCallId}] Restricting to Opus 48kHz");
+            }
+            else if (remoteOffersG722)
+            {
+                // Force G.722 only - 16kHz wideband
+                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.G722);
+                Log($"🎯 [{_currentCallId}] Restricting to G.722 16kHz");
+            }
+            // else: use default G.711 8kHz
+
+            // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints
             {
                 AudioSource = _adaAudioSource,
                 AudioSink = null // We handle inbound audio manually
             };
 
-            var sessionConfig = new VoIPMediaSessionConfig
-            {
-                MediaEndPoint = mediaEndPoints,
-                AudioExtrasEncoder = opusEncoder // Enables Opus 48kHz wideband
-            };
-
-            _mediaSession = new VoIPMediaSession(sessionConfig);
+            _mediaSession = new VoIPMediaSession(mediaEndPoints);
             _mediaSession.AcceptRtpFromAny = true;
-
-            // Log incoming SDP offer codecs
-            LogIncomingSdp(inviteRequest);
 
             // Hook up RTP receiver for inbound audio (SIP → AI)
             _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
@@ -399,46 +440,6 @@ public class SipOpenAIBridge : IDisposable
         if (_disposed) return;
         OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {message}");
     }
-
-    /// <summary>
-    /// Parse and log codecs from incoming SDP offer
-    /// </summary>
-    private void LogIncomingSdp(SIPRequest inviteRequest)
-    {
-        try
-        {
-            var sdpBody = inviteRequest.Body;
-            if (string.IsNullOrEmpty(sdpBody)) return;
-
-            var sdp = SDP.ParseSDPDescription(sdpBody);
-            var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
-            if (audioMedia == null) return;
-
-            var codecs = audioMedia.MediaFormats
-                .Select(f => $"{f.Value.Name()}({f.Key})")
-                .ToList();
-
-            Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
-
-            // Check for wideband codecs
-            bool hasG722 = audioMedia.MediaFormats.Any(f => 
-                f.Value.Name()?.Equals("G722", StringComparison.OrdinalIgnoreCase) == true);
-            bool hasOpus = audioMedia.MediaFormats.Any(f => 
-                f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
-            
-            if (hasOpus)
-                Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
-            else if (hasG722)
-                Log($"🎧 [{_currentCallId}] G.722 available - 16kHz wideband");
-            else
-                Log($"📞 [{_currentCallId}] Narrowband only (G.711 8kHz)");
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠️ SDP parse error: {ex.Message}");
-        }
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
