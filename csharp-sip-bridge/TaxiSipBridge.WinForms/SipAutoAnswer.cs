@@ -3,6 +3,7 @@ using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 
@@ -236,10 +237,17 @@ public class SipAutoAnswer : IDisposable
         Log($"🔧 [{callId}] Creating AdaAudioSource + VoIPMediaSession...");
         Log($"🔧 [{callId}] Audio mode: {_config.AudioMode}");
 
+        // Log incoming SDP to see what codecs the remote supports
+        LogIncomingSdp(callId, req);
+
         // Create AdaAudioSource - this implements IAudioSource and will handle
         // encoding + RTP pacing via its internal timer
         _adaAudioSource = new AdaAudioSource(_config.AudioMode, _config.JitterBufferMs);
         _adaAudioSource.OnDebugLog += msg => Log(msg);
+
+        // Log our supported codecs
+        var ourFormats = _adaAudioSource.GetAudioSourceFormats();
+        Log($"🔧 [{callId}] Our supported codecs: {string.Join(", ", ourFormats.Select(f => $"{f.FormatName}@{f.ClockRate}Hz"))}");
 
         // Create media endpoints with our custom audio source
         var mediaEndPoints = new MediaEndPoints
@@ -249,6 +257,9 @@ public class SipAutoAnswer : IDisposable
 
         var mediaSession = new VoIPMediaSession(mediaEndPoints);
         mediaSession.AcceptRtpFromAny = true;
+
+        // Log our SDP offer
+        LogOutgoingSdp(callId, mediaSession);
 
         Log($"🔧 [{callId}] AcceptRtpFromAny={mediaSession.AcceptRtpFromAny}");
 
@@ -709,6 +720,116 @@ public class SipAutoAnswer : IDisposable
         catch (Exception ex)
         {
             Log($"⚠️ [{callId}] LogNegotiatedCodec error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Log SDP offer from incoming INVITE to see what codecs the remote supports.
+    /// </summary>
+    private void LogIncomingSdp(string callId, SIPRequest req)
+    {
+        try
+        {
+            if (req.Body == null || string.IsNullOrEmpty(req.Body))
+            {
+                Log($"📋 [{callId}] No SDP in INVITE");
+                return;
+            }
+
+            var sdp = SDP.ParseSDPDescription(req.Body);
+            if (sdp == null)
+            {
+                Log($"📋 [{callId}] Could not parse SDP");
+                return;
+            }
+
+            Log($"═══════════════════════════════════════════════════════");
+            Log($"📋 [{callId}] INCOMING SDP OFFER (what remote supports):");
+            
+            var audioAnnouncement = sdp.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
+            if (audioAnnouncement != null)
+            {
+                var formats = audioAnnouncement.MediaFormats;
+                Log($"   Remote audio codecs ({formats.Count} total):");
+                
+                foreach (var fmt in formats.Values.OrderBy(f => f.ID))
+                {
+                    var codecName = fmt.ID switch
+                    {
+                        0 => "PCMU (G.711 μ-law)",
+                        8 => "PCMA (G.711 A-law)",
+                        9 => "G.722 (16kHz wideband)",
+                        _ => fmt.Name()
+                    };
+                    Log($"      PT {fmt.ID,3}: {codecName} @ {fmt.ClockRate()}Hz");
+                }
+                
+                // Check for wideband codec support
+                bool hasG722 = formats.ContainsKey(9);
+                bool hasOpus = formats.Values.Any(f => f.Name().ToUpper().Contains("OPUS"));
+                
+                if (hasOpus)
+                    Log($"   ✅ Remote supports OPUS (48kHz HD)");
+                else if (hasG722)
+                    Log($"   ✅ Remote supports G.722 (16kHz wideband)");
+                else
+                    Log($"   ⚠️ Remote only supports narrowband (G.711)");
+            }
+            else
+            {
+                Log($"   No audio media in SDP");
+            }
+            
+            Log($"═══════════════════════════════════════════════════════");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] LogIncomingSdp error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Log our SDP answer to show what codecs we're offering.
+    /// </summary>
+    private void LogOutgoingSdp(string callId, VoIPMediaSession mediaSession)
+    {
+        try
+        {
+            var sdp = mediaSession.CreateOffer(null);
+            if (sdp == null)
+            {
+                Log($"📋 [{callId}] Could not get our SDP offer");
+                return;
+            }
+
+            Log($"═══════════════════════════════════════════════════════");
+            Log($"📋 [{callId}] OUR SDP OFFER (what we advertise):");
+            
+            var audioAnnouncement = sdp.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
+            if (audioAnnouncement != null)
+            {
+                var formats = audioAnnouncement.MediaFormats;
+                Log($"   Our audio codecs ({formats.Count} total):");
+                
+                foreach (var fmt in formats.Values.OrderBy(f => f.ID))
+                {
+                    var codecName = fmt.ID switch
+                    {
+                        0 => "PCMU (G.711 μ-law)",
+                        8 => "PCMA (G.711 A-law)",
+                        9 => "G.722 (16kHz wideband)",
+                        111 => "OPUS (48kHz HD)",
+                        _ => fmt.Name()
+                    };
+                    Log($"      PT {fmt.ID,3}: {codecName} @ {fmt.ClockRate()}Hz");
+                }
+            }
+            
+            Log($"═══════════════════════════════════════════════════════");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] LogOutgoingSdp error: {ex.Message}");
         }
     }
 
