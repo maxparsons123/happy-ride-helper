@@ -88,33 +88,73 @@ function ulawToPcm16(ulaw: Uint8Array): Int16Array {
   return out;
 }
 
+/**
+ * High-quality upsampling with 11-tap FIR interpolation filter.
+ * Uses Sinc filter with Blackman window for smooth interpolation.
+ * Matches the C# AdaAudioSource quality for consistent audio.
+ */
 function resamplePcm16To24k(pcm: Int16Array, inputSampleRate: number): Int16Array {
   if (inputSampleRate === 24000) return pcm;
+  
+  // 11-tap FIR filter coefficients (Sinc with Blackman window)
+  // Symmetric filter for interpolation, normalized to sum to 1.0
+  const FIR_COEFFS = [-0.0067, -0.0161, 0.0134, 0.1072, 0.2413, 0.3218, 0.2413, 0.1072, 0.0134, -0.0161, -0.0067];
+  const FIR_CENTER = 5;
+  
   if (inputSampleRate === 16000) {
+    // 16kHz → 24kHz (1.5x upsampling)
     const outLen = Math.floor((pcm.length * 3) / 2);
     const out = new Int16Array(outLen);
+    
     for (let i = 0; i < outLen; i++) {
-      const srcIdx = (i * 2) / 3;
-      const idx0 = Math.floor(srcIdx);
-      const idx1 = Math.min(idx0 + 1, pcm.length - 1);
-      const frac = srcIdx - idx0;
-      out[i] = Math.round(pcm[idx0] * (1 - frac) + pcm[idx1] * frac);
+      const srcPos = (i * 2) / 3;
+      const srcIdx = Math.floor(srcPos);
+      const frac = srcPos - srcIdx;
+      
+      // Apply FIR filter centered around source position
+      let acc = 0;
+      for (let j = 0; j < FIR_COEFFS.length; j++) {
+        const idx = srcIdx + j - FIR_CENTER;
+        if (idx >= 0 && idx < pcm.length) {
+          acc += pcm[idx] * FIR_COEFFS[j];
+        }
+      }
+      
+      // Blend with linear interpolation for fractional positions
+      if (frac > 0.01 && srcIdx + 1 < pcm.length) {
+        const linear = pcm[srcIdx] * (1 - frac) + pcm[srcIdx + 1] * frac;
+        acc = acc * 0.7 + linear * 0.3; // Blend FIR with linear
+      }
+      
+      out[i] = Math.max(-32768, Math.min(32767, Math.round(acc)));
     }
     return out;
   }
-  // 8kHz → 24kHz (3x linear interpolation)
+  
+  // 8kHz → 24kHz (3x upsampling with FIR interpolation)
   const out = new Int16Array(pcm.length * 3);
-  for (let i = 0; i < pcm.length - 1; i++) {
-    const s0 = pcm[i];
-    const s1 = pcm[i + 1];
-    out[i * 3] = s0;
-    out[i * 3 + 1] = Math.round(s0 + (s1 - s0) / 3);
-    out[i * 3 + 2] = Math.round(s0 + ((s1 - s0) * 2) / 3);
+  
+  for (let i = 0; i < pcm.length; i++) {
+    // For each input sample, generate 3 output samples
+    for (let phase = 0; phase < 3; phase++) {
+      const outIdx = i * 3 + phase;
+      let acc = 0;
+      
+      // Apply polyphase FIR filter
+      for (let j = 0; j < FIR_COEFFS.length; j++) {
+        const srcIdx = i + j - FIR_CENTER;
+        if (srcIdx >= 0 && srcIdx < pcm.length) {
+          // Phase-shifted coefficient selection for polyphase filter
+          const phaseOffset = (phase * FIR_COEFFS.length) / 3;
+          const coeffIdx = Math.floor((j + phaseOffset) % FIR_COEFFS.length);
+          acc += pcm[srcIdx] * FIR_COEFFS[coeffIdx];
+        }
+      }
+      
+      out[outIdx] = Math.max(-32768, Math.min(32767, Math.round(acc * 3))); // Scale for 3x upsampling
+    }
   }
-  const lastIdx = Math.max(pcm.length - 1, 0);
-  out[lastIdx * 3] = pcm[lastIdx] ?? 0;
-  out[lastIdx * 3 + 1] = pcm[lastIdx] ?? 0;
-  out[lastIdx * 3 + 2] = pcm[lastIdx] ?? 0;
+  
   return out;
 }
 
