@@ -317,6 +317,7 @@ public class SipOpenAIBridge : IDisposable
                 if (fallbackFormats.Count > 0)
                     _adaAudioSource.SetAudioSourceFormat(fallbackFormats[0]);
 
+                Log($"🔧 [{_currentCallId}] Creating fallback media session...");
                 var fallbackEndPoints = new MediaEndPoints
                 {
                     AudioSource = _adaAudioSource,
@@ -325,15 +326,17 @@ public class SipOpenAIBridge : IDisposable
                 _mediaSession = new VoIPMediaSession(fallbackEndPoints);
                 _mediaSession.AcceptRtpFromAny = true;
                 _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
+                Log($"🔧 [{_currentCallId}] Fallback media session created, attempting answer...");
 
                 // Re-accept the original INVITE (SIPSorcery allows re-answer with different session)
                 try
                 {
                     answered = await _userAgent.Answer(uas, _mediaSession);
+                    Log($"🔧 [{_currentCallId}] Fallback answer returned: {answered}");
                 }
                 catch (Exception ex2)
                 {
-                    Log($"❌ [{_currentCallId}] Fallback answer also failed: {ex2.Message}");
+                    Log($"❌ [{_currentCallId}] Fallback answer exception: {ex2.GetType().Name}: {ex2.Message}");
                     answered = false;
                 }
             }
