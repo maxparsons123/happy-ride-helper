@@ -237,6 +237,21 @@ public class SipOpenAIBridge : IDisposable
             }
             // else: use default G.711 8kHz
 
+            // IMPORTANT: after restricting, ensure the audio source has a valid selected format.
+            // Some endpoints + negotiation flows can fail if the source is still "selected" to a
+            // format that is no longer offered.
+            var offeredFormats = _adaAudioSource.GetAudioSourceFormats();
+            Log($"🔧 [{_currentCallId}] Offering codecs: {string.Join(", ", offeredFormats.Select(f => $"{f.FormatName}@{f.ClockRate}Hz PT={f.FormatID} ch={f.ChannelCount}"))}");
+            if (offeredFormats.Count > 0)
+            {
+                _adaAudioSource.SetAudioSourceFormat(offeredFormats[0]);
+                Log($"🎯 [{_currentCallId}] Selected codec: {offeredFormats[0].FormatName}@{offeredFormats[0].ClockRate}Hz PT={offeredFormats[0].FormatID} ch={offeredFormats[0].ChannelCount}");
+            }
+            else
+            {
+                Log($"⚠️ [{_currentCallId}] No codecs left after restriction; falling back to default codec list");
+            }
+
             // Create VoIPMediaSession with our custom audio source
             var mediaEndPoints = new MediaEndPoints
             {
