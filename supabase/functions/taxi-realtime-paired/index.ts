@@ -697,16 +697,38 @@ function computeNextStep(booking: SessionState["booking"], preSummaryDone?: bool
 
 // Get instruction for next step based on what's needed
 // USES userTruth for summary to prevent address hallucinations
-function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], booking: SessionState["booking"], userTruth?: UserTruth): string {
+// ADDRESS RECITATION: Echoes back the just-captured value for verification before moving on
+function getNextStepInstruction(
+  nextStep: SessionState["lastQuestionAsked"], 
+  booking: SessionState["booking"], 
+  userTruth?: UserTruth,
+  justCapturedField?: string,
+  justCapturedValue?: string
+): string {
+  // ADDRESS RECITATION: Echo back the address/value just captured before asking the next question
+  let recitationPrefix = "";
+  if (justCapturedField && justCapturedValue) {
+    if (justCapturedField === "pickup") {
+      recitationPrefix = `FIRST say: "Got it, picking you up from ${justCapturedValue}." Then `;
+    } else if (justCapturedField === "destination") {
+      recitationPrefix = `FIRST say: "Right, going to ${justCapturedValue}." Then `;
+    } else if (justCapturedField === "passengers") {
+      const paxWord = justCapturedValue === "1" ? "one passenger" : `${justCapturedValue} passengers`;
+      recitationPrefix = `FIRST say: "Okay, ${paxWord}." Then `;
+    } else if (justCapturedField === "time") {
+      recitationPrefix = `FIRST say: "Got it, ${justCapturedValue}." Then `;
+    }
+  }
+  
   switch (nextStep) {
     case "pickup":
-      return "Ask the user: 'Where would you like to be picked up?' Then wait for their response.";
+      return `${recitationPrefix}Ask the user: 'Where would you like to be picked up?' Then wait for their response.`;
     case "destination":
-      return "What is your destination?";
+      return `${recitationPrefix}ask: "And where would you like to go?"`;
     case "passengers":
-      return "How many passengers will be traveling?";
+      return `${recitationPrefix}ask: "How many passengers will be traveling?"`;
     case "time":
-      return "When do you need the taxi - now or for a specific time?";
+      return `${recitationPrefix}ask: "When do you need the taxi - now or for a specific time?"`;
     case "address_correction_clarify":
       return "Ask the user: 'Would you like me to change the pickup or the destination?' and wait for their response.";
     case "pre_summary": {
@@ -715,7 +737,7 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
       const destination = userTruth?.destination || booking.destination || "unknown";
       const passengers = userTruth?.passengers || booking.passengers || 1;
       const time = userTruth?.time || booking.pickupTime || "as soon as possible";
-      return `Give a quick recap using EXACTLY these addresses (do NOT change them):
+      return `${recitationPrefix}Give a quick recap using EXACTLY these addresses (do NOT change them):
 "So that's from ${pickup} to ${destination}, ${passengers} passenger${passengers === 1 ? '' : 's'}, ${time}. Is there anything you'd like to change before I get you a quote?"
 CRITICAL: Say the pickup "${pickup}" and destination "${destination}" EXACTLY as written above - do NOT substitute or alter them.
 Wait for their response.`;
@@ -3392,10 +3414,22 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 userTruthUpdated = true;
               }
             } else if (effectiveQuestionType === "time") {
-              sessionState.userTruth.time = userText;
-              sessionState.booking.pickupTime = userText; // Sync to booking
-              console.log(`[${callId}] 📌 User Truth: time = "${userText}"`);
-              userTruthUpdated = true;
+              // GUARD: Check if user gave an ADDRESS instead of a time
+              // This happens when they misheard or are correcting a previous answer
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              const looksLikeTime = /\b(now|asap|soon|minute|hour|today|tomorrow|morning|afternoon|evening|night|pm|am|\d{1,2}[:.]\d{2}|\d{1,2}\s*(o'?clock|pm|am)?)\b/i.test(userText.toLowerCase());
+              
+              if (looksLikeAddress && !looksLikeTime) {
+                // User gave an address when asked about time - this is likely a correction
+                console.log(`[${callId}] ⚠️ TIME MISMATCH: User said "${userText}" which looks like an address, not a time. Treating as correction.`);
+                // DON'T store as time - let the correction detection handle it
+              } else {
+                // Normal time response
+                sessionState.userTruth.time = userText;
+                sessionState.booking.pickupTime = userText; // Sync to booking
+                console.log(`[${callId}] 📌 User Truth: time = "${userText}"`);
+                userTruthUpdated = true;
+              }
             }
             
             // IMMEDIATELY persist User Truth to database to prevent data loss
@@ -4403,8 +4437,23 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
             const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
             sessionState.lastQuestionAsked = nextStep;
+            
+            // Get the value that was just captured for recitation
+            let justCapturedValue: string | undefined;
+            if (fieldUpdated === "pickup") justCapturedValue = sessionState.booking.pickup || undefined;
+            else if (fieldUpdated === "destination") justCapturedValue = sessionState.booking.destination || undefined;
+            else if (fieldUpdated === "passengers") justCapturedValue = String(sessionState.booking.passengers);
+            else if (fieldUpdated === "time") justCapturedValue = sessionState.booking.pickupTime || undefined;
+            
             // Pass userTruth for accurate summary (prevents address hallucinations)
-            const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking, sessionState.userTruth);
+            // Also pass just-captured field/value for ADDRESS RECITATION
+            const nextInstruction = getNextStepInstruction(
+              nextStep, 
+              sessionState.booking, 
+              sessionState.userTruth,
+              fieldUpdated || undefined,
+              justCapturedValue
+            );
             
             console.log(`[${callId}] 📊 Booking updated (${fieldUpdated}):`, sessionState.booking, `| Next: ${nextStep}`);
             await updateLiveCall(sessionState);
