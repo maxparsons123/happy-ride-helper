@@ -4345,26 +4345,59 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             let fieldUpdated: string | null = null;
             
             // Validate and update ONLY the expected field
+            // ALSO update userTruth with Ada's extracted address (cleaner than raw STT)
             if (expectedField === "pickup" && toolArgs.pickup) {
-              sessionState.booking.pickup = String(toolArgs.pickup);
+              const extractedPickup = String(toolArgs.pickup);
+              sessionState.booking.pickup = extractedPickup;
+              // Update userTruth with Ada's extraction - it's usually cleaner than raw STT
+              // (e.g., "pick me up from 52A David Road please" → "52A David Road")
+              sessionState.userTruth.pickup = extractedPickup;
+              console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}"`);
               fieldUpdated = "pickup";
             } else if (expectedField === "destination" && toolArgs.destination) {
-              sessionState.booking.destination = String(toolArgs.destination);
+              const extractedDest = String(toolArgs.destination);
+              sessionState.booking.destination = extractedDest;
+              sessionState.userTruth.destination = extractedDest;
+              console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}"`);
               fieldUpdated = "destination";
             } else if (expectedField === "passengers" && toolArgs.passengers !== undefined) {
-              sessionState.booking.passengers = Number(toolArgs.passengers);
+              const extractedPax = Number(toolArgs.passengers);
+              sessionState.booking.passengers = extractedPax;
+              sessionState.userTruth.passengers = extractedPax;
               fieldUpdated = "passengers";
             } else if (expectedField === "time" && toolArgs.pickup_time) {
-              sessionState.booking.pickupTime = String(toolArgs.pickup_time);
+              const extractedTime = String(toolArgs.pickup_time);
+              sessionState.booking.pickupTime = extractedTime;
+              sessionState.userTruth.time = extractedTime;
               fieldUpdated = "time";
             } else {
               // AI tried to update wrong field - still accept but log warning
               console.log(`[${callId}] ⚠️ sync_booking_data: expected ${expectedField} but got`, toolArgs);
               // Fall back to accepting whatever field was provided
-              if (toolArgs.pickup) { sessionState.booking.pickup = String(toolArgs.pickup); fieldUpdated = "pickup"; }
-              else if (toolArgs.destination) { sessionState.booking.destination = String(toolArgs.destination); fieldUpdated = "destination"; }
-              else if (toolArgs.passengers !== undefined) { sessionState.booking.passengers = Number(toolArgs.passengers); fieldUpdated = "passengers"; }
-              else if (toolArgs.pickup_time) { sessionState.booking.pickupTime = String(toolArgs.pickup_time); fieldUpdated = "time"; }
+              if (toolArgs.pickup) { 
+                const val = String(toolArgs.pickup);
+                sessionState.booking.pickup = val; 
+                sessionState.userTruth.pickup = val;
+                fieldUpdated = "pickup"; 
+              }
+              else if (toolArgs.destination) { 
+                const val = String(toolArgs.destination);
+                sessionState.booking.destination = val; 
+                sessionState.userTruth.destination = val;
+                fieldUpdated = "destination"; 
+              }
+              else if (toolArgs.passengers !== undefined) { 
+                const val = Number(toolArgs.passengers);
+                sessionState.booking.passengers = val; 
+                sessionState.userTruth.passengers = val;
+                fieldUpdated = "passengers"; 
+              }
+              else if (toolArgs.pickup_time) { 
+                const val = String(toolArgs.pickup_time);
+                sessionState.booking.pickupTime = val; 
+                sessionState.userTruth.time = val;
+                fieldUpdated = "time"; 
+              }
             }
             
             // COMPUTE NEXT STEP from state (server-driven, not AI-driven)
