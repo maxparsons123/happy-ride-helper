@@ -230,7 +230,7 @@ public class SipOpenAIBridge : IDisposable
             var audioTrack = _mediaSession.AudioLocalTrack;
             var remoteRtp = _mediaSession.AudioDestinationEndPoint;
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
-            Log($"📡 [{_currentCallId}] RTP destination: {remoteRtp}, codec: {audioTrack?.Capabilities?.FirstOrDefault().FormatName ?? "unknown"}");
+            Log($"📡 [{_currentCallId}] RTP destination: {remoteRtp}, codec: {audioTrack?.Capabilities?.FirstOrDefault().Name ?? "unknown"}");
 
             // Connect to OpenAI Realtime API
             _aiClient = new OpenAIRealtimeClient(
