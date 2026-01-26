@@ -965,41 +965,43 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // PASSTHROUGH with LINEAR INTERPOLATION: 24kHz → 8kHz (3:1)
-        // Instead of just picking every 3rd sample, interpolate for smoother audio
-        int outputLen = pcm24k.Length / 3;
-        var pcm8k = new short[outputLen];
+        // 16kHz MODE: 24kHz → 16kHz (3:2 ratio)
+        // For every 3 input samples, output 2 samples using linear interpolation
+        int outputLen = (pcm24k.Length * 2) / 3;
+        var pcm16k = new short[outputLen];
         
         for (int i = 0; i < outputLen; i++)
         {
-            int srcIdx = i * 3;
-            // Linear interpolation: weighted average of 3 source samples
-            // This preserves more high-frequency detail than simple decimation
-            if (srcIdx + 2 < pcm24k.Length)
+            // Position in source at 1.5x rate
+            float srcPos = i * 1.5f;
+            int srcIdx = (int)srcPos;
+            float frac = srcPos - srcIdx;
+            
+            if (srcIdx + 1 < pcm24k.Length)
             {
-                // Weighted blend: 25% first, 50% middle, 25% last
-                int blended = (pcm24k[srcIdx] + pcm24k[srcIdx + 1] * 2 + pcm24k[srcIdx + 2]) / 4;
-                pcm8k[i] = (short)Math.Clamp(blended, short.MinValue, short.MaxValue);
+                // Linear interpolation between samples
+                int interpolated = (int)(pcm24k[srcIdx] * (1 - frac) + pcm24k[srcIdx + 1] * frac);
+                pcm16k[i] = (short)Math.Clamp(interpolated, short.MinValue, short.MaxValue);
             }
-            else
+            else if (srcIdx < pcm24k.Length)
             {
-                pcm8k[i] = pcm24k[srcIdx];
+                pcm16k[i] = pcm24k[srcIdx];
             }
         }
 
-        // Encode to µ-law (8-bit companded)
-        var ulaw = AudioCodecs.MuLawEncode(pcm8k);
+        // Encode to µ-law
+        var ulaw = AudioCodecs.MuLawEncode(pcm16k);
 
-        // Split into 20ms frames (160 bytes @ 8kHz µ-law)
-        for (int i = 0; i < ulaw.Length; i += 160)
+        // Split into 20ms frames (320 bytes @ 16kHz µ-law)
+        for (int i = 0; i < ulaw.Length; i += 320)
         {
-            int len = Math.Min(160, ulaw.Length - i);
-            var frame = new byte[160];
+            int len = Math.Min(320, ulaw.Length - i);
+            var frame = new byte[320];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
             
             // Pad short frames with silence (0xFF = µ-law silence)
-            if (len < 160)
-                Array.Fill(frame, (byte)0xFF, len, 160 - len);
+            if (len < 320)
+                Array.Fill(frame, (byte)0xFF, len, 320 - len);
             
             if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);

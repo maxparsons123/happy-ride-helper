@@ -15,7 +15,7 @@ namespace TaxiSipBridge.Audio;
 public class MuLawAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
-    private const int FRAME_SIZE_BYTES = 160; // 8kHz * 20ms = 160 samples
+    private const int FRAME_SIZE_BYTES = 320; // 16kHz * 20ms = 320 samples
     private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer
     private const int CROSSFADE_SAMPLES = 8; // Smooth transitions
 
