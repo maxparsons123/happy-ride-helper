@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge.Audio;
 using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
@@ -83,7 +84,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 80)
     {
-        _audioEncoder = new AudioEncoder();
+        // Use UnifiedAudioEncoder which supports Opus > G.722 > G.711
+        _audioEncoder = new UnifiedAudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = Math.Max(20, jitterBufferMs);
