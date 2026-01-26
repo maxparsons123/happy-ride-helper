@@ -202,6 +202,14 @@ public class SipOpenAIBridge : IDisposable
                             .ToList();
                         Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
                         
+                        // Detailed Opus parameters if present
+                        var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f => 
+                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
+                        if (opusFormat.Value != null)
+                        {
+                            Log($"🔍 [{_currentCallId}] Remote Opus: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={opusFormat.Value.Channels()}, fmtp={opusFormat.Value.Fmtp ?? "none"}");
+                        }
+                        
                         if (remoteOffersOpus)
                             Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
                         else if (remoteOffersG722)
@@ -259,14 +267,19 @@ public class SipOpenAIBridge : IDisposable
             }
 
             // Create VoIPMediaSession with our custom audio source
+            // NOTE: For Opus to work, we need to use a custom MediaEndPoints setup
+            // that properly advertises Opus in SDP
             var mediaEndPoints = new MediaEndPoints
             {
                 AudioSource = _adaAudioSource,
-                AudioSink = null // We handle inbound audio manually
+                AudioSink = null // We handle inbound audio manually via OnRtpPacketReceived
             };
 
             _mediaSession = new VoIPMediaSession(mediaEndPoints);
             _mediaSession.AcceptRtpFromAny = true;
+            
+            // Debug: Log what formats the media session will advertise
+            Log($"🔍 [{_currentCallId}] MediaSession created, AudioTrack formats: {_mediaSession.AudioLocalTrack?.Capabilities?.Count ?? 0} capabilities");
 
             // Hook up RTP receiver for inbound audio (SIP → AI)
             _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
