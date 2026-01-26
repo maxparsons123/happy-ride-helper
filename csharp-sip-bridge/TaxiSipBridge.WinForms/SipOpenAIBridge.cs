@@ -226,7 +226,10 @@ public class SipOpenAIBridge : IDisposable
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
 
             // Connect to OpenAI Realtime API
-            _aiClient = new OpenAIRealtimeClient(_apiKey);
+            _aiClient = new OpenAIRealtimeClient(
+                _apiKey,
+                model: "gpt-4o-mini-realtime-preview-2024-12-17"
+            );
             _aiClient.OnLog += msg => Log(msg);
             _aiClient.OnTranscript += t =>
             {
