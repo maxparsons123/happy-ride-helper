@@ -392,7 +392,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return output;
     }
 
-
+    private static bool IsNarrowbandCodec(AudioFormat format)
     {
         return format.FormatName.Equals("PCMU", StringComparison.OrdinalIgnoreCase) ||
                format.FormatName.Equals("PCMA", StringComparison.OrdinalIgnoreCase);
