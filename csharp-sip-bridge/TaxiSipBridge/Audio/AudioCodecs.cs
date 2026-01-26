@@ -519,15 +519,20 @@ public static class AudioCodecs
 }
 
 /// <summary>
-/// SIPSorcery-compatible audio encoder with Opus support.
+/// SIPSorcery-compatible audio encoder with Opus and G.722 support.
 /// Wraps AudioCodecs static methods for IAudioEncoder interface.
 /// </summary>
 public class UnifiedAudioEncoder : IAudioEncoder
 {
     private readonly AudioEncoder _baseEncoder;
+    private readonly G722Codec _g722Codec = new();
 
     private static readonly AudioFormat OpusFormat = new AudioFormat(
         AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+
+    // G.722 operates at 16kHz with 64kbps
+    private static readonly AudioFormat G722Format = new AudioFormat(
+        AudioCodecsEnum.G722, 9, 16000, 1, "G722");
 
     public UnifiedAudioEncoder()
     {
@@ -538,8 +543,11 @@ public class UnifiedAudioEncoder : IAudioEncoder
     {
         get
         {
-            var formats = new List<AudioFormat>(_baseEncoder.SupportedFormats);
-            formats.Insert(0, OpusFormat); // Opus has priority
+            var formats = new List<AudioFormat>();
+            // Priority order: Opus > G.722 > G.711
+            formats.Add(OpusFormat);
+            formats.Add(G722Format);
+            formats.AddRange(_baseEncoder.SupportedFormats);
             return formats;
         }
     }
@@ -549,6 +557,9 @@ public class UnifiedAudioEncoder : IAudioEncoder
         if (format.Codec == AudioCodecsEnum.OPUS)
             return AudioCodecs.OpusEncode(pcm);
         
+        if (format.Codec == AudioCodecsEnum.G722)
+            return _g722Codec.Encode(pcm);
+        
         return _baseEncoder.EncodeAudio(pcm, format);
     }
 
@@ -557,6 +568,18 @@ public class UnifiedAudioEncoder : IAudioEncoder
         if (format.Codec == AudioCodecsEnum.OPUS)
             return AudioCodecs.OpusDecode(encodedSample);
         
+        if (format.Codec == AudioCodecsEnum.G722)
+            return _g722Codec.Decode(encodedSample);
+        
         return _baseEncoder.DecodeAudio(encodedSample, format);
+    }
+
+    /// <summary>
+    /// Reset stateful codecs (call at start of new call).
+    /// </summary>
+    public void ResetCodecState()
+    {
+        _g722Codec.Reset();
+        AudioCodecs.ResetOpus();
     }
 }
