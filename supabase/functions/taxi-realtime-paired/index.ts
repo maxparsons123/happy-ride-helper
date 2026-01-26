@@ -58,11 +58,16 @@ async function extractBookingWithAI(
 ): Promise<AIExtractionResult | null> {
   try {
     // Convert history to extraction format
-    const conversation = conversationHistory.map(msg => ({
-      role: msg.role as "user" | "assistant" | "system",
-      text: msg.content,
-      timestamp: new Date(msg.timestamp).toISOString()
-    }));
+    // IMPORTANT: Only pass USER turns into the extractor.
+    // Assistant summaries can contain wrong addresses; if we include them,
+    // the extractor can "lock in" hallucinated values and overwrite state.
+    const conversation = conversationHistory
+      .filter(msg => msg.role === "user")
+      .map(msg => ({
+        role: msg.role as "user",
+        text: msg.content,
+        timestamp: new Date(msg.timestamp).toISOString()
+      }));
 
     // Only extract if we have conversation
     if (conversation.length === 0) {
@@ -2829,21 +2834,82 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 callId
               ).then(async (aiResult) => {
                 if (!aiResult || aiResult.confidence === "low") return;
+
+                // Grounding guard: never let extraction overwrite addresses unless
+                // the extracted value is supported by what the user actually said.
+                const extractUserSpokenTextForGrounding = (raw: string): string => {
+                  const s = String(raw || "");
+                  // If we have a [CONTEXT: ...] prefix, keep only the actual user payload after it.
+                  const ctx = s.match(/\]\s*(.+)$/);
+                  if (ctx?.[1]) return ctx[1].trim();
+                  // Strip other leading tags like [NO CHANGES NEEDED]
+                  return s.replace(/^\s*\[[^\]]+\]\s*/g, "").trim();
+                };
+
+                const normalizeForCompare = (s: string): string =>
+                  s
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\s]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+
+                const tokenise = (s: string): string[] => {
+                  const stop = new Set(["the", "a", "an", "to", "at", "from", "in", "on", "of", "and", "is", "its", "it", "my"]);
+                  return normalizeForCompare(s)
+                    .split(" ")
+                    .filter(t => t && !stop.has(t) && (t.length >= 3 || /^\d+[a-z]?$/.test(t)));
+                };
+
+                const isGroundedInUserText = (extracted: string, userText: string): boolean => {
+                  const e = normalizeForCompare(extracted);
+                  const u = normalizeForCompare(userText);
+                  if (!e || !u) return false;
+                  if (e === u) return true;
+                  if (e.includes(u) || u.includes(e)) return true;
+
+                  const eTokens = new Set(tokenise(extracted));
+                  const uTokens = tokenise(userText);
+                  if (uTokens.length === 0) return false;
+
+                  let overlap = 0;
+                  for (const t of uTokens) {
+                    if (eTokens.has(t)) overlap++;
+                  }
+                  // For short landmark-like phrases, require at least 1 shared token.
+                  // For longer phrases, require at least 2.
+                  return overlap >= (uTokens.length <= 3 ? 1 : 2);
+                };
+
+                const lastUserMsg = (() => {
+                  for (let i = sessionState.conversationHistory.length - 1; i >= 0; i--) {
+                    const m = sessionState.conversationHistory[i];
+                    if (m.role === "user") return extractUserSpokenTextForGrounding(String(m.content || ""));
+                  }
+                  return "";
+                })();
                 
                 let updated = false;
                 
                 // Update pickup if AI found one and it's different
                 if (aiResult.pickup && aiResult.pickup !== sessionState.booking.pickup) {
-                  console.log(`[${callId}] 🧠 AI UPDATE pickup: "${sessionState.booking.pickup}" → "${aiResult.pickup}"`);
-                  sessionState.booking.pickup = aiResult.pickup;
-                  updated = true;
+                  if (isGroundedInUserText(aiResult.pickup, lastUserMsg)) {
+                    console.log(`[${callId}] 🧠 AI UPDATE pickup: "${sessionState.booking.pickup}" → "${aiResult.pickup}"`);
+                    sessionState.booking.pickup = aiResult.pickup;
+                    updated = true;
+                  } else {
+                    console.log(`[${callId}] 🧱 Ignored AI pickup overwrite (not grounded in user text). user="${lastUserMsg}" ai="${aiResult.pickup}"`);
+                  }
                 }
                 
                 // Update destination if AI found one and it's different
                 if (aiResult.destination && aiResult.destination !== sessionState.booking.destination) {
-                  console.log(`[${callId}] 🧠 AI UPDATE destination: "${sessionState.booking.destination}" → "${aiResult.destination}"`);
-                  sessionState.booking.destination = aiResult.destination;
-                  updated = true;
+                  if (isGroundedInUserText(aiResult.destination, lastUserMsg)) {
+                    console.log(`[${callId}] 🧠 AI UPDATE destination: "${sessionState.booking.destination}" → "${aiResult.destination}"`);
+                    sessionState.booking.destination = aiResult.destination;
+                    updated = true;
+                  } else {
+                    console.log(`[${callId}] 🧱 Ignored AI destination overwrite (not grounded in user text). user="${lastUserMsg}" ai="${aiResult.destination}"`);
+                  }
                 }
                 
                 // Update passengers if AI found them and they're different
@@ -3596,9 +3662,11 @@ Ask: "Should I change the pickup or the destination to ${pendingAddress}?"`
               
               // Check for explicit change requests
               const wantsChanges = /change|amend|actually|wait|hold on|wrong|incorrect/i.test(lowerText);
+              const explicitFieldMention = /\b(pickup|pick up|destination|going to|drop off|from|to)\b/i.test(userText);
+              // NOTE: landmarks like "Cozy Club" may not match this regex, so we also use explicitFieldMention above.
               const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|\d+[a-zA-Z]?\s+\w)/i.test(userText);
               
-              console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, address=${looksLikeAddress}`);
+              console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, explicitField=${explicitFieldMention}, address=${looksLikeAddress}`);
               
               if (wantsNoChanges && !wantsChanges && !looksLikeAddress) {
                 // User confirmed no changes - NOW ask if they want a quote
@@ -3632,7 +3700,7 @@ Do NOT request the quote yet - wait for them to say yes.`
                 break;
               }
               
-              if (wantsChanges || looksLikeAddress) {
+              if (wantsChanges || looksLikeAddress || explicitFieldMention) {
                 // User wants to change something - reset confirmation flow
                 console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something - resetting flow`);
                 sessionState.preSummaryDone = false;
@@ -3641,7 +3709,7 @@ Do NOT request the quote yet - wait for them to say yes.`
                 
                 // FIX: We need to actually process the address change, not just reset flags
                 // Determine if this is a pickup or destination correction based on context
-                if (looksLikeAddress) {
+                if (looksLikeAddress || explicitFieldMention) {
                   const currentPickup = sessionState.booking.pickup?.toLowerCase() || "";
                   const currentDest = sessionState.booking.destination?.toLowerCase() || "";
                   const newAddressLower = userText.toLowerCase();
