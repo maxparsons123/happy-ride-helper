@@ -14,11 +14,9 @@ namespace TaxiSipBridge.Audio;
 /// </summary>
 public class MuLawAudioSource : IAudioSource, IDisposable
 {
-    // 16kHz mode: Send 160 bytes every 10ms (same as 8kHz: 160 bytes/20ms)
-    // This maintains proper playback speed since SIP endpoint plays at 8kHz
-    private const int AUDIO_SAMPLE_PERIOD_MS = 10;
-    private const int FRAME_SIZE_BYTES = 160; // 160 bytes per 10ms at 16kHz effective rate
-    private const int MAX_QUEUED_FRAMES = 10000; // ~100 seconds buffer (doubled for 10ms frames)
+    private const int AUDIO_SAMPLE_PERIOD_MS = 20;
+    private const int FRAME_SIZE_BYTES = 160; // 8kHz * 20ms = 160 samples
+    private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer
     private const int CROSSFADE_SAMPLES = 8; // Smooth transitions
 
     private static readonly byte[] MuLawSilence;
