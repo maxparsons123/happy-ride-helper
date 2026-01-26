@@ -44,7 +44,7 @@ public class SipAdaBridgeConfig
     public string SipUser { get; set; } = "max201";
     public string SipPassword { get; set; } = "qwe70954504118";
     // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
-    public string AdaWsUrl { get; set; } = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired";
+    public string AdaWsUrl { get; set; } = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
     public SipTransportType Transport { get; set; } = SipTransportType.UDP;
     public AudioMode AudioMode { get; set; } = AudioMode.Standard;
     public int JitterBufferMs { get; set; } = 60; // Pre-buffer size for JitterBuffer mode
