@@ -574,7 +574,17 @@ public class UnifiedAudioEncoder : IAudioEncoder
             formats.Add(OpusFormat106);
             formats.Add(OpusFormat111);
             formats.Add(G722Format);   // Wideband - 16kHz
-            formats.AddRange(_baseEncoder.SupportedFormats); // G.711 - 8kHz
+
+            // IMPORTANT:
+            // Some SIPSorcery builds include an Opus AudioFormat in the base AudioEncoder,
+            // typically mono (ch=1). If we include it here it can override our explicit
+            // stereo (ch=2) Opus formats and cause 406 AudioIncompatible with endpoints
+            // that offer opus/48000/2.
+            //
+            // Therefore, only take non-Opus/non-G722 formats from the base encoder.
+            formats.AddRange(_baseEncoder.SupportedFormats.Where(f =>
+                f.Codec != AudioCodecsEnum.OPUS &&
+                f.Codec != AudioCodecsEnum.G722));
             return formats;
         }
     }

@@ -764,7 +764,14 @@ public class UnifiedAudioEncoder : IAudioEncoder
             formats.Add(OpusFormat106);
             formats.Add(OpusFormat111);
             formats.Add(G722Format);
-            formats.AddRange(_baseEncoder.SupportedFormats);
+
+            // IMPORTANT: Avoid pulling any Opus formats from the base encoder.
+            // Some SIPSorcery versions include a mono Opus AudioFormat, which can
+            // override our explicit stereo (ch=2) Opus formats and cause
+            // 406 AudioIncompatible with endpoints offering opus/48000/2.
+            formats.AddRange(_baseEncoder.SupportedFormats.Where(f =>
+                f.Codec != AudioCodecsEnum.OPUS &&
+                f.Codec != AudioCodecsEnum.G722));
             return formats;
         }
     }
