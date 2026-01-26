@@ -291,7 +291,7 @@ public class SipOpenAIBridge : IDisposable
             Log($"🔧 [{_currentCallId}] Answering call...");
             
             // Debug: Log UAS state before answer
-            Log($"🔍 [{_currentCallId}] UAS state before Answer: Transaction={uas.SIPDialogue?.DialogueId ?? "null"}, CallId={uas.ClientTransaction?.TransactionRequest?.Header?.CallId}");
+            Log($"🔍 [{_currentCallId}] UAS state before Answer: Dialogue={uas.SIPDialogue?.CallId ?? "null"}, TransactionId={uas.ClientTransaction?.TransactionId}");
             
             // Debug: Log media session SDP capabilities
             var localSdp = _mediaSession.CreateOffer(null);
