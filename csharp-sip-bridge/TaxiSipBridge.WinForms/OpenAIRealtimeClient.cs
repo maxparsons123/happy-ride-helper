@@ -328,6 +328,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
 
             var type = typeEl.GetString();
+            
+            // Verbose logging for debugging - show all response events
+            if (type?.StartsWith("response.") == true && type != "response.audio.delta")
+            {
+                Log($"📋 {type}: {json.Substring(0, Math.Min(500, json.Length))}");
+            }
 
             switch (type)
             {
@@ -348,6 +354,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         if (!string.IsNullOrEmpty(base64))
                         {
                             var pcmBytes = Convert.FromBase64String(base64);
+                            Log($"🔊 Audio delta: {pcmBytes.Length} bytes PCM");
                             OnPcm24Audio?.Invoke(pcmBytes);
                             ProcessAdaAudio(pcmBytes);
                         }
