@@ -731,7 +731,12 @@ public class UnifiedAudioEncoder : IAudioEncoder
 {
     private readonly AudioEncoder _baseEncoder;
 
-    private static readonly AudioFormat OpusFormat = new AudioFormat(
+    // NOTE: Opus is a dynamic RTP payload. SIP endpoints commonly advertise different
+    // payload types (e.g. 106, 111). We include both to maximize interoperability.
+    private static readonly AudioFormat OpusFormat106 = new AudioFormat(
+        AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+
+    private static readonly AudioFormat OpusFormat111 = new AudioFormat(
         AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
 
     // G.722 operates at 16kHz with 64kbps
@@ -749,7 +754,9 @@ public class UnifiedAudioEncoder : IAudioEncoder
         {
             var formats = new List<AudioFormat>();
             // Priority order: Opus > G.722 > G.711
-            formats.Add(OpusFormat);
+            // Opus 48kHz (two common dynamic payload types)
+            formats.Add(OpusFormat106);
+            formats.Add(OpusFormat111);
             formats.Add(G722Format);
             formats.AddRange(_baseEncoder.SupportedFormats);
             return formats;
