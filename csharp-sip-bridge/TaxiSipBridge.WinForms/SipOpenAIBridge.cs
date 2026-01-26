@@ -281,18 +281,63 @@ public class SipOpenAIBridge : IDisposable
 
             await Task.Delay(200);
 
-            // Answer the call
+            // Answer the call (with Opus→PCMU fallback)
             Log($"🔧 [{_currentCallId}] Answering call...");
             bool answered = false;
+            bool usedFallback = false;
             try
             {
                 answered = await _userAgent.Answer(uas, _mediaSession);
             }
             catch (Exception ex)
             {
-                Log($"❌ [{_currentCallId}] Exception during Answer(): {ex.GetType().Name}: {ex.Message}\n{ex}");
+                Log($"❌ [{_currentCallId}] Exception during Answer(): {ex.GetType().Name}: {ex.Message}");
                 answered = false;
             }
+
+            // Opus→PCMU fallback: if Opus answer failed, retry with G.711
+            if (!answered && (remoteOffersOpus || remoteOffersG722))
+            {
+                Log($"⚠️ [{_currentCallId}] Wideband answer failed - falling back to PCMU");
+                usedFallback = true;
+
+                // Cleanup first attempt
+                try { _mediaSession?.Close("Fallback"); } catch { }
+                _mediaSession?.Dispose();
+                _adaAudioSource?.Dispose();
+
+                // Recreate with PCMU only
+                _adaAudioSource = new AdaAudioSource(AudioMode.JitterBuffer, 200);
+                _adaAudioSource.OnDebugLog += msg => Log(msg);
+                _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
+                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
+
+                var fallbackFormats = _adaAudioSource.GetAudioSourceFormats();
+                Log($"🔧 [{_currentCallId}] Fallback codecs: {string.Join(", ", fallbackFormats.Select(f => $"{f.FormatName}@{f.ClockRate}Hz PT={f.FormatID}"))}");
+                if (fallbackFormats.Count > 0)
+                    _adaAudioSource.SetAudioSourceFormat(fallbackFormats[0]);
+
+                var fallbackEndPoints = new MediaEndPoints
+                {
+                    AudioSource = _adaAudioSource,
+                    AudioSink = null
+                };
+                _mediaSession = new VoIPMediaSession(fallbackEndPoints);
+                _mediaSession.AcceptRtpFromAny = true;
+                _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
+
+                // Re-accept the original INVITE (SIPSorcery allows re-answer with different session)
+                try
+                {
+                    answered = await _userAgent.Answer(uas, _mediaSession);
+                }
+                catch (Exception ex2)
+                {
+                    Log($"❌ [{_currentCallId}] Fallback answer also failed: {ex2.Message}");
+                    answered = false;
+                }
+            }
+
             if (!answered)
             {
                 try
@@ -307,6 +352,9 @@ public class SipOpenAIBridge : IDisposable
                 await CleanupCall();
                 return;
             }
+
+            if (usedFallback)
+                Log($"⚠️ [{_currentCallId}] Answered with PCMU fallback (Opus negotiation failed)");
 
             // Start media session
             await _mediaSession.Start();
