@@ -222,9 +222,8 @@ public class SipOpenAIBridge : IDisposable
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
-            // TEMPORARILY: Skip Opus/G.722 to debug answer failures - use PCMU directly
-            // TODO: Re-enable wideband once we understand why Opus answer hangs
-            bool forceNarrowband = true; // Set to false to try Opus again
+            // Re-enabled Opus negotiation for debugging
+            bool forceNarrowband = false; // Set to true to force PCMU
             if (!forceNarrowband && remoteOffersOpus)
             {
                 // Force Opus only - highest quality 48kHz
@@ -290,15 +289,44 @@ public class SipOpenAIBridge : IDisposable
 
             // Answer the call (with Opus→PCMU fallback)
             Log($"🔧 [{_currentCallId}] Answering call...");
+            
+            // Debug: Log UAS state before answer
+            Log($"🔍 [{_currentCallId}] UAS state before Answer: Transaction={uas.SIPDialogue?.DialogueId ?? "null"}, CallId={uas.ClientTransaction?.TransactionRequest?.Header?.CallId}");
+            
+            // Debug: Log media session SDP capabilities
+            var localSdp = _mediaSession.CreateOffer(null);
+            if (localSdp != null)
+            {
+                var audioMedia = localSdp.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
+                if (audioMedia != null)
+                {
+                    Log($"🔍 [{_currentCallId}] Local SDP audio formats: {string.Join(", ", audioMedia.MediaFormats.Values.Select(f => $"{f.Name()}@{f.ClockRate()}"))}");
+                }
+            }
+            
             bool answered = false;
             bool usedFallback = false;
             try
             {
-                answered = await _userAgent.Answer(uas, _mediaSession);
+                var answerTask = _userAgent.Answer(uas, _mediaSession);
+                var timeoutTask = Task.Delay(5000); // 5 second timeout
+                var completedTask = await Task.WhenAny(answerTask, timeoutTask);
+                
+                if (completedTask == timeoutTask)
+                {
+                    Log($"❌ [{_currentCallId}] Answer() timed out after 5 seconds");
+                    answered = false;
+                }
+                else
+                {
+                    answered = await answerTask;
+                    Log($"🔍 [{_currentCallId}] Answer() returned: {answered}");
+                }
             }
             catch (Exception ex)
             {
                 Log($"❌ [{_currentCallId}] Exception during Answer(): {ex.GetType().Name}: {ex.Message}");
+                Log($"❌ [{_currentCallId}] Stack trace: {ex.StackTrace}");
                 answered = false;
             }
 
