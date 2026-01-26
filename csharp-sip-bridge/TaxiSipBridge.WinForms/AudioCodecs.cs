@@ -398,7 +398,9 @@ public static class AudioCodecs
     #region Opus Codec
 
     public const int OPUS_SAMPLE_RATE = 48000;
-    public const int OPUS_CHANNELS = 1;
+    // NOTE: Many SIP endpoints advertise Opus as stereo (opus/48000/2).
+    // We negotiate 2 channels and can duplicate mono to stereo for compatibility.
+    public const int OPUS_CHANNELS = 2;
     public const int OPUS_BITRATE = 32000;
     public const int OPUS_FRAME_SIZE_MS = 20;
     public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
@@ -415,8 +417,9 @@ public static class AudioCodecs
             _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
             _opusEncoder.Bitrate = OPUS_BITRATE;
 
-            short[] frame = pcm.Length == OPUS_FRAME_SIZE ? pcm : new short[OPUS_FRAME_SIZE];
-            if (pcm.Length != OPUS_FRAME_SIZE) Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
+            int requiredSamples = OPUS_FRAME_SIZE * OPUS_CHANNELS;
+            short[] frame = pcm.Length == requiredSamples ? pcm : new short[requiredSamples];
+            if (pcm.Length != requiredSamples) Array.Copy(pcm, frame, Math.Min(pcm.Length, requiredSamples));
 
             byte[] outBuf = new byte[1275];
             int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
@@ -431,9 +434,10 @@ public static class AudioCodecs
         lock (_opusDecoderLock)
         {
             _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
-            short[] outBuf = new short[OPUS_FRAME_SIZE];
-            int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
-            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
+            short[] outBuf = new short[OPUS_FRAME_SIZE * OPUS_CHANNELS];
+            int lenPerChannel = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
+            int totalSamples = Math.Min(outBuf.Length, lenPerChannel * OPUS_CHANNELS);
+            return totalSamples < outBuf.Length ? outBuf.Take(totalSamples).ToArray() : outBuf;
         }
     }
 

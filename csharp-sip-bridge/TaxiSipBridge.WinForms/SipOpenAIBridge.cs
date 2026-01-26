@@ -379,8 +379,19 @@ public class SipOpenAIBridge : IDisposable
                 // Re-accept the original INVITE (SIPSorcery allows re-answer with different session)
                 try
                 {
-                    answered = await _userAgent.Answer(uas, _mediaSession);
-                    Log($"🔧 [{_currentCallId}] Fallback answer returned: {answered}");
+                    var answerTask2 = _userAgent.Answer(uas, _mediaSession);
+                    var timeoutTask2 = Task.Delay(3000);
+                    var completed2 = await Task.WhenAny(answerTask2, timeoutTask2);
+                    if (completed2 == timeoutTask2)
+                    {
+                        Log($"❌ [{_currentCallId}] Fallback Answer() timed out after 3 seconds (INVITE likely no longer answerable)");
+                        answered = false;
+                    }
+                    else
+                    {
+                        answered = await answerTask2;
+                        Log($"🔧 [{_currentCallId}] Fallback answer returned: {answered}");
+                    }
                 }
                 catch (Exception ex2)
                 {
@@ -478,6 +489,42 @@ public class SipOpenAIBridge : IDisposable
 
         var payload = rtpPacket.Payload;
         if (payload == null || payload.Length == 0) return;
+
+        // If Opus is negotiated, RTP payload will be Opus frames (typically PT 106/111).
+        // Decode Opus -> PCM16 and send using the generic PCM path with correct sample rate.
+        var pt = rtpPacket.Header.PayloadType;
+        if (pt == 106 || pt == 111)
+        {
+            try
+            {
+                var pcm48 = AudioCodecs.OpusDecode(payload);
+
+                // Downmix stereo (interleaved) to mono for the AI.
+                short[] mono;
+                if (AudioCodecs.OPUS_CHANNELS == 2 && pcm48.Length % 2 == 0)
+                {
+                    mono = new short[pcm48.Length / 2];
+                    for (int i = 0, j = 0; i < pcm48.Length; i += 2, j++)
+                    {
+                        int mixed = (pcm48[i] + pcm48[i + 1]) / 2;
+                        mono[j] = (short)mixed;
+                    }
+                }
+                else
+                {
+                    mono = pcm48;
+                }
+
+                var pcmBytes = AudioCodecs.ShortsToBytes(mono);
+                _ = _aiClient.SendAudioAsync(pcmBytes, AudioCodecs.OPUS_SAMPLE_RATE);
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Opus decode error (PT={pt}): {ex.Message}");
+                return;
+            }
+        }
 
         // Decode µ-law to PCM16 using NAudio (matches SIPSorcery example pattern)
         var pcm16 = new short[payload.Length];
