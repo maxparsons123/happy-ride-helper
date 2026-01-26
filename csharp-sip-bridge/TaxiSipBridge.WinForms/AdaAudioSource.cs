@@ -449,6 +449,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
             if (abs > peak) peak = abs;
         }
 
+        // Safety: avoid division by zero or NaN
+        if (peak < 1) peak = 1;
+
         if (peak < LIMITER_THRESHOLD)
         {
             _limiterGain = Math.Min(1.0f, _limiterGain + 0.01f);
@@ -456,8 +459,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         float targetGain = LIMITER_CEILING / peak;
+        // Clamp gain to reasonable range
+        targetGain = Math.Clamp(targetGain, 0.1f, 2.0f);
+        
         float alpha = peak > LIMITER_CEILING ? 0.3f : 0.05f;
         _limiterGain = _limiterGain * (1 - alpha) + targetGain * alpha;
+        _limiterGain = Math.Clamp(_limiterGain, 0.1f, 2.0f);
+
+        // Safety: avoid division by zero in compression
+        float range = LIMITER_CEILING - LIMITER_THRESHOLD;
+        if (range < 1) range = 1;
 
         for (int i = 0; i < samples.Length; i++)
         {
@@ -465,12 +476,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
             if (Math.Abs(sample) > LIMITER_THRESHOLD)
             {
-                float sign = Math.Sign(sample);
+                float sign = sample >= 0 ? 1f : -1f;
                 float abs = Math.Abs(sample);
-                float over = (abs - LIMITER_THRESHOLD) / (LIMITER_CEILING - LIMITER_THRESHOLD);
-                float compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * (float)Math.Tanh(over);
+                float over = (abs - LIMITER_THRESHOLD) / range;
+                float compressed = LIMITER_THRESHOLD + range * (float)Math.Tanh(over);
                 sample = sign * compressed;
             }
+
+            // Final safety clamp
+            if (float.IsNaN(sample) || float.IsInfinity(sample))
+                sample = 0;
 
             samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
         }
