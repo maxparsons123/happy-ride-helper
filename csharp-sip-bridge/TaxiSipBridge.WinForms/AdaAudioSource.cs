@@ -76,7 +76,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public event Action? OnQueueEmpty;
     private bool _wasQueueEmpty = true;
 
-    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 120)
+    public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 200)
     {
         _audioEncoder = new AudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
