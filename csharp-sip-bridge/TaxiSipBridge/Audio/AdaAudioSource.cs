@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using TaxiSipBridge.Audio;
@@ -20,6 +21,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
+
+    // Prevent overlapping timer callbacks (can cause "fast" audio + clicking).
+    private readonly object _sendLock = new();
 
     private Timer? _sendTimer;
     private bool _isStarted;
@@ -241,6 +245,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     {
         if (_isClosed || _isPaused || _disposed) return;
 
+        // System.Threading.Timer can overlap; skip if previous callback is still running.
+        if (!Monitor.TryEnter(_sendLock)) return;
+
         try
         {
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
@@ -385,6 +392,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             OnDebugLog?.Invoke($"[AdaAudioSource] ❌ Error: {ex.Message}");
             OnAudioSourceError?.Invoke($"AdaAudioSource error: {ex.Message}");
+        }
+        finally
+        {
+            Monitor.Exit(_sendLock);
         }
     }
 
