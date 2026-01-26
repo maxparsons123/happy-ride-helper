@@ -37,14 +37,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     // Boundary smoothing to prevent clicks/crackling
     private short _lastOutputSample;
-    private short _prevFrameLastSample; // For inter-frame crossfade
     private bool _lastFrameWasSilence = true;
     private short[]? _lastAudioFrame; // Keep last frame for interpolation
 
-    // Soft-knee limiter to prevent clipping
-    private float _limiterGain = 1.0f;
-    private const float LIMITER_THRESHOLD = 28000f;
-    private const float LIMITER_CEILING = 32000f;
+    // Stateful resampler - maintains continuity between frames
+    private ContinuousResampler? _resampler;
 
     // Audio mode configuration
     private AudioMode _audioMode = AudioMode.Standard;
@@ -190,12 +187,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Clear all queued audio.
+    /// Clear all queued audio and reset resampler state.
     /// </summary>
     public void ClearQueue()
     {
         while (_pcmQueue.TryDequeue(out _)) { }
         _needsFadeIn = true;
+        _resampler?.Reset();
     }
 
     public Task StartAudio()
@@ -272,16 +270,26 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Use NAudio WDL resampler for professional-grade quality
-                    // SimpleResample mode uses fallback linear interpolation
+                    // Initialize stateful resampler on first use
+                    if (_resampler == null && targetRate != 24000)
+                    {
+                        _resampler = new ContinuousResampler(24000, targetRate);
+                        OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Created ContinuousResampler 24kHz -> {targetRate}Hz");
+                    }
+
+                    // Use stateful resampler for smooth inter-frame transitions
                     if (_audioMode == AudioMode.SimpleResample)
                     {
                         audioFrame = SimpleResample(pcm24, 24000, targetRate);
                     }
+                    else if (_resampler != null)
+                    {
+                        // Stateful FIR resampler - eliminates frame boundary clicks
+                        audioFrame = _resampler.Process(pcm24);
+                    }
                     else
                     {
-                        // NAudio WDL resampler - high quality for all sample rates
-                        audioFrame = AudioCodecs.ResampleNAudio(pcm24, 24000, targetRate);
+                        audioFrame = pcm24; // No resampling needed
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP
@@ -292,10 +300,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = fixedFrame;
                     }
 
-                    // Apply soft-knee limiter to prevent clipping
-                    ApplySoftLimiter(audioFrame);
-
-                    // If we were in silence, crossfade from last sample to new audio
+                    // Simple crossfade from silence to audio (no limiter - causes pumping)
                     if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
                     {
                         int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
@@ -383,64 +388,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return samples;
     }
 
-    private static short[] Downsample24kTo8k(short[] pcm24)
-    {
-        if (pcm24.Length < 3) return Array.Empty<short>();
-
-        int outLen = pcm24.Length / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int center = i * 3;
-            int s0 = pcm24[center];
-            int s1 = center + 1 < pcm24.Length ? pcm24[center + 1] : s0;
-            int s2 = center + 2 < pcm24.Length ? pcm24[center + 2] : s1;
-
-            output[i] = (short)((s0 * 2 + s1 * 2 + s2) / 5);
-        }
-
-        return output;
-    }
-
-    /// <summary>
-    /// Soft-knee limiter prevents clipping while preserving dynamics
-    /// </summary>
-    private void ApplySoftLimiter(short[] samples)
-    {
-        if (samples.Length == 0) return;
-
-        float peak = 0;
-        foreach (var sample in samples)
-        {
-            float abs = Math.Abs(sample);
-            if (abs > peak) peak = abs;
-        }
-
-        if (peak < LIMITER_THRESHOLD)
-        {
-            _limiterGain = Math.Min(1.0f, _limiterGain + 0.01f);
-            return;
-        }
-
-        float targetGain = LIMITER_CEILING / peak;
-        float alpha = peak > LIMITER_CEILING ? 0.3f : 0.05f;
-        _limiterGain = _limiterGain * (1 - alpha) + targetGain * alpha;
-
-        for (int i = 0; i < samples.Length; i++)
-        {
-            float sample = samples[i] * _limiterGain;
-            if (Math.Abs(sample) > LIMITER_THRESHOLD)
-            {
-                float sign = Math.Sign(sample);
-                float abs = Math.Abs(sample);
-                float over = (abs - LIMITER_THRESHOLD) / (LIMITER_CEILING - LIMITER_THRESHOLD);
-                float compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * (float)Math.Tanh(over);
-                sample = sign * compressed;
-            }
-            samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
-        }
-    }
+    // Downsample24kTo8k removed - now using ContinuousResampler for smooth audio
 
     /// <summary>
     /// Generate an interpolated frame during underrun to prevent stuttering.
