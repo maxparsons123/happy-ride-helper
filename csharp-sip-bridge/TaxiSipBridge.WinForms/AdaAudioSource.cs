@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
-using NAudio.Dsp;
 using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
@@ -14,7 +13,7 @@ namespace TaxiSipBridge;
 /// Custom audio source that receives PCM audio from Ada (WebSocket) and provides
 /// encoded samples to SIPSorcery's RTP transport.
 /// 
-/// Uses NAudio's WdlResampler for high-fidelity, low-artifact resampling.
+/// Uses simple linear interpolation for resampling (proven reliable).
 /// </summary>
 public class AdaAudioSource : IAudioSource, IDisposable
 {
@@ -34,8 +33,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // NAudio resampler (stateful — one per instance)
-    private WdlResampler? _resampler;
+    // Resampler state (simple linear interpolation - proven to work)
+    private double _resamplePhase;
+    private short _lastInputSample;
 
     private Timer? _sendTimer;
     private bool _isStarted;
@@ -100,14 +100,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
         _audioFormatManager.SetSelectedFormat(audioFormat);
 
-        // Reinitialize resampler for new target rate
-        _resampler = new WdlResampler();
-        _resampler.SetMode(true, 2, false); // interp=true, filtercnt=2, sinc=false for speed
-        _resampler.SetFilterParms();
-        _resampler.SetFeedMode(false); // output-driven mode
-        _resampler.SetRates(24000, audioFormat.ClockRate);
+        // Reset resampler state for new format
+        _resamplePhase = 0;
+        _lastInputSample = 0;
 
-        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz (WDL resampler)");
+        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz (linear resample)");
     }
 
     public void RestrictFormats(Func<AudioFormat, bool> filter)
@@ -235,8 +232,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private void SendSampleCore()
     {
-        if (_resampler == null) return;
-
         int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
         int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
         short[] audioFrame;
@@ -266,33 +261,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 // 1. Volume boost
                 ApplyVolumeBoost(pcm24, VOLUME_BOOST);
 
-                // 2. Convert to float for WDL resampler
-                var floatInput = new float[pcm24.Length];
-                for (int i = 0; i < pcm24.Length; i++)
-                    floatInput[i] = pcm24[i] / 32768f;
+                // 2. Resample 24kHz → targetRate using simple linear interpolation
+                audioFrame = ResampleLinear(pcm24, 24000, targetRate, samplesNeeded);
 
-                // 3. Resample using NAudio WDL (output-driven mode).
-                // IMPORTANT: ResamplePrepare expects the number of *output* samples we want.
-                // It returns how many input samples are required to synthesize that output.
-                var floatOutput = new float[samplesNeeded];
-
-                int inNeeded = _resampler.ResamplePrepare(samplesNeeded, 1, out float[] inBuffer, out int inBufferOffset);
-
-                int toCopy = Math.Min(floatInput.Length, inNeeded);
-                Array.Copy(floatInput, 0, inBuffer, inBufferOffset, toCopy);
-                if (toCopy < inNeeded)
+                // Log first frame to confirm audio is being processed
+                if (_sentFrames < 5)
                 {
-                    Array.Clear(inBuffer, inBufferOffset + toCopy, inNeeded - toCopy);
-                }
-
-                int outProduced = _resampler.ResampleOut(floatOutput, 0, samplesNeeded, 1, inNeeded);
-
-                // 4. Convert back to short[]
-                audioFrame = new short[samplesNeeded];
-                int copyLen = Math.Min(outProduced, samplesNeeded);
-                for (int i = 0; i < copyLen; i++)
-                {
-                    audioFrame[i] = (short)Math.Clamp(floatOutput[i] * 32767f, short.MinValue, short.MaxValue);
+                    short peak = 0;
+                    foreach (var s in audioFrame) if (Math.Abs(s) > peak) peak = (short)Math.Abs(s);
+                    OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}");
                 }
 
                 // 5. Pre-emphasis for narrowband codecs
@@ -365,7 +342,57 @@ public class AdaAudioSource : IAudioSource, IDisposable
         OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
     }
 
-    private static bool ShouldApplyPreEmphasis(AudioFormat format)
+    /// <summary>
+    /// Simple linear interpolation resampling - stateful for smooth frame boundaries.
+    /// </summary>
+    private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
+    {
+        if (fromRate == toRate)
+        {
+            // No resampling needed
+            var copy = new short[outputLen];
+            Array.Copy(input, copy, Math.Min(input.Length, outputLen));
+            return copy;
+        }
+
+        var output = new short[outputLen];
+        double ratio = (double)fromRate / toRate;
+
+        for (int i = 0; i < outputLen; i++)
+        {
+            double srcPos = _resamplePhase + i * ratio;
+            int srcIdx = (int)srcPos;
+            double frac = srcPos - srcIdx;
+
+            short s0, s1;
+            if (srcIdx < 0)
+            {
+                s0 = _lastInputSample;
+                s1 = input.Length > 0 ? input[0] : (short)0;
+            }
+            else if (srcIdx >= input.Length - 1)
+            {
+                s0 = srcIdx < input.Length ? input[srcIdx] : (input.Length > 0 ? input[^1] : (short)0);
+                s1 = s0;
+            }
+            else
+            {
+                s0 = input[srcIdx];
+                s1 = input[srcIdx + 1];
+            }
+
+            output[i] = (short)(s0 + (s1 - s0) * frac);
+        }
+
+        // Update phase for next frame (wrap around input length)
+        _resamplePhase = (_resamplePhase + outputLen * ratio) - input.Length;
+        if (input.Length > 0)
+            _lastInputSample = input[^1];
+
+        return output;
+    }
+
+
     {
         return format.FormatName.Equals("PCMU", StringComparison.OrdinalIgnoreCase) ||
                format.FormatName.Equals("PCMA", StringComparison.OrdinalIgnoreCase);
