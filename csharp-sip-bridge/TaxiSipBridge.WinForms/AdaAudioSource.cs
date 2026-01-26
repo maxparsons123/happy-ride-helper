@@ -308,15 +308,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns++;
                     
-                    // Reset jitter buffer state
-                    if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled)
+                    // Reset jitter buffer state after prolonged underrun
+                    if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled && _consecutiveUnderruns > 10)
                     {
                         _jitterBufferFilled = false;
                     }
                     
-                    // On first few underruns, try to interpolate from last frame
-                    // This prevents stuttering on brief gaps
-                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
+                    // On first several underruns, interpolate from last frame to prevent stuttering
+                    // OpenAI sends audio in bursts, so we need ~120ms tolerance
+                    if (_consecutiveUnderruns <= 6 && _lastAudioFrame != null)
                     {
                         audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
                         _interpolatedFrames++;
