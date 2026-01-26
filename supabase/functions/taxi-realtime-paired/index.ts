@@ -3520,7 +3520,134 @@ Do NOT request the quote yet - wait for them to say yes.`
                 sessionState.preSummaryDone = false;
                 sessionState.awaitingConfirmation = false;
                 sessionState.quoteInFlight = false;
-                // Don't break - let the normal transcript handling process the change
+                
+                // FIX: We need to actually process the address change, not just reset flags
+                // Determine if this is a pickup or destination correction based on context
+                if (looksLikeAddress) {
+                  const currentPickup = sessionState.booking.pickup?.toLowerCase() || "";
+                  const currentDest = sessionState.booking.destination?.toLowerCase() || "";
+                  const newAddressLower = userText.toLowerCase();
+                  
+                  // Check if user explicitly mentions which field they're changing
+                  const isPickupMention = /\b(pickup|pick up|from|collect|start)\b/i.test(userText);
+                  const isDestMention = /\b(destination|to|going to|drop|end|finish)\b/i.test(userText);
+                  
+                  // Store in userTruth for verbatim playback
+                  sessionState.userTruth = sessionState.userTruth || {};
+                  
+                  console.log(`[${callId}] 🏠 PRE-SUMMARY ADDRESS CORRECTION: "${userText}" isPickup=${isPickupMention}, isDest=${isDestMention}`);
+                  
+                  // If they mention a specific field, update that one
+                  // Otherwise, ask them which one they want to change
+                  sessionState.conversationHistory.push({
+                    role: "user",
+                    content: `[CONTEXT: User provided address "${userText}" during pre-summary to make a correction]`,
+                    timestamp: Date.now()
+                  });
+                  
+                  if (isPickupMention && !isDestMention) {
+                    // Extract just the address part
+                    const cleanAddress = userText.replace(/\b(pickup|pick up|from|collect|start)\s*(is|to|at|:)?\s*/i, "").trim();
+                    sessionState.booking.pickup = cleanAddress || userText;
+                    sessionState.userTruth.pickup = cleanAddress || userText;
+                    console.log(`[${callId}] ✏️ PICKUP UPDATED to: "${sessionState.booking.pickup}"`);
+                    
+                    // Reset to pre_summary to re-confirm
+                    sessionState.lastQuestionAsked = "pre_summary";
+                    
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[PICKUP CORRECTED] User changed pickup to: "${sessionState.booking.pickup}"
+                          
+Updated booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}", passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "now"}
+
+Acknowledge the change and read back the UPDATED summary:
+"So that's from ${sessionState.booking.pickup} to ${sessionState.booking.destination}, ${sessionState.booking.passengers} passengers, ${sessionState.booking.pickupTime || "as soon as possible"}. Is there anything else you'd like to change?"`
+                        }]
+                      }
+                    }));
+                    safeResponseCreate(openaiWs!, sessionState, callId);
+                    // Persist the update
+                    updateLiveCall(sessionState).catch(() => {});
+                    break;
+                  } else if (isDestMention && !isPickupMention) {
+                    const cleanAddress = userText.replace(/\b(destination|to|going to|drop|end|finish)\s*(is|at|:)?\s*/i, "").trim();
+                    sessionState.booking.destination = cleanAddress || userText;
+                    sessionState.userTruth.destination = cleanAddress || userText;
+                    console.log(`[${callId}] ✏️ DESTINATION UPDATED to: "${sessionState.booking.destination}"`);
+                    
+                    sessionState.lastQuestionAsked = "pre_summary";
+                    
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[DESTINATION CORRECTED] User changed destination to: "${sessionState.booking.destination}"
+                          
+Updated booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}", passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "now"}
+
+Acknowledge the change and read back the UPDATED summary:
+"So that's from ${sessionState.booking.pickup} to ${sessionState.booking.destination}, ${sessionState.booking.passengers} passengers, ${sessionState.booking.pickupTime || "as soon as possible"}. Is there anything else you'd like to change?"`
+                        }]
+                      }
+                    }));
+                    safeResponseCreate(openaiWs!, sessionState, callId);
+                    updateLiveCall(sessionState).catch(() => {});
+                    break;
+                  } else {
+                    // Not clear which field - ask the user
+                    console.log(`[${callId}] ❓ UNCLEAR WHICH FIELD: Asking user to clarify pickup or destination`);
+                    
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "system",
+                        content: [{
+                          type: "input_text",
+                          text: `[ADDRESS CORRECTION UNCLEAR] User said "${userText}" but it's unclear if they want to change pickup or destination.
+
+Current booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}"
+
+Ask them: "Would you like me to change the pickup or the destination to ${userText}?"
+
+Do NOT guess - explicitly ask which field they want to update.`
+                        }]
+                      }
+                    }));
+                    safeResponseCreate(openaiWs!, sessionState, callId);
+                    break;
+                  }
+                }
+                
+                // If wantsChanges but not an address, let Ada ask what they want to change
+                if (wantsChanges && !looksLikeAddress) {
+                  openaiWs!.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "message",
+                      role: "system",
+                      content: [{
+                        type: "input_text",
+                        text: `[USER WANTS CHANGES] The user indicated they want to change something by saying: "${userText}"
+
+Ask them: "Of course, what would you like to change - the pickup, destination, number of passengers, or the time?"
+
+Current booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}", passengers=${sessionState.booking.passengers}, time=${sessionState.booking.pickupTime || "as soon as possible"}`
+                      }]
+                    }
+                  }));
+                  safeResponseCreate(openaiWs!, sessionState, callId);
+                  break;
+                }
               }
             }
             
