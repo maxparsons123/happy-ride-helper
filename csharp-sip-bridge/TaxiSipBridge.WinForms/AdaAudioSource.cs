@@ -275,9 +275,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 int outBufferLen = (int)Math.Ceiling(floatInput.Length * targetRate / 24000.0) + 64;
                 var floatOutput = new float[outBufferLen];
 
-                int inNeeded = _resampler.ResamplePrepare(floatInput.Length, 1, out float[] inBuffer);
-                Array.Copy(floatInput, inBuffer, Math.Min(floatInput.Length, inNeeded));
-                int outProduced = _resampler.ResampleOut(floatOutput, 0, floatOutput.Length, 1);
+                int inNeeded = _resampler.ResamplePrepare(floatInput.Length, 1, out float[] inBuffer, out int inBufferOffset);
+                Array.Copy(floatInput, 0, inBuffer, inBufferOffset, Math.Min(floatInput.Length, inNeeded));
+                int outProduced = _resampler.ResampleOut(floatOutput, 0, floatOutput.Length, 1, inNeeded);
 
                 // 4. Convert back to short[]
                 audioFrame = new short[samplesNeeded];
