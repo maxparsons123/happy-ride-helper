@@ -73,7 +73,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 80)
     {
-        _audioEncoder = new AudioEncoder();
+        // Use OpusAudioEncoder which supports both Opus (48kHz) and G.711 (8kHz)
+        _audioEncoder = new OpusAudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = jitterBufferMs;
@@ -270,21 +271,31 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Initialize stateful resampler on first use
-                    if (_resampler == null && targetRate != 24000)
+                    // Determine resampling strategy based on target rate
+                    // - Opus: 48kHz (2:1 upsample from 24kHz - PRESERVES quality)
+                    // - G.711: 8kHz (3:1 downsample from 24kHz - loses quality)
+                    bool isOpus = targetRate == 48000;
+                    
+                    // Initialize resampler on first use (if needed)
+                    if (_resampler == null && targetRate != 24000 && _audioMode != AudioMode.Passthrough)
                     {
                         _resampler = new ContinuousResampler(24000, targetRate);
-                        OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Created ContinuousResampler 24kHz -> {targetRate}Hz");
+                        string direction = isOpus ? "UPSAMPLE (quality preserved)" : "DOWNSAMPLE (quality loss)";
+                        OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Created ContinuousResampler 24kHz -> {targetRate}Hz ({direction})");
                     }
 
                     // Select processing mode
                     if (_audioMode == AudioMode.Passthrough)
                     {
                         // BYPASS: Send 24kHz directly without resampling (TEST ONLY)
-                        // This will sound wrong if codec is 8kHz - audio will play 3x fast
                         audioFrame = pcm24;
                         if (_sentFrames == 0)
                             OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ PASSTHROUGH MODE: Sending 24kHz directly, targetRate={targetRate}Hz");
+                    }
+                    else if (isOpus)
+                    {
+                        // Opus: Simple 2x upsample (24kHz → 48kHz) - high quality
+                        audioFrame = Upsample24kTo48k(pcm24);
                     }
                     else if (_audioMode == AudioMode.SimpleResample)
                     {
@@ -292,7 +303,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     }
                     else if (_resampler != null)
                     {
-                        // Stateful FIR resampler - eliminates frame boundary clicks
+                        // Stateful FIR resampler for G.711 downsampling
                         audioFrame = _resampler.Process(pcm24);
                     }
                     else
@@ -393,6 +404,31 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         return samples;
+    }
+
+    /// <summary>
+    /// Upsample 24kHz to 48kHz for Opus codec (2:1 interpolation).
+    /// This PRESERVES quality since we're adding samples, not removing them.
+    /// </summary>
+    private static short[] Upsample24kTo48k(short[] pcm24)
+    {
+        if (pcm24.Length == 0) return Array.Empty<short>();
+
+        int outLen = pcm24.Length * 2;
+        var output = new short[outLen];
+
+        for (int i = 0; i < pcm24.Length; i++)
+        {
+            int outIdx = i * 2;
+            short current = pcm24[i];
+            short next = (i + 1 < pcm24.Length) ? pcm24[i + 1] : current;
+            
+            // Linear interpolation between samples
+            output[outIdx] = current;
+            output[outIdx + 1] = (short)((current + next) / 2);
+        }
+
+        return output;
     }
 
     // Downsample24kTo8k removed - now using ContinuousResampler for smooth audio
