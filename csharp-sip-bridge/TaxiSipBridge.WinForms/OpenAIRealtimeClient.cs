@@ -965,17 +965,29 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // PASSTHROUGH MODE: No DSP, just simple point decimation 24kHz → 8kHz
-        // Pick every 3rd sample (no averaging, no filtering)
+        // PASSTHROUGH with LINEAR INTERPOLATION: 24kHz → 8kHz (3:1)
+        // Instead of just picking every 3rd sample, interpolate for smoother audio
         int outputLen = pcm24k.Length / 3;
         var pcm8k = new short[outputLen];
         
         for (int i = 0; i < outputLen; i++)
         {
-            pcm8k[i] = pcm24k[i * 3];  // Just take every 3rd sample
+            int srcIdx = i * 3;
+            // Linear interpolation: weighted average of 3 source samples
+            // This preserves more high-frequency detail than simple decimation
+            if (srcIdx + 2 < pcm24k.Length)
+            {
+                // Weighted blend: 25% first, 50% middle, 25% last
+                int blended = (pcm24k[srcIdx] + pcm24k[srcIdx + 1] * 2 + pcm24k[srcIdx + 2]) / 4;
+                pcm8k[i] = (short)Math.Clamp(blended, short.MinValue, short.MaxValue);
+            }
+            else
+            {
+                pcm8k[i] = pcm24k[srcIdx];
+            }
         }
 
-        // Encode to µ-law
+        // Encode to µ-law (8-bit companded)
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
         // Split into 20ms frames (160 bytes @ 8kHz µ-law)
