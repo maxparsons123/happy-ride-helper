@@ -160,7 +160,10 @@ public partial class MainForm : Form
                     return;
                 }
 
-                _localAiClient = new OpenAIRealtimeClient(apiKey);
+                _localAiClient = new OpenAIRealtimeClient(
+                    apiKey, 
+                    model: "gpt-4o-mini-realtime-preview-2024-12-17"
+                );
                 _localAiClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
                 _localAiClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
                 _localAiClient.OnConnected += () => SafeInvoke(() =>
