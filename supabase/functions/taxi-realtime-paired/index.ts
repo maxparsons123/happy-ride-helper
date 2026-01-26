@@ -749,6 +749,37 @@ function applyAlphanumericCorrections(text: string): string {
   return corrected;
 }
 
+// === ADDRESS DEDUPLICATION ===
+// Fixes STT echo issues like "52A. 52A David Road" or "52A .52A David Road"
+// These happen when STT captures audio twice (echo or repeat)
+function deduplicateAddress(text: string): string {
+  if (!text) return text;
+  
+  // Pattern to detect duplicated address prefixes:
+  // "52A. 52A David Road" → "52A David Road"
+  // "52A .52A David Road" → "52A David Road"  
+  // "7 Russell Street. 7 Russell Street" → "7 Russell Street"
+  
+  // Match pattern: (address part) + separator + (same address part repeated)
+  // Common separators: ". ", " .", ", ", " "
+  const duplicatePattern = /^(.{3,40}?)\s*[.,]\s*\1\b/i;
+  const match = text.match(duplicatePattern);
+  if (match) {
+    console.log(`[Dedupe] Removed duplicate: "${text}" → "${match[1]}${text.slice(match[0].length)}"`);
+    return (match[1] + text.slice(match[0].length)).trim();
+  }
+  
+  // Also check for house number duplication: "52A 52A David Road" → "52A David Road"
+  const houseNumDupe = /^(\d+[a-zA-Z]?)\s+\1\b/i;
+  const houseMatch = text.match(houseNumDupe);
+  if (houseMatch) {
+    console.log(`[Dedupe] Removed house number duplicate: "${text}" → "${houseMatch[1]}${text.slice(houseMatch[0].length)}"`);
+    return (houseMatch[1] + text.slice(houseMatch[0].length)).trim();
+  }
+  
+  return text;
+}
+
 // === PASSENGER PARSING (multilingual from simple) ===
 function parsePassengersFromText(text: string): number {
   const lower = text.toLowerCase().trim();
@@ -3316,7 +3347,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             // Apply alphanumeric corrections for house numbers (e.g., "52 A" → "52A")
             const alphanumericCorrected = applyAlphanumericCorrections(rawText);
             // Apply STT corrections for common telephony mishearings
-            const userText = correctTranscript(alphanumericCorrected);
+            const sttCorrected = correctTranscript(alphanumericCorrected);
+            // Apply deduplication to fix STT echo issues (e.g., "52A. 52A David Road" → "52A David Road")
+            const userText = deduplicateAddress(sttCorrected);
             if (userText !== rawText) {
               console.log(`[${callId}] 🔧 STT corrected: "${rawText}" → "${userText}"`);
             }
