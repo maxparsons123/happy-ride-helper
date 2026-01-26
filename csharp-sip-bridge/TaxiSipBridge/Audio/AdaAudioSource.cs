@@ -339,10 +339,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 }
             }
 
-            // Track samples for next frame's crossfade
+            // Track last sample for next frame's crossfade
             if (audioFrame.Length > 0)
             {
-                _prevFrameLastSample = audioFrame[^1];
                 _lastOutputSample = audioFrame[^1];
                 _lastFrameWasSilence = false;
             }
