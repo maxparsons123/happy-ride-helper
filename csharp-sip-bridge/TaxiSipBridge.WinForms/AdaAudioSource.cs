@@ -13,8 +13,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer - OpenAI sends faster than real-time
-    private const int FADE_IN_SAMPLES = 80;  // Increased for smoother fade
+    private const int FADE_IN_SAMPLES = 80;  // Smooth fade-in
     private const int CROSSFADE_SAMPLES = 40; // For silence-to-audio transitions
+    
+    // DSP constants matching edge function
+    private const float VOLUME_BOOST = 1.4f;       // Match edge function boost
+    private const float PRE_EMPHASIS_COEFF = 0.97f; // High-frequency boost for clarity
+    private const float DE_EMPHASIS_COEFF = 0.95f;  // Reverse pre-emphasis for natural sound
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
@@ -39,6 +44,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short _prevFrameLastSample; // For inter-frame crossfade
     private bool _lastFrameWasSilence = true;
     private short[]? _lastAudioFrame; // Keep last frame for interpolation
+    private short _preEmphasisPrevSample; // For pre-emphasis filter state
 
     // Soft-knee limiter to prevent clipping
     private float _limiterGain = 1.0f;
@@ -270,24 +276,29 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Select resampling method based on audio mode
+                    // === DSP PIPELINE (matches edge function) ===
+                    
+                    // 1. Apply volume boost
+                    ApplyVolumeBoost(pcm24, VOLUME_BOOST);
+                    
+                    // 2. Apply low-pass anti-aliasing filter before resampling
+                    var filtered = ApplyLowPassFilter(pcm24);
+
+                    // 3. Resample based on target rate
                     if (_audioMode == AudioMode.SimpleResample)
                     {
-                        // Simple linear interpolation only
-                        audioFrame = SimpleResample(pcm24, 24000, targetRate);
+                        audioFrame = SimpleResample(filtered, 24000, targetRate);
                     }
                     else if (targetRate == 8000)
                     {
-                        // Use optimized 3:1 decimator for 8kHz
-                        audioFrame = Downsample24kTo8k(pcm24);
+                        audioFrame = Downsample24kTo8k(filtered);
                     }
                     else
                     {
-                        // Use AudioCodecs high-quality resampler
-                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                        audioFrame = AudioCodecs.Resample(filtered, 24000, targetRate);
                     }
 
-                    // Hard-enforce exact 20ms frame size for RTP
+                    // 4. Hard-enforce exact 20ms frame size for RTP
                     if (audioFrame.Length != samplesNeeded)
                     {
                         var fixedFrame = new short[samplesNeeded];
@@ -295,10 +306,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = fixedFrame;
                     }
 
-                    // Apply soft-knee limiter to prevent clipping
+                    // 5. Apply soft-knee limiter to prevent clipping
                     ApplySoftLimiter(audioFrame);
-
-                    // If we were in silence, crossfade from last sample to new audio
+                    
+                    // 6. Apply inter-frame cosine crossfade for smooth transitions
+                    if (!_lastFrameWasSilence && _lastAudioFrame != null && audioFrame.Length >= CROSSFADE_SAMPLES)
+                    {
+                        ApplyInterFrameCrossfade(audioFrame, _lastAudioFrame);
+                    }
+                    
+                    // 7. If transitioning from silence, crossfade from last sample
                     if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
                     {
                         int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
@@ -310,7 +327,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     }
 
                     // Store for interpolation on underrun
-                    _lastAudioFrame = audioFrame;
+                    _lastAudioFrame = (short[])audioFrame.Clone();
                 }
                 else
                 {
@@ -417,6 +434,72 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Apply volume boost to increase clarity.
+    /// </summary>
+    private static void ApplyVolumeBoost(short[] samples, float boost)
+    {
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float val = samples[i] * boost;
+            samples[i] = (short)Math.Clamp(val, short.MinValue, short.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Low-pass anti-aliasing filter before downsampling.
+    /// 5-tap moving average provides smooth frequency rolloff.
+    /// </summary>
+    private static short[] ApplyLowPassFilter(short[] input)
+    {
+        if (input.Length < 5) return input;
+        
+        var output = new short[input.Length];
+        
+        // 5-tap weighted filter: [1, 2, 3, 2, 1] / 9
+        for (int i = 0; i < input.Length; i++)
+        {
+            int sum = input[i] * 3; // Center weight
+            
+            if (i >= 1) sum += input[i - 1] * 2;
+            else sum += input[i] * 2;
+            
+            if (i >= 2) sum += input[i - 2];
+            else sum += input[i];
+            
+            if (i < input.Length - 1) sum += input[i + 1] * 2;
+            else sum += input[i] * 2;
+            
+            if (i < input.Length - 2) sum += input[i + 2];
+            else sum += input[i];
+            
+            output[i] = (short)(sum / 9);
+        }
+        
+        return output;
+    }
+
+    /// <summary>
+    /// Apply cosine crossfade between consecutive frames for seamless transitions.
+    /// </summary>
+    private static void ApplyInterFrameCrossfade(short[] currentFrame, short[] previousFrame)
+    {
+        int fadeLen = Math.Min(CROSSFADE_SAMPLES, Math.Min(currentFrame.Length, previousFrame.Length));
+        int prevStart = previousFrame.Length - fadeLen;
+        
+        for (int i = 0; i < fadeLen; i++)
+        {
+            // Cosine interpolation for smoother power-level transitions
+            double phase = (double)(i + 1) / (fadeLen + 1);
+            float t = (float)((1.0 - Math.Cos(phase * Math.PI)) / 2.0);
+            
+            short prevSample = previousFrame[prevStart + i];
+            short currSample = currentFrame[i];
+            
+            currentFrame[i] = (short)(prevSample * (1.0f - t) + currSample * t);
+        }
     }
 
     /// <summary>
