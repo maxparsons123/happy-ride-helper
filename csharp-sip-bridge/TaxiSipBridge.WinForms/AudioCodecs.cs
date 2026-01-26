@@ -131,21 +131,21 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// High-quality resampling using simple linear interpolation.
-    /// Fast and efficient for real-time processing - avoids NAudio overhead per-frame.
+    /// High-quality resampling for real-time audio.
+    /// Uses proper anti-aliasing filter for downsampling.
     /// </summary>
     public static short[] ResampleNAudio(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
         if (input.Length == 0) return input;
 
-        // For 24kHz → 8kHz (3:1 decimation), use optimized path
+        // For 24kHz → 8kHz (3:1 decimation), use FIR-filtered decimation
         if (fromRate == 24000 && toRate == 8000)
         {
-            return Decimate3to1(input);
+            return Decimate3to1WithFilter(input);
         }
 
-        // Generic linear interpolation (fast, good quality for real-time)
+        // Generic linear interpolation for other rates
         double ratio = (double)fromRate / toRate;
         int outputLength = (int)(input.Length / ratio);
         var output = new short[outputLength];
@@ -170,23 +170,38 @@ public static class AudioCodecs
         return output;
     }
 
+    // Pre-computed 7-tap low-pass FIR filter coefficients for 24kHz → 8kHz
+    // Designed with sinc function and Blackman window, cutoff at ~3.5kHz
+    private static readonly double[] LPF_COEFFS = {
+        0.0214, 0.0885, 0.2316, 0.3170, 0.2316, 0.0885, 0.0214
+    };
+    private const int FILTER_HALF = 3; // (7-1)/2
+
     /// <summary>
-    /// Optimized 3:1 decimation for 24kHz → 8kHz with simple averaging filter.
-    /// Much faster than generic resampling, prevents aliasing.
+    /// 3:1 decimation with proper anti-aliasing FIR filter.
+    /// Prevents aliasing artifacts that cause "underwater" sound.
     /// </summary>
-    private static short[] Decimate3to1(short[] input)
+    private static short[] Decimate3to1WithFilter(short[] input)
     {
         int outputLen = input.Length / 3;
         var output = new short[outputLen];
 
         for (int i = 0; i < outputLen; i++)
         {
-            int srcIdx = i * 3;
-            // Simple 3-tap average (acts as low-pass filter)
-            int sum = input[srcIdx];
-            if (srcIdx + 1 < input.Length) sum += input[srcIdx + 1];
-            if (srcIdx + 2 < input.Length) sum += input[srcIdx + 2];
-            output[i] = (short)Math.Clamp(sum / 3, -32768, 32767);
+            int centerIdx = i * 3;
+            double acc = 0;
+
+            // Apply FIR filter centered at decimation point
+            for (int j = 0; j < LPF_COEFFS.Length; j++)
+            {
+                int srcIdx = centerIdx + j - FILTER_HALF;
+                if (srcIdx >= 0 && srcIdx < input.Length)
+                {
+                    acc += input[srcIdx] * LPF_COEFFS[j];
+                }
+            }
+
+            output[i] = (short)Math.Clamp(Math.Round(acc), -32768, 32767);
         }
 
         return output;
