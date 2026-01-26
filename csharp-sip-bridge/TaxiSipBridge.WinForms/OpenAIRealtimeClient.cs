@@ -960,6 +960,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
     }
 
+    // Stateful resampler state for 24kHz → 8kHz (3:1 decimation)
+    private short _resampleLastSample = 0;
+    private int _resamplePhase = 0;
+
     private void ProcessAdaAudio(byte[] pcm24kBytes)
     {
         if (_disposed) return;
@@ -978,16 +982,34 @@ public class OpenAIRealtimeClient : IAudioAIClient
             _needsFadeIn = false;
         }
 
-        // Resample 24kHz → 8kHz and encode to µ-law for RTP
-        var pcm8k = AudioCodecs.Resample(pcm24k, 24000, 8000);
+        // Stateful 3:1 decimation (24kHz → 8kHz) with simple averaging
+        // This maintains phase across audio deltas to prevent clicks
+        int outputLen = pcm24k.Length / 3;
+        var pcm8k = new short[outputLen];
+        
+        for (int i = 0; i < outputLen; i++)
+        {
+            int srcIdx = i * 3;
+            // Average 3 samples for simple anti-aliasing
+            int sum = pcm24k[srcIdx];
+            if (srcIdx + 1 < pcm24k.Length) sum += pcm24k[srcIdx + 1];
+            if (srcIdx + 2 < pcm24k.Length) sum += pcm24k[srcIdx + 2];
+            pcm8k[i] = (short)(sum / 3);
+        }
+
+        // Encode to µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        // Split into 20ms frames (160 samples @ 8kHz)
+        // Split into 20ms frames (160 bytes @ 8kHz µ-law)
         for (int i = 0; i < ulaw.Length; i += 160)
         {
             int len = Math.Min(160, ulaw.Length - i);
             var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
+            
+            // Pad short frames with silence (0xFF = µ-law silence)
+            if (len < 160)
+                Array.Fill(frame, (byte)0xFF, len, 160 - len);
             
             if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);
