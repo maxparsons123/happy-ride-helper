@@ -239,7 +239,7 @@ public class SipOpenAIBridge : IDisposable
             {
                 var fmt = audioTrack.Capabilities[0];
                 codecName = fmt.Name() ?? "unknown";
-                clockRate = fmt.ClockRate;
+                clockRate = fmt.ClockRate();
             }
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
             Log($"📡 [{_currentCallId}] RTP → {remoteRtp}");
