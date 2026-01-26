@@ -180,9 +180,15 @@ public class SipOpenAIBridge : IDisposable
 
         try
         {
-            // Parse remote SDP to detect available wideband codecs
+            // Parse remote SDP to detect available codecs and capture exact PTs.
+            // For incoming calls (UAS), we should answer using ONLY payload types that the remote offered.
             bool remoteOffersOpus = false;
             bool remoteOffersG722 = false;
+            bool remoteOffersPcmu = false;
+            bool remoteOffersPcma = false;
+            int? remoteOpusPt = null;
+            int remoteOpusChannels = 1;
+            string? remoteOpusFmtp = null;
             try
             {
                 var sdpBody = inviteRequest.Body;
@@ -196,6 +202,11 @@ public class SipOpenAIBridge : IDisposable
                             f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
                         remoteOffersG722 = audioMedia.MediaFormats.Any(f => 
                             f.Value.Name()?.Equals("G722", StringComparison.OrdinalIgnoreCase) == true);
+
+                        remoteOffersPcmu = audioMedia.MediaFormats.Any(f =>
+                            f.Value.Name()?.Equals("PCMU", StringComparison.OrdinalIgnoreCase) == true);
+                        remoteOffersPcma = audioMedia.MediaFormats.Any(f =>
+                            f.Value.Name()?.Equals("PCMA", StringComparison.OrdinalIgnoreCase) == true);
                         
                         var codecs = audioMedia.MediaFormats
                             .Select(f => $"{f.Value.Name()}({f.Key})")
@@ -203,11 +214,14 @@ public class SipOpenAIBridge : IDisposable
                         Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
                         
                         // Detailed Opus parameters if present
-                        var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f => 
+                        var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
                             f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
                         if (!opusFormat.Value.IsEmpty())
                         {
-                            Log($"🔍 [{_currentCallId}] Remote Opus: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={opusFormat.Value.Channels()}, fmtp={opusFormat.Value.Fmtp ?? "none"}");
+                            remoteOpusPt = opusFormat.Key;
+                            remoteOpusChannels = Math.Max(1, opusFormat.Value.Channels());
+                            remoteOpusFmtp = opusFormat.Value.Fmtp;
+                            Log($"🔍 [{_currentCallId}] Remote Opus: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
                         }
                         
                         if (remoteOffersOpus)
@@ -234,9 +248,19 @@ public class SipOpenAIBridge : IDisposable
             bool forceNarrowband = false; // Set to true to force PCMU
             if (!forceNarrowband && remoteOffersOpus)
             {
-                // Force Opus only - highest quality 48kHz
-                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
-                Log($"🎯 [{_currentCallId}] Restricting to Opus 48kHz");
+                // IMPORTANT: Only answer with the *exact* Opus payload type the remote offered.
+                // Offering additional dynamic PTs (e.g. 111) in an answer can cause the remote to reject.
+                if (remoteOpusPt.HasValue)
+                {
+                    int pt = remoteOpusPt.Value;
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS && fmt.FormatID == pt);
+                    Log($"🎯 [{_currentCallId}] Restricting to remote Opus PT={pt} (48kHz), remoteChannels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
+                }
+                else
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
+                    Log($"🎯 [{_currentCallId}] Restricting to Opus 48kHz (remote PT unknown)");
+                }
             }
             else if (!forceNarrowband && remoteOffersG722)
             {
@@ -246,9 +270,22 @@ public class SipOpenAIBridge : IDisposable
             }
             else
             {
-                // Force PCMU/PCMA for reliable 8kHz operation
-                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
-                Log($"🎯 [{_currentCallId}] Using PCMU/PCMA 8kHz (forceNarrowband={forceNarrowband})");
+                // Answer only with what the remote offered (prefer PCMU, then PCMA).
+                if (remoteOffersPcmu)
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMU 8kHz (forceNarrowband={forceNarrowband})");
+                }
+                else if (remoteOffersPcma)
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
+                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMA 8kHz (forceNarrowband={forceNarrowband})");
+                }
+                else
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
+                    Log($"🎯 [{_currentCallId}] Using PCMU/PCMA 8kHz (remote offer unknown, forceNarrowband={forceNarrowband})");
+                }
             }
 
             // IMPORTANT: after restricting, ensure the audio source has a valid selected format.
@@ -354,11 +391,16 @@ public class SipOpenAIBridge : IDisposable
                 _mediaSession?.Dispose();
                 _adaAudioSource?.Dispose();
 
-                // Recreate with PCMU only
+                // Recreate with PCMU only (use only remote-offered codecs where possible)
                 _adaAudioSource = new AdaAudioSource(AudioMode.JitterBuffer, 200);
                 _adaAudioSource.OnDebugLog += msg => Log(msg);
                 _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
-                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
+                if (remoteOffersPcmu)
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+                else if (remoteOffersPcma)
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
+                else
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
 
                 var fallbackFormats = _adaAudioSource.GetAudioSourceFormats();
                 Log($"🔧 [{_currentCallId}] Fallback codecs: {string.Join(", ", fallbackFormats.Select(f => $"{f.FormatName}@{f.ClockRate}Hz PT={f.FormatID}"))}");
