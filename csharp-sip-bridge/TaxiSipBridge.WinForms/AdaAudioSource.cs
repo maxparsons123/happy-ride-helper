@@ -6,20 +6,26 @@ using Timer = System.Threading.Timer;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Custom audio source that receives PCM audio from Ada (WebSocket) and provides
-/// encoded samples to SIPSorcery's RTP transport. Based on AudioExtrasSource pattern.
+/// Audio playback mode for AdaAudioSource.
+/// </summary>
+public enum AudioMode
+{
+    Standard,       // Use NAudio WDL resampler (professional quality)
+    JitterBuffer,   // Add jitter buffer before playback
+    TestTone        // Send 440Hz test tone instead of audio
+}
+
+/// <summary>
+/// Custom audio source that receives PCM audio from OpenAI (24kHz) and provides
+/// encoded samples to SIPSorcery's RTP transport.
+/// 
+/// Uses NAudio's professional WDL resampler for high-quality audio conversion.
 /// </summary>
 public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
-    private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer - OpenAI sends faster than real-time
-    private const int FADE_IN_SAMPLES = 80;  // Smooth fade-in
-    private const int CROSSFADE_SAMPLES = 40; // For silence-to-audio transitions
-    
-    // DSP constants matching edge function
-    private const float VOLUME_BOOST = 1.4f;       // Match edge function boost
-    private const float PRE_EMPHASIS_COEFF = 0.97f; // High-frequency boost for clarity
-    private const float DE_EMPHASIS_COEFF = 0.95f;  // Reverse pre-emphasis for natural sound
+    private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer
+    private const int FADE_IN_SAMPLES = 80;
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
@@ -36,47 +42,32 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _enqueuedFrames;
     private int _sentFrames;
     private int _silenceFrames;
-    private int _interpolatedFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
-    // Boundary smoothing to prevent clicks/crackling
-    private short _lastOutputSample;
-    private short _prevFrameLastSample; // For inter-frame crossfade
-    private bool _lastFrameWasSilence = true;
-    private short[]? _lastAudioFrame; // Keep last frame for interpolation
-    private short _preEmphasisPrevSample; // For pre-emphasis filter state
-
-    // Soft-knee limiter to prevent clipping
-    private float _limiterGain = 1.0f;
-    private const float LIMITER_THRESHOLD = 28000f;
-    private const float LIMITER_CEILING = 32000f;
-
-    // Audio mode configuration
-    private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 80; // Increased default for better buffering
+    // Jitter buffer
+    private AudioMode _audioMode;
+    private int _jitterBufferMs;
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
 
-    // Test tone mode
+    // Last sample for smooth transitions
+    private short _lastOutputSample;
+    private short[]? _lastAudioFrame;
+    private bool _lastFrameWasSilence = true;
+
+    // Test tone
     private bool _testToneMode;
     private int _testToneSampleIndex;
-    private const double TEST_TONE_FREQ = 440.0; // A4 note
+    private const double TEST_TONE_FREQ = 440.0;
 
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
     public event RawAudioSampleDelegate? OnAudioSourceRawSample { add { } remove { } }
     public event SourceErrorDelegate? OnAudioSourceError;
-    event Action<EncodedAudioFrame>? IAudioSource.OnAudioSourceEncodedFrameReady
-    {
-        add { }
-        remove { }
-    }
+    event Action<EncodedAudioFrame>? IAudioSource.OnAudioSourceEncodedFrameReady { add { } remove { } }
 
-    // Debug logging
     public event Action<string>? OnDebugLog;
-
-    // Fires when audio queue becomes empty (bot finished speaking)
     public event Action? OnQueueEmpty;
-    private bool _wasQueueEmpty = true; // Track state to fire only on transition
+    private bool _wasQueueEmpty = true;
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 80)
     {
@@ -84,12 +75,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = jitterBufferMs;
-
-        // Test tone mode is set via audio mode
-        if (_audioMode == AudioMode.TestTone)
-        {
-            _testToneMode = true;
-        }
+        _testToneMode = audioMode == AudioMode.TestTone;
     }
 
     public List<AudioFormat> GetAudioSourceFormats() => _audioFormatManager.GetSourceFormats();
@@ -97,137 +83,90 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void SetAudioSourceFormat(AudioFormat audioFormat)
     {
         _audioFormatManager.SetSelectedFormat(audioFormat);
-        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} (ID={audioFormat.FormatID}) @ {audioFormat.ClockRate}Hz");
+        OnDebugLog?.Invoke($"[AdaAudioSource] 🎵 Format: {audioFormat.FormatName} @ {audioFormat.ClockRate}Hz");
     }
 
-    public void RestrictFormats(Func<AudioFormat, bool> filter)
-    {
-        _audioFormatManager.RestrictFormats(filter);
-    }
-
+    public void RestrictFormats(Func<AudioFormat, bool> filter) => _audioFormatManager.RestrictFormats(filter);
     public bool HasEncodedAudioSubscribers() => OnAudioSourceEncodedSample != null;
-
     public bool IsAudioSourcePaused() => _isPaused;
 
-    /// <summary>
-    /// Enable test tone mode - sends a 440Hz sine wave instead of Ada audio.
-    /// Useful for debugging codec/format issues.
-    /// </summary>
     public void EnableTestTone(bool enable = true)
     {
         _testToneMode = enable;
         _testToneSampleIndex = 0;
-        OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Test tone mode: {(enable ? "ENABLED" : "DISABLED")}");
+        OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Test tone: {(enable ? "ON" : "OFF")}");
     }
 
-    public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample)
-    {
-        // Not used - we receive audio via EnqueuePcm24
-    }
+    public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample) { }
 
     /// <summary>
-    /// Queue PCM audio from Ada (24kHz, 16-bit signed, little-endian).
-    /// This will be resampled and encoded based on negotiated codec.
+    /// Queue PCM audio from OpenAI (24kHz, 16-bit signed, little-endian).
     /// </summary>
     public void EnqueuePcm24(byte[] pcmBytes)
     {
-        if (_disposed || _isClosed || pcmBytes.Length == 0) return;
-        if (_testToneMode) return; // Ignore Ada audio in test mode
+        if (_disposed || _isClosed || pcmBytes.Length == 0 || _testToneMode) return;
 
-        // Convert bytes to shorts (24kHz, 16-bit mono)
+        // Convert bytes to shorts
         var pcm24All = new short[pcmBytes.Length / 2];
         Buffer.BlockCopy(pcmBytes, 0, pcm24All, 0, pcmBytes.Length);
 
-        // IMPORTANT: packetise into 20ms frames.
-        // Ada deltas can be variable length; RTP expects consistent 20ms frames.
-        const int PCM24_FRAME_SAMPLES = 24000 / 1000 * AUDIO_SAMPLE_PERIOD_MS; // 480
-
+        // Split into 20ms frames (480 samples @ 24kHz)
+        const int FRAME_SAMPLES = 480;
         int frameCount = 0;
-        for (int offset = 0; offset < pcm24All.Length; offset += PCM24_FRAME_SAMPLES)
-        {
-            int len = Math.Min(PCM24_FRAME_SAMPLES, pcm24All.Length - offset);
 
-            // Pad last frame to full 20ms to keep timestamps stable.
-            var frame = new short[PCM24_FRAME_SAMPLES];
+        for (int offset = 0; offset < pcm24All.Length; offset += FRAME_SAMPLES)
+        {
+            int len = Math.Min(FRAME_SAMPLES, pcm24All.Length - offset);
+            var frame = new short[FRAME_SAMPLES];
             Array.Copy(pcm24All, offset, frame, 0, len);
 
-            // Apply fade-in only on the first frame after a reset.
-            if (_needsFadeIn && frame.Length > 0)
+            // Fade-in on first frame
+            if (_needsFadeIn)
             {
                 int fadeLen = Math.Min(FADE_IN_SAMPLES, frame.Length);
                 for (int i = 0; i < fadeLen; i++)
-                {
-                    float gain = (float)i / fadeLen;
-                    frame[i] = (short)(frame[i] * gain);
-                }
+                    frame[i] = (short)(frame[i] * ((float)i / fadeLen));
                 _needsFadeIn = false;
             }
 
-            // Bound the queue
             while (_pcmQueue.Count >= MAX_QUEUED_FRAMES)
                 _pcmQueue.TryDequeue(out _);
 
             _pcmQueue.Enqueue(frame);
             _enqueuedFrames++;
-            _wasQueueEmpty = false; // Mark that we have audio
+            _wasQueueEmpty = false;
             frameCount++;
         }
 
-        // Log first enqueue
-        if (_enqueuedFrames > 0 && _enqueuedFrames == frameCount)
-            OnDebugLog?.Invoke($"[AdaAudioSource] 📥 First audio: {pcm24All.Length} samples split into {frameCount}x{PCM24_FRAME_SAMPLES}");
+        if (_enqueuedFrames == frameCount)
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📥 First audio: {pcm24All.Length} samples → {frameCount} frames");
 
-        // Log stats every 3 seconds
         if ((DateTime.Now - _lastStatsLog).TotalSeconds >= 3)
         {
-            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enq={_enqueuedFrames}, sent={_sentFrames}, sil={_silenceFrames}, interp={_interpolatedFrames}, q={_pcmQueue.Count}");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📊 enq={_enqueuedFrames}, sent={_sentFrames}, sil={_silenceFrames}, q={_pcmQueue.Count}");
             _lastStatsLog = DateTime.Now;
         }
     }
 
-    /// <summary>
-    /// Signal that a new response is starting (for fade-in).
-    /// </summary>
-    public void ResetFadeIn()
-    {
-        _needsFadeIn = true;
-    }
-
-    /// <summary>
-    /// Clear all queued audio.
-    /// </summary>
-    public void ClearQueue()
-    {
-        while (_pcmQueue.TryDequeue(out _)) { }
-        _needsFadeIn = true;
-    }
+    public void ResetFadeIn() => _needsFadeIn = true;
+    public void ClearQueue() { while (_pcmQueue.TryDequeue(out _)) { } _needsFadeIn = true; }
 
     public Task StartAudio()
     {
         if (_audioFormatManager.SelectedFormat.IsEmpty())
-            throw new ApplicationException("Audio format not set. Cannot start AdaAudioSource.");
+            throw new ApplicationException("Audio format not set.");
 
         if (!_isStarted)
         {
             _isStarted = true;
             _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
-            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Timer started ({AUDIO_SAMPLE_PERIOD_MS}ms), format={_audioFormatManager.SelectedFormat.FormatName}");
+            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Started, format={_audioFormatManager.SelectedFormat.FormatName}");
         }
-
         return Task.CompletedTask;
     }
 
-    public Task PauseAudio()
-    {
-        _isPaused = true;
-        return Task.CompletedTask;
-    }
-
-    public Task ResumeAudio()
-    {
-        _isPaused = false;
-        return Task.CompletedTask;
-    }
+    public Task PauseAudio() { _isPaused = true; return Task.CompletedTask; }
+    public Task ResumeAudio() { _isPaused = false; return Task.CompletedTask; }
 
     public Task CloseAudio()
     {
@@ -235,9 +174,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             _isClosed = true;
             _sendTimer?.Dispose();
-            _sendTimer = null;
             ClearQueue();
-            OnDebugLog?.Invoke($"[AdaAudioSource] ⏹️ Closed (enqueued={_enqueuedFrames}, sent={_sentFrames}, silence={_silenceFrames})");
+            OnDebugLog?.Invoke($"[AdaAudioSource] ⏹️ Closed (sent={_sentFrames})");
         }
         return Task.CompletedTask;
     }
@@ -254,18 +192,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
             if (_testToneMode)
             {
-                // Generate a 440Hz test tone
                 audioFrame = GenerateTestTone(samplesNeeded, targetRate);
             }
             else
             {
-                // Check jitter buffer mode - wait until we have enough frames buffered
+                // Jitter buffer: wait for buffer to fill
                 if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
                 {
-                    int framesNeeded = _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS; // e.g., 60ms = 3 frames
+                    int framesNeeded = _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS;
                     if (_pcmQueue.Count < framesNeeded)
                     {
-                        SendSilence();
+                        SendSilence(samplesNeeded);
                         return;
                     }
                     _jitterBufferFilled = true;
@@ -276,29 +213,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // === DSP PIPELINE (matches edge function) ===
-                    
-                    // 1. Apply volume boost
-                    ApplyVolumeBoost(pcm24, VOLUME_BOOST);
-                    
-                    // 2. Apply low-pass anti-aliasing filter before resampling
-                    var filtered = ApplyLowPassFilter(pcm24);
+                    // *** USE NAUDIO WDL RESAMPLER - professional quality ***
+                    audioFrame = AudioCodecs.ResampleNAudio(pcm24, 24000, targetRate);
 
-                    // 3. Resample based on target rate
-                    if (_audioMode == AudioMode.SimpleResample)
-                    {
-                        audioFrame = SimpleResample(filtered, 24000, targetRate);
-                    }
-                    else if (targetRate == 8000)
-                    {
-                        audioFrame = Downsample24kTo8k(filtered);
-                    }
-                    else
-                    {
-                        audioFrame = AudioCodecs.Resample(filtered, 24000, targetRate);
-                    }
-
-                    // 4. Hard-enforce exact 20ms frame size for RTP
+                    // Ensure exact frame size
                     if (audioFrame.Length != samplesNeeded)
                     {
                         var fixedFrame = new short[samplesNeeded];
@@ -306,88 +224,63 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = fixedFrame;
                     }
 
-                    // 5. Apply soft-knee limiter to prevent clipping
-                    ApplySoftLimiter(audioFrame);
-                    
-                    // 6. Apply inter-frame cosine crossfade for smooth transitions
-                    if (!_lastFrameWasSilence && _lastAudioFrame != null && audioFrame.Length >= CROSSFADE_SAMPLES)
+                    // Simple crossfade from silence
+                    if (_lastFrameWasSilence && audioFrame.Length > 20)
                     {
-                        ApplyInterFrameCrossfade(audioFrame, _lastAudioFrame);
-                    }
-                    
-                    // 7. If transitioning from silence, crossfade from last sample
-                    if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
-                    {
-                        int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
-                        for (int i = 0; i < fadeLen; i++)
+                        for (int i = 0; i < 20; i++)
                         {
-                            float t = (float)i / fadeLen;
+                            float t = i / 20f;
                             audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
                         }
                     }
 
-                    // Store for interpolation on underrun
                     _lastAudioFrame = (short[])audioFrame.Clone();
                 }
                 else
                 {
                     _consecutiveUnderruns++;
 
-                    // Reset jitter buffer state after prolonged underrun
                     if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled && _consecutiveUnderruns > 10)
-                    {
                         _jitterBufferFilled = false;
-                    }
 
-                    // On first several underruns, interpolate from last frame to prevent stuttering
-                    // OpenAI sends audio in bursts, so we need ~120ms tolerance
-                    if (_consecutiveUnderruns <= 6 && _lastAudioFrame != null)
+                    // Brief interpolation on underrun
+                    if (_consecutiveUnderruns <= 3 && _lastAudioFrame != null)
                     {
-                        audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
-                        _interpolatedFrames++;
+                        audioFrame = new short[samplesNeeded];
+                        float fadeOut = 1f - (_consecutiveUnderruns * 0.3f);
+                        for (int i = 0; i < samplesNeeded && i < _lastAudioFrame.Length; i++)
+                            audioFrame[i] = (short)(_lastAudioFrame[i] * fadeOut * (1f - (float)i / samplesNeeded));
                     }
                     else
                     {
-                        SendSilence();
+                        SendSilence(samplesNeeded);
                         return;
                     }
                 }
             }
 
-            // Track samples for next frame's crossfade
             if (audioFrame.Length > 0)
             {
-                _prevFrameLastSample = audioFrame[^1];
                 _lastOutputSample = audioFrame[^1];
                 _lastFrameWasSilence = false;
             }
 
-            // Encode using negotiated codec
+            // Encode and send
             byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
-
-            // Calculate RTP duration
-            uint durationRtpUnits = (uint)samplesNeeded;
-
             _sentFrames++;
 
-            // Log first few Ada audio frames to confirm they're being sent
-            if (_sentFrames <= 10 && !_testToneMode)
-            {
-                OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 ADA frame {_sentFrames}: {encoded.Length}b {_audioFormatManager.SelectedFormat.FormatName}, hasSubscribers={OnAudioSourceEncodedSample != null}");
-            }
+            if (_sentFrames <= 5 && !_testToneMode)
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {encoded.Length}b");
 
-            OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
+            OnAudioSourceEncodedSample?.Invoke((uint)samplesNeeded, encoded);
         }
         catch (Exception ex)
         {
-            OnDebugLog?.Invoke($"[AdaAudioSource] ❌ Error: {ex.Message}");
-            OnAudioSourceError?.Invoke($"AdaAudioSource error: {ex.Message}");
+            OnDebugLog?.Invoke($"[AdaAudioSource] ❌ {ex.Message}");
+            OnAudioSourceError?.Invoke(ex.Message);
         }
     }
 
-    /// <summary>
-    /// Generate a sine wave test tone at 440Hz.
-    /// </summary>
     private short[] GenerateTestTone(int sampleCount, int sampleRate)
     {
         var samples = new short[sampleCount];
@@ -395,75 +288,47 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
         for (int i = 0; i < sampleCount; i++)
         {
-            double sample = Math.Sin(angularFreq * _testToneSampleIndex);
-            samples[i] = (short)(sample * 16000); // ~50% volume
+            samples[i] = (short)(Math.Sin(angularFreq * _testToneSampleIndex) * 16000);
             _testToneSampleIndex++;
         }
-
         return samples;
     }
 
-    /// <summary>
-    /// High-quality 24kHz to 8kHz downsampling with 11-tap FIR anti-aliasing filter.
-    /// Matches the edge function's resampling quality to prevent metallic/robotic sound.
-    /// Uses Sinc filter with Blackman window, cutting off above 3.5kHz.
-    /// </summary>
-    private static short[] Downsample24kTo8k(short[] pcm24)
+    private void SendSilence(int samplesNeeded = 160)
     {
-        if (pcm24.Length < 3) return Array.Empty<short>();
+        _silenceFrames++;
+        _lastFrameWasSilence = true;
 
-        int outLen = pcm24.Length / 3;
-        var output = new short[outLen];
-
-        // 11-tap FIR filter coefficients (Sinc with Blackman window)
-        // This cuts off frequencies above 3.5kHz to prevent aliasing
-        float[] h = { -0.005f, -0.012f, 0.010f, 0.080f, 0.180f, 0.240f, 0.180f, 0.080f, 0.010f, -0.012f, -0.005f };
-        float sum = 0.746f; // Sum of coefficients for normalization
-
-        for (int i = 0; i < outLen; i++)
+        if (!_wasQueueEmpty && _pcmQueue.IsEmpty)
         {
-            float acc = 0;
-            int center = i * 3;
-            for (int j = 0; j < h.Length; j++)
-            {
-                int idx = center + j - 5; // Center the filter
-                if (idx >= 0 && idx < pcm24.Length) 
-                    acc += pcm24[idx] * h[j];
-            }
-            output[i] = (short)Math.Clamp(acc / sum, short.MinValue, short.MaxValue);
+            _wasQueueEmpty = true;
+            OnQueueEmpty?.Invoke();
         }
 
-        return output;
-    }
-
-    /// <summary>
-    /// Apply volume boost to increase clarity.
-    /// </summary>
-    private static void ApplyVolumeBoost(short[] samples, float boost)
-    {
-        for (int i = 0; i < samples.Length; i++)
+        var silence = new short[samplesNeeded];
+        
+        // Fade out from last sample
+        if (_lastOutputSample != 0)
         {
-            float val = samples[i] * boost;
-            samples[i] = (short)Math.Clamp(val, short.MinValue, short.MaxValue);
+            int fadeLen = Math.Min(20, samplesNeeded);
+            for (int i = 0; i < fadeLen; i++)
+                silence[i] = (short)(_lastOutputSample * (1f - (float)i / fadeLen));
+            _lastOutputSample = 0;
         }
+
+        byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
+        OnAudioSourceEncodedSample?.Invoke((uint)samplesNeeded, encoded);
     }
 
-    /// <summary>
-    /// Low-pass anti-aliasing filter before downsampling.
-    /// 5-tap moving average provides smooth frequency rolloff.
-    /// </summary>
-    private static short[] ApplyLowPassFilter(short[] input)
+    public void Dispose()
     {
-        if (input.Length < 5) return input;
-        
-        var output = new short[input.Length];
-        
-        // 5-tap weighted filter: [1, 2, 3, 2, 1] / 9
-        for (int i = 0; i < input.Length; i++)
-        {
-            int sum = input[i] * 3; // Center weight
-            
-            if (i >= 1) sum += input[i - 1] * 2;
+        if (_disposed) return;
+        _disposed = true;
+        _sendTimer?.Dispose();
+        ClearQueue();
+        GC.SuppressFinalize(this);
+    }
+}
             else sum += input[i] * 2;
             
             if (i >= 2) sum += input[i - 2];
