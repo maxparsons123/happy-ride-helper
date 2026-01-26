@@ -37,7 +37,9 @@ public static class AudioCodecs
     
     // Opus constants
     public const int OPUS_SAMPLE_RATE = 48000;
-    public const int OPUS_CHANNELS = 1;
+    // NOTE: Many SIP endpoints advertise Opus as stereo (opus/48000/2) even for voice.
+    // To maximize interoperability we negotiate 2 channels and duplicate mono to stereo when needed.
+    public const int OPUS_CHANNELS = 2;
     public const int OPUS_BITRATE = 32000;
     public const int OPUS_FRAME_SIZE_MS = 20;
     public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
@@ -287,7 +289,8 @@ public static class AudioCodecs
     
     /// <summary>
     /// Encode PCM16 samples to Opus.
-    /// Input should be 48kHz mono, 960 samples (20ms frame).
+    /// Input should be 48kHz, 20ms frame.
+    /// PCM is interleaved when OPUS_CHANNELS=2 (L,R,L,R,...).
     /// </summary>
     public static byte[] OpusEncode(short[] pcm)
     {
@@ -296,16 +299,18 @@ public static class AudioCodecs
             _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
             _opusEncoder.Bitrate = OPUS_BITRATE;
 
-            // Ensure we have exactly 960 samples (20ms @ 48kHz)
+            // Ensure we have exactly 20ms of samples.
+            // Concentus expects `frameSize` in samples-per-channel.
+            int requiredSamples = OPUS_FRAME_SIZE * OPUS_CHANNELS;
             short[] frame;
-            if (pcm.Length == OPUS_FRAME_SIZE)
+            if (pcm.Length == requiredSamples)
             {
                 frame = pcm;
             }
             else
             {
-                frame = new short[OPUS_FRAME_SIZE];
-                Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
+                frame = new short[requiredSamples];
+                Array.Copy(pcm, frame, Math.Min(pcm.Length, requiredSamples));
             }
 
             byte[] outBuf = new byte[1275]; // Max Opus frame size
@@ -319,7 +324,7 @@ public static class AudioCodecs
 
     /// <summary>
     /// Decode Opus to PCM16 samples.
-    /// Output is 48kHz mono.
+    /// Output is 48kHz interleaved PCM with OPUS_CHANNELS channels.
     /// </summary>
     public static short[] OpusDecode(byte[] encoded)
     {
@@ -327,10 +332,11 @@ public static class AudioCodecs
         {
             _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
 
-            short[] outBuf = new short[OPUS_FRAME_SIZE];
-            int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
-            
-            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
+            short[] outBuf = new short[OPUS_FRAME_SIZE * OPUS_CHANNELS];
+            int lenPerChannel = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
+
+            int totalSamples = Math.Min(outBuf.Length, lenPerChannel * OPUS_CHANNELS);
+            return totalSamples < outBuf.Length ? outBuf.Take(totalSamples).ToArray() : outBuf;
         }
     }
     

@@ -251,13 +251,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
         try
         {
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
-            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            int channels = Math.Max(1, _audioFormatManager.SelectedFormat.ChannelCount);
+            int samplesPerChannel = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            int samplesNeeded = samplesPerChannel * channels;
             short[] audioFrame;
 
             if (_testToneMode)
             {
                 // Generate a 440Hz test tone
-                audioFrame = GenerateTestTone(samplesNeeded, targetRate);
+                audioFrame = GenerateTestTone(samplesPerChannel, targetRate, channels);
             }
             else
             {
@@ -309,6 +311,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     {
                         // Opus: Simple 2x upsample (24kHz → 48kHz) - high quality
                         audioFrame = Upsample24kTo48k(pcm24);
+                        if (channels == 2)
+                            audioFrame = MonoToStereoInterleaved(audioFrame);
                     }
                     else if (isG722)
                     {
@@ -329,7 +333,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = pcm24; // No resampling needed (already at target rate)
                     }
 
-                    // Hard-enforce exact 20ms frame size for RTP
+                    // Hard-enforce exact 20ms frame size for RTP (total samples, includes channels)
                     if (audioFrame.Length != samplesNeeded)
                     {
                         var fixedFrame = new short[samplesNeeded];
@@ -387,7 +391,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
 
             // Calculate RTP duration
-            uint durationRtpUnits = (uint)samplesNeeded;
+            // RTP duration is in samples-per-channel units.
+            uint durationRtpUnits = (uint)samplesPerChannel;
 
             _sentFrames++;
 
@@ -413,19 +418,33 @@ public class AdaAudioSource : IAudioSource, IDisposable
     /// <summary>
     /// Generate a sine wave test tone at 440Hz.
     /// </summary>
-    private short[] GenerateTestTone(int sampleCount, int sampleRate)
+    private short[] GenerateTestTone(int samplesPerChannel, int sampleRate, int channels)
     {
-        var samples = new short[sampleCount];
+        var mono = new short[samplesPerChannel];
         double angularFreq = 2.0 * Math.PI * TEST_TONE_FREQ / sampleRate;
 
-        for (int i = 0; i < sampleCount; i++)
+        for (int i = 0; i < samplesPerChannel; i++)
         {
             double sample = Math.Sin(angularFreq * _testToneSampleIndex);
-            samples[i] = (short)(sample * 16000); // ~50% volume
+            mono[i] = (short)(sample * 16000); // ~50% volume
             _testToneSampleIndex++;
         }
 
-        return samples;
+        if (channels <= 1) return mono;
+        return MonoToStereoInterleaved(mono);
+    }
+
+    private static short[] MonoToStereoInterleaved(short[] mono)
+    {
+        if (mono.Length == 0) return Array.Empty<short>();
+        var stereo = new short[mono.Length * 2];
+        for (int i = 0; i < mono.Length; i++)
+        {
+            int j = i * 2;
+            stereo[j] = mono[i];
+            stereo[j + 1] = mono[i];
+        }
+        return stereo;
     }
 
     /// <summary>
@@ -520,18 +539,25 @@ public class AdaAudioSource : IAudioSource, IDisposable
         try
         {
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
-            int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            int channels = Math.Max(1, _audioFormatManager.SelectedFormat.ChannelCount);
+            int samplesPerChannel = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            int samplesNeeded = samplesPerChannel * channels;
             var silence = new short[samplesNeeded];
 
             // Avoid click when we transition from non-zero audio to silence.
             if (!_lastFrameWasSilence && _lastOutputSample != 0 && samplesNeeded > 0)
             {
                 // ~5ms ramp to zero
-                int rampLen = Math.Min(samplesNeeded, Math.Max(1, targetRate / 200));
+                int rampLen = Math.Min(samplesPerChannel, Math.Max(1, targetRate / 200));
                 for (int i = 0; i < rampLen; i++)
                 {
                     float g = 1f - ((float)i / rampLen);
-                    silence[i] = (short)(_lastOutputSample * g);
+                    short v = (short)(_lastOutputSample * g);
+                    for (int ch = 0; ch < channels; ch++)
+                    {
+                        int idx = i * channels + ch;
+                        if (idx < silence.Length) silence[idx] = v;
+                    }
                 }
 
                 // Ensure next real audio fades in smoothly.
@@ -539,7 +565,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
 
             byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
-            uint durationRtpUnits = (uint)samplesNeeded;
+            uint durationRtpUnits = (uint)samplesPerChannel;
 
             _silenceFrames++;
             _lastFrameWasSilence = true;
