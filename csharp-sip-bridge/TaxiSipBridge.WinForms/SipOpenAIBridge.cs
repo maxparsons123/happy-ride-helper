@@ -233,9 +233,14 @@ public class SipOpenAIBridge : IDisposable
             // Log negotiated codec details
             var audioTrack = _mediaSession.AudioLocalTrack;
             var remoteRtp = _mediaSession.AudioDestinationEndPoint;
-            var negotiatedCodec = audioTrack?.Capabilities?.FirstOrDefault();
-            var codecName = negotiatedCodec?.Name ?? "unknown";
-            var clockRate = negotiatedCodec?.ClockRate ?? 0;
+            var codecName = "unknown";
+            var clockRate = 0;
+            if (audioTrack?.Capabilities?.Count > 0)
+            {
+                var fmt = audioTrack.Capabilities[0];
+                codecName = fmt.Name ?? "unknown";
+                clockRate = fmt.ClockRate;
+            }
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
             Log($"📡 [{_currentCallId}] RTP → {remoteRtp}");
             Log($"🎵 [{_currentCallId}] Negotiated codec: {codecName} @ {clockRate}Hz");
