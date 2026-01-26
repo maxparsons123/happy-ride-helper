@@ -970,31 +970,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // Apply fade-in to prevent clicks
-        if (_needsFadeIn && pcm24k.Length > 0)
-        {
-            int fadeLen = Math.Min(FadeInSamples, pcm24k.Length);
-            for (int i = 0; i < fadeLen; i++)
-            {
-                float gain = (float)i / fadeLen;
-                pcm24k[i] = (short)(pcm24k[i] * gain);
-            }
-            _needsFadeIn = false;
-        }
-
-        // Stateful 3:1 decimation (24kHz → 8kHz) with simple averaging
-        // This maintains phase across audio deltas to prevent clicks
+        // PASSTHROUGH MODE: No DSP, just simple point decimation 24kHz → 8kHz
+        // Pick every 3rd sample (no averaging, no filtering)
         int outputLen = pcm24k.Length / 3;
         var pcm8k = new short[outputLen];
         
         for (int i = 0; i < outputLen; i++)
         {
-            int srcIdx = i * 3;
-            // Average 3 samples for simple anti-aliasing
-            int sum = pcm24k[srcIdx];
-            if (srcIdx + 1 < pcm24k.Length) sum += pcm24k[srcIdx + 1];
-            if (srcIdx + 2 < pcm24k.Length) sum += pcm24k[srcIdx + 2];
-            pcm8k[i] = (short)(sum / 3);
+            pcm8k[i] = pcm24k[i * 3];  // Just take every 3rd sample
         }
 
         // Encode to µ-law
