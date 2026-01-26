@@ -20,7 +20,12 @@ public enum AudioMode
     JitterBuffer,
     BuiltInPacer,
     SimpleResample,
-    TestTone
+    TestTone,
+    /// <summary>
+    /// Bypass resampling - send 24kHz directly (for testing only).
+    /// WARNING: Will sound wrong if codec is 8kHz!
+    /// </summary>
+    Passthrough
 }
 
 /// <summary>
