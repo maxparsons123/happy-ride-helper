@@ -702,6 +702,8 @@ function getNextStepInstruction(nextStep: SessionState["lastQuestionAsked"], boo
       return "How many passengers will be traveling?";
     case "time":
       return "When do you need the taxi - now or for a specific time?";
+    case "address_correction_clarify":
+      return "Ask the user: 'Would you like me to change the pickup or the destination?' and wait for their response.";
     case "pre_summary": {
       // CRITICAL: Use userTruth (raw STT) values, falling back to booking if empty
       const pickup = userTruth?.pickup || booking.pickup || "unknown";
@@ -791,11 +793,13 @@ interface SessionState {
   };
   // USER TRUTH: Raw values from STT that override AI extraction
   userTruth: UserTruth;
-  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none";
+  lastQuestionAsked: "pickup" | "destination" | "passengers" | "time" | "address_correction_clarify" | "pre_summary" | "confirmation" | "none";
   // RACE CONDITION FIX: Snapshot the question type when user STARTS speaking
   // This prevents the state machine from skipping steps when Ada's next question
   // arrives before the user's answer to the previous question
-  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "pre_summary" | "confirmation" | "none" | null;
+  questionTypeAtSpeechStart: "pickup" | "destination" | "passengers" | "time" | "address_correction_clarify" | "pre_summary" | "confirmation" | "none" | null;
+  // When user provides an address during pre-summary but it's unclear if it's pickup or destination
+  pendingAddressCorrection: string | null;
   conversationHistory: Array<{ role: string; content: string; timestamp: number }>;
   bookingConfirmed: boolean;
   openAiResponseActive: boolean;
@@ -1803,6 +1807,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     },
     lastQuestionAsked: "none",
     questionTypeAtSpeechStart: null, // RACE CONDITION FIX: Snapshot question when user starts speaking
+    pendingAddressCorrection: null,
     conversationHistory: [],
     bookingConfirmed: false,
     openAiResponseActive: false,
@@ -3466,6 +3471,118 @@ Current state: pickup=${sessionState.booking.pickup || "empty"}, destination=${s
               await updateLiveCall(sessionState);
               break; // Correction handled, don't run normal context pairing
             }
+
+            // ADDRESS CORRECTION CLARIFICATION: User previously provided an address during pre-summary,
+            // and we asked: "pickup or destination?". Handle the user's answer here.
+            if (sessionState.lastQuestionAsked === "address_correction_clarify" && sessionState.pendingAddressCorrection) {
+              const pendingAddress = sessionState.pendingAddressCorrection;
+              const lowerText = userText.toLowerCase().trim();
+              const isPickupMention = /\b(pickup|pick up|from|collect|start)\b/i.test(lowerText);
+              const isDestMention = /\b(destination|to|going to|drop|end|finish)\b/i.test(lowerText);
+              const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+
+              console.log(`[${callId}] 🧭 ADDRESS CORRECTION CLARIFY: pending="${pendingAddress}", reply="${userText}" pickup=${isPickupMention} dest=${isDestMention} address=${looksLikeAddress}`);
+
+              // If user says another address instead of clarifying, treat that as the new pending correction address.
+              if (looksLikeAddress && !isPickupMention && !isDestMention) {
+                sessionState.pendingAddressCorrection = userText;
+
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[ADDRESS CORRECTION STILL UNCLEAR] User gave another address: "${userText}".
+
+Ask clearly: "Do you want me to change the pickup or the destination to ${userText}?"`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                updateLiveCall(sessionState).catch(() => {});
+                break;
+              }
+
+              if (isPickupMention && !isDestMention) {
+                sessionState.booking.pickup = pendingAddress;
+                sessionState.userTruth.pickup = pendingAddress;
+                sessionState.pendingAddressCorrection = null;
+
+                // Reset confirmation flow
+                sessionState.preSummaryDone = false;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuestionAsked = "pre_summary";
+
+                const instruction = getNextStepInstruction("pre_summary", sessionState.booking, sessionState.userTruth);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[PICKUP UPDATED] Pickup changed to "${pendingAddress}". Now re-confirm the journey details.
+
+${instruction}`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                updateLiveCall(sessionState).catch(() => {});
+                break;
+              }
+
+              if (isDestMention && !isPickupMention) {
+                sessionState.booking.destination = pendingAddress;
+                sessionState.userTruth.destination = pendingAddress;
+                sessionState.pendingAddressCorrection = null;
+
+                // Reset confirmation flow
+                sessionState.preSummaryDone = false;
+                sessionState.awaitingConfirmation = false;
+                sessionState.quoteInFlight = false;
+                sessionState.lastQuestionAsked = "pre_summary";
+
+                const instruction = getNextStepInstruction("pre_summary", sessionState.booking, sessionState.userTruth);
+                openaiWs!.send(JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "system",
+                    content: [{
+                      type: "input_text",
+                      text: `[DESTINATION UPDATED] Destination changed to "${pendingAddress}". Now re-confirm the journey details.
+
+${instruction}`
+                    }]
+                  }
+                }));
+                safeResponseCreate(openaiWs!, sessionState, callId);
+                updateLiveCall(sessionState).catch(() => {});
+                break;
+              }
+
+              // Still unclear: ask again
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[CLARIFICATION NEEDED] The user replied "${userText}", but I still need to know whether to change pickup or destination.
+
+Ask: "Should I change the pickup or the destination to ${pendingAddress}?"`
+                  }]
+                }
+              }));
+              safeResponseCreate(openaiWs!, sessionState, callId);
+              updateLiveCall(sessionState).catch(() => {});
+              break;
+            }
             
             // PRE-SUMMARY PHASE: Handle user response to "Is there anything you'd like to change?"
             if (sessionState.lastQuestionAsked === "pre_summary" && !sessionState.preSummaryDone) {
@@ -3605,6 +3722,10 @@ Acknowledge the change and read back the UPDATED summary:
                   } else {
                     // Not clear which field - ask the user
                     console.log(`[${callId}] ❓ UNCLEAR WHICH FIELD: Asking user to clarify pickup or destination`);
+
+                    // Transition to an explicit clarify step so the next user response is interpreted correctly.
+                    sessionState.pendingAddressCorrection = userText;
+                    sessionState.lastQuestionAsked = "address_correction_clarify";
                     
                     openaiWs!.send(JSON.stringify({
                       type: "conversation.item.create",
@@ -3618,6 +3739,8 @@ Acknowledge the change and read back the UPDATED summary:
 Current booking: pickup="${sessionState.booking.pickup}", destination="${sessionState.booking.destination}"
 
 Ask them: "Would you like me to change the pickup or the destination to ${userText}?"
+
+IMPORTANT: Wait for their answer. They can reply with "pickup" or "destination".
 
 Do NOT guess - explicitly ask which field they want to update.`
                         }]
