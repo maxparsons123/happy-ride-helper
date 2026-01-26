@@ -1,5 +1,11 @@
+using System.Collections.Generic;
+using System.Linq;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
+using Concentus.Enums;
+using Concentus.Structs;
 
 namespace TaxiSipBridge;
 
@@ -66,7 +72,7 @@ public static class AudioCodecs
             pcm[i] = (short)(sign * magnitude);
         }
         return pcm;
-
+    }
     /// <summary>
     /// Encode PCM16 samples to µ-law (G.711).
     /// </summary>
@@ -387,5 +393,209 @@ public static class AudioCodecs
         var b = new byte[s.Length * 2];
         Buffer.BlockCopy(s, 0, b, 0, b.Length);
         return b;
+    }
+
+    #region Opus Codec
+
+    public const int OPUS_SAMPLE_RATE = 48000;
+    public const int OPUS_CHANNELS = 1;
+    public const int OPUS_BITRATE = 32000;
+    public const int OPUS_FRAME_SIZE_MS = 20;
+    public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
+
+    private static OpusEncoder? _opusEncoder;
+    private static OpusDecoder? _opusDecoder;
+    private static readonly object _opusEncoderLock = new object();
+    private static readonly object _opusDecoderLock = new object();
+
+    public static byte[] OpusEncode(short[] pcm)
+    {
+        lock (_opusEncoderLock)
+        {
+            _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+            _opusEncoder.Bitrate = OPUS_BITRATE;
+
+            short[] frame = pcm.Length == OPUS_FRAME_SIZE ? pcm : new short[OPUS_FRAME_SIZE];
+            if (pcm.Length != OPUS_FRAME_SIZE) Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
+
+            byte[] outBuf = new byte[1275];
+            int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
+            byte[] result = new byte[len];
+            Array.Copy(outBuf, result, len);
+            return result;
+        }
+    }
+
+    public static short[] OpusDecode(byte[] encoded)
+    {
+        lock (_opusDecoderLock)
+        {
+            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+            short[] outBuf = new short[OPUS_FRAME_SIZE];
+            int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
+            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
+        }
+    }
+
+    public static void ResetOpus()
+    {
+        lock (_opusEncoderLock) { _opusEncoder = null; }
+        lock (_opusDecoderLock) { _opusDecoder = null; }
+    }
+
+    #endregion
+
+    #region G.722 Wideband (16kHz)
+
+    public const int G722_SAMPLE_RATE = 16000;
+    public const int G722_BITRATE = 64000;
+
+    private static int _g722LowBand = 0;
+    private static int _g722HighBand = 0;
+    private static int _g722LowPrev = 0;
+    private static int _g722HighPrev = 0;
+    private static readonly object _g722Lock = new object();
+
+    private static readonly int[] G722_QL = { -2048, -1024, -512, -256, 0, 256, 512, 1024 };
+    private static readonly int[] G722_QH = { -256, -128, -64, 0, 64, 128, 256, 512 };
+
+    public static byte[] G722Encode(short[] pcm)
+    {
+        lock (_g722Lock)
+        {
+            var output = new byte[pcm.Length / 2];
+            for (int i = 0; i < pcm.Length - 1; i += 2)
+            {
+                int low = (pcm[i] + pcm[i + 1]) / 2;
+                int high = (pcm[i] - pcm[i + 1]) / 2;
+
+                int diffL = low - _g722LowPrev;
+                int codeL = QuantizeLow(diffL);
+                _g722LowPrev = _g722LowPrev + G722_QL[codeL & 0x07];
+
+                int diffH = high - _g722HighPrev;
+                int codeH = QuantizeHigh(diffH);
+                _g722HighPrev = _g722HighPrev + G722_QH[codeH & 0x03];
+
+                output[i / 2] = (byte)((codeL & 0x3F) | ((codeH & 0x03) << 6));
+            }
+            return output;
+        }
+    }
+
+    public static short[] G722Decode(byte[] encoded)
+    {
+        lock (_g722Lock)
+        {
+            var output = new short[encoded.Length * 2];
+            for (int i = 0; i < encoded.Length; i++)
+            {
+                int codeL = encoded[i] & 0x3F;
+                int codeH = (encoded[i] >> 6) & 0x03;
+
+                _g722LowBand = Math.Clamp(_g722LowBand + G722_QL[codeL & 0x07], -32768, 32767);
+                _g722HighBand = Math.Clamp(_g722HighBand + G722_QH[codeH], -16384, 16383);
+
+                output[i * 2] = (short)Math.Clamp(_g722LowBand + _g722HighBand, -32768, 32767);
+                output[i * 2 + 1] = (short)Math.Clamp(_g722LowBand - _g722HighBand, -32768, 32767);
+            }
+            return output;
+        }
+    }
+
+    public static void ResetG722()
+    {
+        lock (_g722Lock) { _g722LowBand = _g722HighBand = _g722LowPrev = _g722HighPrev = 0; }
+    }
+
+    private static int QuantizeLow(int diff)
+    {
+        if (diff < -1536) return 0;
+        if (diff < -768) return 1;
+        if (diff < -384) return 2;
+        if (diff < -128) return 3;
+        if (diff < 128) return 4;
+        if (diff < 384) return 5;
+        if (diff < 768) return 6;
+        return 7;
+    }
+
+    private static int QuantizeHigh(int diff)
+    {
+        if (diff < -192) return 0;
+        if (diff < -64) return 1;
+        if (diff < 64) return 2;
+        return 3;
+    }
+
+    #endregion
+
+    public static void ResetAllCodecs()
+    {
+        ResetOpus();
+        ResetG722();
+    }
+}
+
+/// <summary>
+/// SIPSorcery-compatible audio encoder with Opus and G.722 support.
+/// Codec priority: Opus (48kHz) > G.722 (16kHz) > G.711 (8kHz)
+/// </summary>
+public class UnifiedAudioEncoder : IAudioEncoder
+{
+    private readonly AudioEncoder _baseEncoder;
+
+    private static readonly AudioFormat OpusFormat = new AudioFormat(
+        AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+
+    private static readonly AudioFormat G722Format = new AudioFormat(
+        AudioCodecsEnum.G722, 9, AudioCodecs.G722_SAMPLE_RATE, 1, "G722");
+
+    public UnifiedAudioEncoder()
+    {
+        _baseEncoder = new AudioEncoder();
+    }
+
+    public List<AudioFormat> SupportedFormats
+    {
+        get
+        {
+            var formats = new List<AudioFormat>();
+            formats.Add(OpusFormat);   // Highest quality - 48kHz
+            formats.Add(G722Format);   // Wideband - 16kHz
+            formats.AddRange(_baseEncoder.SupportedFormats); // G.711 - 8kHz
+            return formats;
+        }
+    }
+
+    public byte[] EncodeAudio(short[] pcm, AudioFormat format)
+    {
+        switch (format.Codec)
+        {
+            case AudioCodecsEnum.OPUS:
+                return AudioCodecs.OpusEncode(pcm);
+            case AudioCodecsEnum.G722:
+                return AudioCodecs.G722Encode(pcm);
+            default:
+                return _baseEncoder.EncodeAudio(pcm, format);
+        }
+    }
+
+    public short[] DecodeAudio(byte[] encodedSample, AudioFormat format)
+    {
+        switch (format.Codec)
+        {
+            case AudioCodecsEnum.OPUS:
+                return AudioCodecs.OpusDecode(encodedSample);
+            case AudioCodecsEnum.G722:
+                return AudioCodecs.G722Decode(encodedSample);
+            default:
+                return _baseEncoder.DecodeAudio(encodedSample, format);
+        }
+    }
+
+    public void ResetCodecState()
+    {
+        AudioCodecs.ResetAllCodecs();
     }
 }

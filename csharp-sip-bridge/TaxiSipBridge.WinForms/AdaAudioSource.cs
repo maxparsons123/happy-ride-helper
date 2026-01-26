@@ -5,7 +5,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
-using TaxiSipBridge.Audio;
 using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
