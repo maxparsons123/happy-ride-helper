@@ -1,4 +1,5 @@
 using System.Net;
+using System.Linq;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP;
@@ -195,6 +196,9 @@ public class SipOpenAIBridge : IDisposable
             _mediaSession = new VoIPMediaSession(mediaEndPoints);
             _mediaSession.AcceptRtpFromAny = true;
 
+            // Log incoming SDP offer codecs
+            LogIncomingSdp(inviteRequest);
+
             // Hook up RTP receiver for inbound audio (SIP → AI)
             _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
@@ -226,11 +230,15 @@ public class SipOpenAIBridge : IDisposable
             // Start media session
             await _mediaSession.Start();
             
-            // Log RTP details for diagnostics
+            // Log negotiated codec details
             var audioTrack = _mediaSession.AudioLocalTrack;
             var remoteRtp = _mediaSession.AudioDestinationEndPoint;
+            var negotiatedCodec = audioTrack?.Capabilities?.FirstOrDefault();
+            var codecName = negotiatedCodec?.Name ?? "unknown";
+            var clockRate = negotiatedCodec?.ClockRate ?? 0;
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
-            Log($"📡 [{_currentCallId}] RTP destination: {remoteRtp}, codec: {audioTrack?.Capabilities?.FirstOrDefault().Name ?? "unknown"}");
+            Log($"📡 [{_currentCallId}] RTP → {remoteRtp}");
+            Log($"🎵 [{_currentCallId}] Negotiated codec: {codecName} @ {clockRate}Hz");
 
             // Connect to OpenAI Realtime API
             _aiClient = new OpenAIRealtimeClient(
@@ -378,6 +386,43 @@ public class SipOpenAIBridge : IDisposable
     {
         if (_disposed) return;
         OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {message}");
+    }
+
+    /// <summary>
+    /// Parse and log codecs from incoming SDP offer
+    /// </summary>
+    private void LogIncomingSdp(SIPRequest inviteRequest)
+    {
+        try
+        {
+            var sdpBody = inviteRequest.Body;
+            if (string.IsNullOrEmpty(sdpBody)) return;
+
+            var sdp = SDP.ParseSDPDescription(sdpBody);
+            var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
+            if (audioMedia == null) return;
+
+            var codecs = audioMedia.MediaFormats
+                .Select(f => $"{f.Value.Name}({f.Key})")
+                .ToList();
+
+            Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
+
+            // Check for wideband codecs
+            bool hasG722 = audioMedia.MediaFormats.Any(f => f.Value.Name.Equals("G722", StringComparison.OrdinalIgnoreCase));
+            bool hasOpus = audioMedia.MediaFormats.Any(f => f.Value.Name.Equals("opus", StringComparison.OrdinalIgnoreCase));
+            
+            if (hasOpus)
+                Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
+            else if (hasG722)
+                Log($"🎧 [{_currentCallId}] G.722 available - 16kHz wideband");
+            else
+                Log($"📞 [{_currentCallId}] Narrowband only (G.711 8kHz)");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ SDP parse error: {ex.Message}");
+        }
     }
 
     public void Dispose()
