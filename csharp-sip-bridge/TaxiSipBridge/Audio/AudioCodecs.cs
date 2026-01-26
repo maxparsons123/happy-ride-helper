@@ -1,5 +1,13 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
+using Concentus.Enums;
+using Concentus.Structs;
 
 namespace TaxiSipBridge.Audio;
 
@@ -13,22 +21,38 @@ public enum ResamplerMode
 }
 
 /// <summary>
-/// Audio codec utilities for µ-law encoding/decoding and high-quality resampling.
-/// Used for converting between OpenAI Realtime API format (24kHz PCM16) and SIP telephony (8kHz µ-law).
+/// Unified audio codec utilities for all telephony audio processing:
+/// - G.711 µ-law/A-law encoding/decoding
+/// - Opus encoding/decoding (high-quality)
+/// - High-quality resampling (NAudio WDL or custom FIR)
+/// - Pre/de-emphasis filters for telephony
 /// </summary>
 public static class AudioCodecs
 {
-    // Pre-emphasis coefficient - boosts high frequencies for better consonant clarity
-    private const float PRE_EMPHASIS = 0.97f;
+    #region Constants
     
-    // De-emphasis coefficient - restores natural frequency balance after processing
+    private const float PRE_EMPHASIS = 0.97f;
     private const float DE_EMPHASIS = 0.97f;
-
+    
+    public const int OPUS_SAMPLE_RATE = 48000;
+    public const int OPUS_CHANNELS = 1;
+    public const int OPUS_BITRATE = 32000;
+    public const int OPUS_FRAME_SIZE_MS = 20;
+    public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
+    
+    #endregion
+    
+    #region Configuration
+    
     /// <summary>
     /// Current resampler mode. Change at runtime for A/B testing.
     /// </summary>
     public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.NAudio;
+    
+    #endregion
 
+    #region G.711 µ-law (PCMU)
+    
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
     /// </summary>
@@ -64,7 +88,11 @@ public static class AudioCodecs
         }
         return ulaw;
     }
+    
+    #endregion
 
+    #region G.711 A-law (PCMA)
+    
     /// <summary>
     /// Decode A-law (G.711) to PCM16 samples.
     /// </summary>
@@ -119,7 +147,84 @@ public static class AudioCodecs
         }
         return alaw;
     }
+    
+    #endregion
 
+    #region Opus Codec
+    
+    private static OpusEncoder? _opusEncoder;
+    private static OpusDecoder? _opusDecoder;
+    private static readonly object _opusEncoderLock = new object();
+    private static readonly object _opusDecoderLock = new object();
+    
+    /// <summary>
+    /// Encode PCM16 samples to Opus.
+    /// Input should be 48kHz mono, 960 samples (20ms frame).
+    /// </summary>
+    public static byte[] OpusEncode(short[] pcm)
+    {
+        lock (_opusEncoderLock)
+        {
+            _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+            _opusEncoder.Bitrate = OPUS_BITRATE;
+
+            // Ensure we have exactly 960 samples (20ms @ 48kHz)
+            short[] frame;
+            if (pcm.Length == OPUS_FRAME_SIZE)
+            {
+                frame = pcm;
+            }
+            else
+            {
+                frame = new short[OPUS_FRAME_SIZE];
+                Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
+            }
+
+            byte[] outBuf = new byte[1275]; // Max Opus frame size
+            int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
+            
+            byte[] result = new byte[len];
+            Array.Copy(outBuf, result, len);
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Decode Opus to PCM16 samples.
+    /// Output is 48kHz mono.
+    /// </summary>
+    public static short[] OpusDecode(byte[] encoded)
+    {
+        lock (_opusDecoderLock)
+        {
+            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+
+            short[] outBuf = new short[OPUS_FRAME_SIZE];
+            int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
+            
+            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
+        }
+    }
+    
+    /// <summary>
+    /// Reset Opus encoder/decoder state (call on new call).
+    /// </summary>
+    public static void ResetOpus()
+    {
+        lock (_opusEncoderLock)
+        {
+            _opusEncoder = null;
+        }
+        lock (_opusDecoderLock)
+        {
+            _opusDecoder = null;
+        }
+    }
+    
+    #endregion
+
+    #region Pre/De-Emphasis Filters
+    
     /// <summary>
     /// Apply pre-emphasis filter to boost high frequencies (consonants).
     /// Use before upsampling for better STT accuracy.
@@ -184,7 +289,24 @@ public static class AudioCodecs
         
         return (short)Math.Clamp(sample, -32768f, 32767f);
     }
+    
+    #endregion
 
+    #region Resampling
+    
+    /// <summary>
+    /// High-quality resampling - uses CurrentResamplerMode to select algorithm.
+    /// </summary>
+    public static short[] Resample(short[] input, int fromRate, int toRate)
+    {
+        return CurrentResamplerMode switch
+        {
+            ResamplerMode.NAudio => ResampleNAudio(input, fromRate, toRate),
+            ResamplerMode.Custom => ResampleCustom(input, fromRate, toRate),
+            _ => ResampleNAudio(input, fromRate, toRate)
+        };
+    }
+    
     /// <summary>
     /// High-quality resampling using NAudio's WDL resampler.
     /// This is a professional-grade resampler used in audio production.
@@ -227,19 +349,6 @@ public static class AudioCodecs
         var bytes = new byte[floats.Length * 4];
         Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
         return bytes;
-    }
-
-    /// <summary>
-    /// High-quality resampling - uses CurrentResamplerMode to select algorithm.
-    /// </summary>
-    public static short[] Resample(short[] input, int fromRate, int toRate)
-    {
-        return CurrentResamplerMode switch
-        {
-            ResamplerMode.NAudio => ResampleNAudio(input, fromRate, toRate),
-            ResamplerMode.Custom => ResampleCustom(input, fromRate, toRate),
-            _ => ResampleNAudio(input, fromRate, toRate)
-        };
     }
 
     /// <summary>
@@ -342,7 +451,7 @@ public static class AudioCodecs
 
     /// <summary>
     /// High-quality resample with pre/de-emphasis for telephony.
-    /// Call this for SIP → Ada (inbound) path.
+    /// Call this for SIP → AI (inbound) path.
     /// </summary>
     public static short[] ResampleWithPreEmphasis(short[] input, int fromRate, int toRate)
     {
@@ -352,14 +461,37 @@ public static class AudioCodecs
 
     /// <summary>
     /// High-quality resample with de-emphasis for telephony.
-    /// Call this for Ada → SIP (outbound) path.
+    /// Call this for AI → SIP (outbound) path.
     /// </summary>
     public static short[] ResampleWithDeEmphasis(short[] input, int fromRate, int toRate)
     {
         var resampled = Resample(input, fromRate, toRate);
         return ApplyDeEmphasis(resampled);
     }
+    
+    /// <summary>
+    /// Simple 2x upsampling using linear interpolation (24kHz → 48kHz).
+    /// </summary>
+    public static short[] Upsample2x(short[] input)
+    {
+        var output = new short[input.Length * 2];
+        for (int i = 0; i < input.Length - 1; i++)
+        {
+            output[i * 2] = input[i];
+            output[i * 2 + 1] = (short)((input[i] + input[i + 1]) / 2);
+        }
+        if (input.Length > 0)
+        {
+            output[(input.Length - 1) * 2] = input[input.Length - 1];
+            output[(input.Length - 1) * 2 + 1] = input[input.Length - 1];
+        }
+        return output;
+    }
+    
+    #endregion
 
+    #region Byte/Short Conversion
+    
     /// <summary>
     /// Convert byte array (little-endian PCM16) to short array.
     /// </summary>
@@ -381,5 +513,50 @@ public static class AudioCodecs
         var b = new byte[s.Length * 2];
         Buffer.BlockCopy(s, 0, b, 0, b.Length);
         return b;
+    }
+    
+    #endregion
+}
+
+/// <summary>
+/// SIPSorcery-compatible audio encoder with Opus support.
+/// Wraps AudioCodecs static methods for IAudioEncoder interface.
+/// </summary>
+public class UnifiedAudioEncoder : IAudioEncoder
+{
+    private readonly AudioEncoder _baseEncoder;
+
+    private static readonly AudioFormat OpusFormat = new AudioFormat(
+        AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+
+    public UnifiedAudioEncoder()
+    {
+        _baseEncoder = new AudioEncoder();
+    }
+
+    public List<AudioFormat> SupportedFormats
+    {
+        get
+        {
+            var formats = new List<AudioFormat>(_baseEncoder.SupportedFormats);
+            formats.Insert(0, OpusFormat); // Opus has priority
+            return formats;
+        }
+    }
+
+    public byte[] EncodeAudio(short[] pcm, AudioFormat format)
+    {
+        if (format.Codec == AudioCodecsEnum.OPUS)
+            return AudioCodecs.OpusEncode(pcm);
+        
+        return _baseEncoder.EncodeAudio(pcm, format);
+    }
+
+    public short[] DecodeAudio(byte[] encodedSample, AudioFormat format)
+    {
+        if (format.Codec == AudioCodecsEnum.OPUS)
+            return AudioCodecs.OpusDecode(encodedSample);
+        
+        return _baseEncoder.DecodeAudio(encodedSample, format);
     }
 }

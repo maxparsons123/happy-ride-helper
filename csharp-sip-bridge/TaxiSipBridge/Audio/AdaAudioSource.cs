@@ -73,8 +73,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     public AdaAudioSource(AudioMode audioMode = AudioMode.Standard, int jitterBufferMs = 80)
     {
-        // Use OpusAudioEncoder which supports both Opus (48kHz) and G.711 (8kHz)
-        _audioEncoder = new OpusAudioEncoder();
+        // Use UnifiedAudioEncoder which supports Opus (48kHz) and G.711 (8kHz)
+        _audioEncoder = new UnifiedAudioEncoder();
         _audioFormatManager = new MediaFormatManager<AudioFormat>(_audioEncoder.SupportedFormats);
         _audioMode = audioMode;
         _jitterBufferMs = jitterBufferMs;
