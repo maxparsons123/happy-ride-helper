@@ -266,12 +266,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private async Task ReceiveLoopAsync()
     {
         var buffer = new byte[1024 * 64];
+        Log("🔄 Receive loop started");
 
         while (!_disposed && _ws?.State == WebSocketState.Open && !(_cts?.Token.IsCancellationRequested ?? true))
         {
             try
             {
                 var result = await _ws.ReceiveAsync(buffer, _cts!.Token);
+                Log($"📨 Received {result.Count} bytes, type={result.MessageType}");
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -288,16 +290,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
             catch (OperationCanceledException) { break; }
             catch (WebSocketException ex)
             {
-                Log($"⚠️ WebSocket error: {ex.Message}");
+                Log($"❌ WebSocket error: {ex}");
                 break;
             }
             catch (Exception ex)
             {
-                Log($"⚠️ Receive error: {ex.Message}");
+                Log($"❌ Receive loop error: {ex}");
                 break;
             }
         }
 
+        Log("🔌 Receive loop ended");
         OnDisconnected?.Invoke();
     }
 
