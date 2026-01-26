@@ -992,16 +992,18 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Encode to µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm16k);
 
-        // Split into 20ms frames (320 bytes @ 16kHz µ-law)
-        for (int i = 0; i < ulaw.Length; i += 320)
+        // Split into 10ms frames (160 bytes) for correct playback speed
+        // SIP plays at 8kHz, so 160 bytes = 20ms playback
+        // Sending every 10ms = 2x speed compensation for 16kHz content
+        for (int i = 0; i < ulaw.Length; i += 160)
         {
-            int len = Math.Min(320, ulaw.Length - i);
-            var frame = new byte[320];
+            int len = Math.Min(160, ulaw.Length - i);
+            var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
             
             // Pad short frames with silence (0xFF = µ-law silence)
-            if (len < 320)
-                Array.Fill(frame, (byte)0xFF, len, 320 - len);
+            if (len < 160)
+                Array.Fill(frame, (byte)0xFF, len, 160 - len);
             
             if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);
