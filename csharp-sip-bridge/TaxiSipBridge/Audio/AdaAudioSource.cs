@@ -280,14 +280,20 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
                     // Determine resampling strategy based on target rate
                     // - Opus: 48kHz (2:1 upsample from 24kHz - PRESERVES quality)
+                    // - G.722: 16kHz (3:2 downsample from 24kHz - WIDEBAND quality)
                     // - G.711: 8kHz (3:1 downsample from 24kHz - loses quality)
                     bool isOpus = targetRate == 48000;
+                    bool isG722 = targetRate == 16000;
                     
                     // Initialize resampler on first use (if needed)
                     if (_resampler == null && targetRate != 24000 && _audioMode != AudioMode.Passthrough)
                     {
                         _resampler = new ContinuousResampler(24000, targetRate);
-                        string direction = isOpus ? "UPSAMPLE (quality preserved)" : "DOWNSAMPLE (quality loss)";
+                        string direction = isOpus 
+                            ? "UPSAMPLE (quality preserved)" 
+                            : isG722 
+                                ? "DOWNSAMPLE to 16kHz (wideband quality)" 
+                                : "DOWNSAMPLE to 8kHz (narrowband)";
                         OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Created ContinuousResampler 24kHz -> {targetRate}Hz ({direction})");
                     }
 
@@ -303,6 +309,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     {
                         // Opus: Simple 2x upsample (24kHz → 48kHz) - high quality
                         audioFrame = Upsample24kTo48k(pcm24);
+                    }
+                    else if (isG722)
+                    {
+                        // G.722: 3:2 downsample (24kHz → 16kHz) - wideband quality
+                        audioFrame = Downsample24kTo16k(pcm24);
                     }
                     else if (_audioMode == AudioMode.SimpleResample)
                     {
@@ -437,6 +448,40 @@ public class AdaAudioSource : IAudioSource, IDisposable
             // Linear interpolation between samples
             output[outIdx] = current;
             output[outIdx + 1] = (short)((current + next) / 2);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Downsample 24kHz to 16kHz for G.722 codec (3:2 ratio with interpolation).
+    /// This provides WIDEBAND quality - significantly better than G.711's 8kHz.
+    /// </summary>
+    private static short[] Downsample24kTo16k(short[] pcm24)
+    {
+        if (pcm24.Length == 0) return Array.Empty<short>();
+
+        // 3:2 ratio means output is 2/3 of input
+        int outLen = (pcm24.Length * 2) / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            // Position in source at 1.5x rate
+            float srcPos = i * 1.5f;
+            int srcIdx = (int)srcPos;
+            float frac = srcPos - srcIdx;
+
+            if (srcIdx + 1 < pcm24.Length)
+            {
+                // Linear interpolation between samples
+                int interpolated = (int)(pcm24[srcIdx] * (1 - frac) + pcm24[srcIdx + 1] * frac);
+                output[i] = (short)Math.Clamp(interpolated, short.MinValue, short.MaxValue);
+            }
+            else if (srcIdx < pcm24.Length)
+            {
+                output[i] = pcm24[srcIdx];
+            }
         }
 
         return output;
