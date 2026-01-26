@@ -1,9 +1,10 @@
 using System.Collections.Concurrent;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge.Audio;
 using Timer = System.Threading.Timer;
 
-namespace TaxiSipBridge;
+namespace TaxiSipBridge.Audio;
 
 /// <summary>
 /// Custom audio source that receives PCM audio from Ada (WebSocket) and provides
@@ -271,21 +272,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 {
                     _consecutiveUnderruns = 0;
 
-                    // Select resampling method based on audio mode
+                    // Use NAudio WDL resampler for professional-grade quality
+                    // SimpleResample mode uses fallback linear interpolation
                     if (_audioMode == AudioMode.SimpleResample)
                     {
-                        // Simple linear interpolation only
                         audioFrame = SimpleResample(pcm24, 24000, targetRate);
-                    }
-                    else if (targetRate == 8000)
-                    {
-                        // Use optimized 3:1 decimator for 8kHz
-                        audioFrame = Downsample24kTo8k(pcm24);
                     }
                     else
                     {
-                        // Use AudioCodecs high-quality resampler
-                        audioFrame = AudioCodecs.Resample(pcm24, 24000, targetRate);
+                        // NAudio WDL resampler - high quality for all sample rates
+                        audioFrame = AudioCodecs.ResampleNAudio(pcm24, 24000, targetRate);
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP
