@@ -386,6 +386,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
         return samples;
     }
 
+    /// <summary>
+    /// High-quality 24kHz to 8kHz downsampling with 11-tap FIR anti-aliasing filter.
+    /// Matches the edge function's resampling quality to prevent metallic/robotic sound.
+    /// Uses Sinc filter with Blackman window, cutting off above 3.5kHz.
+    /// </summary>
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
         if (pcm24.Length < 3) return Array.Empty<short>();
@@ -393,14 +398,22 @@ public class AdaAudioSource : IAudioSource, IDisposable
         int outLen = pcm24.Length / 3;
         var output = new short[outLen];
 
+        // 11-tap FIR filter coefficients (Sinc with Blackman window)
+        // This cuts off frequencies above 3.5kHz to prevent aliasing
+        float[] h = { -0.005f, -0.012f, 0.010f, 0.080f, 0.180f, 0.240f, 0.180f, 0.080f, 0.010f, -0.012f, -0.005f };
+        float sum = 0.746f; // Sum of coefficients for normalization
+
         for (int i = 0; i < outLen; i++)
         {
+            float acc = 0;
             int center = i * 3;
-            int s0 = pcm24[center];
-            int s1 = center + 1 < pcm24.Length ? pcm24[center + 1] : s0;
-            int s2 = center + 2 < pcm24.Length ? pcm24[center + 2] : s1;
-
-            output[i] = (short)((s0 * 2 + s1 * 2 + s2) / 5);
+            for (int j = 0; j < h.Length; j++)
+            {
+                int idx = center + j - 5; // Center the filter
+                if (idx >= 0 && idx < pcm24.Length) 
+                    acc += pcm24[idx] * h[j];
+            }
+            output[i] = (short)Math.Clamp(acc / sum, short.MinValue, short.MaxValue);
         }
 
         return output;
