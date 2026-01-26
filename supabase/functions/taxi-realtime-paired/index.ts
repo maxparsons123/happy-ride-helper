@@ -3590,7 +3590,8 @@ Ask: "Should I change the pickup or the destination to ${pendingAddress}?"`
               const normalized = lowerText.replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
               
               // Check for "no changes" responses (meaning they're happy with booking)
-              const noChangesPatterns = /^(no|nope|nah|no thanks|that's fine|that's good|all good|looks good|sounds good|perfect|great|correct|right|yes|yeah)\b/i;
+              // NOTE: We normalize punctuation away (e.g. "that's" -> "that s"), so include variants.
+              const noChangesPatterns = /^(no|nope|nah|no thanks|thats fine|that s fine|thats good|that s good|all good|looks good|sounds good|perfect|great|correct|right|yes|yeah|yep|yup|ok|okay)\b/i;
               const wantsNoChanges = noChangesPatterns.test(normalized);
               
               // Check for explicit change requests
