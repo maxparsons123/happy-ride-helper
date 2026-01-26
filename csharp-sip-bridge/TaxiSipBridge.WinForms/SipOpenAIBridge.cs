@@ -222,20 +222,27 @@ public class SipOpenAIBridge : IDisposable
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
-            // Restrict formats to prefer wideband when available
-            if (remoteOffersOpus)
+            // TEMPORARILY: Skip Opus/G.722 to debug answer failures - use PCMU directly
+            // TODO: Re-enable wideband once we understand why Opus answer hangs
+            bool forceNarrowband = true; // Set to false to try Opus again
+            if (!forceNarrowband && remoteOffersOpus)
             {
                 // Force Opus only - highest quality 48kHz
                 _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
                 Log($"🎯 [{_currentCallId}] Restricting to Opus 48kHz");
             }
-            else if (remoteOffersG722)
+            else if (!forceNarrowband && remoteOffersG722)
             {
                 // Force G.722 only - 16kHz wideband
                 _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.G722);
                 Log($"🎯 [{_currentCallId}] Restricting to G.722 16kHz");
             }
-            // else: use default G.711 8kHz
+            else
+            {
+                // Force PCMU/PCMA for reliable 8kHz operation
+                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
+                Log($"🎯 [{_currentCallId}] Using PCMU/PCMA 8kHz (forceNarrowband={forceNarrowband})");
+            }
 
             // IMPORTANT: after restricting, ensure the audio source has a valid selected format.
             // Some endpoints + negotiation flows can fail if the source is still "selected" to a
