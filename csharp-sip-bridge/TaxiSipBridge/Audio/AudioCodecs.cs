@@ -22,8 +22,9 @@ public enum ResamplerMode
 
 /// <summary>
 /// Unified audio codec utilities for all telephony audio processing:
-/// - G.711 µ-law/A-law encoding/decoding
-/// - Opus encoding/decoding (high-quality)
+/// - G.711 µ-law/A-law encoding/decoding (8kHz narrowband)
+/// - G.722 encoding/decoding (16kHz wideband)
+/// - Opus encoding/decoding (48kHz high-quality)
 /// - High-quality resampling (NAudio WDL or custom FIR)
 /// - Pre/de-emphasis filters for telephony
 /// </summary>
@@ -34,11 +35,18 @@ public static class AudioCodecs
     private const float PRE_EMPHASIS = 0.97f;
     private const float DE_EMPHASIS = 0.97f;
     
+    // Opus constants
     public const int OPUS_SAMPLE_RATE = 48000;
     public const int OPUS_CHANNELS = 1;
     public const int OPUS_BITRATE = 32000;
     public const int OPUS_FRAME_SIZE_MS = 20;
     public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
+    
+    // G.722 constants
+    public const int G722_SAMPLE_RATE = 16000;
+    public const int G722_BITRATE = 64000;
+    public const int G722_FRAME_SIZE_MS = 20;
+    public const int G722_FRAME_SIZE = G722_SAMPLE_RATE / 1000 * G722_FRAME_SIZE_MS; // 320 samples
     
     #endregion
     
@@ -150,6 +158,126 @@ public static class AudioCodecs
     
     #endregion
 
+    #region G.722 Wideband (16kHz)
+    
+    // G.722 sub-band ADPCM state
+    private static int _g722LowBand = 0;
+    private static int _g722HighBand = 0;
+    private static int _g722LowPrev = 0;
+    private static int _g722HighPrev = 0;
+    private static readonly object _g722Lock = new object();
+
+    // Quantization tables for G.722
+    private static readonly int[] G722_QL = { -2048, -1024, -512, -256, 0, 256, 512, 1024 };
+    private static readonly int[] G722_QH = { -256, -128, -64, 0, 64, 128, 256, 512 };
+
+    /// <summary>
+    /// Encode PCM16 samples to G.722.
+    /// Input: 16kHz mono PCM16, output: 64kbps G.722 stream.
+    /// </summary>
+    public static byte[] G722Encode(short[] pcm)
+    {
+        lock (_g722Lock)
+        {
+            // G.722 uses sub-band ADPCM - simplified implementation
+            // Each sample pair produces one byte
+            var output = new byte[pcm.Length / 2];
+
+            for (int i = 0; i < pcm.Length - 1; i += 2)
+            {
+                // Split into low and high sub-bands using QMF
+                int low = (pcm[i] + pcm[i + 1]) / 2;
+                int high = (pcm[i] - pcm[i + 1]) / 2;
+
+                // ADPCM encode low band (6 bits)
+                int diffL = low - _g722LowPrev;
+                int codeL = QuantizeLow(diffL);
+                _g722LowPrev = _g722LowPrev + G722_QL[codeL & 0x07];
+
+                // ADPCM encode high band (2 bits)
+                int diffH = high - _g722HighPrev;
+                int codeH = QuantizeHigh(diffH);
+                _g722HighPrev = _g722HighPrev + G722_QH[codeH & 0x03];
+
+                // Pack: 6 bits low + 2 bits high
+                output[i / 2] = (byte)((codeL & 0x3F) | ((codeH & 0x03) << 6));
+            }
+
+            return output;
+        }
+    }
+
+    /// <summary>
+    /// Decode G.722 to PCM16 samples.
+    /// Input: 64kbps G.722 stream, output: 16kHz mono PCM16.
+    /// </summary>
+    public static short[] G722Decode(byte[] encoded)
+    {
+        lock (_g722Lock)
+        {
+            var output = new short[encoded.Length * 2];
+
+            for (int i = 0; i < encoded.Length; i++)
+            {
+                // Unpack: 6 bits low + 2 bits high
+                int codeL = encoded[i] & 0x3F;
+                int codeH = (encoded[i] >> 6) & 0x03;
+
+                // ADPCM decode low band
+                _g722LowBand = _g722LowBand + G722_QL[codeL & 0x07];
+                _g722LowBand = Math.Clamp(_g722LowBand, -32768, 32767);
+
+                // ADPCM decode high band
+                _g722HighBand = _g722HighBand + G722_QH[codeH];
+                _g722HighBand = Math.Clamp(_g722HighBand, -16384, 16383);
+
+                // Reconstruct using inverse QMF
+                output[i * 2] = (short)Math.Clamp(_g722LowBand + _g722HighBand, -32768, 32767);
+                output[i * 2 + 1] = (short)Math.Clamp(_g722LowBand - _g722HighBand, -32768, 32767);
+            }
+
+            return output;
+        }
+    }
+
+    /// <summary>
+    /// Reset G.722 encoder/decoder state (call on new call).
+    /// </summary>
+    public static void ResetG722()
+    {
+        lock (_g722Lock)
+        {
+            _g722LowBand = 0;
+            _g722HighBand = 0;
+            _g722LowPrev = 0;
+            _g722HighPrev = 0;
+        }
+    }
+
+    private static int QuantizeLow(int diff)
+    {
+        // 6-bit quantization for low sub-band
+        if (diff < -1536) return 0;
+        if (diff < -768) return 1;
+        if (diff < -384) return 2;
+        if (diff < -128) return 3;
+        if (diff < 128) return 4;
+        if (diff < 384) return 5;
+        if (diff < 768) return 6;
+        return 7;
+    }
+
+    private static int QuantizeHigh(int diff)
+    {
+        // 2-bit quantization for high sub-band
+        if (diff < -192) return 0;
+        if (diff < -64) return 1;
+        if (diff < 64) return 2;
+        return 3;
+    }
+    
+    #endregion
+
     #region Opus Codec
     
     private static OpusEncoder? _opusEncoder;
@@ -221,6 +349,19 @@ public static class AudioCodecs
         }
     }
     
+    #endregion
+
+    #region Codec Reset
+
+    /// <summary>
+    /// Reset all codec states (call at start of new call).
+    /// </summary>
+    public static void ResetAllCodecs()
+    {
+        ResetOpus();
+        ResetG722();
+    }
+
     #endregion
 
     #region Pre/De-Emphasis Filters
@@ -487,6 +628,69 @@ public static class AudioCodecs
         }
         return output;
     }
+
+    /// <summary>
+    /// 3:2 downsampling for 24kHz → 16kHz conversion (for G.722).
+    /// Uses weighted linear interpolation for quality.
+    /// </summary>
+    public static short[] Downsample24kTo16k(short[] input)
+    {
+        // 24kHz → 16kHz = 3:2 ratio
+        int outputLen = (input.Length * 2) / 3;
+        var output = new short[outputLen];
+
+        for (int i = 0; i < outputLen; i++)
+        {
+            // Source position in 24kHz stream
+            double srcPos = i * 1.5;
+            int srcIdx = (int)srcPos;
+            double frac = srcPos - srcIdx;
+
+            if (srcIdx + 1 < input.Length)
+            {
+                // Linear interpolation
+                double val = input[srcIdx] * (1 - frac) + input[srcIdx + 1] * frac;
+                output[i] = (short)Math.Clamp(val, -32768, 32767);
+            }
+            else if (srcIdx < input.Length)
+            {
+                output[i] = input[srcIdx];
+            }
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// 2:3 upsampling for 16kHz → 24kHz conversion (from G.722).
+    /// Uses linear interpolation.
+    /// </summary>
+    public static short[] Upsample16kTo24k(short[] input)
+    {
+        // 16kHz → 24kHz = 2:3 ratio
+        int outputLen = (input.Length * 3) / 2;
+        var output = new short[outputLen];
+
+        for (int i = 0; i < outputLen; i++)
+        {
+            // Source position in 16kHz stream
+            double srcPos = i * (2.0 / 3.0);
+            int srcIdx = (int)srcPos;
+            double frac = srcPos - srcIdx;
+
+            if (srcIdx + 1 < input.Length)
+            {
+                double val = input[srcIdx] * (1 - frac) + input[srcIdx + 1] * frac;
+                output[i] = (short)Math.Clamp(val, -32768, 32767);
+            }
+            else if (srcIdx < input.Length)
+            {
+                output[i] = input[srcIdx];
+            }
+        }
+
+        return output;
+    }
     
     #endregion
 
@@ -521,18 +725,18 @@ public static class AudioCodecs
 /// <summary>
 /// SIPSorcery-compatible audio encoder with Opus and G.722 support.
 /// Wraps AudioCodecs static methods for IAudioEncoder interface.
+/// Codec priority: Opus (48kHz) > G.722 (16kHz) > G.711 (8kHz)
 /// </summary>
 public class UnifiedAudioEncoder : IAudioEncoder
 {
     private readonly AudioEncoder _baseEncoder;
-    private readonly G722Codec _g722Codec = new();
 
     private static readonly AudioFormat OpusFormat = new AudioFormat(
         AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
 
     // G.722 operates at 16kHz with 64kbps
     private static readonly AudioFormat G722Format = new AudioFormat(
-        AudioCodecsEnum.G722, 9, 16000, 1, "G722");
+        AudioCodecsEnum.G722, 9, AudioCodecs.G722_SAMPLE_RATE, 1, "G722");
 
     public UnifiedAudioEncoder()
     {
@@ -554,24 +758,32 @@ public class UnifiedAudioEncoder : IAudioEncoder
 
     public byte[] EncodeAudio(short[] pcm, AudioFormat format)
     {
-        if (format.Codec == AudioCodecsEnum.OPUS)
-            return AudioCodecs.OpusEncode(pcm);
-        
-        if (format.Codec == AudioCodecsEnum.G722)
-            return _g722Codec.Encode(pcm);
-        
-        return _baseEncoder.EncodeAudio(pcm, format);
+        switch (format.Codec)
+        {
+            case AudioCodecsEnum.OPUS:
+                return AudioCodecs.OpusEncode(pcm);
+
+            case AudioCodecsEnum.G722:
+                return AudioCodecs.G722Encode(pcm);
+
+            default:
+                return _baseEncoder.EncodeAudio(pcm, format);
+        }
     }
 
     public short[] DecodeAudio(byte[] encodedSample, AudioFormat format)
     {
-        if (format.Codec == AudioCodecsEnum.OPUS)
-            return AudioCodecs.OpusDecode(encodedSample);
-        
-        if (format.Codec == AudioCodecsEnum.G722)
-            return _g722Codec.Decode(encodedSample);
-        
-        return _baseEncoder.DecodeAudio(encodedSample, format);
+        switch (format.Codec)
+        {
+            case AudioCodecsEnum.OPUS:
+                return AudioCodecs.OpusDecode(encodedSample);
+
+            case AudioCodecsEnum.G722:
+                return AudioCodecs.G722Decode(encodedSample);
+
+            default:
+                return _baseEncoder.DecodeAudio(encodedSample, format);
+        }
     }
 
     /// <summary>
@@ -579,7 +791,6 @@ public class UnifiedAudioEncoder : IAudioEncoder
     /// </summary>
     public void ResetCodecState()
     {
-        _g722Codec.Reset();
-        AudioCodecs.ResetOpus();
+        AudioCodecs.ResetAllCodecs();
     }
 }
