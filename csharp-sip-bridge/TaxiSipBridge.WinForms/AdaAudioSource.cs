@@ -273,7 +273,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 }
 
                 // 5. Pre-emphasis for narrowband codecs
-                if (ShouldApplyPreEmphasis(_audioFormatManager.SelectedFormat))
+                if (IsNarrowbandCodec(_audioFormatManager.SelectedFormat))
                 {
                     ApplyPreEmphasis(audioFrame);
                 }
