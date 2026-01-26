@@ -181,9 +181,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
             _lastSample = current;
         }
         
-        // Volume boost for telephony (1.4x like edge function)
+        // Volume boost for telephony - INCREASED to 2.5x for better VAD detection
+        // Telephony audio is often very quiet compared to desktop mics
         for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 1.4, short.MinValue, short.MaxValue);
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
         
         // Resample 8kHz → 24kHz
         var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
@@ -475,9 +476,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,           // Raised for telephony (reduces false triggers from line noise)
-                    prefix_padding_ms = 500,   // More padding to catch start of speech
-                    silence_duration_ms = 1200 // INCREASED for telephony - gives users time to respond
+                    threshold = 0.25,          // LOWERED for telephony - more sensitive to quiet speech
+                    prefix_padding_ms = 500,   // Captures start of speech
+                    silence_duration_ms = 1200 // Long wait for user to respond
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -485,7 +486,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 Config: VAD=0.4, prefix=500ms, silence=1200ms (telephony-optimized)");
+        Log("🎧 Config: VAD=0.25, prefix=500ms, silence=1200ms, volume=2.5x (telephony-optimized)");
         
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
