@@ -33,6 +33,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     // Pre-emphasis for telephony clarity (matches edge function)
     private const float PRE_EMPHASIS_COEFF = 0.97f;
     private short _lastSample = 0;
+    private int _audioPacketsSent = 0;
     
     // Session state
     private string? _callerId;
@@ -200,6 +201,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         try
         {
+            _audioPacketsSent++;
+            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
+                Log($"📤 Sent audio #{_audioPacketsSent}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24, {base64.Length} chars base64");
+            
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
                 WebSocketMessageType.Text,
@@ -245,6 +250,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         try
         {
+            _audioPacketsSent++;
+            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
+                Log($"📤 Sent PCM audio #{_audioPacketsSent}: {pcmData.Length}b → {base64.Length} chars base64");
+            
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
                 WebSocketMessageType.Text,
