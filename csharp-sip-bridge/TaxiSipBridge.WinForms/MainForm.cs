@@ -23,7 +23,7 @@ public partial class MainForm : Form
         txtSipUser.Text = "max201";
         txtSipPassword.Text = "qwe70954504118";
         // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
-        txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired";
+        txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
         txtApiKey.Text = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
