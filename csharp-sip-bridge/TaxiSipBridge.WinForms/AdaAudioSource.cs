@@ -271,13 +271,21 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 for (int i = 0; i < pcm24.Length; i++)
                     floatInput[i] = pcm24[i] / 32768f;
 
-                // 3. Resample using NAudio WDL (high quality, anti-aliased)
-                int outBufferLen = (int)Math.Ceiling(floatInput.Length * targetRate / 24000.0) + 64;
-                var floatOutput = new float[outBufferLen];
+                // 3. Resample using NAudio WDL (output-driven mode).
+                // IMPORTANT: ResamplePrepare expects the number of *output* samples we want.
+                // It returns how many input samples are required to synthesize that output.
+                var floatOutput = new float[samplesNeeded];
 
-                int inNeeded = _resampler.ResamplePrepare(floatInput.Length, 1, out float[] inBuffer, out int inBufferOffset);
-                Array.Copy(floatInput, 0, inBuffer, inBufferOffset, Math.Min(floatInput.Length, inNeeded));
-                int outProduced = _resampler.ResampleOut(floatOutput, 0, floatOutput.Length, 1, inNeeded);
+                int inNeeded = _resampler.ResamplePrepare(samplesNeeded, 1, out float[] inBuffer, out int inBufferOffset);
+
+                int toCopy = Math.Min(floatInput.Length, inNeeded);
+                Array.Copy(floatInput, 0, inBuffer, inBufferOffset, toCopy);
+                if (toCopy < inNeeded)
+                {
+                    Array.Clear(inBuffer, inBufferOffset + toCopy, inNeeded - toCopy);
+                }
+
+                int outProduced = _resampler.ResampleOut(floatOutput, 0, samplesNeeded, 1, inNeeded);
 
                 // 4. Convert back to short[]
                 audioFrame = new short[samplesNeeded];
