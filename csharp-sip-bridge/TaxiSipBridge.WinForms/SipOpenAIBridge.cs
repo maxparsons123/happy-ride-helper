@@ -286,8 +286,19 @@ public class SipOpenAIBridge : IDisposable
         var payload = rtpPacket.Payload;
         if (payload == null || payload.Length == 0) return;
 
-        // Send µ-law audio to OpenAI (it handles decoding/resampling)
-        _ = _aiClient.SendMuLawAsync(payload);
+        // Decode µ-law to PCM16 using NAudio (matches SIPSorcery example pattern)
+        var pcm16 = new short[payload.Length];
+        for (int i = 0; i < payload.Length; i++)
+        {
+            pcm16[i] = NAudio.Codecs.MuLawDecoder.MuLawToLinearSample(payload[i]);
+        }
+
+        // Convert to bytes for OpenAI (16-bit little-endian)
+        var pcmBytes = new byte[pcm16.Length * 2];
+        Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
+
+        // Send PCM16 @ 8kHz to OpenAI (it will resample to 24kHz)
+        _ = _aiClient.SendPcm8kAsync(pcmBytes);
     }
 
     private void OnAiAudioReceived(byte[] pcm24kBytes)

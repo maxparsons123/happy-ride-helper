@@ -216,6 +216,65 @@ public class OpenAIRealtimeClient : IAudioAIClient
         catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
     }
 
+    /// <summary>
+    /// Send PCM16 audio at 8kHz (already decoded from µ-law via NAudio).
+    /// This matches the SIPSorcery example pattern using NAudio.Codecs.MuLawDecoder.
+    /// </summary>
+    public async Task SendPcm8kAsync(byte[] pcm8kBytes)
+    {
+        if (_disposed || _ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
+
+        // Echo guard
+        if (!_awaitingConfirmation)
+        {
+            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+                return;
+        }
+
+        // Convert bytes to shorts
+        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
+
+        // Apply pre-emphasis for consonant clarity (matches edge function)
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
+            _lastSample = current;
+        }
+
+        // Volume boost for telephony - 2.5x for better VAD detection
+        for (int i = 0; i < pcm8k.Length; i++)
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
+
+        // Resample 8kHz → 24kHz
+        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+        // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
+        var sampleCount = pcm8kBytes.Length / 2;
+        var durationMs = (double)sampleCount * 1000.0 / 8000.0;
+        _inputBufferedMs += durationMs;
+
+        var base64 = Convert.ToBase64String(pcmBytes);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+
+        try
+        {
+            _audioPacketsSent++;
+            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
+                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
+
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+    }
+
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
