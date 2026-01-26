@@ -191,11 +191,16 @@ public class SipOpenAIBridge : IDisposable
             var mediaEndPoints = new MediaEndPoints
             {
                 AudioSource = _adaAudioSource,
-                AudioSink = null, // We handle inbound audio manually
-                AudioEncoder = opusEncoder
+                AudioSink = null // We handle inbound audio manually
             };
 
-            _mediaSession = new VoIPMediaSession(mediaEndPoints);
+            var sessionConfig = new VoIPMediaSessionConfig
+            {
+                MediaEndPoint = mediaEndPoints,
+                AudioExtrasEncoder = opusEncoder // Enables Opus 48kHz wideband
+            };
+
+            _mediaSession = new VoIPMediaSession(sessionConfig);
             _mediaSession.AcceptRtpFromAny = true;
 
             // Log incoming SDP offer codecs
