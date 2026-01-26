@@ -527,11 +527,49 @@ public class OpenAIRealtimeClient : IAudioAIClient
         
         await Task.Delay(delayMs);
         
-        if (_ws?.State != WebSocketState.Open) return;
+        // If WebSocket closed, attempt full reconnection
+        if (_ws?.State != WebSocketState.Open)
+        {
+            Log("🔄 WebSocket closed - attempting full reconnection...");
+            await ReconnectAsync();
+            return; // Greeting will be triggered by session.updated after reconnect
+        }
         
         // Clear any stale state and retry
         await SendJsonAsync(new { type = "input_audio_buffer.clear" });
         await SendGreetingRequestAsync();
+    }
+
+    private async Task ReconnectAsync()
+    {
+        if (_disposed) return;
+        
+        try
+        {
+            // Dispose old WebSocket
+            _ws?.Dispose();
+            
+            // Create new WebSocket
+            _ws = new ClientWebSocket();
+            _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
+            _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
+            
+            var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
+            Log($"🔄 Reconnecting to OpenAI...");
+            
+            await _ws.ConnectAsync(uri, _cts?.Token ?? CancellationToken.None);
+            Log("✅ Reconnected to OpenAI Realtime API");
+            
+            // Reset greeting flag so it triggers again after session.updated
+            _greetingSent = false;
+            
+            // Restart receive loop
+            _ = ReceiveLoopAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Reconnection failed: {ex.Message}");
+        }
     }
 
     private async Task SendContextHintAsync(string userText)
