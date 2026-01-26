@@ -1163,6 +1163,14 @@ const STT_CORRECTIONS: Record<string, string> = {
   "david rowe": "David Road",
   "david rode": "David Road",
   "david roat": "David Road",
+  "david rowsey": "David Road",  // Common Whisper mishearing
+  "david rosie": "David Road",
+  "david rosey": "David Road",
+  "david roussey": "David Road",
+  "welcome two chile, david rowsey": "52A David Road",  // Full phrase correction
+  "welcome to chile, david rowsey": "52A David Road",
+  "welcome to chili david rowsey": "52A David Road",
+  "52a david rowsey": "52A David Road",
   "this is qa, david rhoades": "52A David Road",
   "this is qa david rhoades": "52A David Road",
   "52 qa david": "52A David Road",
@@ -4439,11 +4447,13 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             sessionState.lastQuestionAsked = nextStep;
             
             // Get the value that was just captured for recitation
+            // CRITICAL: Use userTruth (raw STT after corrections) NOT Ada's extraction
+            // This prevents hallucinations like "Dover Street" when user said "David Road"
             let justCapturedValue: string | undefined;
-            if (fieldUpdated === "pickup") justCapturedValue = sessionState.booking.pickup || undefined;
-            else if (fieldUpdated === "destination") justCapturedValue = sessionState.booking.destination || undefined;
-            else if (fieldUpdated === "passengers") justCapturedValue = String(sessionState.booking.passengers);
-            else if (fieldUpdated === "time") justCapturedValue = sessionState.booking.pickupTime || undefined;
+            if (fieldUpdated === "pickup") justCapturedValue = sessionState.userTruth.pickup || sessionState.booking.pickup || undefined;
+            else if (fieldUpdated === "destination") justCapturedValue = sessionState.userTruth.destination || sessionState.booking.destination || undefined;
+            else if (fieldUpdated === "passengers") justCapturedValue = String(sessionState.userTruth.passengers || sessionState.booking.passengers);
+            else if (fieldUpdated === "time") justCapturedValue = sessionState.userTruth.time || sessionState.booking.pickupTime || undefined;
             
             // Pass userTruth for accurate summary (prevents address hallucinations)
             // Also pass just-captured field/value for ADDRESS RECITATION
