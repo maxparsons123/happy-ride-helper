@@ -235,20 +235,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Convert bytes to shorts
         var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
 
-        // Apply pre-emphasis for consonant clarity (matches edge function)
+        // PASSTHROUGH MODE: No DSP - just simple point upsampling 8kHz → 24kHz
+        // Pick each sample 3x (no filtering, no boost, no pre-emphasis)
+        var pcm24k = new short[pcm8k.Length * 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
-            short current = pcm8k[i];
-            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
-            _lastSample = current;
+            pcm24k[i * 3] = pcm8k[i];
+            pcm24k[i * 3 + 1] = pcm8k[i];
+            pcm24k[i * 3 + 2] = pcm8k[i];
         }
-
-        // Volume boost for telephony - 2.5x for better VAD detection
-        for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
-
-        // Resample 8kHz → 24kHz
-        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
