@@ -12,7 +12,7 @@ namespace TaxiSipBridge;
 public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
-    private const int MAX_QUEUED_FRAMES = 500;
+    private const int MAX_QUEUED_FRAMES = 5000; // ~100 seconds buffer - OpenAI sends faster than real-time
     private const int FADE_IN_SAMPLES = 80;  // Increased for smoother fade
     private const int CROSSFADE_SAMPLES = 40; // For silence-to-audio transitions
 
