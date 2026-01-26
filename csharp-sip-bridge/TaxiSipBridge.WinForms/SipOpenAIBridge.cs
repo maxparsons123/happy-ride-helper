@@ -238,7 +238,7 @@ public class SipOpenAIBridge : IDisposable
             if (audioTrack?.Capabilities?.Count > 0)
             {
                 var fmt = audioTrack.Capabilities[0];
-                codecName = fmt.Name ?? "unknown";
+                codecName = fmt.Name() ?? "unknown";
                 clockRate = fmt.ClockRate;
             }
             Log($"✅ [{_currentCallId}] Call answered, RTP started");
@@ -408,14 +408,16 @@ public class SipOpenAIBridge : IDisposable
             if (audioMedia == null) return;
 
             var codecs = audioMedia.MediaFormats
-                .Select(f => $"{f.Value.Name}({f.Key})")
+                .Select(f => $"{f.Value.Name()}({f.Key})")
                 .ToList();
 
             Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
 
             // Check for wideband codecs
-            bool hasG722 = audioMedia.MediaFormats.Any(f => f.Value.Name.Equals("G722", StringComparison.OrdinalIgnoreCase));
-            bool hasOpus = audioMedia.MediaFormats.Any(f => f.Value.Name.Equals("opus", StringComparison.OrdinalIgnoreCase));
+            bool hasG722 = audioMedia.MediaFormats.Any(f => 
+                f.Value.Name()?.Equals("G722", StringComparison.OrdinalIgnoreCase) == true);
+            bool hasOpus = audioMedia.MediaFormats.Any(f => 
+                f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
             
             if (hasOpus)
                 Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
