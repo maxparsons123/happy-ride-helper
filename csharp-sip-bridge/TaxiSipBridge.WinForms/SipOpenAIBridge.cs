@@ -187,15 +187,15 @@ public class SipOpenAIBridge : IDisposable
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
             // Create VoIPMediaSession with our custom audio source and Opus encoder
+            var opusEncoder = new OpusAudioEncoder();
             var mediaEndPoints = new MediaEndPoints
             {
                 AudioSource = _adaAudioSource,
-                AudioSink = null // We handle inbound audio manually
+                AudioSink = null, // We handle inbound audio manually
+                AudioEncoder = opusEncoder
             };
 
-            // Use OpusAudioEncoder for wideband 48kHz audio (falls back to G.711 if remote doesn't support)
-            var opusEncoder = new OpusAudioEncoder();
-            _mediaSession = new VoIPMediaSession(mediaEndPoints, opusEncoder);
+            _mediaSession = new VoIPMediaSession(mediaEndPoints);
             _mediaSession.AcceptRtpFromAny = true;
 
             // Log incoming SDP offer codecs
