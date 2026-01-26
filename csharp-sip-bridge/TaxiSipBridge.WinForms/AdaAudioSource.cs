@@ -336,13 +336,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 _lastFrameWasSilence = false;
             }
 
-            // Log first few frames
-            if (_sentFrames < 5)
-            {
-                var mode = _testToneMode ? "TONE" : "ADA";
-                OnDebugLog?.Invoke($"[AdaAudioSource] 📤 [{mode}] Frame {_sentFrames}: {audioFrame.Length} samples @{targetRate}Hz, codec={_audioFormatManager.SelectedFormat.FormatName}");
-            }
-
             // Encode using negotiated codec
             byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
 
@@ -350,6 +343,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
             uint durationRtpUnits = (uint)samplesNeeded;
 
             _sentFrames++;
+            
+            // Log first few Ada audio frames to confirm they're being sent
+            if (_sentFrames <= 10 && !_testToneMode)
+            {
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 ADA frame {_sentFrames}: {encoded.Length}b {_audioFormatManager.SelectedFormat.FormatName}, hasSubscribers={OnAudioSourceEncodedSample != null}");
+            }
+            
             OnAudioSourceEncodedSample?.Invoke(durationRtpUnits, encoded);
         }
         catch (Exception ex)
