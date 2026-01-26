@@ -530,7 +530,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // If WebSocket closed, attempt full reconnection
         if (_ws?.State != WebSocketState.Open)
         {
-            Log("🔄 WebSocket closed - attempting full reconnection...");
+            Log("🔄 WebSocket closed before retry - attempting full reconnection...");
             await ReconnectAsync();
             return; // Greeting will be triggered by session.updated after reconnect
         }
@@ -538,6 +538,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Clear any stale state and retry
         await SendJsonAsync(new { type = "input_audio_buffer.clear" });
         await SendGreetingRequestAsync();
+        
+        // Give OpenAI a moment to respond - if it closes immediately, we'll catch it
+        await Task.Delay(200);
+        
+        if (_ws?.State != WebSocketState.Open)
+        {
+            Log("🔄 WebSocket closed after retry - attempting full reconnection...");
+            await ReconnectAsync();
+        }
     }
 
     private async Task ReconnectAsync()
