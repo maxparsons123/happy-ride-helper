@@ -277,8 +277,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Created ContinuousResampler 24kHz -> {targetRate}Hz");
                     }
 
-                    // Use stateful resampler for smooth inter-frame transitions
-                    if (_audioMode == AudioMode.SimpleResample)
+                    // Select processing mode
+                    if (_audioMode == AudioMode.Passthrough)
+                    {
+                        // BYPASS: Send 24kHz directly without resampling (TEST ONLY)
+                        // This will sound wrong if codec is 8kHz - audio will play 3x fast
+                        audioFrame = pcm24;
+                        if (_sentFrames == 0)
+                            OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ PASSTHROUGH MODE: Sending 24kHz directly, targetRate={targetRate}Hz");
+                    }
+                    else if (_audioMode == AudioMode.SimpleResample)
                     {
                         audioFrame = SimpleResample(pcm24, 24000, targetRate);
                     }
@@ -289,7 +297,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     }
                     else
                     {
-                        audioFrame = pcm24; // No resampling needed
+                        audioFrame = pcm24; // No resampling needed (already at target rate)
                     }
 
                     // Hard-enforce exact 20ms frame size for RTP
