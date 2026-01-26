@@ -34,7 +34,13 @@ public enum AudioMode
     /// <summary>
     /// Test mode: 440Hz sine wave to verify RTP/codec path.
     /// </summary>
-    TestTone
+    TestTone,
+    
+    /// <summary>
+    /// Bypass resampling - send 24kHz directly (for testing only).
+    /// WARNING: Will sound wrong if codec is 8kHz!
+    /// </summary>
+    Passthrough
 }
 
 public class SipAdaBridgeConfig
