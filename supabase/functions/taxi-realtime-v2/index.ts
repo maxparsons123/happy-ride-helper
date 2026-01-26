@@ -724,14 +724,18 @@ serve(async (req) => {
               const passengerWord = passengersToWord(booking.passengers);
               
               if (openaiWs?.readyState === WebSocket.OPEN) {
+                // CRITICAL: Use userTruth (raw STT) for recap to prevent hallucination
+                const recapPickup = userTruth.pickup || booking.pickup;
+                const recapDestination = userTruth.destination || booking.destination;
                 openaiWs.send(JSON.stringify({
                   type: "conversation.item.create",
                   item: { type: "message", role: "system", content: [{ type: "input_text", text: `[CORRECTION APPLIED] Updated. Give NEW summary with EXACTLY these values:
-- Pickup: "${booking.pickup}"
-- Destination: "${booking.destination}"
+- Pickup: "${recapPickup}"
+- Destination: "${recapDestination}"
 - Passengers: ${passengerWord}
-- Time: "${booking.time}"
-Say: "Let me update that. So that's from ${booking.pickup} to ${booking.destination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
+- Time: "${userTruth.time || booking.time}"
+Say: "Let me update that. So that's from ${recapPickup} to ${recapDestination}, ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${userTruth.time || booking.time}. Is that correct?"
+CRITICAL: Say the pickup and destination EXACTLY as written above - do NOT substitute or alter them.` }] }
                 }));
               }
             } else {
@@ -827,15 +831,19 @@ Say: "Let me update that. So that's from ${booking.pickup} to ${booking.destinat
           const passengerWord = passengersToWord(booking.passengers || 1);
           
           if (openaiWs?.readyState === WebSocket.OPEN) {
+            // CRITICAL: Use userTruth (raw STT) for recap to prevent hallucination
+            const recapPickup = userTruth.pickup || booking.pickup;
+            const recapDestination = userTruth.destination || booking.destination;
             openaiWs.send(JSON.stringify({
               type: "conversation.item.create",
               item: { type: "message", role: "system", content: [{ type: "input_text", text: `[STEP] Time: ${timeValue}. NOW GIVE SUMMARY using EXACTLY these values:
-- Pickup: "${booking.pickup}"
-- Destination: "${booking.destination}"  
+- Pickup: "${recapPickup}"
+- Destination: "${recapDestination}"  
 - Passengers: ${passengerWord} (say "${passengerWord}" NOT "${booking.passengers}")
-- Time: "${booking.time}"
+- Time: "${userTruth.time}"
 ${booking.luggage ? `- Luggage: ${booking.luggage}` : ''}
-Say: "So that's from [pickup] to [destination], for ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${booking.time}. Is that correct?"` }] }
+Say: "So that's from ${recapPickup} to ${recapDestination}, for ${passengerWord} passenger${booking.passengers !== 1 ? 's' : ''}, pickup ${userTruth.time}. Is that correct?"
+CRITICAL: Say the pickup "${recapPickup}" and destination "${recapDestination}" EXACTLY as written - do NOT substitute or alter them.` }] }
             }));
           }
         }
