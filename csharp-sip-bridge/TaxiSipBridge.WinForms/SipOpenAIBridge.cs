@@ -282,9 +282,27 @@ public class SipOpenAIBridge : IDisposable
             await Task.Delay(200);
 
             // Answer the call
-            bool answered = await _userAgent.Answer(uas, _mediaSession);
+            Log($"🔧 [{_currentCallId}] Answering call...");
+            bool answered = false;
+            try
+            {
+                answered = await _userAgent.Answer(uas, _mediaSession);
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ [{_currentCallId}] Exception during Answer(): {ex.GetType().Name}: {ex.Message}\n{ex}");
+                answered = false;
+            }
             if (!answered)
             {
+                try
+                {
+                    var offered = _adaAudioSource?.GetAudioSourceFormats();
+                    if (offered != null)
+                        Log($"🔧 [{_currentCallId}] Offered codecs at failure: {string.Join(", ", offered.Select(f => $"{f.FormatName}@{f.ClockRate}Hz PT={f.FormatID} ch={f.ChannelCount}"))}");
+                }
+                catch { /* never crash on diagnostics */ }
+
                 Log($"❌ [{_currentCallId}] Failed to answer call");
                 await CleanupCall();
                 return;
