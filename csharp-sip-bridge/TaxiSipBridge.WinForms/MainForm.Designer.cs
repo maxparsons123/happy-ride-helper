@@ -81,6 +81,17 @@ partial class MainForm
         };
         chkLocalOpenAI.CheckedChanged += this.chkLocalOpenAI_CheckedChanged;
 
+        // === Simli Avatar ===
+        chkSimliAvatar = new CheckBox 
+        { 
+            Text = "🎭 Simli Avatar", 
+            Location = new Point(565, 88), 
+            Size = new Size(130, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(156, 39, 176)
+        };
+        chkSimliAvatar.CheckedChanged += this.chkSimliAvatar_CheckedChanged;
+
         // OpenAI API Key (shown when Local mode is checked)
         lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
         txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(520, 23), UseSystemPasswordChar = true, Visible = false };
@@ -89,6 +100,15 @@ partial class MainForm
         // WebSocket URL (hidden when Local mode is checked)
         lblWs = new Label { Text = "Ada URL:", Location = new Point(15, 118), Size = new Size(60, 23) };
         txtWebSocketUrl = new TextBox { Location = new Point(75, 115), Size = new Size(520, 23) };
+
+        // Simli configuration row
+        lblSimliApiKey = new Label { Text = "Simli Key:", Location = new Point(15, 148), Size = new Size(65, 23), Visible = false };
+        txtSimliApiKey = new TextBox { Location = new Point(85, 145), Size = new Size(200, 23), UseSystemPasswordChar = true, Visible = false };
+        txtSimliApiKey.PlaceholderText = "Simli API key";
+        
+        lblSimliFaceId = new Label { Text = "Face ID:", Location = new Point(295, 148), Size = new Size(55, 23), Visible = false };
+        txtSimliFaceId = new TextBox { Location = new Point(355, 145), Size = new Size(240, 23), Visible = false };
+        txtSimliFaceId.PlaceholderText = "Simli avatar face ID";
 
         // Start SIP Button
         btnStartStop = new Button
@@ -125,9 +145,10 @@ partial class MainForm
             lblUser, txtSipUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
-            chkLocalOpenAI,
+            chkLocalOpenAI, chkSimliAvatar,
             lblApiKey, txtApiKey,
             lblWs, txtWebSocketUrl,
+            lblSimliApiKey, txtSimliApiKey, lblSimliFaceId, txtSimliFaceId,
             btnStartStop, btnMicTest
         });
 
@@ -220,12 +241,17 @@ partial class MainForm
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
     private TextBox txtApiKey;
+    private TextBox txtSimliApiKey;
+    private TextBox txtSimliFaceId;
     private ComboBox cmbTransport;
     private ComboBox cmbAudioMode;
     private ComboBox cmbResampler;
     private CheckBox chkLocalOpenAI;
+    private CheckBox chkSimliAvatar;
     private Label lblApiKey;
     private Label lblWs;
+    private Label lblSimliApiKey;
+    private Label lblSimliFaceId;
     private Button btnStartStop;
     private Button btnMicTest;
     private Button btnClearLogs;
