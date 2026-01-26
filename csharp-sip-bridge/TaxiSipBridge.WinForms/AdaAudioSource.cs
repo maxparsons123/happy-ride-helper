@@ -34,8 +34,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _interpolatedFrames;
     private DateTime _lastStatsLog = DateTime.MinValue;
 
-    // Boundary smoothing to prevent clicks/crackling during underruns
+    // Boundary smoothing to prevent clicks/crackling
     private short _lastOutputSample;
+    private short _prevFrameLastSample; // For inter-frame crossfade
     private bool _lastFrameWasSilence = true;
     private short[]? _lastAudioFrame; // Keep last frame for interpolation
 
@@ -329,9 +330,22 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 }
             }
 
-            // Track last sample to avoid clicks on underrun transitions
+            // Apply inter-frame crossfade to prevent clicks at frame boundaries
+            if (audioFrame.Length > 0 && !_lastFrameWasSilence)
+            {
+                // Blend first 8 samples with previous frame's last sample
+                int blendLen = Math.Min(8, audioFrame.Length);
+                for (int i = 0; i < blendLen; i++)
+                {
+                    float t = (float)(i + 1) / (blendLen + 1);
+                    audioFrame[i] = (short)(_prevFrameLastSample * (1 - t) + audioFrame[i] * t);
+                }
+            }
+
+            // Track samples for next frame's crossfade
             if (audioFrame.Length > 0)
             {
+                _prevFrameLastSample = audioFrame[^1];
                 _lastOutputSample = audioFrame[^1];
                 _lastFrameWasSilence = false;
             }
@@ -379,21 +393,33 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     private static short[] Downsample24kTo8k(short[] pcm24)
     {
-        // 24kHz → 8kHz is exactly 3:1. Using a small FIR per group avoids boundary artifacts.
-        if (pcm24.Length < 3) return new short[0];
+        // 24kHz → 8kHz is exactly 3:1 decimation
+        // Use a 7-tap Sinc-based low-pass filter for better anti-aliasing
+        if (pcm24.Length < 7) return new short[pcm24.Length / 3];
 
         int outLen = pcm24.Length / 3;
         var output = new short[outLen];
 
+        // 7-tap low-pass FIR coefficients (normalized Sinc window)
+        // Cutoff at ~3.5kHz to prevent aliasing at 8kHz output
+        float[] h = { 0.05f, 0.15f, 0.30f, 0.50f, 0.30f, 0.15f, 0.05f };
+        float sum = 1.5f; // Normalization factor
+
         for (int i = 0; i < outLen; i++)
         {
-            int idx = i * 3;
-            int s0 = pcm24[idx];
-            int s1 = pcm24[idx + 1];
-            int s2 = pcm24[idx + 2];
-
-            // 3-tap low-pass-ish: (1,2,1)/4
-            output[i] = (short)((s0 + (s1 * 2) + s2) / 4);
+            int center = i * 3;
+            float acc = 0;
+            
+            for (int j = -3; j <= 3; j++)
+            {
+                int idx = center + j;
+                if (idx >= 0 && idx < pcm24.Length)
+                {
+                    acc += pcm24[idx] * h[j + 3];
+                }
+            }
+            
+            output[i] = (short)Math.Clamp(acc / sum, short.MinValue, short.MaxValue);
         }
 
         return output;
