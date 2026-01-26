@@ -66,6 +66,61 @@ public static class AudioCodecs
     }
 
     /// <summary>
+    /// Decode A-law (G.711) to PCM16 samples.
+    /// </summary>
+    public static short[] ALawDecode(byte[] data)
+    {
+        var pcm = new short[data.Length];
+        for (int i = 0; i < data.Length; i++)
+        {
+            int alaw = data[i] ^ 0x55;
+            int sign = (alaw & 0x80) != 0 ? -1 : 1;
+            int exponent = (alaw >> 4) & 0x07;
+            int mantissa = alaw & 0x0F;
+            
+            int magnitude;
+            if (exponent == 0)
+                magnitude = (mantissa << 4) + 8;
+            else
+                magnitude = ((mantissa << 4) + 0x108) << (exponent - 1);
+            
+            pcm[i] = (short)(sign * magnitude);
+        }
+        return pcm;
+    }
+
+    /// <summary>
+    /// Encode PCM16 samples to A-law (G.711).
+    /// </summary>
+    public static byte[] ALawEncode(short[] pcm)
+    {
+        var alaw = new byte[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            int s = pcm[i];
+            int sign = 0;
+            if (s < 0) { s = -s; sign = 0x80; }
+            
+            int exponent = 7;
+            int mask = 0x4000;
+            while (exponent > 0 && (s & mask) == 0)
+            {
+                exponent--;
+                mask >>= 1;
+            }
+            
+            int mantissa;
+            if (exponent == 0)
+                mantissa = (s >> 4) & 0x0F;
+            else
+                mantissa = (s >> (exponent + 3)) & 0x0F;
+            
+            alaw[i] = (byte)((sign | (exponent << 4) | mantissa) ^ 0x55);
+        }
+        return alaw;
+    }
+
+    /// <summary>
     /// Apply pre-emphasis filter to boost high frequencies (consonants).
     /// Use before upsampling for better STT accuracy.
     /// y[n] = x[n] - α * x[n-1]
