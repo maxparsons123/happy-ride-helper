@@ -469,7 +469,26 @@ public static class AudioCodecs
         ResetG722();
         ResetFirFilter();
         SoxrResamplerHelper.Reset();
+        TtsPreConditioner.Reset();
         TelephonyVoiceShaping.Reset();
+    }
+
+    /// <summary>
+    /// Process TTS output through full pre-conditioning pipeline before telephony encoding.
+    /// Pipeline: 24kHz PCM → Pre-condition → Resample 8kHz → Voice Shaping → G.711
+    /// </summary>
+    public static short[] ProcessTtsForTelephony(short[] pcm24k)
+    {
+        // 1) Pre-condition: de-ess, soften, micro-noise, gain norm
+        var conditioned = TtsPreConditioner.Process(pcm24k);
+        
+        // 2) Resample 24kHz → 8kHz
+        var pcm8k = Resample24kTo8k(conditioned);
+        
+        // 3) Voice shaping (warmth, presence, compression) applied during encoding
+        // Note: TelephonyVoiceShaping is applied in ALawEncode/MuLawEncode
+        
+        return pcm8k;
     }
 }
 
