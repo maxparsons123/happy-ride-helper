@@ -54,6 +54,19 @@ public class SipAdaBridgeConfig
     public SipTransportType Transport { get; set; } = SipTransportType.UDP;
     public AudioMode AudioMode { get; set; } = AudioMode.Standard;
     public int JitterBufferMs { get; set; } = 60; // Pre-buffer size for JitterBuffer mode
+    
+    // NAT Traversal Settings
+    public bool EnableStun { get; set; } = true;
+    public string StunServer { get; set; } = "stun.l.google.com";
+    public int StunPort { get; set; } = 19302;
+    public string? StunServer2 { get; set; } = "stun1.l.google.com"; // Fallback STUN
+    
+    // TURN server (for symmetric NAT / double NAT scenarios)
+    public bool EnableTurn { get; set; } = false;
+    public string? TurnServer { get; set; } = null;
+    public int TurnPort { get; set; } = 3478;
+    public string? TurnUsername { get; set; } = null;
+    public string? TurnPassword { get; set; } = null;
 
     public bool IsValid(out string error)
     {
