@@ -356,9 +356,12 @@ class CallEndedException(Exception):
 class CallState:
     call_id: str
     phone: str = "Unknown"
-    ast_codec: str = "ulaw"
-    ast_rate: int = RATE_ULAW
-    ast_frame_bytes: int = 160
+    # IMPORTANT: For WhatsApp dialplan we force slin16 (16kHz) in both read/write formats.
+    # If we start in ulaw and Ada speaks immediately, we may send short ulaw-sized frames
+    # that Asterisk can effectively play as 20ms, causing very slow (stretched) audio.
+    ast_codec: str = field(default_factory=lambda: "slin16" if FORCE_SLIN16 else "ulaw")
+    ast_rate: int = field(default_factory=lambda: RATE_SLIN16 if FORCE_SLIN16 else RATE_ULAW)
+    ast_frame_bytes: int = field(default_factory=lambda: 320 if FORCE_SLIN16 else 160)
     format_locked: bool = False
     format_lock_time: float = 0.0
     first_frame_at: float = 0.0
