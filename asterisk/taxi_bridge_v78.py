@@ -102,15 +102,15 @@ FORMAT_LOCK_FRAME_COUNT = 5    # Fewer frames needed when Opus is clear
 # DSP Pipeline — **ENHANCED**
 ENABLE_VOLUME_BOOST = True
 ENABLE_AGC = True
-VOLUME_BOOST_FACTOR = 3.0
-TARGET_RMS = 300
-AGC_MAX_GAIN = 15.0
+VOLUME_BOOST_FACTOR = 10.0
+TARGET_RMS = 600
+AGC_MAX_GAIN = 50.0
 AGC_MIN_GAIN = 1.0
 AGC_SMOOTHING = 0.15
-AGC_FLOOR_RMS = 10
+AGC_FLOOR_RMS = 1
 PRE_EMPHASIS_COEFF_DEFAULT = 0.95
-ENABLE_NOISE_GATE = True
-NOISE_GATE_THRESHOLD = 80      # RMS below this = noise
+ENABLE_NOISE_GATE = False      # Telephony audio can be extremely quiet; gating kills real speech
+NOISE_GATE_THRESHOLD = 80      # (unused when gate disabled)
 SOFT_CLIP_THRESHOLD = 32000.0  # Prevent hard clipping
 
 # Connection
