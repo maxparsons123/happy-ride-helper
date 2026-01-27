@@ -288,30 +288,6 @@ public static class AudioCodecs
 
     #endregion
 
-    #region Byte/Short Conversion Helpers
-
-    /// <summary>
-    /// Convert byte array to short array (little-endian PCM16).
-    /// </summary>
-    public static short[] BytesToShorts(byte[] bytes)
-    {
-        var shorts = new short[bytes.Length / 2];
-        Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
-        return shorts;
-    }
-
-    /// <summary>
-    /// Convert short array to byte array (little-endian PCM16).
-    /// </summary>
-    public static byte[] ShortsToBytes(short[] shorts)
-    {
-        var bytes = new byte[shorts.Length * 2];
-        Buffer.BlockCopy(shorts, 0, bytes, 0, bytes.Length);
-        return bytes;
-    }
-
-    #endregion
-
     public static void ResetAllCodecs()
     {
         ResetOpus();
