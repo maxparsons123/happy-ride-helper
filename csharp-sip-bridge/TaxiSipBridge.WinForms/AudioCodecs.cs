@@ -398,9 +398,9 @@ public static class AudioCodecs
     #region Opus Codec
 
     public const int OPUS_SAMPLE_RATE = 48000;
-    // NOTE: Many SIP endpoints advertise Opus as stereo (opus/48000/2).
-    // We negotiate 2 channels and can duplicate mono to stereo for compatibility.
-    public const int OPUS_CHANNELS = 2;
+    // Use mono encoding internally - the stereo SDP negotiation is for compatibility,
+    // but we send mono audio which decoders handle fine
+    public const int OPUS_CHANNELS = 1;
     public const int OPUS_BITRATE = 32000;
     public const int OPUS_FRAME_SIZE_MS = 20;
     public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
@@ -414,39 +414,31 @@ public static class AudioCodecs
     {
         lock (_opusEncoderLock)
         {
+            // Use mono encoder - works fine even with stereo SDP negotiation
             _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
             _opusEncoder.Bitrate = OPUS_BITRATE;
 
-            int requiredSamples = OPUS_FRAME_SIZE * OPUS_CHANNELS; // 1920 for stereo
-            short[] frame;
-
-            if (pcm.Length == requiredSamples)
-            {
-                // Already correct size (interleaved stereo)
-                frame = pcm;
-            }
-            else if (pcm.Length == OPUS_FRAME_SIZE)
-            {
-                // Mono input - duplicate to interleaved stereo
-                frame = new short[requiredSamples];
-                for (int i = 0; i < OPUS_FRAME_SIZE; i++)
-                {
-                    frame[i * 2] = pcm[i];     // Left
-                    frame[i * 2 + 1] = pcm[i]; // Right
-                }
-            }
-            else
-            {
-                // Wrong size - pad or truncate
-                frame = new short[requiredSamples];
-                Array.Copy(pcm, frame, Math.Min(pcm.Length, requiredSamples));
-            }
+            // Expect 960 mono samples for 20ms frame at 48kHz
+            short[] frame = pcm.Length == OPUS_FRAME_SIZE ? pcm : new short[OPUS_FRAME_SIZE];
+            if (pcm.Length != OPUS_FRAME_SIZE)
+                Array.Copy(pcm, frame, Math.Min(pcm.Length, OPUS_FRAME_SIZE));
 
             byte[] outBuf = new byte[1275];
             int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
             byte[] result = new byte[len];
             Array.Copy(outBuf, result, len);
             return result;
+        }
+    }
+
+    public static short[] OpusDecode(byte[] encoded)
+    {
+        lock (_opusDecoderLock)
+        {
+            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
+            short[] outBuf = new short[OPUS_FRAME_SIZE];
+            int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
+            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
         }
     }
 
@@ -572,11 +564,14 @@ public class UnifiedAudioEncoder : IAudioEncoder
 
     // NOTE: Opus is a dynamic RTP payload. Different SIP endpoints commonly advertise
     // different payload types (e.g. 106, 111). We include both to maximize interoperability.
+    // SDP format uses 2 channels for compatibility, but encoder uses mono internally.
+    private const int SDP_OPUS_CHANNELS = 2;
+    
     private static readonly AudioFormat OpusFormat106 = new AudioFormat(
-        AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+        AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus");
 
     private static readonly AudioFormat OpusFormat111 = new AudioFormat(
-        AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, AudioCodecs.OPUS_CHANNELS, "opus");
+        AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus");
 
     private static readonly AudioFormat G722Format = new AudioFormat(
         AudioCodecsEnum.G722, 9, AudioCodecs.G722_SAMPLE_RATE, 1, "G722");
