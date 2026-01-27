@@ -564,8 +564,9 @@ public class SipOpenAIBridge : IDisposable
                 var pcm48 = AudioCodecs.OpusDecode(payload);
 
                 // Downmix stereo (interleaved) to mono for the AI.
+                // Decoder returns stereo when OPUS_DECODE_CHANNELS == 2
                 short[] mono;
-                if (AudioCodecs.OPUS_CHANNELS == 2 && pcm48.Length % 2 == 0)
+                if (AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
                 {
                     mono = new short[pcm48.Length / 2];
                     for (int i = 0, j = 0; i < pcm48.Length; i += 2, j++)
