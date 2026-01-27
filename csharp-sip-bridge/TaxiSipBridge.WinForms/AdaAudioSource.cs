@@ -295,6 +295,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     /// <summary>
     /// Stateful linear interpolation resampler (24kHz → target rate).
+    /// Uses exact 2x upsample for 24kHz→48kHz to avoid boundary glitches.
     /// </summary>
     private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
     {
@@ -306,6 +307,41 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         var output = new short[outputLen];
+
+        // Special case: exact 2x upsample (24kHz → 48kHz) - no phase drift
+        if (toRate == fromRate * 2)
+        {
+            for (int i = 0; i < outputLen; i++)
+            {
+                int srcIdx = i / 2;
+                bool isInterpolated = (i % 2) == 1;
+
+                if (srcIdx >= input.Length)
+                {
+                    // Past end - hold last sample
+                    output[i] = input.Length > 0 ? input[^1] : (short)0;
+                }
+                else if (isInterpolated)
+                {
+                    // Interpolate between current and next (or hold if at end)
+                    short s0 = input[srcIdx];
+                    short s1 = (srcIdx + 1 < input.Length) ? input[srcIdx + 1] : s0;
+                    output[i] = (short)((s0 + s1) / 2);
+                }
+                else
+                {
+                    // Direct copy
+                    output[i] = input[srcIdx];
+                }
+            }
+            
+            if (input.Length > 0)
+                _lastInputSample = input[^1];
+            
+            return output;
+        }
+
+        // General case: stateful linear interpolation
         double ratio = (double)fromRate / toRate;
 
         for (int i = 0; i < outputLen; i++)
