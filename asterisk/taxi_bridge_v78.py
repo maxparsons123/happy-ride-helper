@@ -460,13 +460,21 @@ class TaxiBridge:
         old_codec = self.state.ast_codec
 
         # Decide best codec/rate based on what we've observed so far.
-        # Prefer slin16 if we saw 640 at least once, OR if FORCE_SLIN16 is enabled.
+        # FORCE_SLIN16 override: if enabled, treat ANY 320-byte frame as 16kHz (10ms)
+        # This handles the case where Asterisk dialplan sets slin16 but sends 320-byte packets
         decided_codec: str
         decided_rate: int
-        if self.state.seen_640 or (FORCE_SLIN16 and self.state.seen_320 and not self.state.seen_160):
+        if self.state.seen_640:
+            # 640 bytes = 20ms @ 16kHz, unambiguously slin16
+            decided_codec = "slin16"
+            decided_rate = RATE_SLIN16
+        elif FORCE_SLIN16 and self.state.seen_320:
+            # FORCE_SLIN16 mode: treat 320 bytes as 10ms @ 16kHz (not 20ms @ 8kHz)
+            # This is the intended setting when Asterisk uses CHANNEL(audioformat)=slin16
             decided_codec = "slin16"
             decided_rate = RATE_SLIN16
         elif self.state.seen_320:
+            # Normal mode: 320 bytes = 20ms @ 8kHz
             decided_codec = "slin"
             decided_rate = RATE_SLIN
         elif self.state.seen_160:
