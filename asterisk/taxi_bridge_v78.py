@@ -844,40 +844,48 @@ class TaxiBridge:
                         await self._detect_format(msg_len, payload)
 
                     # If we keep seeing ambiguous 320-byte PCM frames, infer true sample rate
-                    # from the frame cadence and lock it to avoid slow/fast audio.
+                    # from the observed cadence and lock it to avoid slow/fast audio.
+                    #
+                    # Note: Even with FORCE_SLIN16 enabled, some AudioSocket installs still
+                    # effectively run 8kHz framing (320B every ~20ms). In that case, treating
+                    # 320B as slin16 causes Ada playback to be half-speed.
                     if (
-                        not FORCE_SLIN16
-                        and not self.state.timing_inferred
+                        not self.state.timing_inferred
                         and self.state.ast_codec in ("slin16", "slin")
                         and msg_len == 320
-                        and len(self.state.audio_dt_ms) >= 10
+                        and len(self.state.audio_dt_ms) >= 15
                     ):
-                        dts = sorted(self.state.audio_dt_ms)
-                        median_ms = dts[len(dts) // 2]
-                        # ~20ms cadence => 8kHz 20ms frames; ~10ms cadence => 16kHz 10ms frames
-                        inferred_codec = "slin" if median_ms >= 15.0 else "slin16"
-                        inferred_rate = RATE_SLIN if inferred_codec == "slin" else RATE_SLIN16
-                        if (self.state.ast_codec, self.state.ast_rate) != (inferred_codec, inferred_rate):
-                            self.state.ast_codec = inferred_codec
-                            self.state.ast_rate = inferred_rate
-                            self.state.ast_frame_bytes = 320
-                            self.state.format_locked = True
-                            self.state.format_lock_time = time.time()
-                            logger.warning(
-                                "[%s] ⏱️ Inferred 320B cadence median=%.1fms → %s@%dHz (locking)",
-                                self.state.call_id,
-                                median_ms,
-                                inferred_codec,
-                                inferred_rate,
-                            )
-                            if self.ws and self.state.ws_connected:
-                                await self.ws.send(json.dumps({
-                                    "type": "update_format",
-                                    "call_id": self.state.call_id,
-                                    "inbound_format": inferred_codec,
-                                    "inbound_sample_rate": inferred_rate,
-                                }))
-                        self.state.timing_inferred = True
+                        # TCP reads can be bursty; ignore extreme outliers.
+                        dts = [dt for dt in self.state.audio_dt_ms if 3.0 <= dt <= 40.0]
+                        if len(dts) >= 10:
+                            dts.sort()
+                            median_ms = dts[len(dts) // 2]
+                            # ~20ms cadence => 8kHz 20ms frames; ~10ms cadence => 16kHz 10ms frames
+                            inferred_codec = "slin" if median_ms >= 15.0 else "slin16"
+                            inferred_rate = RATE_SLIN if inferred_codec == "slin" else RATE_SLIN16
+
+                            self.state.timing_inferred = True
+
+                            if (self.state.ast_codec, self.state.ast_rate) != (inferred_codec, inferred_rate):
+                                self.state.ast_codec = inferred_codec
+                                self.state.ast_rate = inferred_rate
+                                self.state.ast_frame_bytes = 320
+                                self.state.format_locked = True
+                                self.state.format_lock_time = time.time()
+                                logger.warning(
+                                    "[%s] ⏱️ Inferred 320B cadence median=%.1fms → %s@%dHz (locking)",
+                                    self.state.call_id,
+                                    median_ms,
+                                    inferred_codec,
+                                    inferred_rate,
+                                )
+                                if self.ws and self.state.ws_connected:
+                                    await self.ws.send(json.dumps({
+                                        "type": "update_format",
+                                        "call_id": self.state.call_id,
+                                        "inbound_format": inferred_codec,
+                                        "inbound_sample_rate": inferred_rate,
+                                    }))
 
                     is_high_quality = self.state.ast_codec in ("slin16", "opus")
                     if self.state.ast_codec == "opus":
@@ -1014,10 +1022,16 @@ class TaxiBridge:
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # Determine frame size based on codec
-                out_frame_bytes = (
-                    SLIN16_OUT_FRAME_BYTES if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
-                )
+                # Determine frame size based on codec.
+                # For slin16, prefer matching whatever framing Asterisk is actually sending us
+                # (320B=10ms @16k, 640B=20ms @16k). Mismatching cadence here is a common cause
+                # of half-speed playback.
+                if self.state.ast_codec == "slin16" and self.state.ast_frame_bytes in (320, 640):
+                    out_frame_bytes = self.state.ast_frame_bytes
+                else:
+                    out_frame_bytes = (
+                        SLIN16_OUT_FRAME_BYTES if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
+                    )
                 
                 # Calculate frame duration in ms based on codec/rate
                 if self.state.ast_codec == "opus":
