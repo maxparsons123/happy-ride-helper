@@ -264,18 +264,19 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming for wideband codecs (Opus 48kHz) - always enabled
-            if (!_jitterBufferFilled && targetRate >= 48000)
+            // Jitter buffer priming for ALL codecs to prevent early underruns
+            // OpenAI sends audio in bursts - need buffer before starting playback
+            if (!_jitterBufferFilled)
             {
-                // Buffer 100ms (5 frames) before starting playback for Opus
-                int minFrames = 5;
+                // Buffer frames before starting: 100ms for Opus, 60ms for narrowband
+                int minFrames = targetRate >= 48000 ? 5 : 3; // 5 frames (100ms) for 48kHz, 3 frames (60ms) for 8kHz
                 if (_pcmQueue.Count < minFrames)
                 {
                     SendSilence();
                     return;
                 }
                 _jitterBufferFilled = true;
-                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Opus jitter buffer primed ({_pcmQueue.Count} frames, 100ms)");
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed: {_pcmQueue.Count} frames @ {targetRate}Hz");
             }
 
             if (_pcmQueue.TryDequeue(out var pcm24))
