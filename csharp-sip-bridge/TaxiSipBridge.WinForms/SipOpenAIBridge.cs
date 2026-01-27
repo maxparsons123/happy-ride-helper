@@ -297,8 +297,8 @@ public class SipOpenAIBridge : IDisposable
 
             // Force Opus negotiation - always offer Opus first regardless of remote SDP
             // This may be rejected by endpoints that don't support Opus
-            // NOTE: bellen.dcota.nl rejects Opus with 406 AudioIncompatible - carrier doesn't support it
-            bool forceOpus = false;  // DISABLED: Carrier doesn't support Opus
+            // Now using MONO Opus (ch=1) for better carrier compatibility
+            bool forceOpus = true;  // ENABLED: Force Opus 48kHz mono
             bool forceNarrowband = false; // Set to true to force PCMU
             
             if (forceOpus && !forceNarrowband)

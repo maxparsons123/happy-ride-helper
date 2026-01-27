@@ -500,8 +500,8 @@ public class UnifiedAudioEncoder : IAudioEncoder
 {
     private readonly AudioEncoder _baseEncoder;
 
-    // SDP uses 2 channels for Opus compatibility, but encoder uses mono internally
-    private const int SDP_OPUS_CHANNELS = 2;
+    // Use mono Opus for better SIP carrier compatibility (many reject stereo)
+    private const int SDP_OPUS_CHANNELS = 1;
     
     private static readonly AudioFormat OpusFormat106 = new AudioFormat(
         AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus");
