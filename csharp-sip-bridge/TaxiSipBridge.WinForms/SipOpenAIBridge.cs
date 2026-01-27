@@ -295,9 +295,18 @@ public class SipOpenAIBridge : IDisposable
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
-            // Re-enabled Opus negotiation for debugging
+            // Force Opus negotiation - always offer Opus first regardless of remote SDP
+            // This may be rejected by endpoints that don't support Opus
+            bool forceOpus = true;  // ENABLED: Force Opus 48kHz for best quality
             bool forceNarrowband = false; // Set to true to force PCMU
-            if (!forceNarrowband && remoteOffersOpus)
+            
+            if (forceOpus && !forceNarrowband)
+            {
+                // Force Opus with standard PT 111 (dynamic payload type)
+                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
+                Log($"🎯 [{_currentCallId}] FORCING Opus 48kHz (ignoring remote offer)");
+            }
+            else if (!forceNarrowband && remoteOffersOpus)
             {
                 // IMPORTANT: Only answer with the *exact* Opus payload type the remote offered.
                 // Offering additional dynamic PTs (e.g. 111) in an answer can cause the remote to reject.
