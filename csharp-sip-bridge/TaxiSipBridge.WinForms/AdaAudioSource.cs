@@ -46,6 +46,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _needsFadeIn = true;
     private bool _isFirstPacket = true;
     private volatile bool _disposed;
+    private bool _enableFadeIn = true;      // Enable fade-in processing
     
     // DSP control flags
     private bool _bypassDsp = false;        // Use edge function DSP
@@ -278,17 +279,18 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             // Jitter buffer priming for ALL codecs to prevent early underruns
             // OpenAI sends audio in bursts - need buffer before starting playback
+            // INCREASED: 8 frames (160ms) to prevent audio sounding too fast
             if (!_jitterBufferFilled)
             {
-                // Buffer frames before starting: 100ms for Opus, 60ms for narrowband
-                int minFrames = targetRate >= 48000 ? 5 : 3; // 5 frames (100ms) for 48kHz, 3 frames (60ms) for 8kHz
+                // Buffer 8 frames (160ms) minimum for stable playback timing
+                int minFrames = 8;
                 if (_pcmQueue.Count < minFrames)
                 {
                     SendSilence();
                     return;
                 }
                 _jitterBufferFilled = true;
-                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed: {_pcmQueue.Count} frames @ {targetRate}Hz");
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed: {_pcmQueue.Count} frames (160ms) @ {targetRate}Hz");
             }
 
             if (_pcmQueue.TryDequeue(out var pcm24))

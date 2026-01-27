@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -30,11 +31,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
     
-    // Pre-emphasis for telephony clarity (matches edge function)
-    private const float PRE_EMPHASIS_COEFF = 0.95f;
-    private short _lastSample = 0;
-    private short _lastInboundSample8k = 0;  // State for 8kHz pre-emphasis
-    private short _lastInboundSampleHd = 0;  // State for wideband pre-emphasis
+    // DSP processor for high-quality inbound audio (ported from Python bridge)
+    private readonly AudioDsp _audioDsp = new();
     private int _audioPacketsSent = 0;
     
     // Session state
@@ -177,31 +175,25 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
+        var pcm8kBytes = AudioCodecs.ShortsToBytes(pcm8k);
         
-        // Apply pre-emphasis for consonant clarity (matches edge function)
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            short current = pcm8k[i];
-            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
-            _lastSample = current;
-        }
+        // Apply full DSP pipeline (high-pass, volume boost, AGC, pre-emphasis, soft clip)
+        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcm8kBytes, isHighQuality: false);
         
-        // Volume boost for telephony - INCREASED to 2.5x for better VAD detection
-        // Telephony audio is often very quiet compared to desktop mics
-        for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
+        // Log DSP gain on first few packets
+        if (_audioPacketsSent < 3)
+            Log($"📊 µ-law DSP gain: {gain:F1}x for inbound audio");
         
         // Resample 8kHz → 24kHz
-        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
+        var processedPcm8k = AudioCodecs.BytesToShorts(processedBytes);
+        var pcm24k = AudioCodecs.Resample(processedPcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
-        // durationMs = (bytes / 8000) * 1000
         var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
         _inputBufferedMs += durationMs;
 
-        // Send as JSON text (matches edge function expectation)
-        // Edge function expects: { type: "input_audio_buffer.append", audio: "base64..." }
+        // Send as JSON text
         var base64 = Convert.ToBase64String(pcmBytes);
         var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
         
@@ -209,7 +201,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent audio #{_audioPacketsSent}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24, {base64.Length} chars base64");
+                Log($"📤 Sent µ-law #{_audioPacketsSent}: {ulawData.Length}b → {pcmBytes.Length}b PCM24 (DSP gain: {gain:F1}x)");
             
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
@@ -223,7 +215,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Send PCM16 audio at 8kHz (already decoded from µ-law via NAudio).
-    /// This matches the SIPSorcery example pattern using NAudio.Codecs.MuLawDecoder.
+    /// Uses AudioDsp for full processing pipeline (ported from Python bridge).
     /// </summary>
     public async Task SendPcm8kAsync(byte[] pcm8kBytes)
     {
@@ -237,28 +229,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Convert bytes to shorts
-        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
+        // Apply full DSP pipeline (high-pass, volume boost, AGC, pre-emphasis, soft clip)
+        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcm8kBytes, isHighQuality: false);
+        
+        // Log DSP gain on first few packets
+        if (_audioPacketsSent < 3)
+            Log($"📊 DSP gain: {gain:F1}x for inbound audio");
 
-        // Volume boost for telephony - needed for VAD detection
-        // Telephony audio is often very quiet compared to desktop mics
-        for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
-
-        // Pre-emphasis filter (0.95 coefficient) - boosts high frequencies for consonant clarity
-        // This significantly improves speech recognition accuracy
-        short prevSample = _lastInboundSample8k;
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            short current = pcm8k[i];
-            int emphasized = current - (int)(prevSample * 0.95);
-            pcm8k[i] = (short)Math.Clamp(emphasized, short.MinValue, short.MaxValue);
-            prevSample = current;
-        }
-        _lastInboundSample8k = prevSample;
+        // Convert processed bytes to shorts
+        var pcm8k = AudioCodecs.BytesToShorts(processedBytes);
 
         // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
-        // Instead of duplicating samples, interpolate between them for smoother audio
         var pcm24k = new short[pcm8k.Length * 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
@@ -287,7 +268,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
+                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24 (DSP gain: {gain:F1}x)");
 
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
@@ -311,25 +292,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Convert to samples for processing
-        var samples = AudioCodecs.BytesToShorts(pcmData);
+        // Apply full DSP pipeline for high-quality audio (Opus, etc.)
+        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcmData, isHighQuality: true);
+        
+        // Log DSP gain on first few packets
+        if (_audioPacketsSent < 3)
+            Log($"📊 HD DSP gain: {gain:F1}x for inbound audio");
 
-        // CRITICAL: Apply 2.5x volume boost for telephony VAD sensitivity
-        // Same as SendPcm8kAsync - without this, OpenAI VAD won't trigger!
-        for (int i = 0; i < samples.Length; i++)
-            samples[i] = (short)Math.Clamp(samples[i] * 2.5, short.MinValue, short.MaxValue);
-
-        // Pre-emphasis filter (0.95 coefficient) - boosts high frequencies for consonant clarity
-        // Apply before resampling for best quality
-        short prevSample = _lastInboundSampleHd;
-        for (int i = 0; i < samples.Length; i++)
-        {
-            short current = samples[i];
-            int emphasized = current - (int)(prevSample * 0.95);
-            samples[i] = (short)Math.Clamp(emphasized, short.MinValue, short.MaxValue);
-            prevSample = current;
-        }
-        _lastInboundSampleHd = prevSample;
+        // Convert processed bytes to shorts for resampling
+        var samples = AudioCodecs.BytesToShorts(processedBytes);
 
         // Resample to 24kHz if needed (e.g., 48kHz Opus → 24kHz)
         short[] pcm24;
@@ -359,7 +330,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent HD audio #{_audioPacketsSent}: {sampleRate}Hz {pcmData.Length}b → 24kHz {audioToSend.Length}b");
+                Log($"📤 Sent HD audio #{_audioPacketsSent}: {sampleRate}Hz {pcmData.Length}b → 24kHz {audioToSend.Length}b (DSP gain: {gain:F1}x)");
             
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
@@ -1178,6 +1149,9 @@ Map user responses to the question you just asked:
     public async Task DisconnectAsync()
     {
         if (_disposed) return;
+        
+        // Reset DSP state for next call
+        _audioDsp.Reset();
         
         try { _cts?.Cancel(); } catch { }
 
