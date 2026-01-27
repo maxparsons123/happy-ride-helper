@@ -278,13 +278,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
         else
         {
             // Jitter buffer priming for ALL codecs to prevent early underruns
-            // OpenAI sends audio in bursts - need buffer before starting playback
-            // INCREASED: 30 frames (600ms) for maximum smoothness against stuttering
+            // OpenAI sends audio in bursts - need substantial buffer before starting playback
+            // INCREASED: 50 frames (1000ms / 1 second) to prevent mid-sentence dropouts
             if (!_jitterBufferFilled)
             {
-                // Buffer 30 frames (600ms) minimum for stable playback timing
-                // Higher buffer = more latency but smoother audio
-                int minFrames = 30;
+                // Buffer 50 frames (1 second) minimum for stable playback timing
+                // Higher buffer = more latency but eliminates mid-sentence stuttering
+                int minFrames = 50;
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -319,11 +319,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns++;
 
-                if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled && _consecutiveUnderruns > 10)
+                // Aggressive re-prime: if we hit 3 underruns, force buffer refill
+                // This prevents cascading dropouts from network jitter
+                if (_jitterBufferFilled && _consecutiveUnderruns >= 3)
+                {
                     _jitterBufferFilled = false;
+                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun detected ({_consecutiveUnderruns}x), re-priming buffer");
+                }
 
                 // On underrun: send silence immediately to prevent artifacts
-                // Interpolation was causing spluttering - simpler is better
                 SendSilence();
                 return;
             }
