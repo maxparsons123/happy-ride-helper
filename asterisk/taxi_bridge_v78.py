@@ -664,23 +664,8 @@ class TaxiBridge:
                     if len(trimmed) >= 9:
                         self.state.phone = trimmed
                         logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
-                
-                # Send AudioSocket handshake to request SLIN16 (16kHz) from Asterisk
-                # 0x01 = Message Type (App Approval/Handshake)
-                # 0x10 = Payload (Signed Linear 16kHz)
-                # This tells Asterisk: "I support and prefer 16kHz audio"
-                handshake = struct.pack(">BHB", 0x01, 1, 0x10)
-                self.writer.write(handshake)
-                await self.writer.drain()
-                logger.info("[%s] 📤 Handshake sent: Requesting SLIN16 (0x10)", self.state.call_id)
-                
         except asyncio.TimeoutError:
             logger.warning("[%s] ⚠️ No UUID message received, continuing without phone", self.state.call_id)
-            # Still send handshake to request 16kHz
-            handshake = struct.pack(">BHB", 0x01, 1, 0x10)
-            self.writer.write(handshake)
-            await self.writer.drain()
-            logger.info("[%s] 📤 Handshake sent (no UUID): Requesting SLIN16", self.state.call_id)
         except Exception as e:
             logger.warning("[%s] ⚠️ Error reading UUID: %s", self.state.call_id, e)
         
