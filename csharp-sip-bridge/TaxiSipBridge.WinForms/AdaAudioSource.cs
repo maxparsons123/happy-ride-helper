@@ -337,7 +337,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // For Opus stereo (ch=2), duplicate mono to interleaved stereo
         short[] frameToEncode = audioFrame;
         bool isOpusStereo = _audioFormatManager.SelectedFormat.FormatName.Equals("OPUS", StringComparison.OrdinalIgnoreCase) &&
-                           _audioFormatManager.SelectedFormat.Channels() == 2;
+                           _audioFormatManager.SelectedFormat.ChannelCount == 2;
         if (isOpusStereo)
         {
             frameToEncode = DuplicateMonoToStereo(audioFrame);
@@ -570,7 +570,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             // For Opus stereo (ch=2), duplicate mono to interleaved stereo
             short[] frameToEncode = silence;
             bool isOpusStereo = _audioFormatManager.SelectedFormat.FormatName.Equals("OPUS", StringComparison.OrdinalIgnoreCase) &&
-                               _audioFormatManager.SelectedFormat.Channels() == 2;
+                               _audioFormatManager.SelectedFormat.ChannelCount == 2;
             if (isOpusStereo)
             {
                 frameToEncode = DuplicateMonoToStereo(silence);
