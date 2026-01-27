@@ -260,7 +260,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 _consecutiveUnderruns = 0;
 
                 // 1. Volume boost
-                ApplyVolumeBoost(pcm24, VOLUME_BOOST);
+                // Keep telephony codecs loud, but avoid over-driving wideband (Opus/G722),
+                // which can cause crackling from constant limiting.
+                float boost = IsNarrowbandCodec(_audioFormatManager.SelectedFormat) ? VOLUME_BOOST : 1.0f;
+                ApplyVolumeBoost(pcm24, boost);
 
                 // 2. Resample 24kHz → targetRate using simple linear interpolation
                 audioFrame = ResampleLinear(pcm24, 24000, targetRate, samplesNeeded);
@@ -268,8 +271,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 // Log first frame to confirm audio is being processed
                 if (_sentFrames < 5)
                 {
-                    short peak = 0;
-                    foreach (var s in audioFrame) if (Math.Abs(s) > peak) peak = (short)Math.Abs(s);
+                    int peak = 0;
+                    foreach (short s in audioFrame)
+                    {
+                        // IMPORTANT: Math.Abs(short) throws for -32768.
+                        int abs = s == short.MinValue ? 32768 : Math.Abs((int)s);
+                        if (abs > peak) peak = abs;
+                    }
                     OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}");
                 }
 
@@ -446,7 +454,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         float peak = 0;
         foreach (var s in samples)
         {
-            float abs = Math.Abs(s);
+            // IMPORTANT: Math.Abs(short) throws for -32768.
+            float abs = s == short.MinValue ? 32768f : Math.Abs((float)s);
             if (abs > peak) peak = abs;
         }
 
