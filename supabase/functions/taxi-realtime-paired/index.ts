@@ -1034,8 +1034,11 @@ const FALLBACK_QUOTE_TIMEOUT_MS = 4000;
 const FALLBACK_QUOTE_FARE = "£12.50";
 const FALLBACK_QUOTE_ETA = "6 minutes";
 
-// While Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off
-const ASSISTANT_LEADIN_IGNORE_MS = 700;
+// While Ada is speaking, we used to ignore the first slice of inbound audio.
+// That can chop off the start of short utterances (e.g. house number like "52A")
+// if the caller replies quickly, causing Ada to re-ask.
+// Keep a *small* lead-in window and only skip frames that are effectively silence.
+const ASSISTANT_LEADIN_IGNORE_MS = 200;
 
 // RMS thresholds for audio quality
 // NOTE: Telephony audio can have extremely low RMS (even ~1-50) depending on trunk/codecs.
@@ -5407,14 +5410,19 @@ Do NOT skip any part. Say ALL of it warmly.]`
         }
 
         if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-          // RMS-based barge-in detection: only forward audio that sounds like real speech
-          // If Ada is speaking, ignore the first slice of inbound audio to avoid echo/noise cutting her off,
-          // then require RMS within a sane window to be treated as a real barge-in.
+          // RMS-based filtering (while Ada is speaking):
+          // We still want to capture the user's speech for STT even if they talk over Ada,
+          // but we should avoid forwarding pure echo/noise.
           if (sessionState.openAiResponseActive) {
             const sinceSpeakStart = sessionState.openAiSpeechStartedAt
               ? (Date.now() - sessionState.openAiSpeechStartedAt)
               : 0;
-            if (sinceSpeakStart > 0 && sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS) {
+            // Only skip early frames if they are effectively silence.
+            if (
+              sinceSpeakStart > 0 &&
+              sinceSpeakStart < ASSISTANT_LEADIN_IGNORE_MS &&
+              rms < RMS_BARGE_IN_MIN
+            ) {
               audioDiag.packetsSkippedBotSpeaking++;
               return;
             }
