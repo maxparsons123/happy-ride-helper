@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Taxi AI Asterisk Bridge v7.8 - AUDIO QUALITY UPGRADE
+
 Architecture:
-Asterisk AudioSocket ←→ Bridge ←→ Edge Function (taxi-realtime-paired)
+  Asterisk AudioSocket <-> Bridge <-> Edge Function (taxi-realtime-paired)
+
 Key Features:
-• Opus @ 64kbps for WhatsApp native 48kHz audio (higher fidelity)
-• Noise gate + adaptive pre-emphasis + soft clipping
-• Dynamic DSP: skip processing for clean slin16/opus inputs
-• High-quality resample_poly for all paths
-• Session handoff, bounded queues, diagnostics
+  - Opus @ 64kbps for WhatsApp native 48kHz audio (higher fidelity)
+  - Noise gate + adaptive pre-emphasis + soft clipping
+  - Dynamic DSP: skip processing for clean slin16/opus inputs
+  - High-quality resample_poly for all paths
+  - Session handoff, bounded queues, diagnostics
 """
 import asyncio
 import base64
