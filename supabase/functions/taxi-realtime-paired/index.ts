@@ -8,7 +8,7 @@
  */
 
 // VERSION: Spoken at start of call for identification
-const VERSION = "Paired 2.3";
+const VERSION = "Paired 2.4";
 
 // ---------------------------------------------------------------------------
 // STT Echo/Garbage Detection
@@ -661,10 +661,14 @@ IF USER SAYS NO:
 2. Ask if there's anything else you can help with
 3. If user says no again, say goodbye and call end_call()
 
-# CANCELLATION
-If user says "cancel", "never mind", "forget it":
-→ CALL cancel_booking
-Ask if there's anything else you can help with.
+# CANCELLATION (STRICT RULES)
+ONLY call cancel_booking when user says EXPLICIT cancel phrases:
+- "cancel", "cancel it", "cancel the booking"
+- "never mind", "forget it", "no thanks", "no thank you"
+🚫 NEVER call cancel_booking for:
+- "yes", "yeah", "that's correct", "right", "correct", "sounds good"
+- Confirming passengers, addresses, or other booking details
+→ After cancelling, ask if there's anything else you can help with.
 
 # NAME HANDLING
 If caller says their name → CALL save_customer_name
@@ -733,7 +737,7 @@ const TOOLS = [
   {
     type: "function",
     name: "cancel_booking",
-    description: "Cancel active booking.",
+    description: "ONLY call this when user EXPLICITLY says 'cancel', 'never mind', 'forget it', or 'no thanks'. Do NOT call for confirmations like 'yes', 'that's correct', 'right', etc.",
     parameters: { type: "object", properties: {} }
   },
   {
