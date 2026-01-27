@@ -120,10 +120,10 @@ SOFT_CLIP_THRESHOLD = 32000.0  # Prevent hard clipping
 OUTBOUND_VOLUME_BOOST = 2.5    # Boost Ada's voice to caller
 
 # slin16 playback framing
-# Many AudioSocket setups effectively play at a fixed 20ms cadence. For slin16@16kHz,
-# 20ms of PCM16 mono is 640 bytes. Sending 320B (10ms) frames can be played as 20ms,
-# which makes Ada sound *very slow*.
-SLIN16_OUT_FRAME_BYTES = int(os.environ.get("SLIN16_OUT_FRAME_BYTES", 640))
+# AudioSocket typically uses 10ms frame cadence. For slin16@16kHz:
+# - 10ms = 160 samples = 320 bytes (PCM16 mono)
+# Sending 640B frames when Asterisk expects 320B causes 2x slow playback.
+SLIN16_OUT_FRAME_BYTES = int(os.environ.get("SLIN16_OUT_FRAME_BYTES", 320))
 
 # Connection
 MAX_RECONNECT_ATTEMPTS = 5
@@ -1000,12 +1000,13 @@ class TaxiBridge:
 
     async def queue_to_asterisk(self) -> None:
         """
-        Fixed-interval pacing: Send frames at exact wall-clock intervals to prevent
-        audio playing too fast. Uses a frame-counter approach instead of bytes-based pacing.
+        Wall-clock pacing with accumulation: Track elapsed time and send frames
+        at proper intervals. Accumulate partial frames instead of inserting silence gaps.
         """
+        start_time = time.time()
+        frames_sent = 0
         buffer = bytearray()
         policy_logged = False
-        frame_count = 0
         
         try:
             while self.running:
@@ -1014,7 +1015,6 @@ class TaxiBridge:
                     buffer.extend(self.audio_queue.popleft())
 
                 # Determine frame size based on codec
-                # For slin16, use 640B (20ms) frames to match Asterisk's playback timing
                 out_frame_bytes = (
                     SLIN16_OUT_FRAME_BYTES if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
                 )
@@ -1023,7 +1023,6 @@ class TaxiBridge:
                 if self.state.ast_codec == "opus":
                     frame_duration_ms = OPUS_FRAME_MS  # 20ms
                 elif self.state.ast_codec == "ulaw":
-                    # ulaw: 1 byte per sample @ 8kHz
                     frame_duration_ms = (out_frame_bytes * 1000) // self.state.ast_rate
                 else:
                     # PCM16: 2 bytes per sample
@@ -1040,14 +1039,16 @@ class TaxiBridge:
                     )
                     policy_logged = True
 
-                # FIXED INTERVAL PACING: Sleep for frame duration FIRST, then send
-                # This ensures we never send faster than real-time
-                await asyncio.sleep(frame_duration_ms / 1000.0)
+                # Wall-clock pacing: Calculate when next frame should be sent
+                next_frame_time = start_time + (frames_sent * frame_duration_ms / 1000.0)
+                delay = next_frame_time - time.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 
                 if not self.running:
                     break
                 
-                # Now prepare and send the frame
+                # Prepare frame to send
                 if self.state.ast_codec == "opus":
                     if len(buffer) > 0:
                         chunk = bytes(buffer)
@@ -1061,11 +1062,16 @@ class TaxiBridge:
                         self.state.keepalive_count += 1
                 else:
                     if len(buffer) >= out_frame_bytes:
+                        # Have enough data - send a full frame
                         chunk = bytes(buffer[:out_frame_bytes])
                         del buffer[:out_frame_bytes]
+                    elif len(buffer) > 0:
+                        # Partial frame - wait briefly for more data to accumulate
+                        # This prevents gaps that cause slow audio
+                        await asyncio.sleep(0.005)
+                        continue  # Don't increment frames_sent, retry
                     else:
-                        # Not enough data for a full frame - send silence to maintain timing
-                        # (accumulating causes audio to play fast when burst arrives)
+                        # No data at all - send silence to keep connection alive
                         chunk = self._silence_frame(out_frame_bytes)
                         self.state.keepalive_count += 1
                 
@@ -1073,7 +1079,7 @@ class TaxiBridge:
                     frame = struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk
                     self.writer.write(frame)
                     await self.writer.drain()
-                    frame_count += 1
+                    frames_sent += 1
                     self.state.last_asterisk_send = time.time()
                 except (BrokenPipeError, ConnectionResetError, OSError) as e:
                     logger.warning("[%s] 🔌 Asterisk pipe closed: %s", self.state.call_id, e)
