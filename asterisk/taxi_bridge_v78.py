@@ -992,7 +992,7 @@ async def main() -> None:
         f"   Endpoint:  {WS_URL.split('/')[-1]}",
         f"   Opus:      {opus_status} @ {OPUS_BITRATE//1000}kbps",
         f"   ForceOpus: {'✅ on' if FORCE_OPUS else 'off'}",
-        f"   Force16k:  {'on' if FORCE_SLIN16 else 'off'}",
+        f"   Force16k:  {'✅ on' if FORCE_SLIN16 else '❌ off'}",
         f"   DSP:       noise_gate + adaptive pre-emph + soft clip",
         f"   Reconnect: {MAX_RECONNECT_ATTEMPTS} attempts",
     ]
