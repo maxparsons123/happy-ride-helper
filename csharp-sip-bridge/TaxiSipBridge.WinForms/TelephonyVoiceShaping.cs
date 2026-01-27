@@ -4,44 +4,67 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Light DSP shaping to make TTS sound more natural on G.711 telephony.
-/// Optimized for Balanced + Sapphire voice.
+/// Tuned for Sapphire voice, SIP G.711, Balanced mode.
 /// </summary>
 public static class TelephonyVoiceShaping
 {
-    // === Tunables (good defaults for Sapphire on phone) ==================
+    // ===== Tuned for Sapphire, SIP G.711, Balanced =====
     
-    // Parametric EQ peaking filter (warmth boost)
-    private const float EQ_GAIN_DB = 2.5f;      // +2.5dB warmth boost
-    private const float EQ_FREQ = 800f;         // 800 Hz (low-mid warmth)
-    private const float EQ_Q = 1.0f;            // moderately wide Q
+    // EQ1 - Warmth
+    private const float EQ1_GAIN_DB = 1.5f;
+    private const float EQ1_FREQ = 800f;
+    private const float EQ1_Q = 1.3f;
 
-    // High-shelf EQ (de-esser / sibilance reduction)
-    private const float HS_GAIN_DB = -3.0f;     // -3dB high cut (reduce lisp)
-    private const float HS_FREQ = 2800f;        // 2.8kHz shelf frequency
-    private const float HS_S = 0.7f;            // shelf slope
+    // EQ2 - Presence (anti-lisp)
+    private const float EQ2_GAIN_DB = 1.0f;
+    private const float EQ2_FREQ = 2200f;
+    private const float EQ2_Q = 1.2f;
 
     // Compressor
-    private const float COMP_THRESHOLD_DB = -18f;
+    private const float COMP_THRESH_DB = -18f;
     private const float COMP_RATIO = 2.0f;
-    private const float COMP_MAKEUP_DB = 3f;
+    private const float COMP_MAKEUP_DB = 1.5f;
 
-    // Output safety (avoid clipping before A-law)
-    private const float OUTPUT_SAFETY_GAIN = 0.85f;
-    private const float SAMPLE_RATE = 8000f; // shaping done at 8k before PCMA
+    // Output safety
+    private const float OUTPUT_SAFETY = 0.88f;
+    private const float SR = 8000f;
 
-    // Parametric EQ state (warmth boost)
-    private static float eq_b0, eq_b1, eq_b2, eq_a1, eq_a2;
-    private static float eq_x1, eq_x2, eq_y1, eq_y2;
-    private static bool eqInitialized = false;
-
-    // High-shelf EQ state (de-esser)
-    private static float hs_b0, hs_b1, hs_b2, hs_a1, hs_a2;
-    private static float hs_x1, hs_x2, hs_y1, hs_y2;
-    private static bool hsInitialized = false;
+    // Biquad states (two filters, peaking)
+    private static float[] x1 = new float[2], x2 = new float[2], y1 = new float[2], y2 = new float[2];
+    private static float[] b0 = new float[2], b1 = new float[2], b2 = new float[2], a1 = new float[2], a2 = new float[2];
+    private static bool coeffsInit = false;
     private static readonly object _lock = new object();
 
-    // Compressor helper
-    private static float DbToLin(float db) => (float)Math.Pow(10.0, db / 20.0);
+    private static float DbToLin(float db) => (float)Math.Pow(10, db / 20.0);
+
+    private static void Init()
+    {
+        if (coeffsInit) return;
+        coeffsInit = true;
+        SetupPeak(0, EQ1_GAIN_DB, EQ1_FREQ, EQ1_Q);
+        SetupPeak(1, EQ2_GAIN_DB, EQ2_FREQ, EQ2_Q);
+    }
+
+    private static void SetupPeak(int i, float gainDb, float freq, float Q)
+    {
+        float A = DbToLin(gainDb);
+        float w0 = 2f * (float)Math.PI * freq / SR;
+        float alpha = (float)Math.Sin(w0) / (2f * Q);
+        float cosw = (float)Math.Cos(w0);
+
+        float bb0 = 1f + alpha * A;
+        float bb1 = -2f * cosw;
+        float bb2 = 1f - alpha * A;
+        float aa0 = 1f + alpha / A;
+        float aa1 = -2f * cosw;
+        float aa2 = 1f - alpha / A;
+
+        b0[i] = bb0 / aa0;
+        b1[i] = bb1 / aa0;
+        b2[i] = bb2 / aa0;
+        a1[i] = aa1 / aa0;
+        a2[i] = aa2 / aa0;
+    }
 
     /// <summary>
     /// Apply EQ + compression + safety gain to 8kHz PCM16 audio.
@@ -53,156 +76,58 @@ public static class TelephonyVoiceShaping
 
         lock (_lock)
         {
-            InitEQ();
-            InitHighShelf();
+            Init();
 
-            // Convert to float -1..1
             float[] buf = new float[pcm.Length];
             for (int i = 0; i < pcm.Length; i++)
                 buf[i] = pcm[i] / 32768f;
 
-            ApplyEQ(buf);           // Warmth boost at 800Hz
-            ApplyHighShelf(buf);    // De-esser at 2.8kHz
-            ApplyCompression(buf);
-            ApplyOutputGain(buf);
+            // EQ stages
+            ApplyEQStage(buf, 0);  // Warmth at 800Hz
+            ApplyEQStage(buf, 1);  // Presence at 2.2kHz
 
-            // Convert back to short
-            short[] outShort = new short[buf.Length];
+            // Compression
+            float tLin = DbToLin(COMP_THRESH_DB);
+            float makeup = DbToLin(COMP_MAKEUP_DB);
             for (int i = 0; i < buf.Length; i++)
-                outShort[i] = (short)(Math.Clamp(buf[i], -1f, 1f) * 32767f);
-
-            return outShort;
-        }
-    }
-
-    /// <summary>
-    /// Initialize parametric bell filter (peaking EQ).
-    /// </summary>
-    private static void InitEQ()
-    {
-        if (eqInitialized) return;
-        eqInitialized = true;
-
-        float A = DbToLin(EQ_GAIN_DB);
-        float w0 = 2f * (float)Math.PI * EQ_FREQ / SAMPLE_RATE;
-        float alpha = (float)Math.Sin(w0) / (2f * EQ_Q);
-        float cosw0 = (float)Math.Cos(w0);
-
-        float b0 = 1f + alpha * A;
-        float b1 = -2f * cosw0;
-        float b2 = 1f - alpha * A;
-        float a0 = 1f + alpha / A;
-        float a1 = -2f * cosw0;
-        float a2 = 1f - alpha / A;
-
-        eq_b0 = b0 / a0;
-        eq_b1 = b1 / a0;
-        eq_b2 = b2 / a0;
-        eq_a1 = a1 / a0;
-        eq_a2 = a2 / a0;
-    }
-
-    /// <summary>
-    /// Apply parametric EQ to boost warmth region.
-    /// </summary>
-    private static void ApplyEQ(float[] buf)
-    {
-        for (int i = 0; i < buf.Length; i++)
-        {
-            float x = buf[i];
-            float y = eq_b0 * x + eq_b1 * eq_x1 + eq_b2 * eq_x2 - eq_a1 * eq_y1 - eq_a2 * eq_y2;
-
-            eq_x2 = eq_x1;
-            eq_x1 = x;
-            eq_y2 = eq_y1;
-            eq_y1 = y;
-
-            buf[i] = y;
-        }
-    }
-
-    /// <summary>
-    /// Initialize high-shelf filter for de-essing.
-    /// </summary>
-    private static void InitHighShelf()
-    {
-        if (hsInitialized) return;
-        hsInitialized = true;
-
-        float A = DbToLin(HS_GAIN_DB);
-        float w0 = 2f * (float)Math.PI * HS_FREQ / SAMPLE_RATE;
-        float cosw0 = (float)Math.Cos(w0);
-        float sinw0 = (float)Math.Sin(w0);
-        float alpha = sinw0 / 2f * (float)Math.Sqrt((A + 1f / A) * (1f / HS_S - 1f) + 2f);
-        float sqrtA = (float)Math.Sqrt(A);
-
-        float b0 = A * ((A + 1f) + (A - 1f) * cosw0 + 2f * sqrtA * alpha);
-        float b1 = -2f * A * ((A - 1f) + (A + 1f) * cosw0);
-        float b2 = A * ((A + 1f) + (A - 1f) * cosw0 - 2f * sqrtA * alpha);
-        float a0 = (A + 1f) - (A - 1f) * cosw0 + 2f * sqrtA * alpha;
-        float a1 = 2f * ((A - 1f) - (A + 1f) * cosw0);
-        float a2 = (A + 1f) - (A - 1f) * cosw0 - 2f * sqrtA * alpha;
-
-        hs_b0 = b0 / a0;
-        hs_b1 = b1 / a0;
-        hs_b2 = b2 / a0;
-        hs_a1 = a1 / a0;
-        hs_a2 = a2 / a0;
-    }
-
-    /// <summary>
-    /// Apply high-shelf EQ to reduce sibilance (de-esser).
-    /// </summary>
-    private static void ApplyHighShelf(float[] buf)
-    {
-        for (int i = 0; i < buf.Length; i++)
-        {
-            float x = buf[i];
-            float y = hs_b0 * x + hs_b1 * hs_x1 + hs_b2 * hs_x2 - hs_a1 * hs_y1 - hs_a2 * hs_y2;
-
-            hs_x2 = hs_x1;
-            hs_x1 = x;
-            hs_y2 = hs_y1;
-            hs_y1 = y;
-
-            buf[i] = y;
-        }
-    }
-
-    /// <summary>
-    /// Gentle compressor (soft knee-ish).
-    /// </summary>
-    private static void ApplyCompression(float[] buf)
-    {
-        float thresholdLin = DbToLin(COMP_THRESHOLD_DB);
-        float makeupLin = DbToLin(COMP_MAKEUP_DB);
-
-        for (int i = 0; i < buf.Length; i++)
-        {
-            float x = buf[i];
-            float ax = Math.Abs(x);
-
-            if (ax > thresholdLin)
             {
-                float over = ax / thresholdLin;
-                float dbOver = (float)(20.0 * Math.Log10(over));
-                float dbComp = dbOver / COMP_RATIO;
-                float gainDb = dbComp - dbOver;
-                float gainLin = DbToLin(gainDb);
-                x *= gainLin;
+                float x = buf[i];
+                float ax = Math.Abs(x);
+                if (ax > tLin)
+                {
+                    float over = ax / tLin;
+                    float dOver = (float)(20f * Math.Log10(over));
+                    float dComp = dOver / COMP_RATIO;
+                    float gDb = dComp - dOver;
+                    float gain = DbToLin(gDb);
+                    x *= gain;
+                }
+                buf[i] = x * makeup;
             }
 
-            buf[i] = x * makeupLin;
+            // Output safety
+            for (int i = 0; i < buf.Length; i++)
+                buf[i] *= OUTPUT_SAFETY;
+
+            // Back to short
+            short[] outPcm = new short[buf.Length];
+            for (int i = 0; i < buf.Length; i++)
+                outPcm[i] = (short)(Math.Clamp(buf[i], -1f, 1f) * 32767f);
+
+            return outPcm;
         }
     }
 
-    /// <summary>
-    /// Safety gain to avoid A-law saturation.
-    /// </summary>
-    private static void ApplyOutputGain(float[] buf)
+    private static void ApplyEQStage(float[] buf, int i)
     {
-        for (int i = 0; i < buf.Length; i++)
-            buf[i] *= OUTPUT_SAFETY_GAIN;
+        for (int n = 0; n < buf.Length; n++)
+        {
+            float x = buf[n];
+            float y = b0[i] * x + b1[i] * x1[i] + b2[i] * x2[i] - a1[i] * y1[i] - a2[i] * y2[i];
+            x2[i] = x1[i]; x1[i] = x;
+            y2[i] = y1[i]; y1[i] = y;
+            buf[n] = y;
+        }
     }
 
     /// <summary>
@@ -212,8 +137,10 @@ public static class TelephonyVoiceShaping
     {
         lock (_lock)
         {
-            eq_x1 = eq_x2 = eq_y1 = eq_y2 = 0f;
-            hs_x1 = hs_x2 = hs_y1 = hs_y2 = 0f;
+            Array.Clear(x1);
+            Array.Clear(x2);
+            Array.Clear(y1);
+            Array.Clear(y2);
         }
     }
 }
