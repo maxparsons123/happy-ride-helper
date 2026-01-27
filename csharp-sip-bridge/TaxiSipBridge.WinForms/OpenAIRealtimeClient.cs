@@ -280,7 +280,65 @@ public class OpenAIRealtimeClient : IAudioAIClient
         catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
     }
 
-    public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
+    /// <summary>
+    /// Send PCM16 audio at 8kHz WITHOUT DSP processing.
+    /// Used for A-law codec which is cleaner and doesn't need enhancement.
+    /// </summary>
+    public async Task SendPcm8kNoDspAsync(byte[] pcm8kBytes)
+    {
+        if (_disposed || _ws?.State != WebSocketState.Open) return;
+        if (_cts?.Token.IsCancellationRequested == true) return;
+
+        // Echo guard (still needed)
+        if (!_awaitingConfirmation)
+        {
+            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+                return;
+        }
+
+        // NO DSP - direct passthrough for A-law
+        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
+
+        // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
+        var pcm24k = new short[pcm8k.Length * 3];
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
+            
+            int outIdx = i * 3;
+            pcm24k[outIdx] = current;
+            pcm24k[outIdx + 1] = (short)((current * 2 + next) / 3);
+            pcm24k[outIdx + 2] = (short)((current + next * 2) / 3);
+        }
+        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+        // Fire audio monitor event
+        OnCallerAudioMonitor?.Invoke(pcmBytes);
+
+        // Track buffered audio duration
+        var sampleCount = pcm8kBytes.Length / 2;
+        var durationMs = (double)sampleCount * 1000.0 / 8000.0;
+        _inputBufferedMs += durationMs;
+
+        var base64 = Convert.ToBase64String(pcmBytes);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+
+        try
+        {
+            _audioPacketsSent++;
+            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
+                Log($"📤 Sent A-law (no DSP) #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
+
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+    }
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;

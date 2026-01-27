@@ -656,19 +656,29 @@ public class SipOpenAIBridge : IDisposable
             }
         }
 
-        // Decode µ-law to PCM16 using NAudio (matches SIPSorcery example pattern)
+        // Detect A-law (PT 8) vs µ-law (PT 0)
+        bool isAlaw = (pt == 8);
+        
+        // Decode G.711 to PCM16
         var pcm16 = new short[payload.Length];
         for (int i = 0; i < payload.Length; i++)
         {
-            pcm16[i] = NAudio.Codecs.MuLawDecoder.MuLawToLinearSample(payload[i]);
+            if (isAlaw)
+                pcm16[i] = NAudio.Codecs.ALawDecoder.ALawToLinearSample(payload[i]);
+            else
+                pcm16[i] = NAudio.Codecs.MuLawDecoder.MuLawToLinearSample(payload[i]);
         }
 
         // Convert to bytes for OpenAI (16-bit little-endian)
         var pcmBytes = new byte[pcm16.Length * 2];
         Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-        // Send PCM16 @ 8kHz to OpenAI (it will resample to 24kHz)
-        _ = _aiClient.SendPcm8kAsync(pcmBytes);
+        // A-law: bypass DSP (cleaner telephony codec, DSP causes artifacts)
+        // µ-law: apply full DSP pipeline
+        if (isAlaw)
+            _ = _aiClient.SendPcm8kNoDspAsync(pcmBytes);
+        else
+            _ = _aiClient.SendPcm8kAsync(pcmBytes);
     }
 
     private void OnAiAudioReceived(byte[] pcm24kBytes)
