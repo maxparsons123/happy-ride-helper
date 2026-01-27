@@ -10,10 +10,15 @@ public static class TelephonyVoiceShaping
 {
     // === Tunables (good defaults for Sapphire on phone) ==================
     
-    // Parametric EQ peaking filter
+    // Parametric EQ peaking filter (warmth boost)
     private const float EQ_GAIN_DB = 2.5f;      // +2.5dB warmth boost
     private const float EQ_FREQ = 800f;         // 800 Hz (low-mid warmth)
     private const float EQ_Q = 1.0f;            // moderately wide Q
+
+    // High-shelf EQ (de-esser / sibilance reduction)
+    private const float HS_GAIN_DB = -3.0f;     // -3dB high cut (reduce lisp)
+    private const float HS_FREQ = 2800f;        // 2.8kHz shelf frequency
+    private const float HS_S = 0.7f;            // shelf slope
 
     // Compressor
     private const float COMP_THRESHOLD_DB = -18f;
@@ -24,10 +29,15 @@ public static class TelephonyVoiceShaping
     private const float OUTPUT_SAFETY_GAIN = 0.85f;
     private const float SAMPLE_RATE = 8000f; // shaping done at 8k before PCMA
 
-    // Parametric EQ state
+    // Parametric EQ state (warmth boost)
     private static float eq_b0, eq_b1, eq_b2, eq_a1, eq_a2;
     private static float eq_x1, eq_x2, eq_y1, eq_y2;
     private static bool eqInitialized = false;
+
+    // High-shelf EQ state (de-esser)
+    private static float hs_b0, hs_b1, hs_b2, hs_a1, hs_a2;
+    private static float hs_x1, hs_x2, hs_y1, hs_y2;
+    private static bool hsInitialized = false;
     private static readonly object _lock = new object();
 
     // Compressor helper
@@ -44,13 +54,15 @@ public static class TelephonyVoiceShaping
         lock (_lock)
         {
             InitEQ();
+            InitHighShelf();
 
             // Convert to float -1..1
             float[] buf = new float[pcm.Length];
             for (int i = 0; i < pcm.Length; i++)
                 buf[i] = pcm[i] / 32768f;
 
-            ApplyEQ(buf);
+            ApplyEQ(buf);           // Warmth boost at 800Hz
+            ApplyHighShelf(buf);    // De-esser at 2.8kHz
             ApplyCompression(buf);
             ApplyOutputGain(buf);
 
@@ -110,6 +122,54 @@ public static class TelephonyVoiceShaping
     }
 
     /// <summary>
+    /// Initialize high-shelf filter for de-essing.
+    /// </summary>
+    private static void InitHighShelf()
+    {
+        if (hsInitialized) return;
+        hsInitialized = true;
+
+        float A = DbToLin(HS_GAIN_DB);
+        float w0 = 2f * (float)Math.PI * HS_FREQ / SAMPLE_RATE;
+        float cosw0 = (float)Math.Cos(w0);
+        float sinw0 = (float)Math.Sin(w0);
+        float alpha = sinw0 / 2f * (float)Math.Sqrt((A + 1f / A) * (1f / HS_S - 1f) + 2f);
+        float sqrtA = (float)Math.Sqrt(A);
+
+        float b0 = A * ((A + 1f) + (A - 1f) * cosw0 + 2f * sqrtA * alpha);
+        float b1 = -2f * A * ((A - 1f) + (A + 1f) * cosw0);
+        float b2 = A * ((A + 1f) + (A - 1f) * cosw0 - 2f * sqrtA * alpha);
+        float a0 = (A + 1f) - (A - 1f) * cosw0 + 2f * sqrtA * alpha;
+        float a1 = 2f * ((A - 1f) - (A + 1f) * cosw0);
+        float a2 = (A + 1f) - (A - 1f) * cosw0 - 2f * sqrtA * alpha;
+
+        hs_b0 = b0 / a0;
+        hs_b1 = b1 / a0;
+        hs_b2 = b2 / a0;
+        hs_a1 = a1 / a0;
+        hs_a2 = a2 / a0;
+    }
+
+    /// <summary>
+    /// Apply high-shelf EQ to reduce sibilance (de-esser).
+    /// </summary>
+    private static void ApplyHighShelf(float[] buf)
+    {
+        for (int i = 0; i < buf.Length; i++)
+        {
+            float x = buf[i];
+            float y = hs_b0 * x + hs_b1 * hs_x1 + hs_b2 * hs_x2 - hs_a1 * hs_y1 - hs_a2 * hs_y2;
+
+            hs_x2 = hs_x1;
+            hs_x1 = x;
+            hs_y2 = hs_y1;
+            hs_y1 = y;
+
+            buf[i] = y;
+        }
+    }
+
+    /// <summary>
     /// Gentle compressor (soft knee-ish).
     /// </summary>
     private static void ApplyCompression(float[] buf)
@@ -153,6 +213,7 @@ public static class TelephonyVoiceShaping
         lock (_lock)
         {
             eq_x1 = eq_x2 = eq_y1 = eq_y2 = 0f;
+            hs_x1 = hs_x2 = hs_y1 = hs_y2 = 0f;
         }
     }
 }
