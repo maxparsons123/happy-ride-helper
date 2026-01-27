@@ -19,6 +19,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int MAX_QUEUED_FRAMES = 5000;
     private const int FADE_IN_SAMPLES = 160; // ~3.3ms at 48kHz for smoother onset
 
+    // Outbound DSP configuration
+    private const float NARROWBAND_VOLUME_BOOST = 1.4f;  // Boost for G.711 (8kHz)
+    private const float SOFT_LIMITER_THRESHOLD = 28000f; // Start limiting here
+    private const float SOFT_LIMITER_CEILING = 32000f;   // Hard ceiling
+
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
@@ -35,9 +40,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _needsFadeIn = true;
     private volatile bool _disposed;
     
-    // DSP bypass mode - skip interpolation/crossfade but keep fade-in for pop prevention
-    private bool _bypassDsp = true; // ENABLED: skip crossfade, interpolation
-    private bool _enableFadeIn = true; // Keep fade-in to prevent pops
+    // DSP control flags
+    private bool _bypassDsp = false;        // Full DSP enabled
+    private bool _enableFadeIn = true;      // Keep fade-in to prevent pops
+    private bool _enableSoftLimiter = true; // Prevent clipping
+    private bool _enableNarrowbandBoost = true; // Volume boost for G.711
 
     // State tracking
     private short _lastOutputSample;
@@ -275,6 +282,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}");
         }
 
+        // Apply outbound DSP pipeline
+        if (!_bypassDsp)
+        {
+            audioFrame = ApplyOutboundDsp(audioFrame, targetRate);
+        }
+
         if (audioFrame.Length > 0)
         {
             _lastOutputSample = audioFrame[^1];
@@ -407,6 +420,59 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         return samples;
+    }
+
+    /// <summary>
+    /// Outbound DSP pipeline: volume boost (narrowband) → soft limiter
+    /// </summary>
+    private short[] ApplyOutboundDsp(short[] samples, int sampleRate)
+    {
+        var output = new short[samples.Length];
+        bool isNarrowband = sampleRate <= 8000;
+
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float sample = samples[i];
+
+            // Volume boost for narrowband codecs (G.711)
+            if (_enableNarrowbandBoost && isNarrowband)
+            {
+                sample *= NARROWBAND_VOLUME_BOOST;
+            }
+
+            // Soft limiter to prevent clipping
+            if (_enableSoftLimiter)
+            {
+                sample = ApplySoftLimiter(sample);
+            }
+
+            output[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Soft limiter using tanh compression for smooth clipping prevention
+    /// </summary>
+    private static float ApplySoftLimiter(float sample)
+    {
+        float absSample = Math.Abs(sample);
+        
+        if (absSample <= SOFT_LIMITER_THRESHOLD)
+        {
+            return sample;
+        }
+
+        // Soft-knee compression using tanh
+        float sign = sample >= 0 ? 1f : -1f;
+        float excess = absSample - SOFT_LIMITER_THRESHOLD;
+        float headroom = SOFT_LIMITER_CEILING - SOFT_LIMITER_THRESHOLD;
+        
+        // Compress excess using tanh curve
+        float compressed = (float)(headroom * Math.Tanh(excess / headroom));
+        
+        return sign * (SOFT_LIMITER_THRESHOLD + compressed);
     }
 
     private void SendSilence()
