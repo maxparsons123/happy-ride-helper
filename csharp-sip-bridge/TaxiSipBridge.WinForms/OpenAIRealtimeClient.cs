@@ -346,6 +346,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
         catch (OperationCanceledException) { }
         catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
     }
+
+    public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
