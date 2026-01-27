@@ -357,12 +357,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Stateful linear interpolation resampler (24kHz → target rate).
-    /// Uses exact 2x upsample for 24kHz→48kHz to avoid boundary glitches.
+    /// Resampler with anti-aliasing filter for downsampling.
+    /// Uses 7-tap FIR low-pass filter before decimation to prevent harshness.
     /// </summary>
     private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
     {
-        // Log first resample to verify correct sample count
+        // Log first resample
         if (_sentFrames == 0)
         {
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample: {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz (ratio={fromRate/(double)toRate:F2})");
@@ -375,9 +375,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
+        // For downsampling (24kHz → 8kHz), apply anti-aliasing low-pass filter first
+        short[] filtered = input;
+        if (toRate < fromRate)
+        {
+            filtered = ApplyAntiAliasingFilter(input);
+        }
+
         var output = new short[outputLen];
 
-        // Special case: exact 2x upsample (24kHz → 48kHz) - no phase drift
+        // Special case: exact 2x upsample (24kHz → 48kHz)
         if (toRate == fromRate * 2)
         {
             for (int i = 0; i < outputLen; i++)
@@ -385,32 +392,29 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 int srcIdx = i / 2;
                 bool isInterpolated = (i % 2) == 1;
 
-                if (srcIdx >= input.Length)
+                if (srcIdx >= filtered.Length)
                 {
-                    // Past end - hold last sample
-                    output[i] = input.Length > 0 ? input[^1] : (short)0;
+                    output[i] = filtered.Length > 0 ? filtered[^1] : (short)0;
                 }
                 else if (isInterpolated)
                 {
-                    // Interpolate between current and next (or hold if at end)
-                    short s0 = input[srcIdx];
-                    short s1 = (srcIdx + 1 < input.Length) ? input[srcIdx + 1] : s0;
+                    short s0 = filtered[srcIdx];
+                    short s1 = (srcIdx + 1 < filtered.Length) ? filtered[srcIdx + 1] : s0;
                     output[i] = (short)((s0 + s1) / 2);
                 }
                 else
                 {
-                    // Direct copy
-                    output[i] = input[srcIdx];
+                    output[i] = filtered[srcIdx];
                 }
             }
             
-            if (input.Length > 0)
-                _lastInputSample = input[^1];
+            if (filtered.Length > 0)
+                _lastInputSample = filtered[^1];
             
             return output;
         }
 
-        // General case: stateful linear interpolation
+        // General case: linear interpolation with decimation
         double ratio = (double)fromRate / toRate;
 
         for (int i = 0; i < outputLen; i++)
@@ -423,26 +427,57 @@ public class AdaAudioSource : IAudioSource, IDisposable
             if (srcIdx < 0)
             {
                 s0 = _lastInputSample;
-                s1 = input.Length > 0 ? input[0] : (short)0;
+                s1 = filtered.Length > 0 ? filtered[0] : (short)0;
             }
-            else if (srcIdx >= input.Length - 1)
+            else if (srcIdx >= filtered.Length - 1)
             {
-                s0 = srcIdx < input.Length ? input[srcIdx] : (input.Length > 0 ? input[^1] : (short)0);
+                s0 = srcIdx < filtered.Length ? filtered[srcIdx] : (filtered.Length > 0 ? filtered[^1] : (short)0);
                 s1 = s0;
             }
             else
             {
-                s0 = input[srcIdx];
-                s1 = input[srcIdx + 1];
+                s0 = filtered[srcIdx];
+                s1 = filtered[srcIdx + 1];
             }
 
             output[i] = (short)(s0 + (s1 - s0) * frac);
         }
 
         _resamplePhase = (_resamplePhase + outputLen * ratio) - input.Length;
-        if (input.Length > 0)
-            _lastInputSample = input[^1];
+        if (filtered.Length > 0)
+            _lastInputSample = filtered[^1];
 
+        return output;
+    }
+
+    /// <summary>
+    /// 7-tap FIR low-pass anti-aliasing filter.
+    /// Cutoff at ~3.5kHz for 8kHz output (below 4kHz Nyquist).
+    /// Removes high frequencies that cause harsh aliasing artifacts.
+    /// </summary>
+    private static short[] ApplyAntiAliasingFilter(short[] input)
+    {
+        if (input.Length < 7) return input;
+        
+        // Simple 7-tap moving average with Gaussian-like weights
+        // Smooth low-pass filter to remove high frequencies before decimation
+        float[] coeffs = { 0.05f, 0.1f, 0.2f, 0.3f, 0.2f, 0.1f, 0.05f };
+        
+        var output = new short[input.Length];
+        
+        for (int i = 0; i < input.Length; i++)
+        {
+            float acc = 0;
+            for (int j = 0; j < coeffs.Length; j++)
+            {
+                int idx = i + j - 3; // Center the filter
+                if (idx < 0) idx = 0;
+                if (idx >= input.Length) idx = input.Length - 1;
+                acc += input[idx] * coeffs[j];
+            }
+            output[i] = (short)Math.Clamp(acc, short.MinValue, short.MaxValue);
+        }
+        
         return output;
     }
 
