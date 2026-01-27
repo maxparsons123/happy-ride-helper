@@ -8,6 +8,7 @@ public partial class MainForm : Form
     private OpenAIRealtimeClient? _localAiClient;
     private SimliAvatarClient? _simliClient;
     private SimliAvatarForm? _simliForm;
+    private AudioMonitor? _callerAudioMonitor;  // For hearing your own processed voice
     private volatile bool _isRunning = false;
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
@@ -118,6 +119,13 @@ public partial class MainForm : Form
                 _sipLocalBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
                 _sipLocalBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
                 _sipLocalBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                
+                // Wire up caller audio monitor for SIP mode
+                _callerAudioMonitor?.Dispose();
+                _callerAudioMonitor = new AudioMonitor(usePcm24k: true);
+                _callerAudioMonitor.IsEnabled = true;
+                _sipLocalBridge.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
+                AddLog("🔊 Audio monitor enabled - you can hear the caller's processed voice");
 
                 _sipLocalBridge.Start();
                 AddLog("🔒 SIP LOCAL AI mode started - Calls go directly to OpenAI");
@@ -211,6 +219,13 @@ public partial class MainForm : Form
                 {
                     AddLog($"📦 Booking: {booking.Pickup} → {booking.Destination}, {booking.Passengers} pax");
                 });
+                
+                // Wire up caller audio monitor - hear your own processed voice
+                _callerAudioMonitor?.Dispose();
+                _callerAudioMonitor = new AudioMonitor(usePcm24k: true);
+                _callerAudioMonitor.IsEnabled = true;
+                _localAiClient.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
+                AddLog("🔊 Audio monitor enabled - you can hear your processed voice");
                 
                 // Wire up Simli avatar to receive AI audio
                 if (_simliClient != null)
@@ -407,6 +422,13 @@ public partial class MainForm : Form
     {
         // Stop Simli avatar
         StopSimliAvatar();
+
+        // Stop caller audio monitor
+        if (_callerAudioMonitor != null)
+        {
+            _callerAudioMonitor.Dispose();
+            _callerAudioMonitor = null;
+        }
 
         // Stop local AI client
         if (_localAiClient != null)

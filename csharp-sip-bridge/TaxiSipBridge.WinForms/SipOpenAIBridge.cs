@@ -44,6 +44,7 @@ public class SipOpenAIBridge : IDisposable
     public event Action<string, string>? OnCallStarted;
     public event Action<string>? OnCallEnded;
     public event Action<string>? OnTranscript;
+    public event Action<byte[]>? OnCallerAudioMonitor;  // Processed caller audio for local playback
 
     public SipOpenAIBridge(
         string apiKey,
@@ -513,6 +514,7 @@ public class SipOpenAIBridge : IDisposable
             };
             _aiClient.OnPcm24Audio += OnAiAudioReceived;
             _aiClient.OnCallEnded += async () => await EndCallAsync();
+            _aiClient.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
             await _aiClient.ConnectAsync(caller, _callCts.Token);
             Log($"🤖 [{_currentCallId}] Connected to OpenAI Realtime API");

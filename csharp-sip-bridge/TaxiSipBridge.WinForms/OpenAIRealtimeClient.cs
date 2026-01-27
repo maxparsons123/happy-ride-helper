@@ -72,6 +72,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
     
+    // Audio monitoring - fires with processed PCM24 audio from caller (for local playback)
+    public event Action<byte[]>? OnCallerAudioMonitor;
+    
     // Tool call events for external handling
     public event Action<string, Dictionary<string, object>>? OnToolCall;
     public event Action<BookingState>? OnBookingUpdated;
@@ -269,6 +272,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
+        // Fire audio monitor event so caller can hear their processed voice
+        OnCallerAudioMonitor?.Invoke(pcmBytes);
+
         // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
         var sampleCount = pcm8kBytes.Length / 2;
         var durationMs = (double)sampleCount * 1000.0 / 8000.0;
@@ -337,6 +343,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
 
         var audioToSend = AudioCodecs.ShortsToBytes(pcm24);
+
+        // Fire audio monitor event so caller can hear their processed voice
+        OnCallerAudioMonitor?.Invoke(audioToSend);
 
         // Track buffered duration for PCM24 path
         var sampleCount = audioToSend.Length / 2; // 2 bytes per sample
