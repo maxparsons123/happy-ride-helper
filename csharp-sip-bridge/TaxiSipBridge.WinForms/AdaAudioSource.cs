@@ -364,15 +364,14 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Stateful resampler with IIR anti-aliasing filter for 24kHz→8kHz.
-    /// Maintains state across frames to prevent warbling/discontinuities.
+    /// Stateful resampler with IIR anti-aliasing filter and cubic interpolation.
+    /// Uses Catmull-Rom spline for smooth, artifact-free resampling.
     /// </summary>
     private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
     {
-        // Log first resample
         if (_sentFrames == 0)
         {
-            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (Stateful IIR): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (Cubic + IIR): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
         }
         
         if (fromRate == toRate)
@@ -391,27 +390,21 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
         var output = new short[outputLen];
 
-        // Special case: exact 2x upsample (24kHz → 48kHz)
+        // Special case: exact 2x upsample (24kHz → 48kHz) - use cubic
         if (toRate == fromRate * 2)
         {
             for (int i = 0; i < outputLen; i++)
             {
                 int srcIdx = i / 2;
-                bool isInterpolated = (i % 2) == 1;
+                float t = (i % 2) * 0.5f;
 
                 if (srcIdx >= filtered.Length)
                 {
                     output[i] = filtered.Length > 0 ? filtered[^1] : (short)0;
                 }
-                else if (isInterpolated)
-                {
-                    short s0 = filtered[srcIdx];
-                    short s1 = (srcIdx + 1 < filtered.Length) ? filtered[srcIdx + 1] : s0;
-                    output[i] = (short)((s0 + s1) / 2);
-                }
                 else
                 {
-                    output[i] = filtered[srcIdx];
+                    output[i] = CubicInterpolate(filtered, srcIdx, t, _lastInputSample);
                 }
             }
             
@@ -421,33 +414,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return output;
         }
 
-        // Stateful linear interpolation for other ratios
+        // Cubic interpolation for other ratios (smoother than linear)
         double ratio = (double)fromRate / toRate;
 
         for (int i = 0; i < outputLen; i++)
         {
             double srcPos = _resamplePhase + i * ratio;
             int srcIdx = (int)srcPos;
-            double frac = srcPos - srcIdx;
+            float t = (float)(srcPos - srcIdx);
 
-            short s0, s1;
-            if (srcIdx < 0)
-            {
-                s0 = _lastInputSample;
-                s1 = filtered.Length > 0 ? filtered[0] : (short)0;
-            }
-            else if (srcIdx >= filtered.Length - 1)
-            {
-                s0 = srcIdx < filtered.Length ? filtered[srcIdx] : (filtered.Length > 0 ? filtered[^1] : (short)0);
-                s1 = s0;
-            }
-            else
-            {
-                s0 = filtered[srcIdx];
-                s1 = filtered[srcIdx + 1];
-            }
-
-            output[i] = (short)(s0 + (s1 - s0) * frac);
+            output[i] = CubicInterpolate(filtered, srcIdx, t, _lastInputSample);
         }
 
         // Update phase for next frame (maintain continuity)
@@ -462,22 +438,48 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
+    /// Catmull-Rom cubic interpolation for smooth audio resampling.
+    /// Uses 4 points to create a smooth curve through the samples.
+    /// </summary>
+    private short CubicInterpolate(short[] samples, int idx, float t, short prevSample)
+    {
+        // Get 4 points for Catmull-Rom: p0, p1, p2, p3
+        float p0 = idx <= 0 ? prevSample : (idx - 1 < samples.Length ? samples[idx - 1] : samples[^1]);
+        float p1 = idx >= 0 && idx < samples.Length ? samples[idx] : (samples.Length > 0 ? samples[^1] : 0);
+        float p2 = idx + 1 < samples.Length ? samples[idx + 1] : p1;
+        float p3 = idx + 2 < samples.Length ? samples[idx + 2] : p2;
+
+        // Catmull-Rom spline coefficients
+        float t2 = t * t;
+        float t3 = t2 * t;
+
+        float result = 0.5f * (
+            (2f * p1) +
+            (-p0 + p2) * t +
+            (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2 +
+            (-p0 + 3f * p1 - 3f * p2 + p3) * t3
+        );
+
+        return (short)Math.Clamp(result, short.MinValue, short.MaxValue);
+    }
+
+    /// <summary>
     /// Stateful 2nd-order IIR Butterworth low-pass filter.
-    /// Cutoff at 3.5kHz for 24kHz input (below 4kHz Nyquist for 8kHz output).
+    /// Cutoff at 3.8kHz for smoother rolloff (less harsh than 3.5kHz).
     /// State maintained across frames to prevent discontinuities.
     /// </summary>
     private short[] ApplyStatefulLowPass(short[] input, int inputRate, int outputRate)
     {
         if (input.Length == 0) return input;
         
-        // Butterworth coefficients for ~3.5kHz cutoff at 24kHz sample rate
-        // This removes frequencies that would alias when decimating to 8kHz
-        // Coefficients: fc = 3500Hz, fs = 24000Hz, Q = 0.707
-        const float b0 = 0.0675f;
-        const float b1 = 0.1349f;
-        const float b2 = 0.0675f;
-        const float a1 = -1.1430f;
-        const float a2 = 0.4128f;
+        // Butterworth coefficients for ~3.8kHz cutoff at 24kHz sample rate
+        // Slightly higher cutoff = less harsh, more natural sound
+        // Coefficients: fc = 3800Hz, fs = 24000Hz, Q = 0.707
+        const float b0 = 0.0809f;
+        const float b1 = 0.1618f;
+        const float b2 = 0.0809f;
+        const float a1 = -1.0546f;
+        const float a2 = 0.3782f;
         
         var output = new short[input.Length];
         
