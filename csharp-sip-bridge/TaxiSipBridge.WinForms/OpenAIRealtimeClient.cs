@@ -235,8 +235,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Convert bytes to shorts
         var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
 
-        // PASSTHROUGH MODE: No DSP - just simple point upsampling 8kHz → 24kHz
-        // Pick each sample 3x (no filtering, no boost, no pre-emphasis)
+        // Volume boost for telephony - needed for VAD detection
+        // Telephony audio is often very quiet compared to desktop mics
+        for (int i = 0; i < pcm8k.Length; i++)
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
+
+        // Simple point upsampling 8kHz → 24kHz (pick each sample 3x)
         var pcm24k = new short[pcm8k.Length * 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
