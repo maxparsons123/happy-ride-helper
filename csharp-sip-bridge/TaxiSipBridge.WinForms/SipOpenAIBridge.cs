@@ -752,11 +752,21 @@ public class SipOpenAIBridge : IDisposable
     {
         if (_disposed || _adaAudioSource == null) return;
 
-        // Feed PCM24 audio to AdaAudioSource - it handles:
+        // Apply TTS pre-conditioning (de-ess, harmonic soften, micro-noise, gain norm)
+        // This cleans up OpenAI's synthetic audio before telephony DSP
+        var pcm24k = new short[pcm24kBytes.Length / 2];
+        Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
+        
+        var conditioned = TtsPreConditioner.Process(pcm24k);
+        
+        var conditionedBytes = new byte[conditioned.Length * 2];
+        Buffer.BlockCopy(conditioned, 0, conditionedBytes, 0, conditionedBytes.Length);
+
+        // Feed conditioned PCM24 audio to AdaAudioSource - it handles:
         // - Resampling 24kHz → 8kHz
-        // - G.711 µ-law encoding
+        // - G.711 encoding
         // - RTP frame pacing (20ms timer)
-        _adaAudioSource.EnqueuePcm24(pcm24kBytes);
+        _adaAudioSource.EnqueuePcm24(conditionedBytes);
     }
 
     public async Task EndCallAsync()
