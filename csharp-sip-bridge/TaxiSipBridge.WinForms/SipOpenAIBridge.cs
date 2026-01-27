@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.Generic;
 using System.Linq;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -29,6 +30,9 @@ public class SipOpenAIBridge : IDisposable
     private AdaAudioSource? _adaAudioSource;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
+
+    // Remote SDP payload type → codec mapping (critical for endpoints that use dynamic PTs)
+    private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
 
     private volatile bool _disposed;
     private volatile bool _isInCall;
@@ -199,6 +203,7 @@ public class SipOpenAIBridge : IDisposable
         _callCts = new CancellationTokenSource();
         _inboundPacketCount = 0;
         _inboundFlushComplete = false;
+        _remotePtToCodec.Clear();
 
         var caller = inviteRequest.Header.From.FromURI.User ?? "unknown";
         Log($"📞 [{_currentCallId}] Incoming call from {caller}");
@@ -224,6 +229,24 @@ public class SipOpenAIBridge : IDisposable
                     var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
                     if (audioMedia != null)
                     {
+                        // Build PT→codec map from remote SDP (don't assume PT=0/8)
+                        _remotePtToCodec.Clear();
+                        foreach (var f in audioMedia.MediaFormats)
+                        {
+                            var pt = f.Key;
+                            var name = f.Value.Name();
+                            if (string.IsNullOrWhiteSpace(name)) continue;
+
+                            if (name.Equals("PCMA", StringComparison.OrdinalIgnoreCase))
+                                _remotePtToCodec[pt] = AudioCodecsEnum.PCMA;
+                            else if (name.Equals("PCMU", StringComparison.OrdinalIgnoreCase))
+                                _remotePtToCodec[pt] = AudioCodecsEnum.PCMU;
+                            else if (name.Equals("G722", StringComparison.OrdinalIgnoreCase))
+                                _remotePtToCodec[pt] = AudioCodecsEnum.G722;
+                            else if (name.Equals("opus", StringComparison.OrdinalIgnoreCase))
+                                _remotePtToCodec[pt] = AudioCodecsEnum.OPUS;
+                        }
+
                         remoteOffersOpus = audioMedia.MediaFormats.Any(f => 
                             f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
                         remoteOffersG722 = audioMedia.MediaFormats.Any(f => 
@@ -238,6 +261,8 @@ public class SipOpenAIBridge : IDisposable
                             .Select(f => $"{f.Value.Name()}({f.Key})")
                             .ToList();
                         Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
+                        if (_remotePtToCodec.Count > 0)
+                            Log($"📥 [{_currentCallId}] Remote PT map: {string.Join(", ", _remotePtToCodec.Select(kvp => $"PT{kvp.Key}={kvp.Value}"))}");
                         
                         // Detailed Opus parameters if present
                         var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
@@ -607,14 +632,27 @@ public class SipOpenAIBridge : IDisposable
         // If Opus is negotiated, RTP payload will be Opus frames (typically PT 106/111).
         // Decode Opus -> PCM16 and send using the generic PCM path with correct sample rate.
         var pt = rtpPacket.Header.PayloadType;
+
+        // Determine codec from remote SDP mapping (fallback: infer from well-known PTs)
+        AudioCodecsEnum codec;
+        if (!_remotePtToCodec.TryGetValue(pt, out codec))
+        {
+            codec = pt switch
+            {
+                0 => AudioCodecsEnum.PCMU,
+                8 => AudioCodecsEnum.PCMA,
+                9 => AudioCodecsEnum.G722,
+                _ => AudioCodecsEnum.PCMU
+            };
+        }
         
         // Log first few packets to verify RTP is arriving
         if (_inboundPacketCount <= 30 || _inboundPacketCount % 500 == 0)
         {
-            Log($"📦 RTP #{_inboundPacketCount}: PT={pt}, len={payload.Length}");
+            Log($"📦 RTP #{_inboundPacketCount}: PT={pt}, codec={codec}, len={payload.Length}");
         }
-        
-        if (pt == 106 || pt == 111)
+
+        if (codec == AudioCodecsEnum.OPUS)
         {
             try
             {
@@ -656,25 +694,54 @@ public class SipOpenAIBridge : IDisposable
             }
         }
 
-        // Detect A-law (PT 8) vs µ-law (PT 0)
-        bool isAlaw = (pt == 8);
-        
-        // Decode G.711 to PCM16
+        // G.722 (16kHz) inbound
+        if (codec == AudioCodecsEnum.G722)
+        {
+            try
+            {
+                var pcm16k = AudioCodecs.G722Decode(payload);
+                var pcmBytes16k = AudioCodecs.ShortsToBytes(pcm16k);
+                _ = _aiClient.SendAudioAsync(pcmBytes16k, AudioCodecs.G722_SAMPLE_RATE);
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ G.722 decode error (PT={pt}): {ex.Message}");
+            }
+            return;
+        }
+
+        // G.711 inbound (PCMA/PCMU)
+        bool isAlaw = codec == AudioCodecsEnum.PCMA;
+
         var pcm16 = new short[payload.Length];
         for (int i = 0; i < payload.Length; i++)
         {
-            if (isAlaw)
-                pcm16[i] = NAudio.Codecs.ALawDecoder.ALawToLinearSample(payload[i]);
-            else
-                pcm16[i] = NAudio.Codecs.MuLawDecoder.MuLawToLinearSample(payload[i]);
+            pcm16[i] = isAlaw
+                ? NAudio.Codecs.ALawDecoder.ALawToLinearSample(payload[i])
+                : NAudio.Codecs.MuLawDecoder.MuLawToLinearSample(payload[i]);
         }
 
-        // Convert to bytes for OpenAI (16-bit little-endian)
+        // Lightweight diagnostics (first few packets only)
+        if (_inboundPacketCount <= 10)
+        {
+            long sumSq = 0;
+            int peak = 0;
+            for (int i = 0; i < pcm16.Length; i++)
+            {
+                int s = pcm16[i];
+                int abs = s == short.MinValue ? 32768 : Math.Abs(s);
+                if (abs > peak) peak = abs;
+                sumSq += (long)s * s;
+            }
+            double rms = pcm16.Length > 0 ? Math.Sqrt(sumSq / (double)pcm16.Length) : 0;
+            Log($"🎙️ RTP decode: codec={codec}, samples={pcm16.Length}, rms={rms:F0}, peak={peak}");
+        }
+
         var pcmBytes = new byte[pcm16.Length * 2];
         Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-        // A-law: bypass DSP (cleaner telephony codec, DSP causes artifacts)
-        // µ-law: apply full DSP pipeline
+        // PCMA: no-DSP + volume boost path (prevents noise gate killing speech)
+        // PCMU: existing DSP path
         if (isAlaw)
             _ = _aiClient.SendPcm8kNoDspAsync(pcmBytes);
         else
