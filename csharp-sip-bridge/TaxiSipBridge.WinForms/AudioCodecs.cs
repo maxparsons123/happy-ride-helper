@@ -142,10 +142,13 @@ public static class AudioCodecs
     #region Opus Codec
 
     public const int OPUS_SAMPLE_RATE = 48000;
-    public const int OPUS_CHANNELS = 1;
+    // Decode as stereo to match SDP negotiation (ch=2), then downmix to mono in caller
+    public const int OPUS_DECODE_CHANNELS = 2;
+    public const int OPUS_ENCODE_CHANNELS = 1; // Encode mono (works fine with stereo SDP)
+    public const int OPUS_CHANNELS = 1; // For backward compatibility
     public const int OPUS_BITRATE = 32000;
     public const int OPUS_FRAME_SIZE_MS = 20;
-    public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples
+    public const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE / 1000 * OPUS_FRAME_SIZE_MS; // 960 samples per channel
 
     private static OpusEncoder? _opusEncoder;
     private static OpusDecoder? _opusDecoder;
@@ -156,7 +159,7 @@ public static class AudioCodecs
     {
         lock (_opusEncoderLock)
         {
-            _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+            _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_ENCODE_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
             _opusEncoder.Bitrate = OPUS_BITRATE;
 
             // Expect 960 mono samples for 20ms frame at 48kHz
@@ -172,14 +175,23 @@ public static class AudioCodecs
         }
     }
 
+    /// <summary>
+    /// Decode Opus frame. Returns STEREO interleaved samples (1920 samples for 20ms).
+    /// Caller should downmix to mono if needed.
+    /// </summary>
     public static short[] OpusDecode(byte[] encoded)
     {
         lock (_opusDecoderLock)
         {
-            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
-            short[] outBuf = new short[OPUS_FRAME_SIZE];
+            // Decode as stereo to match SDP ch=2 negotiation
+            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_DECODE_CHANNELS);
+            // Stereo output buffer: 960 samples × 2 channels = 1920 samples
+            int stereoFrameSize = OPUS_FRAME_SIZE * OPUS_DECODE_CHANNELS;
+            short[] outBuf = new short[stereoFrameSize];
             int len = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
-            return len < OPUS_FRAME_SIZE ? outBuf.Take(len).ToArray() : outBuf;
+            // len is samples per channel, so total samples = len * 2
+            int totalSamples = len * OPUS_DECODE_CHANNELS;
+            return totalSamples < stereoFrameSize ? outBuf.Take(totalSamples).ToArray() : outBuf;
         }
     }
 
