@@ -53,7 +53,7 @@ public class SipAdaBridgeConfig
     public string AdaWsUrl { get; set; } = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
     public SipTransportType Transport { get; set; } = SipTransportType.UDP;
     public AudioMode AudioMode { get; set; } = AudioMode.Standard;
-    public int JitterBufferMs { get; set; } = 60; // Pre-buffer size for JitterBuffer mode
+    public int JitterBufferMs { get; set; } = 240; // Pre-buffer size for smoother playback
     
     // NAT Traversal Settings
     public bool EnableStun { get; set; } = true;
