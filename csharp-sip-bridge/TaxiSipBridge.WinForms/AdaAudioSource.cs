@@ -348,6 +348,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             audioFrame = ApplyOutboundDsp(audioFrame, targetRate);
         }
+        else
+        {
+            // A-law path: apply volume boost only (no other DSP)
+            const float ALAW_VOLUME_BOOST = 1.5f;
+            for (int i = 0; i < audioFrame.Length; i++)
+            {
+                audioFrame[i] = (short)Math.Clamp(audioFrame[i] * ALAW_VOLUME_BOOST, short.MinValue, short.MaxValue);
+            }
+        }
 
         if (audioFrame.Length > 0)
         {

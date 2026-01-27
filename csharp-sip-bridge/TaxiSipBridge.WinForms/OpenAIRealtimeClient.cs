@@ -296,8 +296,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // NO DSP - direct passthrough for A-law
+        // NO DSP - but apply volume boost for A-law path
+        const float ALAW_VOLUME_BOOST = 2.5f;
         var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
+        
+        // Apply volume boost
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * ALAW_VOLUME_BOOST, short.MinValue, short.MaxValue);
+        }
 
         // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
         var pcm24k = new short[pcm8k.Length * 3];
