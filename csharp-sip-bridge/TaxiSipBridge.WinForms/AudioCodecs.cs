@@ -66,6 +66,46 @@ public static class AudioCodecs
     }
 
     /// <summary>
+    /// Encode PCM16 samples to A-law (G.711).
+    /// </summary>
+    public static byte[] ALawEncode(short[] pcm)
+    {
+        var alaw = new byte[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            int s = pcm[i];
+            int sign = 0;
+            if (s < 0)
+            {
+                sign = 0x80;
+                s = -s;
+            }
+
+            // Compress using A-law companding
+            int exponent = 7;
+            int mask = 0x4000;
+            while ((s & mask) == 0 && exponent > 0)
+            {
+                exponent--;
+                mask >>= 1;
+            }
+
+            int mantissa;
+            if (exponent == 0)
+            {
+                mantissa = (s >> 4) & 0x0F;
+            }
+            else
+            {
+                mantissa = (s >> (exponent + 3)) & 0x0F;
+            }
+
+            alaw[i] = (byte)((sign | (exponent << 4) | mantissa) ^ 0x55);
+        }
+        return alaw;
+    }
+
+    /// <summary>
     /// Encode PCM16 samples to µ-law (G.711).
     /// </summary>
     public static byte[] MuLawEncode(short[] pcm)
@@ -347,6 +387,10 @@ public class UnifiedAudioEncoder : IAudioEncoder
                 return AudioCodecs.OpusEncode(pcm);
             case AudioCodecsEnum.G722:
                 return AudioCodecs.G722Encode(pcm);
+            case AudioCodecsEnum.PCMA:
+                return AudioCodecs.ALawEncode(pcm);
+            case AudioCodecsEnum.PCMU:
+                return AudioCodecs.MuLawEncode(pcm);
             default:
                 return _baseEncoder.EncodeAudio(pcm, format);
         }
@@ -360,6 +404,10 @@ public class UnifiedAudioEncoder : IAudioEncoder
                 return AudioCodecs.OpusDecode(encodedSample);
             case AudioCodecsEnum.G722:
                 return AudioCodecs.G722Decode(encodedSample);
+            case AudioCodecsEnum.PCMA:
+                return AudioCodecs.ALawDecode(encodedSample);
+            case AudioCodecsEnum.PCMU:
+                return AudioCodecs.MuLawDecode(encodedSample);
             default:
                 return _baseEncoder.DecodeAudio(encodedSample, format);
         }
