@@ -296,21 +296,21 @@ public class SipOpenAIBridge : IDisposable
             }
             else
             {
-                // Answer only with what the remote offered (prefer PCMU, then PCMA).
-                if (remoteOffersPcmu)
-                {
-                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
-                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMU 8kHz (forceNarrowband={forceNarrowband})");
-                }
-                else if (remoteOffersPcma)
+                // Answer only with what the remote offered (prefer PCMA, then PCMU for desktop compatibility).
+                if (remoteOffersPcma)
                 {
                     _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
-                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMA 8kHz (forceNarrowband={forceNarrowband})");
+                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMA 8kHz (A-law, forceNarrowband={forceNarrowband})");
+                }
+                else if (remoteOffersPcmu)
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU);
+                    Log($"🎯 [{_currentCallId}] Using remote-offered PCMU 8kHz (μ-law, forceNarrowband={forceNarrowband})");
                 }
                 else
                 {
-                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMU || fmt.Codec == AudioCodecsEnum.PCMA);
-                    Log($"🎯 [{_currentCallId}] Using PCMU/PCMA 8kHz (remote offer unknown, forceNarrowband={forceNarrowband})");
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+                    Log($"🎯 [{_currentCallId}] Using PCMA/PCMU 8kHz (remote offer unknown, forceNarrowband={forceNarrowband})");
                 }
             }
 
