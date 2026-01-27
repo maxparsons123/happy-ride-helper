@@ -8,24 +8,42 @@
  */
 
 // VERSION: Spoken at start of call for identification
-const VERSION = "Paired 2.2";
+const VERSION = "Paired 2.3";
 
 // ---------------------------------------------------------------------------
 // STT Echo/Garbage Detection
 // Rejects values that are clearly Ada's own prompts being captured by STT
 // ---------------------------------------------------------------------------
 const ADA_PROMPT_PHRASES = [
-  "address", "street name", "passenger", "pickup", "destination", "where would you like",
-  "going to", "how many", "what time", "when do you need", "let me confirm",
-  "so that's", "from", "welcome to", "taxibot", "booking assistant",
+  "street name", "where would you like",
+  "how many", "what time", "when do you need", "let me confirm",
+  "so that's", "welcome to", "taxibot", "booking assistant",
   "quick and easy", "get started", "anything you'd like to change",
   "get you a quote", "shall i", "is there anything"
+];
+
+// Exact garbage phrases that should be completely rejected (not valid addresses)
+const GARBAGE_PHRASES = [
+  "addresses, street names, numbers, passenger count",
+  "addresses street names numbers passenger count",
+  "addresses, street names",
+  "street names, numbers",
+  "passenger count",
+  "welcome to chile",
+  "welcome to chili",
+  "please provide your",
+  "i need your",
 ];
 
 function isLikelyAdaEcho(value: string): boolean {
   if (!value || value.length < 5) return false;
   
-  const lower = value.toLowerCase();
+  const lower = value.toLowerCase().trim();
+  
+  // Check for exact garbage phrases first (most reliable)
+  for (const garbage of GARBAGE_PHRASES) {
+    if (lower === garbage || lower.includes(garbage)) return true;
+  }
   
   // Count how many Ada-prompt phrases appear in the value
   let matchCount = 0;
@@ -35,11 +53,6 @@ function isLikelyAdaEcho(value: string): boolean {
   
   // If 2+ Ada phrases found, it's likely echo
   if (matchCount >= 2) return true;
-  
-  // Specific known garbage patterns
-  if (lower.includes("addresses, street names")) return true;
-  if (lower.includes("passenger count")) return true;
-  if (lower.includes("welcome to chile")) return true; // STT mishearing
   
   return false;
 }
@@ -3778,18 +3791,27 @@ Ask: "Should I change the pickup or the destination to ${pendingAddress}?"`
               const lowerText = userText.toLowerCase().trim();
               const normalized = lowerText.replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
               
+              // FIRST: Check if this is garbage/echo text that should be ignored
+              if (isLikelyAdaEcho(userText)) {
+                console.log(`[${callId}] 🔊 PRE-SUMMARY: Ignoring garbage/echo: "${userText}"`);
+                // Just ignore - don't respond or change state
+                break;
+              }
+              
               // Check for "no changes" responses (meaning they're happy with booking)
               // NOTE: We normalize punctuation away (e.g. "that's" -> "that s"), so include variants.
-              const noChangesPatterns = /^(no|nope|nah|no thanks|thats fine|that s fine|thats good|that s good|all good|looks good|sounds good|perfect|great|correct|right|yes|yeah|yep|yup|ok|okay)\b/i;
+              const noChangesPatterns = /^(no|nope|nah|no thanks|thats fine|that s fine|thats good|that s good|all good|looks good|sounds good|perfect|great|correct|right|yes|yeah|yep|yup|ok|okay|fine|good)\b/i;
               const wantsNoChanges = noChangesPatterns.test(normalized);
               
               // Check for explicit change requests
               const wantsChanges = /change|amend|actually|wait|hold on|wrong|incorrect/i.test(lowerText);
               const explicitFieldMention = /\b(pickup|pick up|destination|going to|drop off|from|to)\b/i.test(userText);
               // NOTE: landmarks like "Cozy Club" may not match this regex, so we also use explicitFieldMention above.
+              // Also check for explicit house numbers (like "52A David Road") as addresses
               const looksLikeAddress = /\b(road|street|avenue|lane|drive|way|close|court|place|crescent|terrace|airport|station|hotel|hospital|\d+[a-zA-Z]?\s+\w)/i.test(userText);
+              const hasExplicitHouseNumber = /^\d+[a-zA-Z]?\s+/i.test(userText.trim());
               
-              console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, explicitField=${explicitFieldMention}, address=${looksLikeAddress}`);
+              console.log(`[${callId}] 🔄 PRE-SUMMARY CHECK: "${userText}" → noChanges=${wantsNoChanges}, wantsChanges=${wantsChanges}, explicitField=${explicitFieldMention}, address=${looksLikeAddress}, houseNumber=${hasExplicitHouseNumber}`);
               
               if (wantsNoChanges && !wantsChanges && !looksLikeAddress) {
                 // User confirmed no changes - NOW ask if they want a quote
@@ -3823,7 +3845,11 @@ Do NOT request the quote yet - wait for them to say yes.`
                 break;
               }
               
-              if (wantsChanges || looksLikeAddress || explicitFieldMention) {
+              // Skip processing if this is garbage text
+              const isGarbage = isLikelyAdaEcho(userText);
+              const hasRealAddress = (looksLikeAddress || hasExplicitHouseNumber) && !isGarbage;
+              
+              if ((wantsChanges || hasRealAddress || explicitFieldMention) && !isGarbage) {
                 // User wants to change something - reset confirmation flow
                 console.log(`[${callId}] 🔄 PRE-SUMMARY: User wants to change something - resetting flow`);
                 sessionState.preSummaryDone = false;
@@ -3832,7 +3858,7 @@ Do NOT request the quote yet - wait for them to say yes.`
                 
                 // FIX: We need to actually process the address change, not just reset flags
                 // Determine if this is a pickup or destination correction based on context
-                if (looksLikeAddress || explicitFieldMention) {
+                if (hasRealAddress || explicitFieldMention) {
                   const currentPickup = sessionState.booking.pickup?.toLowerCase() || "";
                   const currentDest = sessionState.booking.destination?.toLowerCase() || "";
                   const newAddressLower = userText.toLowerCase();
@@ -4572,26 +4598,32 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
 
             // USER TRUTH PRIORITY: Use captured STT values over AI-extracted values
             // This prevents hallucinations from corrupting addresses
-            const resolvedPickup = sessionState.userTruth.pickup || toolArgs.pickup ? String(toolArgs.pickup) : sessionState.booking.pickup;
-            const resolvedDestination = sessionState.userTruth.destination || toolArgs.destination ? String(toolArgs.destination) : sessionState.booking.destination;
+            // FIXED: Correct precedence - userTruth first, then toolArgs, then booking state
+            const resolvedPickup = sessionState.userTruth.pickup 
+              ? sessionState.userTruth.pickup 
+              : (toolArgs.pickup ? String(toolArgs.pickup) : sessionState.booking.pickup);
+            const resolvedDestination = sessionState.userTruth.destination 
+              ? sessionState.userTruth.destination 
+              : (toolArgs.destination ? String(toolArgs.destination) : sessionState.booking.destination);
             const resolvedPassengers = sessionState.userTruth.passengers > 0 
               ? sessionState.userTruth.passengers 
               : (toolArgs.passengers !== undefined ? Number(toolArgs.passengers) : sessionState.booking.passengers);
-            const resolvedPickupTime = sessionState.userTruth.time || toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime;
+            const resolvedPickupTime = sessionState.userTruth.time 
+              ? sessionState.userTruth.time 
+              : (toolArgs.pickup_time ? String(toolArgs.pickup_time) : sessionState.booking.pickupTime);
 
-            // Log User Truth override
-            if (sessionState.userTruth.pickup && sessionState.userTruth.pickup !== toolArgs.pickup) {
-              console.log(`[${callId}] 📌 User Truth override: pickup "${toolArgs.pickup}" → "${sessionState.userTruth.pickup}"`);
-            }
-            if (sessionState.userTruth.destination && sessionState.userTruth.destination !== toolArgs.destination) {
-              console.log(`[${callId}] 📌 User Truth override: destination "${toolArgs.destination}" → "${sessionState.userTruth.destination}"`);
-            }
+            // Log the resolution chain for debugging
+            console.log(`[${callId}] 📊 Variable resolution: 
+              pickup: userTruth="${sessionState.userTruth.pickup}" toolArgs="${toolArgs.pickup}" booking="${sessionState.booking.pickup}" → resolved="${resolvedPickup}"
+              dest: userTruth="${sessionState.userTruth.destination}" toolArgs="${toolArgs.destination}" booking="${sessionState.booking.destination}" → resolved="${resolvedDestination}"
+              pax: userTruth=${sessionState.userTruth.passengers} toolArgs=${toolArgs.passengers} booking=${sessionState.booking.passengers} → resolved=${resolvedPassengers}
+              time: userTruth="${sessionState.userTruth.time}" toolArgs="${toolArgs.pickup_time}" booking="${sessionState.booking.pickupTime}" → resolved="${resolvedPickupTime}"`);
 
-            // Use User Truth for final values
-            const finalPickup = sessionState.userTruth.pickup || resolvedPickup;
-            const finalDestination = sessionState.userTruth.destination || resolvedDestination;
-            const finalPassengers = sessionState.userTruth.passengers > 0 ? sessionState.userTruth.passengers : resolvedPassengers;
-            const finalTime = sessionState.userTruth.time || resolvedPickupTime || "ASAP";
+            // Final values after resolution (no additional || chains needed)
+            const finalPickup = resolvedPickup;
+            const finalDestination = resolvedDestination;
+            const finalPassengers = resolvedPassengers;
+            const finalTime = resolvedPickupTime || "ASAP";
 
             // Persist any provided details so subsequent tool calls (e.g. confirmed) include full booking info
             if (finalPickup) sessionState.booking.pickup = finalPickup;
