@@ -17,7 +17,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 5000;
-    private const int FADE_IN_SAMPLES = 80;
+    private const int FADE_IN_SAMPLES = 160; // ~3.3ms at 48kHz for smoother onset
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
