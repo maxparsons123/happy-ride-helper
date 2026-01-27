@@ -71,6 +71,45 @@ function validateAddress(value: string | null | undefined, callId: string): stri
   return trimmed;
 }
 
+/**
+ * Check if Ada's extracted address is grounded in the user's raw STT.
+ * Returns true if the extraction shares meaningful tokens with the original.
+ * This prevents hallucinations like "52A" → "Victoria Station" but allows
+ * legitimate cleaning like "52A" → "52A David Road".
+ */
+function isGroundedInUserText(adaExtraction: string, userStt: string): boolean {
+  if (!adaExtraction || !userStt) return false;
+  
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, " ").trim();
+  const adaNorm = normalize(adaExtraction);
+  const userNorm = normalize(userStt);
+  
+  // Extract meaningful tokens (numbers, words 2+ chars)
+  const adaTokens = adaNorm.split(/\s+/).filter(t => t.length >= 2 || /^\d+$/.test(t));
+  const userTokens = userNorm.split(/\s+/).filter(t => t.length >= 2 || /^\d+$/.test(t));
+  
+  if (userTokens.length === 0) return true; // Empty STT - trust Ada
+  
+  // Check if ANY user token appears in Ada's extraction
+  for (const userToken of userTokens) {
+    // Exact match or Ada contains the token
+    if (adaTokens.includes(userToken) || adaNorm.includes(userToken)) {
+      return true;
+    }
+    // Number prefix match (e.g., "52" matches "52a")
+    if (/^\d+$/.test(userToken)) {
+      for (const adaToken of adaTokens) {
+        if (adaToken.startsWith(userToken) || adaToken === userToken) {
+          return true;
+        }
+      }
+    }
+  }
+  
+  // No overlap = likely hallucination
+  return false;
+}
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -4465,16 +4504,25 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             let fieldUpdated: string | null = null;
             
             // Validate and update ONLY the expected field
-            // CRITICAL: Do NOT overwrite userTruth with Ada's extraction!
-            // userTruth must remain the raw STT transcript to prevent AI hallucinations
-            // from corrupting the ground truth (e.g., user says "52A" but Ada hallucinates "Victoria Station")
-            // We only update booking.* with Ada's value for display purposes
+            // STRATEGY: Use Ada's extraction if it's GROUNDED in user STT (shares tokens)
+            // This allows cleaning like "52A" → "52A David Road" but rejects 
+            // hallucinations like "52A" → "Victoria Station"
             if (expectedField === "pickup" && toolArgs.pickup) {
               const extractedPickup = validateAddress(String(toolArgs.pickup), callId);
               if (extractedPickup) {
-                // Only update booking, NOT userTruth - userTruth is sacred STT capture
-                sessionState.booking.pickup = sessionState.userTruth.pickup || extractedPickup;
-                console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}" (userTruth: "${sessionState.userTruth.pickup}")`);
+                const userStt = sessionState.userTruth.pickup || "";
+                const isGrounded = isGroundedInUserText(extractedPickup, userStt);
+                
+                if (isGrounded || !userStt) {
+                  // Ada's extraction is valid - use it (allows cleaning like "52A" → "52A David Road")
+                  sessionState.booking.pickup = extractedPickup;
+                  sessionState.userTruth.pickup = extractedPickup; // Safe to update since it's grounded
+                  console.log(`[${callId}] 📌 Ada pickup GROUNDED: "${extractedPickup}" (from STT: "${userStt}")`);
+                } else {
+                  // Ada hallucinated - use raw STT instead
+                  sessionState.booking.pickup = userStt;
+                  console.log(`[${callId}] 🚫 Ada pickup HALLUCINATION rejected: "${extractedPickup}" vs STT: "${userStt}"`);
+                }
                 fieldUpdated = "pickup";
               } else {
                 console.log(`[${callId}] ⚠️ Pickup rejected as garbage, asking again`);
@@ -4482,9 +4530,19 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             } else if (expectedField === "destination" && toolArgs.destination) {
               const extractedDest = validateAddress(String(toolArgs.destination), callId);
               if (extractedDest) {
-                // Only update booking, NOT userTruth
-                sessionState.booking.destination = sessionState.userTruth.destination || extractedDest;
-                console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}" (userTruth: "${sessionState.userTruth.destination}")`);
+                const userStt = sessionState.userTruth.destination || "";
+                const isGrounded = isGroundedInUserText(extractedDest, userStt);
+                
+                if (isGrounded || !userStt) {
+                  // Ada's extraction is valid - use it
+                  sessionState.booking.destination = extractedDest;
+                  sessionState.userTruth.destination = extractedDest;
+                  console.log(`[${callId}] 📌 Ada destination GROUNDED: "${extractedDest}" (from STT: "${userStt}")`);
+                } else {
+                  // Ada hallucinated - use raw STT instead
+                  sessionState.booking.destination = userStt;
+                  console.log(`[${callId}] 🚫 Ada destination HALLUCINATION rejected: "${extractedDest}" vs STT: "${userStt}"`);
+                }
                 fieldUpdated = "destination";
               } else {
                 console.log(`[${callId}] ⚠️ Destination rejected as garbage, asking again`);
@@ -4508,19 +4566,24 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             } else {
               // AI tried to update wrong field - still accept but log warning
               console.log(`[${callId}] ⚠️ sync_booking_data: expected ${expectedField} but got`, toolArgs);
-              // Fall back to accepting whatever field was provided (with validation)
-              // But NEVER overwrite userTruth for addresses
+              // Fall back to accepting whatever field was provided (with grounding validation)
               if (toolArgs.pickup) { 
                 const val = validateAddress(String(toolArgs.pickup), callId);
                 if (val) {
-                  sessionState.booking.pickup = sessionState.userTruth.pickup || val; 
+                  const userStt = sessionState.userTruth.pickup || "";
+                  const isGrounded = isGroundedInUserText(val, userStt);
+                  sessionState.booking.pickup = (isGrounded || !userStt) ? val : userStt;
+                  if (isGrounded) sessionState.userTruth.pickup = val;
                   fieldUpdated = "pickup"; 
                 }
               }
               else if (toolArgs.destination) { 
                 const val = validateAddress(String(toolArgs.destination), callId);
                 if (val) {
-                  sessionState.booking.destination = sessionState.userTruth.destination || val; 
+                  const userStt = sessionState.userTruth.destination || "";
+                  const isGrounded = isGroundedInUserText(val, userStt);
+                  sessionState.booking.destination = (isGrounded || !userStt) ? val : userStt;
+                  if (isGrounded) sessionState.userTruth.destination = val;
                   fieldUpdated = "destination"; 
                 }
               }
