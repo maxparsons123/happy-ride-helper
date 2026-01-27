@@ -30,13 +30,14 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // Resampler state (stateful for smooth frame-to-frame transitions)
+    // High-quality polyphase FIR resamplers (one per target rate)
+    private PolyphaseFirResampler? _resampler8k;
+    private PolyphaseFirResampler? _resampler16k;
+    private PolyphaseFirResampler? _resampler48k;
+    
+    // Fallback state for rates without dedicated resampler
     private double _resamplePhase;
     private short _lastInputSample;
-    
-    // Anti-aliasing filter state (IIR low-pass for 24kHz→8kHz)
-    private float _lpfState1;
-    private float _lpfState2;
 
     private Timer? _sendTimer;
     private bool _isStarted;
@@ -187,11 +188,14 @@ public class AdaAudioSource : IAudioSource, IDisposable
     {
         ClearQueue();
         
-        // Reset resampler state
+        // Reset polyphase FIR resamplers
+        _resampler8k?.Reset();
+        _resampler16k?.Reset();
+        _resampler48k?.Reset();
+        
+        // Reset fallback resampler state
         _resamplePhase = 0;
         _lastInputSample = 0;
-        _lpfState1 = 0;
-        _lpfState2 = 0;
         
         // Reset DSP/audio state
         _needsFadeIn = true;
@@ -290,7 +294,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             if (_pcmQueue.TryDequeue(out var pcm24))
             {
                 _consecutiveUnderruns = 0;
-                audioFrame = ResampleLinear(pcm24, 24000, targetRate, samplesNeeded);
+                audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
                 // Crossfade from silence to audio to prevent spluttering
                 if (_lastFrameWasSilence && audioFrame.Length > 0)
@@ -364,16 +368,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Stateful resampler with IIR anti-aliasing filter and cubic interpolation.
-    /// Uses Catmull-Rom spline for smooth, artifact-free resampling.
+    /// High-quality polyphase FIR resampling with proper anti-aliasing.
+    /// Uses Kaiser-windowed sinc filter for clean, artifact-free audio.
     /// </summary>
-    private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
+    private short[] ResamplePolyphase(short[] input, int fromRate, int toRate, int outputLen)
     {
-        if (_sentFrames == 0)
-        {
-            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (Cubic + IIR): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
-        }
-        
         if (fromRate == toRate)
         {
             var copy = new short[outputLen];
@@ -381,122 +380,46 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
-        // For downsampling, apply anti-aliasing low-pass filter first
-        short[] filtered = input;
-        if (toRate < fromRate)
-        {
-            filtered = ApplyStatefulLowPass(input, fromRate, toRate);
-        }
-
-        var output = new short[outputLen];
-
-        // Special case: exact 2x upsample (24kHz → 48kHz) - use cubic
-        if (toRate == fromRate * 2)
-        {
-            for (int i = 0; i < outputLen; i++)
-            {
-                int srcIdx = i / 2;
-                float t = (i % 2) * 0.5f;
-
-                if (srcIdx >= filtered.Length)
-                {
-                    output[i] = filtered.Length > 0 ? filtered[^1] : (short)0;
-                }
-                else
-                {
-                    output[i] = CubicInterpolate(filtered, srcIdx, t, _lastInputSample);
-                }
-            }
-            
-            if (filtered.Length > 0)
-                _lastInputSample = filtered[^1];
-            
-            return output;
-        }
-
-        // Cubic interpolation for other ratios (smoother than linear)
-        double ratio = (double)fromRate / toRate;
-
-        for (int i = 0; i < outputLen; i++)
-        {
-            double srcPos = _resamplePhase + i * ratio;
-            int srcIdx = (int)srcPos;
-            float t = (float)(srcPos - srcIdx);
-
-            output[i] = CubicInterpolate(filtered, srcIdx, t, _lastInputSample);
-        }
-
-        // Update phase for next frame (maintain continuity)
-        _resamplePhase = (_resamplePhase + outputLen * ratio) - filtered.Length;
-        while (_resamplePhase < 0) _resamplePhase += 1.0;
-        while (_resamplePhase >= 1.0) _resamplePhase -= 1.0;
+        // Get or create the appropriate polyphase resampler
+        PolyphaseFirResampler resampler = GetOrCreateResampler(fromRate, toRate);
         
-        if (filtered.Length > 0)
-            _lastInputSample = filtered[^1];
+        if (_sentFrames == 0)
+        {
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (Polyphase FIR): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
+        }
 
-        return output;
+        return resampler.Resample(input, outputLen);
     }
-
+    
     /// <summary>
-    /// Catmull-Rom cubic interpolation for smooth audio resampling.
-    /// Uses 4 points to create a smooth curve through the samples.
+    /// Get or create a polyphase FIR resampler for the given rate conversion.
     /// </summary>
-    private short CubicInterpolate(short[] samples, int idx, float t, short prevSample)
+    private PolyphaseFirResampler GetOrCreateResampler(int fromRate, int toRate)
     {
-        // Get 4 points for Catmull-Rom: p0, p1, p2, p3
-        float p0 = idx <= 0 ? prevSample : (idx - 1 < samples.Length ? samples[idx - 1] : samples[^1]);
-        float p1 = idx >= 0 && idx < samples.Length ? samples[idx] : (samples.Length > 0 ? samples[^1] : 0);
-        float p2 = idx + 1 < samples.Length ? samples[idx + 1] : p1;
-        float p3 = idx + 2 < samples.Length ? samples[idx + 2] : p2;
-
-        // Catmull-Rom spline coefficients
-        float t2 = t * t;
-        float t3 = t2 * t;
-
-        float result = 0.5f * (
-            (2f * p1) +
-            (-p0 + p2) * t +
-            (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2 +
-            (-p0 + 3f * p1 - 3f * p2 + p3) * t3
-        );
-
-        return (short)Math.Clamp(result, short.MinValue, short.MaxValue);
-    }
-
-    /// <summary>
-    /// Stateful 2nd-order IIR Butterworth low-pass filter.
-    /// Cutoff at 3.8kHz for smoother rolloff (less harsh than 3.5kHz).
-    /// State maintained across frames to prevent discontinuities.
-    /// </summary>
-    private short[] ApplyStatefulLowPass(short[] input, int inputRate, int outputRate)
-    {
-        if (input.Length == 0) return input;
-        
-        // Butterworth coefficients for ~3.8kHz cutoff at 24kHz sample rate
-        // Slightly higher cutoff = less harsh, more natural sound
-        // Coefficients: fc = 3800Hz, fs = 24000Hz, Q = 0.707
-        const float b0 = 0.0809f;
-        const float b1 = 0.1618f;
-        const float b2 = 0.0809f;
-        const float a1 = -1.0546f;
-        const float a2 = 0.3782f;
-        
-        var output = new short[input.Length];
-        
-        for (int i = 0; i < input.Length; i++)
+        // Use cached resamplers for common conversions
+        if (fromRate == 24000 && toRate == 8000)
         {
-            float x = input[i];
-            
-            // Direct Form II Transposed
-            float y = b0 * x + _lpfState1;
-            _lpfState1 = b1 * x - a1 * y + _lpfState2;
-            _lpfState2 = b2 * x - a2 * y;
-            
-            output[i] = (short)Math.Clamp(y, short.MinValue, short.MaxValue);
+            _resampler8k ??= new PolyphaseFirResampler(24000, 8000);
+            return _resampler8k;
         }
         
-        return output;
+        if (fromRate == 24000 && toRate == 16000)
+        {
+            _resampler16k ??= new PolyphaseFirResampler(24000, 16000);
+            return _resampler16k;
+        }
+        
+        if (fromRate == 24000 && toRate == 48000)
+        {
+            _resampler48k ??= new PolyphaseFirResampler(24000, 48000);
+            return _resampler48k;
+        }
+        
+        // Fallback: create new resampler (less efficient but handles any rate)
+        return new PolyphaseFirResampler(fromRate, toRate);
     }
+
+    // Legacy methods removed - now using PolyphaseFirResampler
     private static short[] GenerateInterpolatedFrame(short[] lastFrame, int samplesNeeded, int underrunCount)
     {
         var output = new short[samplesNeeded];
