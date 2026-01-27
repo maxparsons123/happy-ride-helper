@@ -136,6 +136,8 @@ public class SoxrResampler : IDisposable
             string? errorMsg = error != IntPtr.Zero ? Marshal.PtrToStringAnsi(soxr_strerror(error)) : "Unknown error";
             throw new InvalidOperationException($"Failed to create soxr resampler: {errorMsg}");
         }
+
+        System.Diagnostics.Debug.WriteLine($"[SoxrResampler] ✓ Initialized: {inputRate}Hz → {outputRate}Hz, quality={quality}");
     }
 
     /// <summary>
