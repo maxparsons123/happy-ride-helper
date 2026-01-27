@@ -922,6 +922,13 @@ class TaxiBridge:
             while self.running:
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
+
+                # IMPORTANT: Asterisk AudioSocket playback pacing can effectively behave like
+                # a fixed 20ms scheduler. For slin16@16kHz, a 20ms PCM16 mono frame is 640 bytes.
+                # If we send 320-byte frames (10ms @ 16kHz), some setups will still play them
+                # as 20ms, resulting in half-speed (slow) audio.
+                out_frame_bytes = 640 if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
+
                 if self.state.ast_codec == "opus":
                     bytes_per_sec = OPUS_BITRATE // 8
                 else:
@@ -949,11 +956,11 @@ class TaxiBridge:
                             chunk = b"\x00" * 80
                         self.state.keepalive_count += 1
                 else:
-                    if len(buffer) >= self.state.ast_frame_bytes:
-                        chunk = bytes(buffer[:self.state.ast_frame_bytes])
-                        del buffer[:self.state.ast_frame_bytes]
+                    if len(buffer) >= out_frame_bytes:
+                        chunk = bytes(buffer[:out_frame_bytes])
+                        del buffer[:out_frame_bytes]
                     else:
-                        chunk = self._silence_frame()
+                        chunk = self._silence_frame(out_frame_bytes)
                         self.state.keepalive_count += 1
                 try:
                     frame = struct.pack(">BH", MSG_AUDIO, len(chunk)) + chunk
@@ -972,9 +979,9 @@ class TaxiBridge:
         except asyncio.CancelledError:
             pass
 
-    def _silence_frame(self) -> bytes:
+    def _silence_frame(self, frame_bytes: Optional[int] = None) -> bytes:
         silence_byte = 0xFF if self.state.ast_codec == "ulaw" else 0x00
-        return bytes([silence_byte]) * self.state.ast_frame_bytes
+        return bytes([silence_byte]) * (frame_bytes or self.state.ast_frame_bytes)
 
 # =============================================================================
 # MAIN
