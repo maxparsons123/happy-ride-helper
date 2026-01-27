@@ -4465,14 +4465,16 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             let fieldUpdated: string | null = null;
             
             // Validate and update ONLY the expected field
-            // ALSO update userTruth with Ada's extracted address (cleaner than raw STT)
-            // CRITICAL: Validate addresses to reject STT echo garbage
+            // CRITICAL: Do NOT overwrite userTruth with Ada's extraction!
+            // userTruth must remain the raw STT transcript to prevent AI hallucinations
+            // from corrupting the ground truth (e.g., user says "52A" but Ada hallucinates "Victoria Station")
+            // We only update booking.* with Ada's value for display purposes
             if (expectedField === "pickup" && toolArgs.pickup) {
               const extractedPickup = validateAddress(String(toolArgs.pickup), callId);
               if (extractedPickup) {
-                sessionState.booking.pickup = extractedPickup;
-                sessionState.userTruth.pickup = extractedPickup;
-                console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}"`);
+                // Only update booking, NOT userTruth - userTruth is sacred STT capture
+                sessionState.booking.pickup = sessionState.userTruth.pickup || extractedPickup;
+                console.log(`[${callId}] 📌 Ada extracted pickup: "${extractedPickup}" (userTruth: "${sessionState.userTruth.pickup}")`);
                 fieldUpdated = "pickup";
               } else {
                 console.log(`[${callId}] ⚠️ Pickup rejected as garbage, asking again`);
@@ -4480,9 +4482,9 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             } else if (expectedField === "destination" && toolArgs.destination) {
               const extractedDest = validateAddress(String(toolArgs.destination), callId);
               if (extractedDest) {
-                sessionState.booking.destination = extractedDest;
-                sessionState.userTruth.destination = extractedDest;
-                console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}"`);
+                // Only update booking, NOT userTruth
+                sessionState.booking.destination = sessionState.userTruth.destination || extractedDest;
+                console.log(`[${callId}] 📌 Ada extracted destination: "${extractedDest}" (userTruth: "${sessionState.userTruth.destination}")`);
                 fieldUpdated = "destination";
               } else {
                 console.log(`[${callId}] ⚠️ Destination rejected as garbage, asking again`);
@@ -4490,30 +4492,35 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             } else if (expectedField === "passengers" && toolArgs.passengers !== undefined) {
               const extractedPax = Number(toolArgs.passengers);
               sessionState.booking.passengers = extractedPax;
-              sessionState.userTruth.passengers = extractedPax;
+              // Passengers are numeric so less likely to hallucinate - can update userTruth
+              if (sessionState.userTruth.passengers <= 0) {
+                sessionState.userTruth.passengers = extractedPax;
+              }
               fieldUpdated = "passengers";
             } else if (expectedField === "time" && toolArgs.pickup_time) {
               const extractedTime = String(toolArgs.pickup_time);
               sessionState.booking.pickupTime = extractedTime;
-              sessionState.userTruth.time = extractedTime;
+              // Time is less likely to hallucinate - can update userTruth if empty
+              if (!sessionState.userTruth.time) {
+                sessionState.userTruth.time = extractedTime;
+              }
               fieldUpdated = "time";
             } else {
               // AI tried to update wrong field - still accept but log warning
               console.log(`[${callId}] ⚠️ sync_booking_data: expected ${expectedField} but got`, toolArgs);
               // Fall back to accepting whatever field was provided (with validation)
+              // But NEVER overwrite userTruth for addresses
               if (toolArgs.pickup) { 
                 const val = validateAddress(String(toolArgs.pickup), callId);
                 if (val) {
-                  sessionState.booking.pickup = val; 
-                  sessionState.userTruth.pickup = val;
+                  sessionState.booking.pickup = sessionState.userTruth.pickup || val; 
                   fieldUpdated = "pickup"; 
                 }
               }
               else if (toolArgs.destination) { 
                 const val = validateAddress(String(toolArgs.destination), callId);
                 if (val) {
-                  sessionState.booking.destination = val; 
-                  sessionState.userTruth.destination = val;
+                  sessionState.booking.destination = sessionState.userTruth.destination || val; 
                   fieldUpdated = "destination"; 
                 }
               }
