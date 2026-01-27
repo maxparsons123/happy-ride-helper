@@ -3514,6 +3514,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             // Capture raw corrected STT output BEFORE any AI processing
             // This provides "ground truth" that overrides AI-extracted values
             // CRITICAL: Also update booking state AND persist immediately to prevent data loss
+            
+            // FILTER: Reject Ada's own voice being captured as user speech
+            if (isLikelyAdaEcho(userText)) {
+              console.log(`[${callId}] 🚫 REJECTED Ada echo as user input: "${userText.substring(0, 50)}..."`);
+              break; // Don't store garbage as user truth
+            }
+            
             let userTruthUpdated = false;
             if (effectiveQuestionType === "pickup") {
               sessionState.userTruth.pickup = userText;
