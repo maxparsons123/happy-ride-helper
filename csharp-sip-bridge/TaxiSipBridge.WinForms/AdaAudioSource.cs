@@ -34,6 +34,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _isClosed;
     private bool _needsFadeIn = true;
     private volatile bool _disposed;
+    
+    // DSP bypass mode - skip all processing except resampling
+    private bool _bypassDsp = true; // ENABLED: skip fade-in, crossfade, interpolation
 
     // State tracking
     private short _lastOutputSample;
@@ -128,7 +131,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             var frame = new short[PCM24_FRAME_SAMPLES];
             Array.Copy(pcm24All, offset, frame, 0, len);
 
-            if (_needsFadeIn && frame.Length > 0)
+            // Fade-in (skip if bypass mode)
+            if (!_bypassDsp && _needsFadeIn && frame.Length > 0)
             {
                 int fadeLen = Math.Min(FADE_IN_SAMPLES, frame.Length);
                 for (int i = 0; i < fadeLen; i++)
@@ -242,7 +246,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled && _consecutiveUnderruns > 10)
                     _jitterBufferFilled = false;
 
-                if (_consecutiveUnderruns <= 6 && _lastAudioFrame != null)
+                // Interpolation (skip if bypass mode - just send silence)
+                if (!_bypassDsp && _consecutiveUnderruns <= 6 && _lastAudioFrame != null)
                 {
                     audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
                     _interpolatedFrames++;
@@ -373,8 +378,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             int samplesNeeded = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
             var silence = new short[samplesNeeded];
 
-            // Ramp down from last sample to avoid click
-            if (!_lastFrameWasSilence && _lastOutputSample != 0 && samplesNeeded > 0)
+            // Ramp down from last sample to avoid click (skip if bypass mode)
+            if (!_bypassDsp && !_lastFrameWasSilence && _lastOutputSample != 0 && samplesNeeded > 0)
             {
                 int rampLen = Math.Min(samplesNeeded, Math.Max(1, targetRate / 200));
                 for (int i = 0; i < rampLen; i++)
