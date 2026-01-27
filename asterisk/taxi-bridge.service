@@ -18,6 +18,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=WS_URL=wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired
 Environment=FORCE_OPUS=true
 Environment=PREFER_OPUS=true
+Environment=FORCE_SLIN16=true
 
 # Logging
 StandardOutput=journal
