@@ -6,6 +6,7 @@ public partial class MainForm : Form
     private SipOpenAIBridge? _sipLocalBridge;  // For Local OpenAI mode
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
+    private TextPipelineClient? _textPipelineClient;  // Cheaper Deepgram+GPT+TTS pipeline
     private SimliAvatarClient? _simliClient;
     private SimliAvatarForm? _simliForm;
     private AudioMonitor? _callerAudioMonitor;  // For hearing your own processed voice
@@ -13,6 +14,7 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
     private bool _useSimliAvatar = false;
+    private bool _useCheaperPipeline = false;  // Deepgram+GPT+TTS mode
 
     public MainForm()
     {
@@ -29,11 +31,25 @@ public partial class MainForm : Form
         // IMPORTANT: WebSocket routing is more reliable via the ".functions.supabase.co" host.
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
         txtApiKey.Text = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
+        txtDeepgramKey.Text = Environment.GetEnvironmentVariable("DEEPGRAM_API_KEY") ?? "";
         txtSimliApiKey.Text = Environment.GetEnvironmentVariable("SIMLI_API_KEY") ?? "";
         txtSimliFaceId.Text = "default"; // Default Simli face
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
         cmbResampler.SelectedIndex = 0; // NAudio (default)
+    }
+    
+    private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e)
+    {
+        _useCheaperPipeline = chkCheaperPipeline.Checked;
+        
+        // Show/hide Deepgram key field
+        lblDeepgramKey.Visible = _useCheaperPipeline && _useLocalOpenAI;
+        txtDeepgramKey.Visible = _useCheaperPipeline && _useLocalOpenAI;
+        
+        AddLog(_useCheaperPipeline 
+            ? "💰 CHEAPER MODE: Deepgram STT + GPT-4o-mini + OpenAI TTS (~$160/20K calls)" 
+            : "⚡ REALTIME MODE: OpenAI Realtime API (~$900/20K calls)");
     }
 
     private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e)
@@ -64,6 +80,11 @@ public partial class MainForm : Form
         txtApiKey.Visible = _useLocalOpenAI;
         lblWs.Visible = !_useLocalOpenAI;
         txtWebSocketUrl.Visible = !_useLocalOpenAI;
+        
+        // Show cheaper pipeline option only in local mode
+        chkCheaperPipeline.Visible = _useLocalOpenAI;
+        lblDeepgramKey.Visible = _useLocalOpenAI && _useCheaperPipeline;
+        txtDeepgramKey.Visible = _useLocalOpenAI && _useCheaperPipeline;
         
         // Update button text
         btnMicTest.Text = _useLocalOpenAI ? "🎤 Test Local AI" : "🎤 Test with Mic";
@@ -197,56 +218,117 @@ public partial class MainForm : Form
                         "API Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
-
-                _localAiClient = new OpenAIRealtimeClient(
-                    apiKey, 
-                    model: "gpt-4o-mini-realtime-preview-2024-12-17"
-                );
-                _localAiClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
-                _localAiClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
-                _localAiClient.OnConnected += () => SafeInvoke(() =>
-                {
-                    SetStatus("🔒 Local OpenAI - Speak to Ada!", Color.Green);
-                    lblActiveCall.Text = "🎤 Local AI Active";
-                    lblActiveCall.ForeColor = Color.Green;
-                });
-                _localAiClient.OnDisconnected += () => SafeInvoke(() =>
-                {
-                    SetStatus("Disconnected", Color.Gray);
-                    StopMicMode();
-                });
-                _localAiClient.OnBookingUpdated += booking => SafeInvoke(() =>
-                {
-                    AddLog($"📦 Booking: {booking.Pickup} → {booking.Destination}, {booking.Passengers} pax");
-                });
                 
-                // Wire up caller audio monitor - hear your own processed voice
-                _callerAudioMonitor?.Dispose();
-                _callerAudioMonitor = new AudioMonitor(usePcm24k: true);
-                _callerAudioMonitor.IsEnabled = true;
-                _localAiClient.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
-                AddLog("🔊 Audio monitor enabled - you can hear your processed voice");
-                
-                // Wire up Simli avatar to receive AI audio
-                if (_simliClient != null)
+                if (_useCheaperPipeline)
                 {
-                    _localAiClient.OnPcm24Audio += async data =>
+                    // === CHEAPER PIPELINE: Deepgram + GPT-4o-mini + TTS ===
+                    var deepgramKey = txtDeepgramKey.Text.Trim();
+                    if (string.IsNullOrEmpty(deepgramKey))
                     {
-                        if (_simliClient?.IsConnected == true)
+                        MessageBox.Show("Please enter your Deepgram API key for the cheaper pipeline", 
+                            "Deepgram Key Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    
+                    _textPipelineClient = new TextPipelineClient(
+                        openAiApiKey: apiKey,
+                        deepgramApiKey: deepgramKey,
+                        voice: "shimmer"
+                    );
+                    _textPipelineClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                    _textPipelineClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                    _textPipelineClient.OnConnected += () => SafeInvoke(() =>
+                    {
+                        SetStatus("💰 Cheaper Pipeline - Speak to Ada!", Color.Green);
+                        lblActiveCall.Text = "🎤 Text Pipeline Active";
+                        lblActiveCall.ForeColor = Color.Green;
+                    });
+                    _textPipelineClient.OnDisconnected += () => SafeInvoke(() =>
+                    {
+                        SetStatus("Disconnected", Color.Gray);
+                        StopMicMode();
+                    });
+                    _textPipelineClient.OnCallEnded += () => SafeInvoke(() =>
+                    {
+                        AddLog("📞 Call ended by AI");
+                        StopMicMode();
+                    });
+                    
+                    // Wire up Simli avatar to receive AI audio
+                    if (_simliClient != null)
+                    {
+                        _textPipelineClient.OnPcm24Audio += async data =>
                         {
-                            await _simliClient.SendPcm24AudioAsync(data);
-                        }
-                    };
-                    _localAiClient.OnAdaSpeaking += msg => _simliForm?.SetSpeaking(true);
-                    _localAiClient.OnResponseStarted += () => _simliForm?.SetSpeaking(true);
+                            if (_simliClient?.IsConnected == true)
+                            {
+                                await _simliClient.SendPcm24AudioAsync(data);
+                            }
+                        };
+                        _textPipelineClient.OnAdaSpeaking += msg => _simliForm?.SetSpeaking(true);
+                        _textPipelineClient.OnResponseStarted += () => _simliForm?.SetSpeaking(true);
+                    }
+
+                    await _textPipelineClient.ConnectAsync("mic-test");
+                    
+                    // Start microphone capture for cheaper pipeline
+                    StartCheaperPipelineMicCapture();
+
+                    AddLog("💰 CHEAPER MODE: Deepgram STT → GPT-4o-mini → OpenAI TTS (Shimmer)");
+                    AddLog("💵 Estimated cost: ~$0.008 per 30-second call vs ~$0.045 for Realtime");
                 }
+                else
+                {
+                    // === OPENAI REALTIME MODE ===
+                    _localAiClient = new OpenAIRealtimeClient(
+                        apiKey, 
+                        model: "gpt-4o-mini-realtime-preview-2024-12-17"
+                    );
+                    _localAiClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                    _localAiClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+                    _localAiClient.OnConnected += () => SafeInvoke(() =>
+                    {
+                        SetStatus("🔒 Local OpenAI - Speak to Ada!", Color.Green);
+                        lblActiveCall.Text = "🎤 Local AI Active";
+                        lblActiveCall.ForeColor = Color.Green;
+                    });
+                    _localAiClient.OnDisconnected += () => SafeInvoke(() =>
+                    {
+                        SetStatus("Disconnected", Color.Gray);
+                        StopMicMode();
+                    });
+                    _localAiClient.OnBookingUpdated += booking => SafeInvoke(() =>
+                    {
+                        AddLog($"📦 Booking: {booking.Pickup} → {booking.Destination}, {booking.Passengers} pax");
+                    });
+                    
+                    // Wire up caller audio monitor - hear your own processed voice
+                    _callerAudioMonitor?.Dispose();
+                    _callerAudioMonitor = new AudioMonitor(usePcm24k: true);
+                    _callerAudioMonitor.IsEnabled = true;
+                    _localAiClient.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
+                    AddLog("🔊 Audio monitor enabled - you can hear your processed voice");
+                    
+                    // Wire up Simli avatar to receive AI audio
+                    if (_simliClient != null)
+                    {
+                        _localAiClient.OnPcm24Audio += async data =>
+                        {
+                            if (_simliClient?.IsConnected == true)
+                            {
+                                await _simliClient.SendPcm24AudioAsync(data);
+                            }
+                        };
+                        _localAiClient.OnAdaSpeaking += msg => _simliForm?.SetSpeaking(true);
+                        _localAiClient.OnResponseStarted += () => _simliForm?.SetSpeaking(true);
+                    }
 
-                await _localAiClient.ConnectAsync("mic-test");
-                
-                // Start microphone capture for local AI
-                StartLocalMicCapture();
+                    await _localAiClient.ConnectAsync("mic-test");
+                    
+                    // Start microphone capture for local AI
+                    StartLocalMicCapture();
 
-                AddLog("🔒 LOCAL MODE: Connected directly to OpenAI Realtime API");
+                    AddLog("🔒 LOCAL MODE: Connected directly to OpenAI Realtime API");
+                }
             }
             else
             {
@@ -387,6 +469,64 @@ public partial class MainForm : Form
 
         AddLog("🎤 Microphone capture started (24kHz PCM16)");
     }
+    
+    private NAudio.Wave.WaveInEvent? _cheaperPipelineWaveIn;
+    
+    private void StartCheaperPipelineMicCapture()
+    {
+        _cheaperPipelineWaveIn = new NAudio.Wave.WaveInEvent
+        {
+            WaveFormat = new NAudio.Wave.WaveFormat(24000, 16, 1), // 24kHz PCM16 mono
+            BufferMilliseconds = 20
+        };
+
+        _cheaperPipelineWaveIn.DataAvailable += async (s, e) =>
+        {
+            if (_textPipelineClient?.IsConnected == true && e.BytesRecorded > 0)
+            {
+                var buffer = new byte[e.BytesRecorded];
+                Buffer.BlockCopy(e.Buffer, 0, buffer, 0, e.BytesRecorded);
+                await _textPipelineClient.SendAudioAsync(buffer, 24000);
+            }
+        };
+
+        _cheaperPipelineWaveIn.StartRecording();
+
+        // Start playback timer for outbound audio (TTS output)
+        _playbackTimer = new System.Timers.Timer(20);
+        _playbackTimer.Elapsed += CheaperPipelinePlaybackElapsed;
+        _playbackTimer.Start();
+
+        AddLog("🎤 Cheaper pipeline mic capture started (24kHz PCM16)");
+    }
+    
+    private void CheaperPipelinePlaybackElapsed(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        if (_textPipelineClient == null) return;
+
+        var frame = _textPipelineClient.GetNextMuLawFrame();
+        if (frame == null) return;
+
+        // Decode µ-law to PCM and play
+        var pcm8k = AudioCodecs.MuLawDecode(frame);
+        var pcm48k = AudioCodecs.Resample(pcm8k, 8000, 48000); // Resample to speaker rate
+        var pcmBytes = AudioCodecs.ShortsToBytes(pcm48k);
+
+        if (_waveOut == null)
+        {
+            _waveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(48000, 16, 1))
+            {
+                BufferDuration = TimeSpan.FromSeconds(2),
+                DiscardOnBufferOverflow = true
+            };
+            _waveOut = new NAudio.Wave.WaveOutEvent();
+            _waveOut.Init(_waveProvider);
+            _waveOut.Play();
+        }
+
+        _waveProvider?.AddSamples(pcmBytes, 0, pcmBytes.Length);
+    }
+    }
 
     private NAudio.Wave.WaveOutEvent? _waveOut;
     private NAudio.Wave.BufferedWaveProvider? _waveProvider;
@@ -436,13 +576,28 @@ public partial class MainForm : Form
             _localAiClient.Dispose();
             _localAiClient = null;
         }
+        
+        // Stop cheaper pipeline client
+        if (_textPipelineClient != null)
+        {
+            _ = _textPipelineClient.DisconnectAsync();
+            _textPipelineClient.Dispose();
+            _textPipelineClient = null;
+        }
 
-        // Stop microphone
+        // Stop microphone (both modes)
         if (_waveIn != null)
         {
             _waveIn.StopRecording();
             _waveIn.Dispose();
             _waveIn = null;
+        }
+        
+        if (_cheaperPipelineWaveIn != null)
+        {
+            _cheaperPipelineWaveIn.StopRecording();
+            _cheaperPipelineWaveIn.Dispose();
+            _cheaperPipelineWaveIn = null;
         }
 
         // Stop playback
