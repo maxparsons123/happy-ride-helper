@@ -423,8 +423,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 int rampLen = Math.Min(samplesNeeded, Math.Max(1, targetRate / 200));
                 for (int i = 0; i < rampLen; i++)
                     silence[i] = (short)(_lastOutputSample * (1f - (float)i / rampLen));
-                _needsFadeIn = true;
             }
+            
+            // Always request fade-in after silence to prevent spikes when audio resumes
+            if (!_lastFrameWasSilence)
+                _needsFadeIn = true;
 
             byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
             _silenceFrames++;
