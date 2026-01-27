@@ -279,12 +279,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             // Jitter buffer priming for ALL codecs to prevent early underruns
             // OpenAI sends audio in bursts - need buffer before starting playback
-            // INCREASED: 15 frames (300ms) for smoother playback
+            // INCREASED: 20 frames (400ms) for maximum smoothness
             if (!_jitterBufferFilled)
             {
-                // Buffer 15 frames (300ms) minimum for stable playback timing
+                // Buffer 20 frames (400ms) minimum for stable playback timing
                 // Higher buffer = more latency but smoother audio
-                int minFrames = 15;
+                int minFrames = 20;
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
