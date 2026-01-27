@@ -3,176 +3,228 @@ using System;
 namespace TaxiSipBridge.Audio;
 
 /// <summary>
-/// High-quality DSP pipeline optimized for OpenAI Realtime API → Opus encoding.
-/// Includes high-pass filtering, noise gating, AGC, and pre-emphasis for maximum clarity.
+/// High-quality DSP pipeline optimized for OpenAI Realtime API → telephony.
+/// Includes high-pass filtering, noise gating, AGC, adaptive pre-emphasis, and soft clipping.
+/// Ported from Python taxi_bridge_v78.py for feature parity.
 /// </summary>
 public class AudioDsp
 {
-    // Configuration - optimized for OpenAI + Opus
-    private const int HighPassCutoff = 80;          // Slightly higher to preserve voice clarity
+    // ========== INBOUND (Caller → AI) Configuration ==========
+    private const int HighPassCutoff = 80;          // Hz - removes low-frequency rumble
     private const int SampleRate = 8000;
-    private const float NoiseGateThreshold = 20f;   // Lower threshold for better sensitivity
-    private const float NoiseGateKneeWidth = 30f;   // Soft knee range (20-50)
-    private const float TargetRms = 2800f;          // Higher target for Opus compression
-    private const float MaxGain = 2.5f;             // Reduced max gain to prevent clipping
-    private const float MinGain = 0.9f;             // Slightly higher min gain
-    private const float GainSmoothingFactor = 0.15f; // Slower smoothing to reduce pumping
-    private const float PreEmphasisCoeff = 0.95f;   // High-frequency boost for Opus clarity
-
+    private const float NoiseGateThreshold = 80f;   // Soft gate threshold (from Python)
+    private const float NoiseGateKneeWidth = 30f;   // Soft knee range
+    private const float TargetRms = 600f;           // Target RMS (from Python: 600)
+    private const float AgcMaxGain = 50.0f;         // Higher max for quiet telephony (from Python)
+    private const float AgcMinGain = 1.0f;          // Minimum gain
+    private const float AgcSmoothingFactor = 0.15f; // Gain smoothing
+    private const float VolumeBoostFactor = 10.0f;  // For very quiet audio (RMS < 200)
+    private const float VolumeBoostThreshold = 200f;// Only boost if RMS below this
+    private const float AgcFloorRms = 1f;           // Minimum RMS to apply AGC
+    private const float SoftClipThreshold = 32000f; // Soft clipping threshold
+    
+    // ========== OUTBOUND (AI → Caller) Configuration ==========
+    private const float OutboundVolumeBoost = 2.5f; // Boost Ada's voice (from Python)
+    
     // High-pass filter state (2nd order Butterworth)
-    private readonly double[] _hpX = new double[3]; // input history [x[n], x[n-1], x[n-2]]
-    private readonly double[] _hpY = new double[3]; // output history [y[n], y[n-1], y[n-2]]
+    private readonly double[] _hpX = new double[3]; // input history
+    private readonly double[] _hpY = new double[3]; // output history
 
-    // Butterworth coefficients for 80Hz @ 8kHz (recalculated for better performance)
+    // Butterworth coefficients for 80Hz @ 8kHz
     private static readonly double[] HpB = { 0.9762421, -1.9524842, 0.9762421 };
     private static readonly double[] HpA = { 1.0, -1.9515384, 0.9534300 };
 
     // AGC state
     private float _lastGain = 1.0f;
     private float _preEmphasisState = 0f;
+    private float _outboundPreEmphasisState = 0f;
 
     /// <summary>
-    /// Applies full DSP pipeline: high-pass → noise gate → AGC → pre-emphasis
+    /// Applies full inbound DSP pipeline: high-pass → volume boost → AGC → adaptive pre-emphasis → soft clip
+    /// Ported from Python taxi_bridge_v78.py AudioProcessor.process_inbound()
     /// </summary>
-    /// <param name="pcmData">Input PCM16 data (little-endian)</param>
-    /// <returns>Processed audio bytes and applied gain</returns>
-    public (byte[] Audio, float Gain) ApplyNoiseReduction(byte[] pcmData)
+    public (byte[] Audio, float Gain) ApplyNoiseReduction(byte[] pcmData, bool isHighQuality = false)
     {
         if (pcmData == null || pcmData.Length == 0)
             return (pcmData ?? Array.Empty<byte>(), 1.0f);
 
-        // Convert bytes to float samples (-1.0 to 1.0)
         var floatSamples = BytesToFloat(pcmData);
         
-        // Apply DSP pipeline in optimal order
+        // Calculate initial RMS
+        float rms = ComputeRmsFloat(floatSamples);
+        
+        // Skip aggressive DSP for already-clean high-quality signals (Opus, etc.)
+        if (isHighQuality && rms > 500f / 32768f)
+        {
+            return (pcmData, 1.0f);
+        }
+        
+        // Step 1: High-pass filter - removes low-frequency rumble
         ApplyHighPassFilter(floatSamples);
-        ApplySoftKneeNoiseGate(floatSamples);
-        float appliedGain = ApplySmoothedAgc(floatSamples);
-        ApplyPreEmphasis(floatSamples);
         
-        // Convert back to bytes
+        // Step 2: Noise gate with soft transition
+        ApplySoftNoiseGate(floatSamples, ref rms);
+        
+        // Step 3: Volume boost for very quiet audio (telephony often arrives at RMS 1-2)
+        if (rms * 32768f < VolumeBoostThreshold)
+        {
+            for (int i = 0; i < floatSamples.Length; i++)
+                floatSamples[i] *= VolumeBoostFactor;
+            rms = ComputeRmsFloat(floatSamples);
+        }
+        
+        // Step 4: AGC with smoothing
+        float appliedGain = ApplySmoothedAgc(floatSamples, rms);
+        
+        // Step 5: Adaptive pre-emphasis (spectral tilt detection from Python)
+        ApplyAdaptivePreEmphasis(floatSamples);
+        
+        // Step 6: Soft clipping (tanh-based, prevents hard clipping)
+        ApplySoftClip(floatSamples);
+        
         var processedBytes = FloatToBytes(floatSamples);
-        
         return (processedBytes, appliedGain);
     }
 
     /// <summary>
-    /// High-pass filter to remove DC offset and low-frequency hum
+    /// Applies outbound DSP: volume boost + soft clip for Ada → caller path
+    /// Ported from Python taxi_bridge_v78.py AudioProcessor.process_outbound()
+    /// </summary>
+    public byte[] ProcessOutbound(byte[] pcmData)
+    {
+        if (pcmData == null || pcmData.Length == 0)
+            return pcmData ?? Array.Empty<byte>();
+
+        var floatSamples = BytesToFloat(pcmData);
+        
+        // Apply volume boost to Ada's voice
+        for (int i = 0; i < floatSamples.Length; i++)
+            floatSamples[i] *= OutboundVolumeBoost;
+        
+        // Soft clip to prevent distortion
+        ApplySoftClip(floatSamples);
+        
+        return FloatToBytes(floatSamples);
+    }
+
+    /// <summary>
+    /// High-pass filter to remove DC offset and low-frequency rumble
     /// </summary>
     private void ApplyHighPassFilter(float[] samples)
     {
         for (int i = 0; i < samples.Length; i++)
         {
-            // Shift history buffers
             _hpX[2] = _hpX[1];
             _hpX[1] = _hpX[0];
             _hpY[2] = _hpY[1];
             _hpY[1] = _hpY[0];
 
-            // Current input
             _hpX[0] = samples[i];
 
-            // Direct Form II IIR filter
             double output = HpB[0] * _hpX[0] + HpB[1] * _hpX[1] + HpB[2] * _hpX[2]
                           - HpA[1] * _hpY[1] - HpA[2] * _hpY[2];
 
-            // Clamp to prevent overflow
             _hpY[0] = Math.Clamp(output, -1.0, 1.0);
             samples[i] = (float)_hpY[0];
         }
     }
 
     /// <summary>
-    /// Soft-knee noise gate with smooth transitions using smoothstep interpolation
+    /// Soft noise gate with fade transition (prevents clicks)
+    /// From Python: if rms < threshold, apply soft fade instead of hard cut
     /// </summary>
-    private void ApplySoftKneeNoiseGate(float[] samples)
+    private void ApplySoftNoiseGate(float[] samples, ref float rms)
     {
-        const float kneeLow = NoiseGateThreshold / 32768f;  // Normalize threshold
-        const float kneeHigh = (NoiseGateThreshold + NoiseGateKneeWidth) / 32768f;
-        const float minGain = 0.1f; // Minimum gain in noise floor
-        const float maxGain = 1.0f; // Full gain above knee
-
-        for (int i = 0; i < samples.Length; i++)
+        float thresholdNorm = NoiseGateThreshold / 32768f;
+        float rmsScaled = rms;
+        
+        if (rmsScaled < thresholdNorm)
         {
-            float absSample = Math.Abs(samples[i]);
-            
-            if (absSample <= kneeLow)
-            {
-                // Below knee - apply minimum gain
-                samples[i] *= minGain;
-            }
-            else if (absSample >= kneeHigh)
-            {
-                // Above knee - full gain (no change needed)
-            }
-            else
-            {
-                // In knee region - smooth interpolation using smoothstep
-                float normalized = (absSample - kneeLow) / (kneeHigh - kneeLow);
-                float smoothNormalized = normalized * normalized * (3.0f - 2.0f * normalized);
-                float gain = minGain + (maxGain - minGain) * smoothNormalized;
-                samples[i] *= gain;
-            }
+            // Soft fade: gate_gain = rms / threshold
+            float gateGain = rmsScaled / thresholdNorm;
+            for (int i = 0; i < samples.Length; i++)
+                samples[i] *= gateGain;
+            rms *= gateGain;
         }
     }
 
     /// <summary>
-    /// Smoothed Automatic Gain Control with noise floor detection
+    /// Smoothed AGC with high max gain for quiet telephony audio
     /// </summary>
-    private float ApplySmoothedAgc(float[] samples)
+    private float ApplySmoothedAgc(float[] samples, float rms)
     {
-        // Calculate RMS of current frame (normalized)
-        double sumSquared = 0;
-        foreach (float sample in samples)
-        {
-            sumSquared += sample * sample;
-        }
+        float targetRmsNorm = TargetRms / 32768f;
+        float floorRmsNorm = AgcFloorRms / 32768f;
         
-        float rms = (float)Math.Sqrt(sumSquared / samples.Length);
-        float rmsScaled = rms * 32768f; // Scale back for threshold comparison
-        
-        // Only apply AGC if signal is above noise floor
-        const float NoiseFloorRms = 30f;
-        if (rmsScaled < NoiseFloorRms)
+        if (rms < floorRmsNorm)
         {
-            // Below noise floor - use minimum gain
-            _lastGain = MinGain;
+            _lastGain = AgcMinGain;
             for (int i = 0; i < samples.Length; i++)
-            {
                 samples[i] *= _lastGain;
-            }
             return _lastGain;
         }
 
-        // Calculate target gain
-        float targetGain = (TargetRms / 32768f) / rms;
-        targetGain = Math.Clamp(targetGain, MinGain, MaxGain);
+        float targetGain = targetRmsNorm / rms;
+        targetGain = Math.Clamp(targetGain, AgcMinGain, AgcMaxGain);
         
-        // Smooth gain transition to prevent pumping artifacts
-        _lastGain += GainSmoothingFactor * (targetGain - _lastGain);
-        _lastGain = Math.Clamp(_lastGain, MinGain, MaxGain);
+        // Smooth gain transition
+        _lastGain += AgcSmoothingFactor * (targetGain - _lastGain);
+        _lastGain = Math.Clamp(_lastGain, AgcMinGain, AgcMaxGain);
         
-        // Apply gain
         for (int i = 0; i < samples.Length; i++)
-        {
             samples[i] *= _lastGain;
-        }
         
         return _lastGain;
     }
 
     /// <summary>
-    /// Pre-emphasis filter to boost high frequencies for better Opus encoding
-    /// H(z) = 1 - α*z^(-1) where α = 0.95
+    /// Adaptive pre-emphasis based on spectral tilt
+    /// From Python: analyze spectral tilt and adjust coefficient (0.92-0.97)
     /// </summary>
-    private void ApplyPreEmphasis(float[] samples)
+    private void ApplyAdaptivePreEmphasis(float[] samples)
+    {
+        if (samples.Length < 100)
+        {
+            ApplyPreEmphasis(samples, 0.95f);
+            return;
+        }
+        
+        // Calculate spectral tilt from sample differences (simplified from Python)
+        float sumDiff = 0;
+        int checkLen = Math.Min(1000, samples.Length - 1);
+        for (int i = 0; i < checkLen; i++)
+            sumDiff += samples[i + 1] - samples[i];
+        float spectralTilt = sumDiff / checkLen;
+        
+        // Adaptive coefficient: more pre-emphasis for low-tilt signals
+        float preEmphCoeff = spectralTilt < 0 ? 0.97f : 0.92f;
+        ApplyPreEmphasis(samples, preEmphCoeff);
+    }
+
+    /// <summary>
+    /// Pre-emphasis filter: H(z) = 1 - α*z^(-1)
+    /// </summary>
+    private void ApplyPreEmphasis(float[] samples, float coeff)
     {
         for (int i = 0; i < samples.Length; i++)
         {
             float current = samples[i];
-            float emphasized = current - PreEmphasisCoeff * _preEmphasisState;
-            samples[i] = Math.Clamp(emphasized, -1.0f, 1.0f);
+            float emphasized = current - coeff * _preEmphasisState;
+            samples[i] = emphasized;
             _preEmphasisState = current;
+        }
+    }
+
+    /// <summary>
+    /// Soft clipping using tanh (prevents hard clipping distortion)
+    /// From Python: np.tanh(samples / threshold) * threshold
+    /// </summary>
+    private void ApplySoftClip(float[] samples)
+    {
+        float thresholdNorm = SoftClipThreshold / 32768f;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] = (float)(Math.Tanh(samples[i] / thresholdNorm) * thresholdNorm);
         }
     }
 
@@ -206,6 +258,18 @@ public class AudioDsp
     }
 
     /// <summary>
+    /// Compute RMS of float samples
+    /// </summary>
+    private static float ComputeRmsFloat(float[] samples)
+    {
+        if (samples.Length == 0) return 0;
+        double sum = 0;
+        foreach (float s in samples)
+            sum += s * s;
+        return (float)Math.Sqrt(sum / samples.Length);
+    }
+
+    /// <summary>
     /// Reset all DSP state (call when starting new audio stream)
     /// </summary>
     public void Reset()
@@ -214,6 +278,7 @@ public class AudioDsp
         Array.Clear(_hpY, 0, _hpY.Length);
         _lastGain = 1.0f;
         _preEmphasisState = 0f;
+        _outboundPreEmphasisState = 0f;
     }
 
     /// <summary>
