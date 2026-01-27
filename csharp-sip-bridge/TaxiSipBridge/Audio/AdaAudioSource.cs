@@ -263,17 +263,22 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
             else
             {
-                // Check jitter buffer mode - wait until we have enough frames buffered
-                if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
+                // ALWAYS prime jitter buffer before starting playback
+                // OpenAI sends audio faster than realtime, but in bursts
+                if (!_jitterBufferFilled)
                 {
-                    int framesNeeded = _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS; // e.g., 60ms = 3 frames
-                    if (_pcmQueue.Count < framesNeeded)
+                    // Opus (48kHz): 100ms, G.711/G.722: 60ms minimum
+                    int minFrames = targetRate >= 48000 ? 5 : 3;
+                    if (_audioMode == AudioMode.JitterBuffer)
+                        minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
+                    
+                    if (_pcmQueue.Count < minFrames)
                     {
                         SendSilence();
                         return;
                     }
                     _jitterBufferFilled = true;
-                    OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer filled ({_pcmQueue.Count} frames)");
+                    OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed: {_pcmQueue.Count} frames @ {targetRate}Hz");
                 }
 
                 if (_pcmQueue.TryDequeue(out var pcm24))
