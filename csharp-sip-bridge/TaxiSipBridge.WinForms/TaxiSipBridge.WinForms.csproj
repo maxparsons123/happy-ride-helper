@@ -31,6 +31,7 @@
     <Compile Include="..\TaxiSipBridge\Audio\G711Codec.cs" Link="Audio\G711Codec.cs" />
     <Compile Include="..\TaxiSipBridge\Audio\AudioResampler.cs" Link="Audio\AudioResampler.cs" />
     <Compile Include="..\TaxiSipBridge\Audio\AudioDsp.cs" Link="Audio\AudioDsp.cs" />
+    <Compile Include="..\TaxiSipBridge\Audio\NAudioResampler.cs" Link="Audio\NAudioResampler.cs" />
 
     <Compile Include="SipAutoAnswer.cs" />
     <Compile Include="AdaAudioClient.cs" />
