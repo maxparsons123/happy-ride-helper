@@ -557,6 +557,13 @@ public class SipOpenAIBridge : IDisposable
         // If Opus is negotiated, RTP payload will be Opus frames (typically PT 106/111).
         // Decode Opus -> PCM16 and send using the generic PCM path with correct sample rate.
         var pt = rtpPacket.Header.PayloadType;
+        
+        // Log first few packets to verify RTP is arriving
+        if (_inboundPacketCount <= 30 || _inboundPacketCount % 500 == 0)
+        {
+            Log($"📦 RTP #{_inboundPacketCount}: PT={pt}, len={payload.Length}");
+        }
+        
         if (pt == 106 || pt == 111)
         {
             try
@@ -578,6 +585,14 @@ public class SipOpenAIBridge : IDisposable
                 else
                 {
                     mono = pcm48;
+                }
+
+                // Log first few processed packets
+                if (_inboundPacketCount <= 30)
+                {
+                    int peak = 0;
+                    foreach (var s in mono) { int abs = Math.Abs((int)s); if (abs > peak) peak = abs; }
+                    Log($"🎙️ Opus→Mono: {mono.Length} samples, peak={peak}");
                 }
 
                 var pcmBytes = AudioCodecs.ShortsToBytes(mono);
