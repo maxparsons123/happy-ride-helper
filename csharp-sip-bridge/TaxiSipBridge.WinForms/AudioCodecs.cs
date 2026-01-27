@@ -97,13 +97,129 @@ public static class AudioCodecs
         return ulaw;
     }
 
+    #region FIR Anti-Aliasing Filter and Decimation
+
+    private const int FIR_TAPS = 101;
+    private static double[]? _firCoeffs;
+    private static float[]? _firHistory;
+    private static readonly object _firLock = new object();
+
     /// <summary>
-    /// Simple linear interpolation resampling - clean and reliable.
+    /// Get or create FIR low-pass filter coefficients (4kHz cutoff for 24kHz sample rate).
+    /// Uses Hamming window for smooth frequency response.
+    /// </summary>
+    private static double[] GetFirCoefficients()
+    {
+        if (_firCoeffs != null) return _firCoeffs;
+
+        var coeffs = new double[FIR_TAPS];
+        double cutoff = 4000.0 / 12000.0; // 4kHz / (24kHz / 2) = normalized cutoff
+
+        for (int i = 0; i < FIR_TAPS; i++)
+        {
+            int m = i - FIR_TAPS / 2;
+            if (m == 0)
+                coeffs[i] = 2 * cutoff;
+            else
+                coeffs[i] = Math.Sin(2 * Math.PI * cutoff * m) / (Math.PI * m);
+
+            // Hamming window for smooth rolloff
+            coeffs[i] *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / FIR_TAPS);
+        }
+
+        _firCoeffs = coeffs;
+        return coeffs;
+    }
+
+    /// <summary>
+    /// Apply FIR low-pass filter (4kHz cutoff) to prevent aliasing before decimation.
+    /// Stateful - maintains history across calls for seamless audio.
+    /// </summary>
+    public static float[] FirLowPass24k(float[] input)
+    {
+        lock (_firLock)
+        {
+            var coeffs = GetFirCoefficients();
+            _firHistory ??= new float[FIR_TAPS];
+
+            var output = new float[input.Length];
+
+            for (int n = 0; n < input.Length; n++)
+            {
+                // Shift history and add new sample
+                for (int k = FIR_TAPS - 1; k > 0; k--)
+                    _firHistory[k] = _firHistory[k - 1];
+                _firHistory[0] = input[n];
+
+                // Convolve with FIR coefficients
+                double sum = 0.0;
+                for (int k = 0; k < FIR_TAPS; k++)
+                    sum += _firHistory[k] * coeffs[k];
+
+                output[n] = (float)sum;
+            }
+
+            return output;
+        }
+    }
+
+    /// <summary>
+    /// Decimate 24kHz to 8kHz (factor of 3). Must be called AFTER FirLowPass24k.
+    /// </summary>
+    public static short[] Decimate24kTo8k(float[] filtered)
+    {
+        int outputLen = filtered.Length / 3;
+        var output = new short[outputLen];
+
+        for (int i = 0, j = 0; j < outputLen; i += 3, j++)
+        {
+            float val = filtered[i] * 32767f;
+            output[j] = (short)Math.Clamp(val, -32768, 32767);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// High-quality 24kHz to 8kHz conversion with anti-aliasing.
+    /// FIR low-pass (4kHz) → Decimate by 3 → Ready for G.711 encoding.
+    /// </summary>
+    public static short[] Resample24kTo8k(short[] input)
+    {
+        // Convert to float for filtering
+        var floatInput = new float[input.Length];
+        for (int i = 0; i < input.Length; i++)
+            floatInput[i] = input[i] / 32768f;
+
+        // Anti-aliasing filter
+        var filtered = FirLowPass24k(floatInput);
+
+        // Decimate
+        return Decimate24kTo8k(filtered);
+    }
+
+    /// <summary>
+    /// Reset FIR filter state (call between calls/sessions).
+    /// </summary>
+    public static void ResetFirFilter()
+    {
+        lock (_firLock) { _firHistory = null; }
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Simple linear interpolation resampling for upsampling (8k→24k).
+    /// Anti-aliasing not needed for upsampling.
     /// </summary>
     public static short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
         if (input.Length == 0) return input;
+
+        // For downsampling, use specialized FIR-based method
+        if (fromRate == 24000 && toRate == 8000)
+            return Resample24kTo8k(input);
 
         double ratio = (double)fromRate / toRate;
         int outputLength = (int)(input.Length / ratio);
@@ -305,6 +421,7 @@ public static class AudioCodecs
     {
         ResetOpus();
         ResetG722();
+        ResetFirFilter();
     }
 }
 
