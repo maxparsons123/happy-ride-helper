@@ -263,12 +263,29 @@ public class SipOpenAIBridge : IDisposable
                         remoteOffersPcma = audioMedia.MediaFormats.Any(f =>
                             f.Value.Name()?.Equals("PCMA", StringComparison.OrdinalIgnoreCase) == true);
                         
-                        var codecs = audioMedia.MediaFormats
-                            .Select(f => $"{f.Value.Name()}({f.Key})")
+                        // ===== DETAILED CODEC LOGGING =====
+                        Log($"═══════════════════════════════════════════════════════════");
+                        Log($"📋 [{_currentCallId}] AVAILABLE CODECS FROM REMOTE SDP:");
+                        Log($"───────────────────────────────────────────────────────────");
+                        foreach (var f in audioMedia.MediaFormats)
+                        {
+                            var codecName = f.Value.Name() ?? "unknown";
+                            var pt = f.Key;
+                            var clockRate = f.Value.ClockRate();
+                            var channels = f.Value.Channels();
+                            var fmtp = f.Value.Fmtp;
+                            Log($"   PT={pt,-3} | {codecName,-12} | {clockRate,5}Hz | ch={channels} | fmtp={fmtp ?? "(none)"}");
+                        }
+                        Log($"───────────────────────────────────────────────────────────");
+                        
+                        // Summary line
+                        var codecSummary = audioMedia.MediaFormats
+                            .Select(f => $"{f.Value.Name()}(PT{f.Key})")
                             .ToList();
-                        Log($"📥 [{_currentCallId}] Remote offers: {string.Join(", ", codecs)}");
+                        Log($"📥 [{_currentCallId}] Summary: {string.Join(", ", codecSummary)}");
+                        
                         if (_remotePtToCodec.Count > 0)
-                            Log($"📥 [{_currentCallId}] Remote PT map: {string.Join(", ", _remotePtToCodec.Select(kvp => $"PT{kvp.Key}={kvp.Value}"))}");
+                            Log($"📥 [{_currentCallId}] Recognized: {string.Join(", ", _remotePtToCodec.Select(kvp => $"PT{kvp.Key}={kvp.Value}"))}");
                         
                         // Detailed Opus parameters if present
                         var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
@@ -279,15 +296,18 @@ public class SipOpenAIBridge : IDisposable
                             remoteOpusPt = opusFormat.Key;
                             remoteOpusChannels = Math.Max(1, opusFormat.Value.Channels());
                             remoteOpusFmtp = opusFormat.Value.Fmtp;
-                            Log($"🔍 [{_currentCallId}] Remote Opus: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
+                            Log($"🔍 [{_currentCallId}] Remote Opus details: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
                         }
                         
+                        // Quality assessment
                         if (remoteOffersOpus)
-                            Log($"🎧 [{_currentCallId}] Opus available - 48kHz wideband!");
+                            Log($"🎧 [{_currentCallId}] ✅ OPUS available - 48kHz wideband!");
                         else if (remoteOffersG722)
-                            Log($"🎧 [{_currentCallId}] G.722 available - 16kHz wideband");
+                            Log($"🎧 [{_currentCallId}] ✅ G.722 available - 16kHz wideband");
                         else
-                            Log($"📞 [{_currentCallId}] Narrowband only (G.711 8kHz)");
+                            Log($"📞 [{_currentCallId}] ⚠️ Narrowband only (G.711 8kHz)");
+                        
+                        Log($"═══════════════════════════════════════════════════════════");
                     }
                 }
             }
