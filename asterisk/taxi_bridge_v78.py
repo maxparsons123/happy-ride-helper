@@ -91,9 +91,11 @@ PREFER_SLIN16 = True
 # FORCE_SLIN16: When true, treat ALL 320-byte frames as 16kHz (not 8kHz)
 # Use this when Asterisk dialplan sets CHANNEL(audioformat)=slin16 but AudioSocket
 # still sends 320-byte frames (which normally indicate 8kHz).
-FORCE_SLIN16 = _env_bool("FORCE_SLIN16", False)  # OFF when using Opus
+# IMPORTANT: Set to True for better STT accuracy on house numbers like "52A"
+FORCE_SLIN16 = _env_bool("FORCE_SLIN16", True)  # ON by default for 16kHz quality
 # FORCE_OPUS: When true, assume all variable-size frames are Opus (for WhatsApp)
-FORCE_OPUS = _env_bool("FORCE_OPUS", True)  # Default ON for WhatsApp
+# Note: When FORCE_SLIN16 is True, this only applies to non-standard frame sizes
+FORCE_OPUS = _env_bool("FORCE_OPUS", False)  # OFF to prioritize slin16 detection
 FORMAT_LOCK_DURATION_S = 60.0  # Lock format for entire call duration
 FORMAT_LOCK_FRAME_COUNT = 5    # Fewer frames needed when Opus is clear
 
@@ -494,26 +496,26 @@ class TaxiBridge:
         old_codec = self.state.ast_codec
 
         # Decide best codec/rate based on what we've observed so far.
+        # PRIORITY: slin16 (16kHz) > slin (8kHz) > ulaw (8kHz)
+        # This ensures best STT quality for house numbers like "52A"
         decided_codec: str
         decided_rate: int
-        if self.state.seen_640:
-            # 640 bytes = 20ms @ 16kHz, unambiguously slin16
+        
+        # Force 16kHz if we see 320 or 640 bytes (common for slin16 frames)
+        # 640 bytes = 20ms @ 16kHz, 320 bytes = 10ms @ 16kHz (or 20ms @ 8kHz)
+        if self.state.seen_640 or self.state.seen_320:
+            # Default to 16kHz for both 320 and 640 byte frames
+            # This gives Whisper double the frequency data (up to 8kHz instead of 4kHz)
             decided_codec = "slin16"
             decided_rate = RATE_SLIN16
-        elif FORCE_SLIN16 and self.state.seen_320:
-            # FORCE_SLIN16 mode: treat 320 bytes as 10ms @ 16kHz (not 20ms @ 8kHz)
-            decided_codec = "slin16"
-            decided_rate = RATE_SLIN16
-        elif self.state.seen_320:
-            # Normal mode: 320 bytes = 20ms @ 8kHz
-            decided_codec = "slin"
-            decided_rate = RATE_SLIN
         elif self.state.seen_160:
+            # 160 bytes = definitely 8kHz ulaw
             decided_codec = "ulaw"
             decided_rate = RATE_ULAW
         else:
-            decided_codec = "slin16" if frame_len > 400 else "ulaw"
-            decided_rate = RATE_SLIN16 if frame_len > 400 else RATE_ULAW
+            # Default fallback to high quality
+            decided_codec = "slin16"
+            decided_rate = RATE_SLIN16
 
         self.state.ast_codec = decided_codec
         self.state.ast_rate = decided_rate
@@ -662,8 +664,23 @@ class TaxiBridge:
                     if len(trimmed) >= 9:
                         self.state.phone = trimmed
                         logger.info("[%s] 👤 Phone: %s", self.state.call_id, self.state.phone)
+                
+                # Send AudioSocket handshake to request SLIN16 (16kHz) from Asterisk
+                # 0x01 = Message Type (App Approval/Handshake)
+                # 0x10 = Payload (Signed Linear 16kHz)
+                # This tells Asterisk: "I support and prefer 16kHz audio"
+                handshake = struct.pack(">BHB", 0x01, 1, 0x10)
+                self.writer.write(handshake)
+                await self.writer.drain()
+                logger.info("[%s] 📤 Handshake sent: Requesting SLIN16 (0x10)", self.state.call_id)
+                
         except asyncio.TimeoutError:
             logger.warning("[%s] ⚠️ No UUID message received, continuing without phone", self.state.call_id)
+            # Still send handshake to request 16kHz
+            handshake = struct.pack(">BHB", 0x01, 1, 0x10)
+            self.writer.write(handshake)
+            await self.writer.drain()
+            logger.info("[%s] 📤 Handshake sent (no UUID): Requesting SLIN16", self.state.call_id)
         except Exception as e:
             logger.warning("[%s] ⚠️ Error reading UUID: %s", self.state.call_id, e)
         
