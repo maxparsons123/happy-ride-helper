@@ -19,9 +19,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int MAX_QUEUED_FRAMES = 5000;
     private const int FADE_IN_SAMPLES = 160; // ~3.3ms at 48kHz for smoother onset
 
-    // Outbound DSP configuration
-    private const float NARROWBAND_VOLUME_BOOST = 1.4f;  // Boost for G.711 (8kHz)
-    private const float SOFT_LIMITER_THRESHOLD = 28000f; // Start limiting here
+    // Outbound DSP configuration - REDUCED for cleaner audio
+    private const float NARROWBAND_VOLUME_BOOST = 1.0f;  // No boost (was 1.4f - caused harshness)
+    private const float SOFT_LIMITER_THRESHOLD = 30000f; // Higher threshold (was 28000)
     private const float SOFT_LIMITER_CEILING = 32000f;   // Hard ceiling
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
