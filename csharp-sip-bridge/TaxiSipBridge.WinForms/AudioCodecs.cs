@@ -8,12 +8,13 @@ using Concentus.Structs;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Resampler mode for A/B testing (kept for UI compatibility).
+/// Resampler mode for A/B testing.
 /// </summary>
 public enum ResamplerMode
 {
     NAudio,
-    Custom
+    Custom,
+    Soxr  // libsoxr high-quality resampler
 }
 
 /// <summary>
@@ -23,9 +24,11 @@ public enum ResamplerMode
 public static class AudioCodecs
 {
     /// <summary>
-    /// Current resampler mode (for UI compatibility - not actively used in simplified mode).
+    /// Current resampler mode for A/B testing.
     /// </summary>
-    public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.NAudio;
+    public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.Soxr;
+
+    private static bool _soxrAvailable = true;  // Assume available until proven otherwise
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
     /// </summary>
@@ -183,21 +186,62 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// High-quality 24kHz to 8kHz conversion with anti-aliasing.
-    /// FIR low-pass (4kHz) → Decimate by 3 → Ready for G.711 encoding.
+    /// High-quality 24kHz to 8kHz conversion.
+    /// Uses libsoxr if available, falls back to FIR decimation.
     /// </summary>
     public static short[] Resample24kTo8k(short[] input)
     {
-        // Convert to float for filtering
+        // Try libsoxr first (best quality)
+        if (CurrentResamplerMode == ResamplerMode.Soxr && _soxrAvailable)
+        {
+            try
+            {
+                return SoxrResamplerHelper.Resample24kTo8k(input);
+            }
+            catch (DllNotFoundException)
+            {
+                _soxrAvailable = false;
+                System.Diagnostics.Debug.WriteLine("[AudioCodecs] libsoxr not found, falling back to FIR");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AudioCodecs] soxr error: {ex.Message}, falling back to FIR");
+            }
+        }
+
+        // Fallback: FIR low-pass + decimate
         var floatInput = new float[input.Length];
         for (int i = 0; i < input.Length; i++)
             floatInput[i] = input[i] / 32768f;
 
-        // Anti-aliasing filter
         var filtered = FirLowPass24k(floatInput);
-
-        // Decimate
         return Decimate24kTo8k(filtered);
+    }
+
+    /// <summary>
+    /// High-quality 8kHz to 24kHz conversion for inbound audio.
+    /// Uses libsoxr if available, falls back to linear interpolation.
+    /// </summary>
+    public static short[] Resample8kTo24k(short[] input)
+    {
+        if (CurrentResamplerMode == ResamplerMode.Soxr && _soxrAvailable)
+        {
+            try
+            {
+                return SoxrResamplerHelper.Resample8kTo24k(input);
+            }
+            catch (DllNotFoundException)
+            {
+                _soxrAvailable = false;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AudioCodecs] soxr 8k→24k error: {ex.Message}");
+            }
+        }
+
+        // Fallback: linear interpolation (good enough for upsampling)
+        return Resample(input, 8000, 24000);
     }
 
     /// <summary>
@@ -424,6 +468,8 @@ public static class AudioCodecs
         ResetOpus();
         ResetG722();
         ResetFirFilter();
+        SoxrResamplerHelper.Reset();
+        TelephonyVoiceShaping.Reset();
     }
 }
 
