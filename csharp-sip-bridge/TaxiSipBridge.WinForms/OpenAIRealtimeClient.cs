@@ -31,8 +31,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private const int FadeInSamples = 48;
     
     // Pre-emphasis for telephony clarity (matches edge function)
-    private const float PRE_EMPHASIS_COEFF = 0.97f;
+    private const float PRE_EMPHASIS_COEFF = 0.95f;
     private short _lastSample = 0;
+    private short _lastInboundSample8k = 0;  // State for 8kHz pre-emphasis
+    private short _lastInboundSampleHd = 0;  // State for wideband pre-emphasis
     private int _audioPacketsSent = 0;
     
     // Session state
@@ -240,13 +242,30 @@ public class OpenAIRealtimeClient : IAudioAIClient
         for (int i = 0; i < pcm8k.Length; i++)
             pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
 
-        // Simple point upsampling 8kHz → 24kHz (pick each sample 3x)
+        // Pre-emphasis filter (0.95 coefficient) - boosts high frequencies for consonant clarity
+        // This significantly improves speech recognition accuracy
+        short prevSample = _lastInboundSample8k;
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            int emphasized = current - (int)(prevSample * 0.95);
+            pcm8k[i] = (short)Math.Clamp(emphasized, short.MinValue, short.MaxValue);
+            prevSample = current;
+        }
+        _lastInboundSample8k = prevSample;
+
+        // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
+        // Instead of duplicating samples, interpolate between them for smoother audio
         var pcm24k = new short[pcm8k.Length * 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
-            pcm24k[i * 3] = pcm8k[i];
-            pcm24k[i * 3 + 1] = pcm8k[i];
-            pcm24k[i * 3 + 2] = pcm8k[i];
+            short current = pcm8k[i];
+            short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
+            
+            int outIdx = i * 3;
+            pcm24k[outIdx] = current;
+            pcm24k[outIdx + 1] = (short)((current * 2 + next) / 3);     // 1/3 towards next
+            pcm24k[outIdx + 2] = (short)((current + next * 2) / 3);     // 2/3 towards next
         }
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
@@ -293,6 +312,18 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Same as SendPcm8kAsync - without this, OpenAI VAD won't trigger!
         for (int i = 0; i < samples.Length; i++)
             samples[i] = (short)Math.Clamp(samples[i] * 2.5, short.MinValue, short.MaxValue);
+
+        // Pre-emphasis filter (0.95 coefficient) - boosts high frequencies for consonant clarity
+        // Apply before resampling for best quality
+        short prevSample = _lastInboundSampleHd;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            short current = samples[i];
+            int emphasized = current - (int)(prevSample * 0.95);
+            samples[i] = (short)Math.Clamp(emphasized, short.MinValue, short.MaxValue);
+            prevSample = current;
+        }
+        _lastInboundSampleHd = prevSample;
 
         // Resample to 24kHz if needed (e.g., 48kHz Opus → 24kHz)
         short[] pcm24;
