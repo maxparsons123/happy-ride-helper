@@ -35,8 +35,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _needsFadeIn = true;
     private volatile bool _disposed;
     
-    // DSP bypass mode - skip all processing except resampling
-    private bool _bypassDsp = true; // ENABLED: skip fade-in, crossfade, interpolation
+    // DSP bypass mode - skip interpolation/crossfade but keep fade-in for pop prevention
+    private bool _bypassDsp = true; // ENABLED: skip crossfade, interpolation
+    private bool _enableFadeIn = true; // Keep fade-in to prevent pops
 
     // State tracking
     private short _lastOutputSample;
@@ -131,8 +132,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             var frame = new short[PCM24_FRAME_SAMPLES];
             Array.Copy(pcm24All, offset, frame, 0, len);
 
-            // Fade-in (skip if bypass mode)
-            if (!_bypassDsp && _needsFadeIn && frame.Length > 0)
+            // Fade-in to prevent pops (always enabled unless explicitly disabled)
+            if (_enableFadeIn && _needsFadeIn && frame.Length > 0)
             {
                 int fadeLen = Math.Min(FADE_IN_SAMPLES, frame.Length);
                 for (int i = 0; i < fadeLen; i++)
