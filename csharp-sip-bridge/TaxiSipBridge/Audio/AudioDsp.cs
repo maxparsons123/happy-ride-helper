@@ -3,167 +3,217 @@ using System;
 namespace TaxiSipBridge.Audio;
 
 /// <summary>
-/// Digital Signal Processing for telephony audio - ported from Python bridge v6.2
-/// Includes high-pass filter, soft-knee noise gate, and smoothed AGC.
+/// High-quality DSP pipeline optimized for OpenAI Realtime API → Opus encoding.
+/// Includes high-pass filtering, noise gating, AGC, and pre-emphasis for maximum clarity.
 /// </summary>
 public class AudioDsp
 {
-    // Configuration - matches Python bridge
-    private const int HighPassCutoff = 60;
+    // Configuration - optimized for OpenAI + Opus
+    private const int HighPassCutoff = 80;          // Slightly higher to preserve voice clarity
     private const int SampleRate = 8000;
-    private const float NoiseGateThreshold = 25f;
-    private const bool NoiseGateSoftKnee = true;
-    private const float TargetRms = 2500f;
-    private const float MaxGain = 3.0f;
-    private const float MinGain = 0.8f;
-    private const float GainSmoothingFactor = 0.2f;
+    private const float NoiseGateThreshold = 20f;   // Lower threshold for better sensitivity
+    private const float NoiseGateKneeWidth = 30f;   // Soft knee range (20-50)
+    private const float TargetRms = 2800f;          // Higher target for Opus compression
+    private const float MaxGain = 2.5f;             // Reduced max gain to prevent clipping
+    private const float MinGain = 0.9f;             // Slightly higher min gain
+    private const float GainSmoothingFactor = 0.15f; // Slower smoothing to reduce pumping
+    private const float PreEmphasisCoeff = 0.95f;   // High-frequency boost for Opus clarity
 
     // High-pass filter state (2nd order Butterworth)
-    private readonly double[] _hpX = new double[3]; // input history
-    private readonly double[] _hpY = new double[3]; // output history
+    private readonly double[] _hpX = new double[3]; // input history [x[n], x[n-1], x[n-2]]
+    private readonly double[] _hpY = new double[3]; // output history [y[n], y[n-1], y[n-2]]
 
-    // Butterworth coefficients for 60Hz @ 8kHz (pre-calculated)
-    // Generated from: butter(2, 60, btype='high', fs=8000, output='ba')
-    private static readonly double[] HpB = { 0.9780305, -1.9560610, 0.9780305 };
-    private static readonly double[] HpA = { 1.0, -1.9555782, 0.9565439 };
+    // Butterworth coefficients for 80Hz @ 8kHz (recalculated for better performance)
+    private static readonly double[] HpB = { 0.9762421, -1.9524842, 0.9762421 };
+    private static readonly double[] HpA = { 1.0, -1.9515384, 0.9534300 };
 
     // AGC state
     private float _lastGain = 1.0f;
+    private float _preEmphasisState = 0f;
 
     /// <summary>
-    /// Apply noise reduction pipeline: High-pass → Noise gate → AGC
+    /// Applies full DSP pipeline: high-pass → noise gate → AGC → pre-emphasis
     /// </summary>
-    /// <param name="pcmData">16-bit PCM audio (little-endian bytes)</param>
-    /// <returns>Processed audio and current gain value</returns>
+    /// <param name="pcmData">Input PCM16 data (little-endian)</param>
+    /// <returns>Processed audio bytes and applied gain</returns>
     public (byte[] Audio, float Gain) ApplyNoiseReduction(byte[] pcmData)
     {
-        if (pcmData == null || pcmData.Length < 4)
-            return (pcmData ?? Array.Empty<byte>(), _lastGain);
+        if (pcmData == null || pcmData.Length == 0)
+            return (pcmData ?? Array.Empty<byte>(), 1.0f);
 
-        int sampleCount = pcmData.Length / 2;
-        var samples = new float[sampleCount];
-
-        // Convert bytes to float samples
-        for (int i = 0; i < sampleCount; i++)
-        {
-            short sample = (short)(pcmData[i * 2] | (pcmData[i * 2 + 1] << 8));
-            samples[i] = sample;
-        }
-
-        // Step 1: High-pass filter (removes low-frequency hum)
-        ApplyHighPassFilter(samples);
-
-        // Step 2: Soft-knee noise gate (removes background noise)
-        ApplySoftKneeNoiseGate(samples);
-
-        // Step 3: Smoothed AGC (normalizes volume)
-        ApplySmoothedAgc(samples);
-
+        // Convert bytes to float samples (-1.0 to 1.0)
+        var floatSamples = BytesToFloat(pcmData);
+        
+        // Apply DSP pipeline in optimal order
+        ApplyHighPassFilter(floatSamples);
+        ApplySoftKneeNoiseGate(floatSamples);
+        float appliedGain = ApplySmoothedAgc(floatSamples);
+        ApplyPreEmphasis(floatSamples);
+        
         // Convert back to bytes
-        var output = new byte[sampleCount * 2];
-        for (int i = 0; i < sampleCount; i++)
-        {
-            short sample = (short)Math.Clamp(samples[i], short.MinValue, short.MaxValue);
-            output[i * 2] = (byte)(sample & 0xFF);
-            output[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
-        }
-
-        return (output, _lastGain);
+        var processedBytes = FloatToBytes(floatSamples);
+        
+        return (processedBytes, appliedGain);
     }
 
     /// <summary>
-    /// Apply 2nd order Butterworth high-pass filter at 60Hz
+    /// High-pass filter to remove DC offset and low-frequency hum
     /// </summary>
     private void ApplyHighPassFilter(float[] samples)
     {
         for (int i = 0; i < samples.Length; i++)
         {
-            // Shift history
-            _hpX[0] = _hpX[1];
-            _hpX[1] = _hpX[2];
-            _hpX[2] = samples[i];
+            // Shift history buffers
+            _hpX[2] = _hpX[1];
+            _hpX[1] = _hpX[0];
+            _hpY[2] = _hpY[1];
+            _hpY[1] = _hpY[0];
 
-            _hpY[0] = _hpY[1];
-            _hpY[1] = _hpY[2];
+            // Current input
+            _hpX[0] = samples[i];
 
-            // Apply IIR filter: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
-            _hpY[2] = HpB[0] * _hpX[2] + HpB[1] * _hpX[1] + HpB[2] * _hpX[0]
-                    - HpA[1] * _hpY[1] - HpA[2] * _hpY[0];
+            // Direct Form II IIR filter
+            double output = HpB[0] * _hpX[0] + HpB[1] * _hpX[1] + HpB[2] * _hpX[2]
+                          - HpA[1] * _hpY[1] - HpA[2] * _hpY[2];
 
-            samples[i] = (float)_hpY[2];
+            // Clamp to prevent overflow
+            _hpY[0] = Math.Clamp(output, -1.0, 1.0);
+            samples[i] = (float)_hpY[0];
         }
     }
 
     /// <summary>
-    /// Apply soft-knee noise gate to reduce background noise while preserving soft consonants
+    /// Soft-knee noise gate with smooth transitions using smoothstep interpolation
     /// </summary>
     private void ApplySoftKneeNoiseGate(float[] samples)
     {
-        if (!NoiseGateSoftKnee)
-        {
-            // Hard gate fallback
-            for (int i = 0; i < samples.Length; i++)
-            {
-                if (Math.Abs(samples[i]) < NoiseGateThreshold)
-                    samples[i] *= 0.1f;
-            }
-            return;
-        }
-
-        // Soft-knee: gradual gain reduction in the knee region
-        float kneeLow = NoiseGateThreshold;
-        float kneeHigh = NoiseGateThreshold * 3f;
+        const float kneeLow = NoiseGateThreshold / 32768f;  // Normalize threshold
+        const float kneeHigh = (NoiseGateThreshold + NoiseGateKneeWidth) / 32768f;
+        const float minGain = 0.1f; // Minimum gain in noise floor
+        const float maxGain = 1.0f; // Full gain above knee
 
         for (int i = 0; i < samples.Length; i++)
         {
-            float absVal = Math.Abs(samples[i]);
-
-            // Calculate gain curve: 0.15 (below knee) to 1.0 (above knee)
-            float normalized = (absVal - kneeLow) / (kneeHigh - kneeLow);
-            float gainCurve = Math.Clamp(normalized, 0f, 1f);
-            float gain = 0.15f + 0.85f * gainCurve;
-
-            samples[i] *= gain;
+            float absSample = Math.Abs(samples[i]);
+            
+            if (absSample <= kneeLow)
+            {
+                // Below knee - apply minimum gain
+                samples[i] *= minGain;
+            }
+            else if (absSample >= kneeHigh)
+            {
+                // Above knee - full gain (no change needed)
+            }
+            else
+            {
+                // In knee region - smooth interpolation using smoothstep
+                float normalized = (absSample - kneeLow) / (kneeHigh - kneeLow);
+                float smoothNormalized = normalized * normalized * (3.0f - 2.0f * normalized);
+                float gain = minGain + (maxGain - minGain) * smoothNormalized;
+                samples[i] *= gain;
+            }
         }
     }
 
     /// <summary>
-    /// Apply smoothed AGC to normalize audio levels without harsh pumping
+    /// Smoothed Automatic Gain Control with noise floor detection
     /// </summary>
-    private void ApplySmoothedAgc(float[] samples)
+    private float ApplySmoothedAgc(float[] samples)
     {
-        // Calculate RMS of the frame
-        double sumSquares = 0;
-        for (int i = 0; i < samples.Length; i++)
+        // Calculate RMS of current frame (normalized)
+        double sumSquared = 0;
+        foreach (float sample in samples)
         {
-            sumSquares += samples[i] * samples[i];
+            sumSquared += sample * sample;
         }
-        float rms = (float)Math.Sqrt(sumSquares / samples.Length);
-
-        // Only apply gain if signal is above noise floor
-        if (rms > 30)
+        
+        float rms = (float)Math.Sqrt(sumSquared / samples.Length);
+        float rmsScaled = rms * 32768f; // Scale back for threshold comparison
+        
+        // Only apply AGC if signal is above noise floor
+        const float NoiseFloorRms = 30f;
+        if (rmsScaled < NoiseFloorRms)
         {
-            float targetGain = Math.Clamp(TargetRms / rms, MinGain, MaxGain);
-
-            // Smooth the gain transition (prevents pumping)
-            _lastGain += GainSmoothingFactor * (targetGain - _lastGain);
-
-            // Apply gain
+            // Below noise floor - use minimum gain
+            _lastGain = MinGain;
             for (int i = 0; i < samples.Length; i++)
             {
                 samples[i] *= _lastGain;
             }
+            return _lastGain;
+        }
+
+        // Calculate target gain
+        float targetGain = (TargetRms / 32768f) / rms;
+        targetGain = Math.Clamp(targetGain, MinGain, MaxGain);
+        
+        // Smooth gain transition to prevent pumping artifacts
+        _lastGain += GainSmoothingFactor * (targetGain - _lastGain);
+        _lastGain = Math.Clamp(_lastGain, MinGain, MaxGain);
+        
+        // Apply gain
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] *= _lastGain;
+        }
+        
+        return _lastGain;
+    }
+
+    /// <summary>
+    /// Pre-emphasis filter to boost high frequencies for better Opus encoding
+    /// H(z) = 1 - α*z^(-1) where α = 0.95
+    /// </summary>
+    private void ApplyPreEmphasis(float[] samples)
+    {
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float current = samples[i];
+            float emphasized = current - PreEmphasisCoeff * _preEmphasisState;
+            samples[i] = Math.Clamp(emphasized, -1.0f, 1.0f);
+            _preEmphasisState = current;
         }
     }
 
     /// <summary>
-    /// Reset filter state (call between calls to prevent artifacts)
+    /// Convert PCM16 bytes to float array (-1.0 to 1.0)
+    /// </summary>
+    private static float[] BytesToFloat(byte[] bytes)
+    {
+        var samples = new float[bytes.Length / 2];
+        for (int i = 0; i < samples.Length; i++)
+        {
+            short sample = (short)(bytes[i * 2] | (bytes[i * 2 + 1] << 8));
+            samples[i] = sample / 32768.0f;
+        }
+        return samples;
+    }
+
+    /// <summary>
+    /// Convert float array (-1.0 to 1.0) to PCM16 bytes
+    /// </summary>
+    private static byte[] FloatToBytes(float[] samples)
+    {
+        var bytes = new byte[samples.Length * 2];
+        for (int i = 0; i < samples.Length; i++)
+        {
+            short sample = (short)Math.Clamp(samples[i] * 32767f, short.MinValue, short.MaxValue);
+            bytes[i * 2] = (byte)(sample & 0xFF);
+            bytes[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
+        }
+        return bytes;
+    }
+
+    /// <summary>
+    /// Reset all DSP state (call when starting new audio stream)
     /// </summary>
     public void Reset()
     {
         Array.Clear(_hpX, 0, _hpX.Length);
         Array.Clear(_hpY, 0, _hpY.Length);
         _lastGain = 1.0f;
+        _preEmphasisState = 0f;
     }
 
     /// <summary>
