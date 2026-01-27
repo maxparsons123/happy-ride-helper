@@ -526,14 +526,20 @@ class TaxiBridge:
         
         # 640 bytes = unambiguously slin16 (20ms @ 16kHz).
         # 320 bytes is AMBIGUOUS: it can be slin (20ms @ 8kHz) or slin16 (10ms @ 16kHz).
-        # We now default 320 → slin@8kHz and let the cadence-inference logic upgrade to slin16
-        # if it actually arrives every ~10ms.
+        # IMPORTANT:
+        # - If FORCE_SLIN16 is enabled (recommended when dialplan forces slin16), treat 320 as slin16.
+        # - Cadence-based inference from TCP read timing is unreliable (frames can arrive in bursts),
+        #   so we only use it when FORCE_SLIN16 is disabled.
         if self.state.seen_640:
             decided_codec = "slin16"
             decided_rate = RATE_SLIN16
         elif self.state.seen_320:
-            decided_codec = "slin"
-            decided_rate = RATE_SLIN
+            if FORCE_SLIN16:
+                decided_codec = "slin16"
+                decided_rate = RATE_SLIN16
+            else:
+                decided_codec = "slin"
+                decided_rate = RATE_SLIN
         elif self.state.seen_160:
             # 160 bytes = definitely 8kHz ulaw
             decided_codec = "ulaw"
@@ -831,7 +837,8 @@ class TaxiBridge:
                     # If we keep seeing ambiguous 320-byte PCM frames, infer true sample rate
                     # from the frame cadence and lock it to avoid slow/fast audio.
                     if (
-                        not self.state.timing_inferred
+                        not FORCE_SLIN16
+                        and not self.state.timing_inferred
                         and self.state.ast_codec in ("slin16", "slin")
                         and msg_len == 320
                         and len(self.state.audio_dt_ms) >= 10
