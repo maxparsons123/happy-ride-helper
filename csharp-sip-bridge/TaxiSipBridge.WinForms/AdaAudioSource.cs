@@ -220,17 +220,19 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming for Opus
-            if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
+            // Jitter buffer priming for wideband codecs (Opus 48kHz) - always enabled
+            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
+            if (!_jitterBufferFilled && targetRate >= 48000)
             {
-                int minFrames = Math.Max(1, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS / 2);
+                // Buffer 100ms (5 frames) before starting playback for Opus
+                int minFrames = 5;
                 if (_pcmQueue.Count < minFrames)
                 {
                     SendSilence();
                     return;
                 }
                 _jitterBufferFilled = true;
-                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed ({_pcmQueue.Count} frames)");
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Opus jitter buffer primed ({_pcmQueue.Count} frames, 100ms)");
             }
 
             if (_pcmQueue.TryDequeue(out var pcm24))
