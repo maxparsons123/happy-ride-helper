@@ -94,8 +94,8 @@ PREFER_SLIN16 = True
 # IMPORTANT: Set to True for better STT accuracy on house numbers like "52A"
 FORCE_SLIN16 = _env_bool("FORCE_SLIN16", True)  # ON by default for 16kHz quality
 # FORCE_OPUS: When true, assume all variable-size frames are Opus (for WhatsApp)
-# Note: When FORCE_SLIN16 is True, this only applies to non-standard frame sizes
-FORCE_OPUS = _env_bool("FORCE_OPUS", False)  # OFF to prioritize slin16 detection
+# This is checked BEFORE slin16 detection, so non-standard frame sizes use Opus
+FORCE_OPUS = _env_bool("FORCE_OPUS", True)  # ON for WhatsApp compatibility
 FORMAT_LOCK_DURATION_S = 60.0  # Lock format for entire call duration
 FORMAT_LOCK_FRAME_COUNT = 5    # Fewer frames needed when Opus is clear
 
