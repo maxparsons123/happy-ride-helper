@@ -17,12 +17,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
 {
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 5000;
-    private const int FADE_IN_SAMPLES = 160; // ~3.3ms at 48kHz for smoother onset
-
-    // Outbound DSP configuration - REDUCED for cleaner audio
-    private const float NARROWBAND_VOLUME_BOOST = 1.0f;  // No boost (was 1.4f - caused harshness)
-    private const float SOFT_LIMITER_THRESHOLD = 30000f; // Higher threshold (was 28000)
-    private const float SOFT_LIMITER_CEILING = 32000f;   // Hard ceiling
+    
+    // Outbound DSP configuration - MATCHES EDGE FUNCTION
+    private const int FADE_IN_SAMPLES = 80;      // Same as edge function
+    private const int CROSSFADE_SAMPLES = 40;    // Same as edge function
+    private const float LIMITER_THRESHOLD = 28000f; // Same as edge function
+    private const float LIMITER_CEILING = 32000f;   // Same as edge function
 
     private readonly MediaFormatManager<AudioFormat> _audioFormatManager;
     private readonly IAudioEncoder _audioEncoder;
@@ -38,13 +38,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _isPaused;
     private bool _isClosed;
     private bool _needsFadeIn = true;
+    private bool _isFirstPacket = true;
     private volatile bool _disposed;
     
     // DSP control flags
-    private bool _bypassDsp = true;         // DSP bypassed for clean audio
-    private bool _enableFadeIn = true;      // Keep fade-in to prevent pops
-    private bool _enableSoftLimiter = true; // Prevent clipping
-    private bool _enableNarrowbandBoost = true; // Volume boost for G.711
+    private bool _bypassDsp = false;        // Use edge function DSP
+    private float _limiterGain = 1.0f;      // Soft limiter gain state
 
     // State tracking
     private short _lastOutputSample;
@@ -189,6 +188,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         
         // Reset DSP/audio state
         _needsFadeIn = true;
+        _isFirstPacket = true;
+        _limiterGain = 1.0f;
         _lastOutputSample = 0;
         _lastAudioFrame = null;
         _lastFrameWasSilence = true;
@@ -477,56 +478,86 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Outbound DSP pipeline: volume boost (narrowband) → soft limiter
+    /// Outbound DSP pipeline - MATCHES EDGE FUNCTION
+    /// Fade-in → Soft limiter → Crossfade
     /// </summary>
     private short[] ApplyOutboundDsp(short[] samples, int sampleRate)
     {
-        var output = new short[samples.Length];
-        bool isNarrowband = sampleRate <= 8000;
-
-        for (int i = 0; i < samples.Length; i++)
+        if (samples.Length == 0) return samples;
+        
+        // 1. Apply fade-in on first packet
+        if (_needsFadeIn)
         {
-            float sample = samples[i];
-
-            // Volume boost for narrowband codecs (G.711)
-            if (_enableNarrowbandBoost && isNarrowband)
+            int fadeLen = Math.Min(FADE_IN_SAMPLES, samples.Length);
+            for (int i = 0; i < fadeLen; i++)
             {
-                sample *= NARROWBAND_VOLUME_BOOST;
+                float gain = (float)i / fadeLen;
+                samples[i] = (short)(samples[i] * gain);
             }
-
-            // Soft limiter to prevent clipping
-            if (_enableSoftLimiter)
-            {
-                sample = ApplySoftLimiter(sample);
-            }
-
-            output[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+            _needsFadeIn = false;
         }
-
-        return output;
+        
+        // 2. Apply soft limiter (matches edge function)
+        ApplySoftLimiter(samples);
+        
+        // 3. Apply crossfade from previous sample
+        if (!_isFirstPacket && samples.Length >= CROSSFADE_SAMPLES)
+        {
+            for (int i = 0; i < CROSSFADE_SAMPLES; i++)
+            {
+                float t = (float)i / CROSSFADE_SAMPLES;
+                samples[i] = (short)(_lastOutputSample * (1f - t) + samples[i] * t);
+            }
+        }
+        _isFirstPacket = false;
+        
+        return samples;
     }
 
     /// <summary>
-    /// Soft limiter using tanh compression for smooth clipping prevention
+    /// Soft limiter - MATCHES EDGE FUNCTION EXACTLY
+    /// Stateful gain with slow recovery and tanh compression
     /// </summary>
-    private static float ApplySoftLimiter(float sample)
+    private void ApplySoftLimiter(short[] samples)
     {
-        float absSample = Math.Abs(sample);
-        
-        if (absSample <= SOFT_LIMITER_THRESHOLD)
+        if (samples.Length == 0) return;
+
+        // Find peak
+        int peak = 0;
+        foreach (short s in samples)
         {
-            return sample;
+            int abs = s == short.MinValue ? 32768 : Math.Abs(s);
+            if (abs > peak) peak = abs;
         }
 
-        // Soft-knee compression using tanh
-        float sign = sample >= 0 ? 1f : -1f;
-        float excess = absSample - SOFT_LIMITER_THRESHOLD;
-        float headroom = SOFT_LIMITER_CEILING - SOFT_LIMITER_THRESHOLD;
-        
-        // Compress excess using tanh curve
-        float compressed = (float)(headroom * Math.Tanh(excess / headroom));
-        
-        return sign * (SOFT_LIMITER_THRESHOLD + compressed);
+        // Below threshold - slowly recover gain
+        if (peak < LIMITER_THRESHOLD)
+        {
+            _limiterGain = Math.Min(1.0f, _limiterGain + 0.01f);
+            return;
+        }
+
+        // Calculate target gain
+        float targetGain = LIMITER_CEILING / peak;
+        float alpha = peak > LIMITER_CEILING ? 0.3f : 0.05f;
+        _limiterGain = _limiterGain * (1f - alpha) + targetGain * alpha;
+
+        // Apply gain and soft-knee compression
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float sample = samples[i] * _limiterGain;
+
+            if (Math.Abs(sample) > LIMITER_THRESHOLD)
+            {
+                float sign = sample >= 0 ? 1f : -1f;
+                float abs = Math.Abs(sample);
+                float over = (abs - LIMITER_THRESHOLD) / (LIMITER_CEILING - LIMITER_THRESHOLD);
+                float compressed = LIMITER_THRESHOLD + (LIMITER_CEILING - LIMITER_THRESHOLD) * (float)Math.Tanh(over);
+                sample = sign * compressed;
+            }
+
+            samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+        }
     }
 
     private void SendSilence()
