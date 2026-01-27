@@ -4512,18 +4512,25 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
               if (extractedPickup) {
                 const userStt = sessionState.userTruth.pickup || "";
                 const isGrounded = isGroundedInUserText(extractedPickup, userStt);
-                
-                if (isGrounded || !userStt) {
+
+                // If we don't have any user transcript to ground against, never accept a guessed address.
+                // This is the root cause of "Victoria Station" being accepted when STT was empty.
+                if (!userStt) {
+                  console.log(
+                    `[${callId}] 🚫 Rejecting Ada pickup (no STT to ground against): "${extractedPickup}"`
+                  );
+                } else if (isGrounded) {
                   // Ada's extraction is valid - use it (allows cleaning like "52A" → "52A David Road")
                   sessionState.booking.pickup = extractedPickup;
                   sessionState.userTruth.pickup = extractedPickup; // Safe to update since it's grounded
                   console.log(`[${callId}] 📌 Ada pickup GROUNDED: "${extractedPickup}" (from STT: "${userStt}")`);
+                  fieldUpdated = "pickup";
                 } else {
                   // Ada hallucinated - use raw STT instead
                   sessionState.booking.pickup = userStt;
                   console.log(`[${callId}] 🚫 Ada pickup HALLUCINATION rejected: "${extractedPickup}" vs STT: "${userStt}"`);
+                  fieldUpdated = "pickup";
                 }
-                fieldUpdated = "pickup";
               } else {
                 console.log(`[${callId}] ⚠️ Pickup rejected as garbage, asking again`);
               }
@@ -4532,18 +4539,23 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
               if (extractedDest) {
                 const userStt = sessionState.userTruth.destination || "";
                 const isGrounded = isGroundedInUserText(extractedDest, userStt);
-                
-                if (isGrounded || !userStt) {
+
+                if (!userStt) {
+                  console.log(
+                    `[${callId}] 🚫 Rejecting Ada destination (no STT to ground against): "${extractedDest}"`
+                  );
+                } else if (isGrounded) {
                   // Ada's extraction is valid - use it
                   sessionState.booking.destination = extractedDest;
                   sessionState.userTruth.destination = extractedDest;
                   console.log(`[${callId}] 📌 Ada destination GROUNDED: "${extractedDest}" (from STT: "${userStt}")`);
+                  fieldUpdated = "destination";
                 } else {
                   // Ada hallucinated - use raw STT instead
                   sessionState.booking.destination = userStt;
                   console.log(`[${callId}] 🚫 Ada destination HALLUCINATION rejected: "${extractedDest}" vs STT: "${userStt}"`);
+                  fieldUpdated = "destination";
                 }
-                fieldUpdated = "destination";
               } else {
                 console.log(`[${callId}] ⚠️ Destination rejected as garbage, asking again`);
               }
@@ -4572,9 +4584,14 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 if (val) {
                   const userStt = sessionState.userTruth.pickup || "";
                   const isGrounded = isGroundedInUserText(val, userStt);
-                  sessionState.booking.pickup = (isGrounded || !userStt) ? val : userStt;
-                  if (isGrounded) sessionState.userTruth.pickup = val;
-                  fieldUpdated = "pickup"; 
+
+                  if (!userStt) {
+                    console.log(`[${callId}] 🚫 Rejecting Ada pickup (no STT to ground against): "${val}"`);
+                  } else {
+                    sessionState.booking.pickup = isGrounded ? val : userStt;
+                    if (isGrounded) sessionState.userTruth.pickup = val;
+                    fieldUpdated = "pickup";
+                  }
                 }
               }
               else if (toolArgs.destination) { 
@@ -4582,9 +4599,14 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 if (val) {
                   const userStt = sessionState.userTruth.destination || "";
                   const isGrounded = isGroundedInUserText(val, userStt);
-                  sessionState.booking.destination = (isGrounded || !userStt) ? val : userStt;
-                  if (isGrounded) sessionState.userTruth.destination = val;
-                  fieldUpdated = "destination"; 
+
+                  if (!userStt) {
+                    console.log(`[${callId}] 🚫 Rejecting Ada destination (no STT to ground against): "${val}"`);
+                  } else {
+                    sessionState.booking.destination = isGrounded ? val : userStt;
+                    if (isGrounded) sessionState.userTruth.destination = val;
+                    fieldUpdated = "destination";
+                  }
                 }
               }
               else if (toolArgs.passengers !== undefined) { 
