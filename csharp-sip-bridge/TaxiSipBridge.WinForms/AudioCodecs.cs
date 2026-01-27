@@ -8,11 +8,24 @@ using Concentus.Structs;
 namespace TaxiSipBridge;
 
 /// <summary>
+/// Resampler mode for A/B testing (kept for UI compatibility).
+/// </summary>
+public enum ResamplerMode
+{
+    NAudio,
+    Custom
+}
+
+/// <summary>
 /// Audio codec utilities for encoding/decoding and resampling.
 /// Simplified for reliability - DSP effects are handled in AdaAudioSource.
 /// </summary>
 public static class AudioCodecs
 {
+    /// <summary>
+    /// Current resampler mode (for UI compatibility - not actively used in simplified mode).
+    /// </summary>
+    public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.NAudio;
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
     /// </summary>
