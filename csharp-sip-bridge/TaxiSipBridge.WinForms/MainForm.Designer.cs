@@ -94,8 +94,25 @@ partial class MainForm
 
         // OpenAI API Key (shown when Local mode is checked)
         lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
-        txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(520, 23), UseSystemPasswordChar = true, Visible = false };
-        txtApiKey.PlaceholderText = "sk-... (Your OpenAI API key for direct connection)";
+        txtApiKey = new TextBox { Location = new Point(75, 115), Size = new Size(300, 23), UseSystemPasswordChar = true, Visible = false };
+        txtApiKey.PlaceholderText = "sk-... (OpenAI API key)";
+        
+        // Cheaper Pipeline checkbox (shown when Local mode is checked)
+        chkCheaperPipeline = new CheckBox 
+        { 
+            Text = "💰 Cheaper Pipeline", 
+            Location = new Point(385, 118), 
+            Size = new Size(140, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(40, 167, 69),
+            Visible = false
+        };
+        chkCheaperPipeline.CheckedChanged += this.chkCheaperPipeline_CheckedChanged;
+        
+        // Deepgram API Key (shown when cheaper pipeline is checked)
+        lblDeepgramKey = new Label { Text = "Deepgram:", Location = new Point(525, 118), Size = new Size(65, 23), Visible = false };
+        txtDeepgramKey = new TextBox { Location = new Point(595, 115), Size = new Size(100, 23), UseSystemPasswordChar = true, Visible = false };
+        txtDeepgramKey.PlaceholderText = "Deepgram key";
 
         // WebSocket URL (hidden when Local mode is checked)
         lblWs = new Label { Text = "Ada URL:", Location = new Point(15, 118), Size = new Size(60, 23) };
@@ -147,6 +164,7 @@ partial class MainForm
             lblResampler, cmbResampler,
             chkLocalOpenAI, chkSimliAvatar,
             lblApiKey, txtApiKey,
+            chkCheaperPipeline, lblDeepgramKey, txtDeepgramKey,
             lblWs, txtWebSocketUrl,
             lblSimliApiKey, txtSimliApiKey, lblSimliFaceId, txtSimliFaceId,
             btnStartStop, btnMicTest
@@ -241,6 +259,7 @@ partial class MainForm
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
     private TextBox txtApiKey;
+    private TextBox txtDeepgramKey;
     private TextBox txtSimliApiKey;
     private TextBox txtSimliFaceId;
     private ComboBox cmbTransport;
@@ -248,7 +267,9 @@ partial class MainForm
     private ComboBox cmbResampler;
     private CheckBox chkLocalOpenAI;
     private CheckBox chkSimliAvatar;
+    private CheckBox chkCheaperPipeline;
     private Label lblApiKey;
+    private Label lblDeepgramKey;
     private Label lblWs;
     private Label lblSimliApiKey;
     private Label lblSimliFaceId;
