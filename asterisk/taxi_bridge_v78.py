@@ -880,11 +880,14 @@ class TaxiBridge:
                                     inferred_rate,
                                 )
                                 if self.ws and self.state.ws_connected:
+                                    # IMPORTANT: Always report 24kHz because we resample to RATE_AI
+                                    # before sending to edge function. Sending the raw Asterisk rate
+                                    # would cause the edge function to misinterpret the audio.
                                     await self.ws.send(json.dumps({
                                         "type": "update_format",
                                         "call_id": self.state.call_id,
-                                        "inbound_format": inferred_codec,
-                                        "inbound_sample_rate": inferred_rate,
+                                        "inbound_format": "slin16",  # We send 16-bit PCM
+                                        "inbound_sample_rate": RATE_AI,  # Always 24kHz after resample
                                     }))
 
                     is_high_quality = self.state.ast_codec in ("slin16", "opus")
