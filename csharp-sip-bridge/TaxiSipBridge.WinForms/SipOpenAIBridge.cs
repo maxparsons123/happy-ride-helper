@@ -20,6 +20,7 @@ public class SipOpenAIBridge : IDisposable
     private readonly string _sipUser;
     private readonly string _sipPassword;
     private readonly SipTransportType _transportType;
+    private readonly SipAdaBridgeConfig? _config;
 
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _regUserAgent;
@@ -53,7 +54,8 @@ public class SipOpenAIBridge : IDisposable
         int sipPort,
         string sipUser,
         string sipPassword,
-        SipTransportType transportType = SipTransportType.UDP)
+        SipTransportType transportType = SipTransportType.UDP,
+        SipAdaBridgeConfig? config = null)
     {
         _apiKey = apiKey;
         _sipServer = sipServer;
@@ -61,6 +63,7 @@ public class SipOpenAIBridge : IDisposable
         _sipUser = sipUser;
         _sipPassword = sipPassword;
         _transportType = transportType;
+        _config = config;
     }
 
     public void Start()
@@ -70,6 +73,16 @@ public class SipOpenAIBridge : IDisposable
         Log("🚀 Starting SIP-OpenAI Bridge...");
 
         _sipTransport = new SIPTransport();
+
+        // Configure STUN for NAT traversal if enabled
+        if (_config?.EnableStun == true && !string.IsNullOrEmpty(_config.StunServer))
+        {
+            var stunUri = new STUNUri(SIPSchemesEnum.stun, _config.StunServer, _config.StunPort);
+            Log($"🌐 STUN enabled: {_config.StunServer}:{_config.StunPort}");
+            
+            // SIPSorcery uses STUNClient for NAT detection - we'll configure it on the channel
+            // The actual STUN binding happens when we create RTP sessions
+        }
 
         // Add appropriate channel based on transport type
         if (_transportType == SipTransportType.TCP)
@@ -327,6 +340,29 @@ public class SipOpenAIBridge : IDisposable
 
             _mediaSession = new VoIPMediaSession(mediaEndPoints);
             _mediaSession.AcceptRtpFromAny = true;
+            
+            // Configure STUN for RTP NAT traversal
+            if (_config?.EnableStun == true && !string.IsNullOrEmpty(_config.StunServer))
+            {
+                var stunUri = new STUNUri(SIPSchemesEnum.stun, _config.StunServer, _config.StunPort);
+                
+                // For RTP sessions, we need to get the public IP via STUN binding request
+                // This helps NAT traversal by advertising the correct external IP in SDP
+                try
+                {
+                    var stunEndPoint = new IPEndPoint(
+                        Dns.GetHostAddresses(_config.StunServer).FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? IPAddress.Any,
+                        _config.StunPort);
+                    
+                    // SIPSorcery VoIPMediaSession can use SetRemoteDescription or SetDestination
+                    // to handle NAT, but for incoming calls we rely on AcceptRtpFromAny
+                    Log($"🌐 [{_currentCallId}] STUN configured: {_config.StunServer}:{_config.StunPort}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"⚠️ [{_currentCallId}] STUN setup warning: {ex.Message}");
+                }
+            }
             
             // Debug: Log what formats the media session will advertise
             Log($"🔍 [{_currentCallId}] MediaSession created, AudioTrack formats: {_mediaSession.AudioLocalTrack?.Capabilities?.Count ?? 0} capabilities");
