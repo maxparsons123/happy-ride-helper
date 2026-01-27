@@ -21,6 +21,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int MAX_QUEUED_FRAMES = 5000;
     private const int FADE_IN_SAMPLES = 80;
     private const int CROSSFADE_SAMPLES = 40;
+    private const int OPUS_JITTER_FILL_MS = 120; // More aggressive jitter buffer for Opus
 
     // DSP parameters
     private const float VOLUME_BOOST = 1.4f;
@@ -245,14 +246,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             if (_audioMode == AudioMode.JitterBuffer && !_jitterBufferFilled)
             {
-                int minFrames = Math.Max(1, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS / 2);
+                // Use more aggressive buffer for Opus to prevent underrun glitches
+                bool isOpus = _audioFormatManager.SelectedFormat.FormatName.Equals("OPUS", StringComparison.OrdinalIgnoreCase);
+                int bufferMs = isOpus ? OPUS_JITTER_FILL_MS : _jitterBufferMs;
+                int minFrames = Math.Max(2, bufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 if (_pcmQueue.Count < minFrames)
                 {
                     SendSilence();
                     return;
                 }
                 _jitterBufferFilled = true;
-                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed ({_pcmQueue.Count} frames)");
+                OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer filled ({_pcmQueue.Count} frames, target={minFrames})");
             }
 
             if (_pcmQueue.TryDequeue(out var pcm24))
@@ -330,7 +334,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             _lastFrameWasSilence = false;
         }
 
-        byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
+        // For Opus stereo (ch=2), duplicate mono to interleaved stereo
+        short[] frameToEncode = audioFrame;
+        bool isOpusStereo = _audioFormatManager.SelectedFormat.FormatName.Equals("OPUS", StringComparison.OrdinalIgnoreCase) &&
+                           _audioFormatManager.SelectedFormat.Channels() == 2;
+        if (isOpusStereo)
+        {
+            frameToEncode = DuplicateMonoToStereo(audioFrame);
+        }
+
+        byte[] encoded = _audioEncoder.EncodeAudio(frameToEncode, _audioFormatManager.SelectedFormat);
         uint durationRtpUnits = (uint)samplesNeeded;
         _sentFrames++;
 
@@ -554,7 +567,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 _needsFadeIn = true;
             }
 
-            byte[] encoded = _audioEncoder.EncodeAudio(silence, _audioFormatManager.SelectedFormat);
+            // For Opus stereo (ch=2), duplicate mono to interleaved stereo
+            short[] frameToEncode = silence;
+            bool isOpusStereo = _audioFormatManager.SelectedFormat.FormatName.Equals("OPUS", StringComparison.OrdinalIgnoreCase) &&
+                               _audioFormatManager.SelectedFormat.Channels() == 2;
+            if (isOpusStereo)
+            {
+                frameToEncode = DuplicateMonoToStereo(silence);
+            }
+
+            byte[] encoded = _audioEncoder.EncodeAudio(frameToEncode, _audioFormatManager.SelectedFormat);
             uint durationRtpUnits = (uint)samplesNeeded;
             _silenceFrames++;
             _lastFrameWasSilence = true;
@@ -572,6 +594,20 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             // Silent fail for resilience
         }
+    }
+
+    /// <summary>
+    /// Duplicate mono samples to interleaved stereo (L R L R...) for Opus stereo encoding.
+    /// </summary>
+    private static short[] DuplicateMonoToStereo(short[] mono)
+    {
+        var stereo = new short[mono.Length * 2];
+        for (int i = 0; i < mono.Length; i++)
+        {
+            stereo[i * 2] = mono[i];     // Left
+            stereo[i * 2 + 1] = mono[i]; // Right
+        }
+        return stereo;
     }
 
     public void Dispose()
