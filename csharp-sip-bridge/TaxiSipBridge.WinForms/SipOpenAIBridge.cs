@@ -222,9 +222,14 @@ public class SipOpenAIBridge : IDisposable
             string? remoteOpusFmtp = null;
             try
             {
-                var sdpBody = inviteRequest.Body;
+                    var sdpBody = inviteRequest.Body;
                 if (!string.IsNullOrEmpty(sdpBody))
                 {
+                        // Helpful when carriers claim wideband support but don't advertise it.
+                        // Truncate to keep logs manageable.
+                        var sdpPreview = sdpBody.Length > 2000 ? sdpBody[..2000] + "\n...<truncated>" : sdpBody;
+                        Log($"📄 [{_currentCallId}] Remote SDP:\n{sdpPreview}");
+
                     var sdp = SDP.ParseSDPDescription(sdpBody);
                     var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
                     if (audioMedia != null)
@@ -243,12 +248,13 @@ public class SipOpenAIBridge : IDisposable
                                 _remotePtToCodec[pt] = AudioCodecsEnum.PCMU;
                             else if (name.Equals("G722", StringComparison.OrdinalIgnoreCase))
                                 _remotePtToCodec[pt] = AudioCodecsEnum.G722;
-                            else if (name.Equals("opus", StringComparison.OrdinalIgnoreCase))
+                            else if (name.Equals("opus", StringComparison.OrdinalIgnoreCase) || name.Equals("opus1", StringComparison.OrdinalIgnoreCase))
                                 _remotePtToCodec[pt] = AudioCodecsEnum.OPUS;
                         }
 
-                        remoteOffersOpus = audioMedia.MediaFormats.Any(f => 
-                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
+                        remoteOffersOpus = audioMedia.MediaFormats.Any(f =>
+                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true ||
+                            f.Value.Name()?.Equals("opus1", StringComparison.OrdinalIgnoreCase) == true);
                         remoteOffersG722 = audioMedia.MediaFormats.Any(f => 
                             f.Value.Name()?.Equals("G722", StringComparison.OrdinalIgnoreCase) == true);
 
@@ -266,7 +272,8 @@ public class SipOpenAIBridge : IDisposable
                         
                         // Detailed Opus parameters if present
                         var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
-                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true);
+                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true ||
+                            f.Value.Name()?.Equals("opus1", StringComparison.OrdinalIgnoreCase) == true);
                         if (!opusFormat.Value.IsEmpty())
                         {
                             remoteOpusPt = opusFormat.Key;
@@ -295,17 +302,22 @@ public class SipOpenAIBridge : IDisposable
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => Log($"🔇 [{_currentCallId}] Ada finished speaking");
 
-            // Force Opus negotiation - always offer Opus first regardless of remote SDP
-            // This may be rejected by endpoints that don't support Opus
-            // Now using MONO Opus (ch=1) for better carrier compatibility
-            bool forceOpus = true;  // ENABLED: Force Opus 48kHz mono
+            // NOTE (incoming calls): we can ONLY negotiate codecs that the remote SDP advertises.
+            // Forcing Opus when the remote offer doesn't include Opus will result in 406 AudioIncompatible.
+            bool forceOpus = false;
             bool forceNarrowband = false; // Set to true to force PCMU
             
             if (forceOpus && !forceNarrowband)
             {
-                // Force Opus with standard PT 111 (dynamic payload type)
-                _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
-                Log($"🎯 [{_currentCallId}] FORCING Opus 48kHz (ignoring remote offer)");
+                if (!remoteOffersOpus)
+                {
+                    Log($"⚠️ [{_currentCallId}] ForceOpus requested but remote SDP does not advertise opus/opus1; cannot negotiate Opus on this incoming call.");
+                }
+                else
+                {
+                    _adaAudioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.OPUS);
+                    Log($"🎯 [{_currentCallId}] FORCING Opus 48kHz mono");
+                }
             }
             else if (!forceNarrowband && remoteOffersOpus)
             {
