@@ -350,16 +350,43 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // A-law path: apply gentle volume boost + soft limiting (no other DSP)
-            const float ALAW_VOLUME_BOOST = 1.2f;  // Reduced to prevent clipping
-            const float SOFT_LIMIT_THRESHOLD = 28000f;
+            // A-law path: minimal processing for clean telephony output
+            // Apply same smoothing as regular path but skip aggressive DSP
             
+            // 1. Fade-in on first packet to prevent pops
+            if (_needsFadeIn && audioFrame.Length > 0)
+            {
+                int fadeLen = Math.Min(FADE_IN_SAMPLES, audioFrame.Length);
+                for (int i = 0; i < fadeLen; i++)
+                {
+                    float gain = (float)i / fadeLen;
+                    audioFrame[i] = (short)(audioFrame[i] * gain);
+                }
+                _needsFadeIn = false;
+            }
+            
+            // 2. Crossfade from previous sample to smooth frame boundaries
+            if (!_isFirstPacket && audioFrame.Length >= CROSSFADE_SAMPLES)
+            {
+                for (int i = 0; i < CROSSFADE_SAMPLES; i++)
+                {
+                    float t = (float)i / CROSSFADE_SAMPLES;
+                    audioFrame[i] = (short)(_lastOutputSample * (1f - t) + audioFrame[i] * t);
+                }
+            }
+            _isFirstPacket = false;
+            
+            // 3. Gentle soft limiting only (no volume boost - OpenAI output is normalized)
+            const float SOFT_LIMIT_THRESHOLD = 30000f;
             for (int i = 0; i < audioFrame.Length; i++)
             {
-                float sample = audioFrame[i] * ALAW_VOLUME_BOOST;
-                // Soft limit using tanh to prevent harsh clipping/raspy sound
-                sample = (float)(Math.Tanh(sample / SOFT_LIMIT_THRESHOLD) * SOFT_LIMIT_THRESHOLD);
-                audioFrame[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+                float sample = audioFrame[i];
+                // Soft limit using tanh - very gentle, just prevents clipping
+                if (Math.Abs(sample) > SOFT_LIMIT_THRESHOLD * 0.8f)
+                {
+                    sample = (float)(Math.Tanh(sample / SOFT_LIMIT_THRESHOLD) * SOFT_LIMIT_THRESHOLD);
+                    audioFrame[i] = (short)sample;
+                }
             }
         }
 
