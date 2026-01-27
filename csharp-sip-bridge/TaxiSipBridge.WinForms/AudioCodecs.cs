@@ -67,13 +67,15 @@ public static class AudioCodecs
 
     /// <summary>
     /// Encode PCM16 samples to A-law (G.711) using NAudio for high-quality encoding.
+    /// Applies TelephonyVoiceShaping (EQ + compression) before encoding.
     /// </summary>
-    public static byte[] ALawEncode(short[] pcm)
+    public static byte[] ALawEncode(short[] pcm, bool applyShaping = true)
     {
-        var alaw = new byte[pcm.Length];
-        for (int i = 0; i < pcm.Length; i++)
+        var shaped = applyShaping ? TelephonyVoiceShaping.Process(pcm) : pcm;
+        var alaw = new byte[shaped.Length];
+        for (int i = 0; i < shaped.Length; i++)
         {
-            alaw[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(pcm[i]);
+            alaw[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(shaped[i]);
         }
         return alaw;
     }
