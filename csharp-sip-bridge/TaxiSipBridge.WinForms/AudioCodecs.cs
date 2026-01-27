@@ -66,41 +66,14 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// Encode PCM16 samples to A-law (G.711).
+    /// Encode PCM16 samples to A-law (G.711) using NAudio for high-quality encoding.
     /// </summary>
     public static byte[] ALawEncode(short[] pcm)
     {
         var alaw = new byte[pcm.Length];
         for (int i = 0; i < pcm.Length; i++)
         {
-            int s = pcm[i];
-            int sign = 0;
-            if (s < 0)
-            {
-                sign = 0x80;
-                s = -s;
-            }
-
-            // Compress using A-law companding
-            int exponent = 7;
-            int mask = 0x4000;
-            while ((s & mask) == 0 && exponent > 0)
-            {
-                exponent--;
-                mask >>= 1;
-            }
-
-            int mantissa;
-            if (exponent == 0)
-            {
-                mantissa = (s >> 4) & 0x0F;
-            }
-            else
-            {
-                mantissa = (s >> (exponent + 3)) & 0x0F;
-            }
-
-            alaw[i] = (byte)((sign | (exponent << 4) | mantissa) ^ 0x55);
+            alaw[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(pcm[i]);
         }
         return alaw;
     }
