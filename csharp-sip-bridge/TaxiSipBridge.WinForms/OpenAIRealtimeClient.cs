@@ -286,20 +286,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        byte[] audioToSend;
+        // Convert to samples for processing
+        var samples = AudioCodecs.BytesToShorts(pcmData);
 
+        // CRITICAL: Apply 2.5x volume boost for telephony VAD sensitivity
+        // Same as SendPcm8kAsync - without this, OpenAI VAD won't trigger!
+        for (int i = 0; i < samples.Length; i++)
+            samples[i] = (short)Math.Clamp(samples[i] * 2.5, short.MinValue, short.MaxValue);
+
+        // Resample to 24kHz if needed (e.g., 48kHz Opus → 24kHz)
+        short[] pcm24;
         if (sampleRate != 24000)
         {
-            var samples = AudioCodecs.BytesToShorts(pcmData);
-            var resampled = AudioCodecs.Resample(samples, sampleRate, 24000);
-            audioToSend = AudioCodecs.ShortsToBytes(resampled);
+            pcm24 = AudioCodecs.Resample(samples, sampleRate, 24000);
         }
         else
         {
-            audioToSend = pcmData;
+            pcm24 = samples;
         }
 
-        // Track buffered duration for PCM24 path (covers browser/WebRTC scenarios)
+        var audioToSend = AudioCodecs.ShortsToBytes(pcm24);
+
+        // Track buffered duration for PCM24 path
         var sampleCount = audioToSend.Length / 2; // 2 bytes per sample
         var durationMs = (double)sampleCount * 1000.0 / 24000.0;
         _inputBufferedMs += durationMs;
@@ -311,7 +319,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM audio #{_audioPacketsSent}: {pcmData.Length}b → {base64.Length} chars base64");
+                Log($"📤 Sent HD audio #{_audioPacketsSent}: {sampleRate}Hz {pcmData.Length}b → 24kHz {audioToSend.Length}b");
             
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
