@@ -30,12 +30,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // NAudio resampler for high-quality downsampling (replaces linear interpolation)
-    private bool _useNAudioResampler = true;
-    
-    // Resampler state (for linear fallback)
+    // Resampler state (stateful for smooth frame-to-frame transitions)
     private double _resamplePhase;
     private short _lastInputSample;
+    
+    // Anti-aliasing filter state (IIR low-pass for 24kHz→8kHz)
+    private float _lpfState1;
+    private float _lpfState2;
 
     private Timer? _sendTimer;
     private bool _isStarted;
@@ -189,6 +190,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // Reset resampler state
         _resamplePhase = 0;
         _lastInputSample = 0;
+        _lpfState1 = 0;
+        _lpfState2 = 0;
         
         // Reset DSP/audio state
         _needsFadeIn = true;
@@ -361,16 +364,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// Resample audio using NAudio WDL resampler (high quality with anti-aliasing).
-    /// Falls back to linear interpolation if NAudio fails.
+    /// Stateful resampler with IIR anti-aliasing filter for 24kHz→8kHz.
+    /// Maintains state across frames to prevent warbling/discontinuities.
     /// </summary>
     private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
     {
         // Log first resample
         if (_sentFrames == 0)
         {
-            string method = _useNAudioResampler ? "NAudio WDL" : "Linear";
-            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample ({method}): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (Stateful IIR): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
         }
         
         if (fromRate == toRate)
@@ -380,64 +382,119 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
-        // Use NAudio WDL resampler for high-quality anti-aliased resampling
-        if (_useNAudioResampler)
+        // For downsampling, apply anti-aliasing low-pass filter first
+        short[] filtered = input;
+        if (toRate < fromRate)
         {
-            try
-            {
-                var resampled = NAudioResampler.Resample(input, fromRate, toRate);
-                
-                // Ensure output is exactly the expected length
-                if (resampled.Length == outputLen)
-                    return resampled;
-                
-                // Adjust length if needed
-                var output = new short[outputLen];
-                int copyLen = Math.Min(resampled.Length, outputLen);
-                Array.Copy(resampled, output, copyLen);
-                return output;
-            }
-            catch (Exception ex)
-            {
-                // Fall back to linear interpolation on error
-                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ NAudio resample failed, using linear: {ex.Message}");
-                _useNAudioResampler = false;
-            }
+            filtered = ApplyStatefulLowPass(input, fromRate, toRate);
         }
 
-        // Fallback: simple linear interpolation
-        return ResampleLinearFallback(input, fromRate, toRate, outputLen);
-    }
-
-    /// <summary>
-    /// Fallback linear interpolation resampler (no anti-aliasing).
-    /// </summary>
-    private short[] ResampleLinearFallback(short[] input, int fromRate, int toRate, int outputLen)
-    {
         var output = new short[outputLen];
+
+        // Special case: exact 2x upsample (24kHz → 48kHz)
+        if (toRate == fromRate * 2)
+        {
+            for (int i = 0; i < outputLen; i++)
+            {
+                int srcIdx = i / 2;
+                bool isInterpolated = (i % 2) == 1;
+
+                if (srcIdx >= filtered.Length)
+                {
+                    output[i] = filtered.Length > 0 ? filtered[^1] : (short)0;
+                }
+                else if (isInterpolated)
+                {
+                    short s0 = filtered[srcIdx];
+                    short s1 = (srcIdx + 1 < filtered.Length) ? filtered[srcIdx + 1] : s0;
+                    output[i] = (short)((s0 + s1) / 2);
+                }
+                else
+                {
+                    output[i] = filtered[srcIdx];
+                }
+            }
+            
+            if (filtered.Length > 0)
+                _lastInputSample = filtered[^1];
+            
+            return output;
+        }
+
+        // Stateful linear interpolation for other ratios
         double ratio = (double)fromRate / toRate;
 
         for (int i = 0; i < outputLen; i++)
         {
-            double srcPos = i * ratio;
+            double srcPos = _resamplePhase + i * ratio;
             int srcIdx = (int)srcPos;
             double frac = srcPos - srcIdx;
 
-            if (srcIdx >= input.Length - 1)
+            short s0, s1;
+            if (srcIdx < 0)
             {
-                output[i] = input.Length > 0 ? input[^1] : (short)0;
+                s0 = _lastInputSample;
+                s1 = filtered.Length > 0 ? filtered[0] : (short)0;
+            }
+            else if (srcIdx >= filtered.Length - 1)
+            {
+                s0 = srcIdx < filtered.Length ? filtered[srcIdx] : (filtered.Length > 0 ? filtered[^1] : (short)0);
+                s1 = s0;
             }
             else
             {
-                short s0 = input[srcIdx];
-                short s1 = input[srcIdx + 1];
-                output[i] = (short)(s0 + (s1 - s0) * frac);
+                s0 = filtered[srcIdx];
+                s1 = filtered[srcIdx + 1];
             }
+
+            output[i] = (short)(s0 + (s1 - s0) * frac);
         }
+
+        // Update phase for next frame (maintain continuity)
+        _resamplePhase = (_resamplePhase + outputLen * ratio) - filtered.Length;
+        while (_resamplePhase < 0) _resamplePhase += 1.0;
+        while (_resamplePhase >= 1.0) _resamplePhase -= 1.0;
+        
+        if (filtered.Length > 0)
+            _lastInputSample = filtered[^1];
 
         return output;
     }
 
+    /// <summary>
+    /// Stateful 2nd-order IIR Butterworth low-pass filter.
+    /// Cutoff at 3.5kHz for 24kHz input (below 4kHz Nyquist for 8kHz output).
+    /// State maintained across frames to prevent discontinuities.
+    /// </summary>
+    private short[] ApplyStatefulLowPass(short[] input, int inputRate, int outputRate)
+    {
+        if (input.Length == 0) return input;
+        
+        // Butterworth coefficients for ~3.5kHz cutoff at 24kHz sample rate
+        // This removes frequencies that would alias when decimating to 8kHz
+        // Coefficients: fc = 3500Hz, fs = 24000Hz, Q = 0.707
+        const float b0 = 0.0675f;
+        const float b1 = 0.1349f;
+        const float b2 = 0.0675f;
+        const float a1 = -1.1430f;
+        const float a2 = 0.4128f;
+        
+        var output = new short[input.Length];
+        
+        for (int i = 0; i < input.Length; i++)
+        {
+            float x = input[i];
+            
+            // Direct Form II Transposed
+            float y = b0 * x + _lpfState1;
+            _lpfState1 = b1 * x - a1 * y + _lpfState2;
+            _lpfState2 = b2 * x - a2 * y;
+            
+            output[i] = (short)Math.Clamp(y, short.MinValue, short.MaxValue);
+        }
+        
+        return output;
+    }
     private static short[] GenerateInterpolatedFrame(short[] lastFrame, int samplesNeeded, int underrunCount)
     {
         var output = new short[samplesNeeded];
