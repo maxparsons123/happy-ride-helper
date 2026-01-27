@@ -116,6 +116,9 @@ ENABLE_NOISE_GATE = False      # Telephony audio can be extremely quiet; gating 
 NOISE_GATE_THRESHOLD = 80      # (unused when gate disabled)
 SOFT_CLIP_THRESHOLD = 32000.0  # Prevent hard clipping
 
+# OUTBOUND (Ada → caller) volume boost
+OUTBOUND_VOLUME_BOOST = 2.5    # Boost Ada's voice to caller
+
 # Connection
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BASE_DELAY_S = 1.0
@@ -318,8 +321,17 @@ class AudioProcessor:
         return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
 
     def process_outbound(self, ai_audio: bytes, from_rate: int, to_rate: int, to_codec: str) -> bytes:
+        """Outbound DSP: resample + volume boost + encode for telephony."""
         if to_codec == "opus" and self.opus_codec:
             return self.opus_codec.encode_with_resample(ai_audio, from_rate)
+        
+        # Apply volume boost to Ada's voice
+        samples = np.frombuffer(ai_audio, dtype=np.int16).astype(np.float32)
+        if samples.size > 0:
+            samples *= OUTBOUND_VOLUME_BOOST
+            samples = self.soft_clip(samples, SOFT_CLIP_THRESHOLD)
+            ai_audio = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        
         resampled = self.resample(ai_audio, from_rate, to_rate)
         if to_codec == "ulaw":
             return self.linear_to_ulaw(resampled)
