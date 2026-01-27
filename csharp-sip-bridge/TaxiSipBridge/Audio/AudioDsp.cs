@@ -10,21 +10,22 @@ namespace TaxiSipBridge.Audio;
 public class AudioDsp
 {
     // ========== INBOUND (Caller → AI) Configuration ==========
+    // Aligned with Python taxi_bridge_v78.py AudioProcessor
     private const int HighPassCutoff = 80;          // Hz - removes low-frequency rumble
     private const int SampleRate = 8000;
-    private const float NoiseGateThreshold = 80f;   // Soft gate threshold (from Python)
-    private const float NoiseGateKneeWidth = 30f;   // Soft knee range
-    private const float TargetRms = 600f;           // Target RMS (from Python: 600)
-    private const float AgcMaxGain = 50.0f;         // Higher max for quiet telephony (from Python)
+    private const float NoiseGateThreshold = 80f;   // Soft gate threshold (v7.8: 80)
+    private const float TargetRms = 300f;           // Target RMS (v7.8: 300)
+    private const float AgcMaxGain = 15.0f;         // Max gain (v7.8: 15.0)
     private const float AgcMinGain = 1.0f;          // Minimum gain
-    private const float AgcSmoothingFactor = 0.15f; // Gain smoothing
-    private const float VolumeBoostFactor = 10.0f;  // For very quiet audio (RMS < 200)
-    private const float VolumeBoostThreshold = 200f;// Only boost if RMS below this
-    private const float AgcFloorRms = 1f;           // Minimum RMS to apply AGC
-    private const float SoftClipThreshold = 32000f; // Soft clipping threshold
+    private const float AgcSmoothingFactor = 0.15f; // Gain smoothing (v7.8: 0.15)
+    private const float VolumeBoostFactor = 3.0f;   // Volume boost (v7.8: 3.0)
+    private const float VolumeBoostThreshold = 200f;// Only boost if RMS below this (v7.8: 200)
+    private const float AgcFloorRms = 10f;          // Minimum RMS to apply AGC (v7.8: 10)
+    private const float SoftClipThreshold = 32000f; // Soft clipping threshold (v7.8: 32000)
     
     // ========== OUTBOUND (AI → Caller) Configuration ==========
-    private const float OutboundVolumeBoost = 2.5f; // Boost Ada's voice (from Python)
+    // v7.8 doesn't apply volume boost to outbound, just resample + soft clip
+    private const float OutboundVolumeBoost = 1.0f; // Unity gain (v7.8 style)
     
     // High-pass filter state (2nd order Butterworth)
     private readonly double[] _hpX = new double[3]; // input history
