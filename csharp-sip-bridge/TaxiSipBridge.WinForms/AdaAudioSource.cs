@@ -320,7 +320,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 int abs = s == short.MinValue ? 32768 : Math.Abs((int)s);
                 if (abs > peak) peak = abs;
             }
-            OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}");
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples @ {targetRate}Hz, peak={peak}");
         }
 
         // Apply outbound DSP pipeline
@@ -336,6 +336,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         byte[] encoded = _audioEncoder.EncodeAudio(audioFrame, _audioFormatManager.SelectedFormat);
+        
+        // Log first encoded frame to verify size
+        if (_sentFrames == 0)
+        {
+            OnDebugLog?.Invoke($"[AdaAudioSource] 📦 First encoded: {audioFrame.Length} samples → {encoded.Length} bytes {_audioFormatManager.SelectedFormat.FormatName}");
+        }
+        
         uint durationRtpUnits = (uint)samplesNeeded;
         _sentFrames++;
 
@@ -354,6 +361,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     /// </summary>
     private short[] ResampleLinear(short[] input, int fromRate, int toRate, int outputLen)
     {
+        // Log first resample to verify correct sample count
+        if (_sentFrames == 0)
+        {
+            OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample: {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz (ratio={fromRate/(double)toRate:F2})");
+        }
+        
         if (fromRate == toRate)
         {
             var copy = new short[outputLen];
