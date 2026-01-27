@@ -442,18 +442,6 @@ public static class AudioCodecs
         }
     }
 
-    public static short[] OpusDecode(byte[] encoded)
-    {
-        lock (_opusDecoderLock)
-        {
-            _opusDecoder ??= new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
-            short[] outBuf = new short[OPUS_FRAME_SIZE * OPUS_CHANNELS];
-            int lenPerChannel = _opusDecoder.Decode(encoded, 0, encoded.Length, outBuf, 0, OPUS_FRAME_SIZE, false);
-            int totalSamples = Math.Min(outBuf.Length, lenPerChannel * OPUS_CHANNELS);
-            return totalSamples < outBuf.Length ? outBuf.Take(totalSamples).ToArray() : outBuf;
-        }
-    }
-
     public static void ResetOpus()
     {
         lock (_opusEncoderLock) { _opusEncoder = null; }
