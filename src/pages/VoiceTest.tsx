@@ -93,6 +93,7 @@ export default function VoiceTest() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
   const currentTranscriptRef = useRef("");
   const speechStartTimeRef = useRef(0);
   const firstAudioTimeRef = useRef(0);
@@ -435,6 +436,10 @@ export default function VoiceTest() {
       workletNodeRef.current.disconnect();
       workletNodeRef.current = null;
     }
+    if (silentGainRef.current) {
+      silentGainRef.current.disconnect();
+      silentGainRef.current = null;
+    }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
       mediaStreamRef.current = null;
@@ -538,7 +543,17 @@ export default function VoiceTest() {
       };
 
       source.connect(workletNode);
-      // Don't connect worklet to destination (we don't want to hear ourselves)
+      // IMPORTANT: In some browsers, an AudioWorklet chain that doesn't ultimately
+      // connect to the destination can get "culled" (pulled as silence), causing
+      // us to send all-zero PCM frames. Route to destination via a 0-gain node so
+      // the graph stays alive without audible monitoring.
+      const silentGain = ctx.createGain();
+      silentGain.gain.value = 0;
+      silentGainRef.current = silentGain;
+
+      workletNode.connect(silentGain);
+      silentGain.connect(ctx.destination);
+
       console.log("AudioWorklet recording started");
     } catch (error) {
       console.error("Mic error:", error);
