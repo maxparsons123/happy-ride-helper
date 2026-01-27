@@ -92,16 +92,17 @@ FORMAT_LOCK_DURATION_S = 60.0
 FORMAT_LOCK_FRAME_COUNT = 5
 
 # DSP Pipeline
+# DEBUG: Disabled noise gate - input RMS was 1-2, gate was zeroing everything
 ENABLE_VOLUME_BOOST = True
 ENABLE_AGC = True
-VOLUME_BOOST_FACTOR = 3.0
-TARGET_RMS = 300
-AGC_MAX_GAIN = 15.0
+VOLUME_BOOST_FACTOR = 10.0  # Increased from 3.0 to amplify weak signal
+TARGET_RMS = 500            # Increased target for very quiet inputs
+AGC_MAX_GAIN = 50.0         # Allow much higher gain for quiet signals
 AGC_MIN_GAIN = 1.0
 AGC_SMOOTHING = 0.15
-AGC_FLOOR_RMS = 10
+AGC_FLOOR_RMS = 1           # Lower floor to allow AGC on quiet signals
 PRE_EMPHASIS_COEFF_DEFAULT = 0.95
-ENABLE_NOISE_GATE = True
+ENABLE_NOISE_GATE = False   # DISABLED - was killing audio at RMS < 80
 NOISE_GATE_THRESHOLD = 80
 SOFT_CLIP_THRESHOLD = 32000.0
 
