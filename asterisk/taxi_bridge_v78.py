@@ -918,6 +918,7 @@ class TaxiBridge:
         start_time = time.time()
         bytes_played = 0
         buffer = bytearray()
+        policy_logged = False
         try:
             while self.running:
                 while self.audio_queue:
@@ -928,6 +929,16 @@ class TaxiBridge:
                 # If we send 320-byte frames (10ms @ 16kHz), some setups will still play them
                 # as 20ms, resulting in half-speed (slow) audio.
                 out_frame_bytes = 640 if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
+                if not policy_logged:
+                    logger.info(
+                        "[%s] 🧾 Outbound frame policy: codec=%s rate=%dHz in_frame=%dB out_frame=%dB",
+                        self.state.call_id,
+                        self.state.ast_codec,
+                        self.state.ast_rate,
+                        self.state.ast_frame_bytes,
+                        out_frame_bytes,
+                    )
+                    policy_logged = True
 
                 if self.state.ast_codec == "opus":
                     bytes_per_sec = OPUS_BITRATE // 8
