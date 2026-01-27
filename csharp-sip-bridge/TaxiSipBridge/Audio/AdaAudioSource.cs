@@ -267,8 +267,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 // OpenAI sends audio faster than realtime, but in bursts
                 if (!_jitterBufferFilled)
                 {
-                    // Opus (48kHz): 100ms, G.711/G.722: 60ms minimum
-                    int minFrames = targetRate >= 48000 ? 5 : 3;
+                    // Opus (48kHz): 120ms (6 frames), G.711/G.722: 120ms (6 frames)
+                    // Increased from 60ms to prevent fast playback from underruns
+                    int minFrames = 6;
                     if (_audioMode == AudioMode.JitterBuffer)
                         minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                     
