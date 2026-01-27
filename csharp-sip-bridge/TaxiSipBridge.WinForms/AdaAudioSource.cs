@@ -176,6 +176,42 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _markEndOfSpeech = false;
     }
 
+    /// <summary>
+    /// Reset all state for a new call. Call this when Ada ends a call.
+    /// </summary>
+    public void Reset()
+    {
+        ClearQueue();
+        
+        // Reset resampler state
+        _resamplePhase = 0;
+        _lastInputSample = 0;
+        
+        // Reset DSP/audio state
+        _needsFadeIn = true;
+        _lastOutputSample = 0;
+        _lastAudioFrame = null;
+        _lastFrameWasSilence = true;
+        
+        // Reset jitter buffer
+        _jitterBufferFilled = false;
+        _consecutiveUnderruns = 0;
+        _markEndOfSpeech = false;
+        
+        // Reset stats
+        _enqueuedFrames = 0;
+        _sentFrames = 0;
+        _silenceFrames = 0;
+        _interpolatedFrames = 0;
+        _lastStatsLog = DateTime.MinValue;
+        _wasQueueEmpty = true;
+        
+        // Reset test tone
+        _testToneSampleIndex = 0;
+        
+        OnDebugLog?.Invoke("[AdaAudioSource] 🔄 Reset for new call");
+    }
+
     public void MarkEndOfSpeech() => _markEndOfSpeech = true;
 
     public Task StartAudio()
