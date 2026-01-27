@@ -32,6 +32,7 @@ public class SipOpenAIBridge : IDisposable
     private volatile bool _disposed;
     private volatile bool _isInCall;
     private string? _currentCallId;
+    private string? _currentCallIdSip;  // SIP Call-ID header for re-INVITE detection
 
     // Flush initial RTP packets to avoid stale audio
     private const int FLUSH_PACKETS = 25;
@@ -161,9 +162,20 @@ public class SipOpenAIBridge : IDisposable
 
     private async Task HandleIncomingCall(SIPRequest inviteRequest)
     {
+        // Check if this is a re-INVITE for the current call (codec renegotiation, hold, etc.)
+        var incomingCallId = inviteRequest.Header.CallId;
+        if (_isInCall && _currentCallIdSip == incomingCallId)
+        {
+            Log($"🔄 [{_currentCallId}] Re-INVITE received (same Call-ID), acknowledging");
+            // For now, just acknowledge re-INVITEs with OK - full handling would require SDP renegotiation
+            var okResponse = SIPResponse.GetResponse(inviteRequest, SIPResponseStatusCodesEnum.Ok, null);
+            await _sipTransport!.SendResponseAsync(okResponse);
+            return;
+        }
+        
         if (_disposed || _isInCall)
         {
-            Log("⚠️ Rejecting call - already in a call or disposed");
+            Log($"⚠️ Rejecting call - already in a call or disposed (incoming={incomingCallId}, current={_currentCallIdSip})");
             var busyResponse = SIPResponse.GetResponse(inviteRequest, SIPResponseStatusCodesEnum.BusyHere, null);
             await _sipTransport!.SendResponseAsync(busyResponse);
             return;
@@ -171,6 +183,7 @@ public class SipOpenAIBridge : IDisposable
 
         _isInCall = true;
         _currentCallId = Guid.NewGuid().ToString("N")[..8];
+        _currentCallIdSip = incomingCallId;  // Store SIP Call-ID for re-INVITE detection
         _callCts = new CancellationTokenSource();
         _inboundPacketCount = 0;
         _inboundFlushComplete = false;
@@ -682,6 +695,7 @@ public class SipOpenAIBridge : IDisposable
         _callCts?.Dispose();
         _callCts = null;
         _currentCallId = null;
+        _currentCallIdSip = null;
     }
 
     public void Stop()
