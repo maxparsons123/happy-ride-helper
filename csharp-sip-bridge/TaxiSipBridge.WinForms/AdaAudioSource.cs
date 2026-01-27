@@ -350,11 +350,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // A-law path: apply volume boost only (no other DSP)
-            const float ALAW_VOLUME_BOOST = 1.5f;
+            // A-law path: apply gentle volume boost + soft limiting (no other DSP)
+            const float ALAW_VOLUME_BOOST = 1.2f;  // Reduced to prevent clipping
+            const float SOFT_LIMIT_THRESHOLD = 28000f;
+            
             for (int i = 0; i < audioFrame.Length; i++)
             {
-                audioFrame[i] = (short)Math.Clamp(audioFrame[i] * ALAW_VOLUME_BOOST, short.MinValue, short.MaxValue);
+                float sample = audioFrame[i] * ALAW_VOLUME_BOOST;
+                // Soft limit using tanh to prevent harsh clipping/raspy sound
+                sample = (float)(Math.Tanh(sample / SOFT_LIMIT_THRESHOLD) * SOFT_LIMIT_THRESHOLD);
+                audioFrame[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
             }
         }
 
