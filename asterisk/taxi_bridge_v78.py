@@ -359,6 +359,14 @@ class CallState:
     call_formally_ended: bool = False
     last_asterisk_send: float = field(default_factory=time.time)
     last_asterisk_recv: float = field(default_factory=time.time)
+    # Timing-based inference for ambiguous 320-byte frames.
+    # 320 bytes can be either:
+    # - 20ms @ 8kHz PCM16 (slin)  OR
+    # - 10ms @ 16kHz PCM16 (slin16)
+    # Some AudioSocket setups always send 320-byte frames, so we infer via cadence.
+    last_audio_frame_ts: float = 0.0
+    audio_dt_ms: Deque[float] = field(default_factory=lambda: deque(maxlen=25))
+    timing_inferred: bool = False
     opus_buffer: bytes = b""
     frames_sent: int = 0
     frames_received: int = 0
@@ -793,8 +801,50 @@ class TaxiBridge:
                                     "user_phone": self.state.phone,
                                 }))
                 elif msg_type == MSG_AUDIO:
+                    # Record cadence for timing inference
+                    now_ts = time.time()
+                    if self.state.last_audio_frame_ts > 0:
+                        self.state.audio_dt_ms.append((now_ts - self.state.last_audio_frame_ts) * 1000.0)
+                    self.state.last_audio_frame_ts = now_ts
+
                     if msg_len != self.state.ast_frame_bytes or self.state.ast_codec != "opus":
                         await self._detect_format(msg_len, payload)
+
+                    # If we keep seeing ambiguous 320-byte PCM frames, infer true sample rate
+                    # from the frame cadence and lock it to avoid slow/fast audio.
+                    if (
+                        not self.state.timing_inferred
+                        and self.state.ast_codec in ("slin16", "slin")
+                        and msg_len == 320
+                        and len(self.state.audio_dt_ms) >= 10
+                    ):
+                        dts = sorted(self.state.audio_dt_ms)
+                        median_ms = dts[len(dts) // 2]
+                        # ~20ms cadence => 8kHz 20ms frames; ~10ms cadence => 16kHz 10ms frames
+                        inferred_codec = "slin" if median_ms >= 15.0 else "slin16"
+                        inferred_rate = RATE_SLIN if inferred_codec == "slin" else RATE_SLIN16
+                        if (self.state.ast_codec, self.state.ast_rate) != (inferred_codec, inferred_rate):
+                            self.state.ast_codec = inferred_codec
+                            self.state.ast_rate = inferred_rate
+                            self.state.ast_frame_bytes = 320
+                            self.state.format_locked = True
+                            self.state.format_lock_time = time.time()
+                            logger.warning(
+                                "[%s] ⏱️ Inferred 320B cadence median=%.1fms → %s@%dHz (locking)",
+                                self.state.call_id,
+                                median_ms,
+                                inferred_codec,
+                                inferred_rate,
+                            )
+                            if self.ws and self.state.ws_connected:
+                                await self.ws.send(json.dumps({
+                                    "type": "update_format",
+                                    "call_id": self.state.call_id,
+                                    "inbound_format": inferred_codec,
+                                    "inbound_sample_rate": inferred_rate,
+                                }))
+                        self.state.timing_inferred = True
+
                     is_high_quality = self.state.ast_codec in ("slin16", "opus")
                     if self.state.ast_codec == "opus":
                         if self.audio_processor.opus_codec:
