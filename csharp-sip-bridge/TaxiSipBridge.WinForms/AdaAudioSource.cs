@@ -41,7 +41,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private volatile bool _disposed;
     
     // DSP control flags
-    private bool _bypassDsp = false;        // Full DSP enabled
+    private bool _bypassDsp = true;         // DSP bypassed for clean audio
     private bool _enableFadeIn = true;      // Keep fade-in to prevent pops
     private bool _enableSoftLimiter = true; // Prevent clipping
     private bool _enableNarrowbandBoost = true; // Volume boost for G.711
