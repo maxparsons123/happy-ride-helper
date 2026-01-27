@@ -444,6 +444,15 @@ class TaxiBridge:
             self.state.ast_frame_bytes = frame_len
             return
 
+        # IMPORTANT: If timing inference has determined the actual cadence, NEVER change
+        # the format. This takes precedence over everything else to prevent the bridge
+        # from flipping back to slin16 after the lock expires.
+        if self.state.timing_inferred:
+            # Just update frame bytes if needed, but never change codec/rate
+            if frame_len in {160, 320, 640}:
+                self.state.ast_frame_bytes = frame_len
+            return
+
         # If format is locked, allow different frame sizes that are still compatible
         # with the locked codec (e.g. slin16 can legitimately appear as 320 bytes (10ms)
         # or 640 bytes (20ms), depending on channel framing).
