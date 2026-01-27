@@ -119,6 +119,12 @@ SOFT_CLIP_THRESHOLD = 32000.0  # Prevent hard clipping
 # OUTBOUND (Ada → caller) volume boost
 OUTBOUND_VOLUME_BOOST = 2.5    # Boost Ada's voice to caller
 
+# slin16 playback framing
+# Many AudioSocket setups effectively play at a fixed 20ms cadence. For slin16@16kHz,
+# 20ms of PCM16 mono is 640 bytes. Sending 320B (10ms) frames can be played as 20ms,
+# which makes Ada sound *very slow*.
+SLIN16_OUT_FRAME_BYTES = int(os.environ.get("SLIN16_OUT_FRAME_BYTES", 640))
+
 # Connection
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BASE_DELAY_S = 1.0
@@ -1003,11 +1009,10 @@ class TaxiBridge:
                     buffer.extend(self.audio_queue.popleft())
 
                 # Outbound framing:
-                # Use the same frame size Asterisk is sending us for this codec.
-                # For slin16 this is commonly 320B (10ms) or 640B (20ms) depending on framing.
-                # Forcing 640B while AI chunks arrive as 320B can cause frequent silence padding
-                # (we send silence until we accumulate 640B), which stretches Ada's speech.
-                out_frame_bytes = self.state.ast_frame_bytes
+                # For slin16, prefer 20ms (640B) frames to avoid half-speed playback.
+                out_frame_bytes = (
+                    SLIN16_OUT_FRAME_BYTES if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
+                )
                 if not policy_logged:
                     logger.info(
                         "[%s] 🧾 Outbound frame policy: codec=%s rate=%dHz in_frame=%dB out_frame=%dB",
@@ -1050,6 +1055,12 @@ class TaxiBridge:
                         chunk = bytes(buffer[:out_frame_bytes])
                         del buffer[:out_frame_bytes]
                     else:
+                        # If we already have *some* audio queued but not enough for a full frame,
+                        # wait briefly to accumulate rather than padding with silence (which would
+                        # stretch speech and sound slow).
+                        if len(buffer) > 0:
+                            await asyncio.sleep(0.005)
+                            continue
                         chunk = self._silence_frame(out_frame_bytes)
                         self.state.keepalive_count += 1
                 try:
