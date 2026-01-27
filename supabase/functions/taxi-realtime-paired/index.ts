@@ -1014,7 +1014,8 @@ const ECHO_GUARD_MS = 250;
 
 // Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
 // so Ada's initial greeting doesn't get cut off mid-sentence.
-const GREETING_PROTECTION_MS = 12000;
+// NOTE: This is now a MAXIMUM - greeting protection is also cleared when Ada finishes speaking.
+const GREETING_PROTECTION_MS = 4000;
 
 // Summary protection window in ms - prevent interruptions while Ada recaps booking or quotes fare
 const SUMMARY_PROTECTION_MS = 8000;
@@ -3450,6 +3451,13 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Set echo guard to block echo from speaker
           sessionState.lastAdaFinishedSpeakingAt = Date.now();
           sessionState.echoGuardUntil = Date.now() + ECHO_GUARD_MS;
+          
+          // CLEAR GREETING PROTECTION when Ada finishes speaking
+          // This ensures user can respond immediately after the greeting ends
+          if (sessionState.greetingProtectionUntil > 0) {
+            console.log(`[${callId}] ✅ Greeting complete - clearing protection, user can now speak`);
+            sessionState.greetingProtectionUntil = 0;
+          }
 
           // If we queued a post-confirmation goodbye response (because OpenAI was still mid-response), send it now.
           if (
