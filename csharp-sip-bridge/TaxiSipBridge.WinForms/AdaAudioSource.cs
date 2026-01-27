@@ -341,8 +341,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples @ {targetRate}Hz, peak={peak}");
         }
 
-        // Apply outbound DSP pipeline
-        if (!_bypassDsp)
+        // Apply outbound DSP pipeline (skip for A-law - cleaner codec needs no processing)
+        var currentCodec = _audioFormatManager.SelectedFormat.Codec;
+        bool skipDsp = _bypassDsp || currentCodec == SIPSorceryMedia.Abstractions.AudioCodecsEnum.PCMA;
+        if (!skipDsp)
         {
             audioFrame = ApplyOutboundDsp(audioFrame, targetRate);
         }
