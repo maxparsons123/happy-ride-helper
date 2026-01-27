@@ -509,13 +509,16 @@ class TaxiBridge:
         decided_codec: str
         decided_rate: int
         
-        # Force 16kHz if we see 320 or 640 bytes (common for slin16 frames)
-        # 640 bytes = 20ms @ 16kHz, 320 bytes = 10ms @ 16kHz (or 20ms @ 8kHz)
-        if self.state.seen_640 or self.state.seen_320:
-            # Default to 16kHz for both 320 and 640 byte frames
-            # This gives Whisper double the frequency data (up to 8kHz instead of 4kHz)
+        # 640 bytes = unambiguously slin16 (20ms @ 16kHz).
+        # 320 bytes is AMBIGUOUS: it can be slin (20ms @ 8kHz) or slin16 (10ms @ 16kHz).
+        # We now default 320 → slin@8kHz and let the cadence-inference logic upgrade to slin16
+        # if it actually arrives every ~10ms.
+        if self.state.seen_640:
             decided_codec = "slin16"
             decided_rate = RATE_SLIN16
+        elif self.state.seen_320:
+            decided_codec = "slin"
+            decided_rate = RATE_SLIN
         elif self.state.seen_160:
             # 160 bytes = definitely 8kHz ulaw
             decided_codec = "ulaw"
