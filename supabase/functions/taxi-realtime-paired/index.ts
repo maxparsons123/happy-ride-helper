@@ -1010,7 +1010,13 @@ interface SessionState {
   preSummaryDone: boolean;
 }
 
-const ECHO_GUARD_MS = 250;
+// Echo guard: short window after Ada finishes speaking where we reject likely echo.
+// IMPORTANT: Keep this short; users often respond immediately ("yes", "no") and we must not miss it.
+const ECHO_GUARD_MS = 120;
+
+// If the inbound audio is clearly real speech (high RMS), allow it through even during echo-guard.
+// This fixes the "Ada doesn't hear my first response" symptom while still filtering low-energy echo.
+const ECHO_GUARD_RMS_BYPASS = 450;
 
 // Greeting protection window in ms - ignore early line noise (and prevent accidental barge-in)
 // so Ada's initial greeting doesn't get cut off mid-sentence.
@@ -5380,7 +5386,8 @@ Do NOT skip any part. Say ALL of it warmly.]`
         }
 
         // ECHO GUARD: block audio briefly after Ada finishes speaking
-        if (Date.now() < sessionState.echoGuardUntil) {
+        // BUT: if the user replies quickly and loudly, let it through (common for short confirmations).
+        if (Date.now() < sessionState.echoGuardUntil && rms < ECHO_GUARD_RMS_BYPASS) {
           audioDiag.packetsSkippedEcho++;
           return; // Drop this audio frame (likely echo)
         }
@@ -5499,6 +5506,7 @@ Do NOT skip any part. Say ALL of it warmly.]`
           }
 
           // ECHO GUARD: block audio briefly after Ada finishes speaking
+          // (For JSON audio we don't have RMS here; keep the reduced time-based guard only.)
           if (Date.now() < sessionState.echoGuardUntil) {
             return; // Drop this audio frame (likely echo)
           }
