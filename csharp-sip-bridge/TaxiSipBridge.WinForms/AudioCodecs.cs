@@ -417,9 +417,30 @@ public static class AudioCodecs
             _opusEncoder ??= new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
             _opusEncoder.Bitrate = OPUS_BITRATE;
 
-            int requiredSamples = OPUS_FRAME_SIZE * OPUS_CHANNELS;
-            short[] frame = pcm.Length == requiredSamples ? pcm : new short[requiredSamples];
-            if (pcm.Length != requiredSamples) Array.Copy(pcm, frame, Math.Min(pcm.Length, requiredSamples));
+            int requiredSamples = OPUS_FRAME_SIZE * OPUS_CHANNELS; // 1920 for stereo
+            short[] frame;
+
+            if (pcm.Length == requiredSamples)
+            {
+                // Already correct size (interleaved stereo)
+                frame = pcm;
+            }
+            else if (pcm.Length == OPUS_FRAME_SIZE)
+            {
+                // Mono input - duplicate to interleaved stereo
+                frame = new short[requiredSamples];
+                for (int i = 0; i < OPUS_FRAME_SIZE; i++)
+                {
+                    frame[i * 2] = pcm[i];     // Left
+                    frame[i * 2 + 1] = pcm[i]; // Right
+                }
+            }
+            else
+            {
+                // Wrong size - pad or truncate
+                frame = new short[requiredSamples];
+                Array.Copy(pcm, frame, Math.Min(pcm.Length, requiredSamples));
+            }
 
             byte[] outBuf = new byte[1275];
             int len = _opusEncoder.Encode(frame, 0, OPUS_FRAME_SIZE, outBuf, 0, outBuf.Length);
