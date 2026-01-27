@@ -64,6 +64,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private int _testToneSampleIndex;
     private const double TEST_TONE_FREQ = 440.0;
 
+    // DSP bypass mode - skip all processing for debugging
+    private bool _bypassDsp = true; // ← SET TO TRUE TO DISABLE ALL DSP
+
     // Debug/stats
     private int _enqueuedFrames;
     private int _sentFrames;
@@ -259,52 +262,53 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns = 0;
 
-                // 1. Volume boost
-                // Keep telephony codecs loud, but avoid over-driving wideband (Opus/G722),
-                // which can cause crackling from constant limiting.
-                float boost = IsNarrowbandCodec(_audioFormatManager.SelectedFormat) ? VOLUME_BOOST : 1.0f;
-                ApplyVolumeBoost(pcm24, boost);
-
-                // 2. Resample 24kHz → targetRate using simple linear interpolation
+                // Resample 24kHz → targetRate
                 audioFrame = ResampleLinear(pcm24, 24000, targetRate, samplesNeeded);
 
-                // Log first frame to confirm audio is being processed
+                // DSP bypass mode - skip all processing
+                if (!_bypassDsp)
+                {
+                    // 1. Volume boost (only for narrowband)
+                    float boost = IsNarrowbandCodec(_audioFormatManager.SelectedFormat) ? VOLUME_BOOST : 1.0f;
+                    ApplyVolumeBoost(audioFrame, boost);
+
+                    // 2. Pre-emphasis for narrowband codecs
+                    if (IsNarrowbandCodec(_audioFormatManager.SelectedFormat))
+                    {
+                        ApplyPreEmphasis(audioFrame);
+                    }
+
+                    // 3. Limiter + dither
+                    ApplySoftLimiter(audioFrame);
+                    ApplyDither(audioFrame);
+
+                    // 4. Crossfade
+                    if (!_lastFrameWasSilence && _lastAudioFrame != null && audioFrame.Length >= CROSSFADE_SAMPLES)
+                    {
+                        ApplyInterFrameCrossfade(audioFrame, _lastAudioFrame);
+                    }
+
+                    if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
+                    {
+                        int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
+                        for (int i = 0; i < fadeLen; i++)
+                        {
+                            float t = (float)i / fadeLen;
+                            audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
+                        }
+                    }
+                }
+
+                // Log first frame
                 if (_sentFrames < 5)
                 {
                     int peak = 0;
                     foreach (short s in audioFrame)
                     {
-                        // IMPORTANT: Math.Abs(short) throws for -32768.
                         int abs = s == short.MinValue ? 32768 : Math.Abs((int)s);
                         if (abs > peak) peak = abs;
                     }
-                    OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}");
-                }
-
-                // 5. Pre-emphasis for narrowband codecs
-                if (IsNarrowbandCodec(_audioFormatManager.SelectedFormat))
-                {
-                    ApplyPreEmphasis(audioFrame);
-                }
-
-                // 6. Limiter + dither
-                ApplySoftLimiter(audioFrame);
-                ApplyDither(audioFrame);
-
-                // 7. Crossfade
-                if (!_lastFrameWasSilence && _lastAudioFrame != null && audioFrame.Length >= CROSSFADE_SAMPLES)
-                {
-                    ApplyInterFrameCrossfade(audioFrame, _lastAudioFrame);
-                }
-
-                if (_lastFrameWasSilence && audioFrame.Length > CROSSFADE_SAMPLES)
-                {
-                    int fadeLen = Math.Min(CROSSFADE_SAMPLES, audioFrame.Length);
-                    for (int i = 0; i < fadeLen; i++)
-                    {
-                        float t = (float)i / fadeLen;
-                        audioFrame[i] = (short)(_lastOutputSample * (1 - t) + audioFrame[i] * t);
-                    }
+                    OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples, peak={peak}, bypassDsp={_bypassDsp}");
                 }
 
                 _lastAudioFrame = (short[])audioFrame.Clone();
