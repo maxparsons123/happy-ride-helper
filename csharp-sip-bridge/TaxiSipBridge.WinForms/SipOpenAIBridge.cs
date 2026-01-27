@@ -166,10 +166,9 @@ public class SipOpenAIBridge : IDisposable
         var incomingCallId = inviteRequest.Header.CallId;
         if (_isInCall && _currentCallIdSip == incomingCallId)
         {
-            Log($"🔄 [{_currentCallId}] Re-INVITE received (same Call-ID), acknowledging");
-            // For now, just acknowledge re-INVITEs with OK - full handling would require SDP renegotiation
-            var okResponse = SIPResponse.GetResponse(inviteRequest, SIPResponseStatusCodesEnum.Ok, null);
-            await _sipTransport!.SendResponseAsync(okResponse);
+            // Don't respond here - let the SIPUserAgent/dialogue handle re-INVITEs
+            // Sending our own response causes protocol errors (missing SDP body)
+            Log($"🔄 [{_currentCallId}] Re-INVITE received (same Call-ID), ignoring (handled by SIP stack)");
             return;
         }
         
