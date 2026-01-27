@@ -1002,11 +1002,12 @@ class TaxiBridge:
                 while self.audio_queue:
                     buffer.extend(self.audio_queue.popleft())
 
-                # IMPORTANT: Asterisk AudioSocket playback pacing can effectively behave like
-                # a fixed 20ms scheduler. For slin16@16kHz, a 20ms PCM16 mono frame is 640 bytes.
-                # If we send 320-byte frames (10ms @ 16kHz), some setups will still play them
-                # as 20ms, resulting in half-speed (slow) audio.
-                out_frame_bytes = 640 if self.state.ast_codec == "slin16" else self.state.ast_frame_bytes
+                # Outbound framing:
+                # Use the same frame size Asterisk is sending us for this codec.
+                # For slin16 this is commonly 320B (10ms) or 640B (20ms) depending on framing.
+                # Forcing 640B while AI chunks arrive as 320B can cause frequent silence padding
+                # (we send silence until we accumulate 640B), which stretches Ada's speech.
+                out_frame_bytes = self.state.ast_frame_bytes
                 if not policy_logged:
                     logger.info(
                         "[%s] 🧾 Outbound frame policy: codec=%s rate=%dHz in_frame=%dB out_frame=%dB",
