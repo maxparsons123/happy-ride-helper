@@ -86,14 +86,16 @@ OPUS_APPLICATION = "voip"
 
 # Format Detection
 LOCK_FORMAT_ULAW = _env_bool("LOCK_FORMAT_ULAW", False)
-PREFER_OPUS = _env_bool("PREFER_OPUS", OPUS_AVAILABLE)
+PREFER_OPUS = _env_bool("PREFER_OPUS", True)  # Default ON for WhatsApp 48kHz
 PREFER_SLIN16 = True
 # FORCE_SLIN16: When true, treat ALL 320-byte frames as 16kHz (not 8kHz)
 # Use this when Asterisk dialplan sets CHANNEL(audioformat)=slin16 but AudioSocket
 # still sends 320-byte frames (which normally indicate 8kHz).
-FORCE_SLIN16 = _env_bool("FORCE_SLIN16", True)  # Enabled by default for new dialplan
+FORCE_SLIN16 = _env_bool("FORCE_SLIN16", False)  # OFF when using Opus
+# FORCE_OPUS: When true, assume all variable-size frames are Opus (for WhatsApp)
+FORCE_OPUS = _env_bool("FORCE_OPUS", True)  # Default ON for WhatsApp
 FORMAT_LOCK_DURATION_S = 60.0  # Lock format for entire call duration
-FORMAT_LOCK_FRAME_COUNT = 10   # Number of consistent frames before locking
+FORMAT_LOCK_FRAME_COUNT = 5    # Fewer frames needed when Opus is clear
 
 # DSP Pipeline — **ENHANCED**
 ENABLE_VOLUME_BOOST = True
@@ -443,10 +445,42 @@ class TaxiBridge:
             self.state.ast_frame_bytes = frame_len
             return
 
-        # === OBSERVATION WINDOW BEFORE LOCKING ===
-        # AudioSocket framing can fluctuate at call start (e.g. first 320 then 640).
-        # Instead of locking immediately on the first frame, observe a few frames and
-        # pick the best match (prefer slin16 if we ever see 640, or if FORCE_SLIN16).
+        # === OPUS DETECTION ===
+        # Opus frames are typically 40-200 bytes for 20ms at 32-64kbps
+        # PCM frames are always exact: 160 (ulaw 20ms), 320 (slin 20ms or slin16 10ms), 640 (slin16 20ms)
+        # Variable-size frames that don't match PCM patterns are likely Opus
+        is_likely_opus = False
+        if FORCE_OPUS and OPUS_AVAILABLE:
+            # If FORCE_OPUS is on and frame doesn't match known PCM sizes, assume Opus
+            if frame_len not in {160, 320, 640}:
+                is_likely_opus = True
+            # Also check for small frames that could be Opus (Opus @ 64kbps = ~160 bytes/20ms)
+            elif frame_len < 320 and len(payload) >= 1:
+                # Opus TOC byte check - valid configs are 0-31
+                toc = payload[0]
+                config = (toc >> 3) & 0x1F
+                if config <= 31 and frame_len < 200:
+                    is_likely_opus = True
+
+        if is_likely_opus:
+            if self.state.ast_codec != "opus":
+                logger.info("[%s] 🎵 Detected Opus format (%d bytes/frame)", self.state.call_id, frame_len)
+            self.state.ast_codec = "opus"
+            self.state.ast_rate = RATE_OPUS
+            self.state.ast_frame_bytes = frame_len
+            self.state.format_locked = True
+            self.state.format_lock_time = time.time()
+            # Notify edge function
+            if self.ws and self.state.ws_connected:
+                await self.ws.send(json.dumps({
+                    "type": "update_format",
+                    "call_id": self.state.call_id,
+                    "inbound_format": "opus",
+                    "inbound_sample_rate": RATE_AI,  # We resample to 24kHz
+                }))
+            return
+
+        # === OBSERVATION WINDOW BEFORE LOCKING (for PCM formats) ===
         if self.state.frames_observed == 0:
             self.state.first_frame_at = time.time()
         self.state.frames_observed += 1
@@ -460,8 +494,6 @@ class TaxiBridge:
         old_codec = self.state.ast_codec
 
         # Decide best codec/rate based on what we've observed so far.
-        # FORCE_SLIN16 override: if enabled, treat ANY 320-byte frame as 16kHz (10ms)
-        # This handles the case where Asterisk dialplan sets slin16 but sends 320-byte packets
         decided_codec: str
         decided_rate: int
         if self.state.seen_640:
@@ -470,7 +502,6 @@ class TaxiBridge:
             decided_rate = RATE_SLIN16
         elif FORCE_SLIN16 and self.state.seen_320:
             # FORCE_SLIN16 mode: treat 320 bytes as 10ms @ 16kHz (not 20ms @ 8kHz)
-            # This is the intended setting when Asterisk uses CHANNEL(audioformat)=slin16
             decided_codec = "slin16"
             decided_rate = RATE_SLIN16
         elif self.state.seen_320:
@@ -500,9 +531,6 @@ class TaxiBridge:
         if old_codec != self.state.ast_codec:
             logger.info("[%s] 🔊 Format: %s @ %dHz (%d bytes/frame)",
                         self.state.call_id, self.state.ast_codec, self.state.ast_rate, frame_len)
-            # IMPORTANT: We resample to 24kHz BEFORE sending to the edge function,
-            # so we report RATE_AI (24000) as the inbound_sample_rate, NOT the Asterisk rate.
-            # This prevents the edge function from re-resampling and corrupting the audio.
             if self.ws and self.state.ws_connected:
                 await self.ws.send(json.dumps({
                     "type": "update_format",
@@ -957,11 +985,11 @@ async def main() -> None:
     )
     opus_status = "✅ available" if OPUS_AVAILABLE else "❌ not installed (pip install opuslib)"
     lines = [
-        f"🚀 Taxi Bridge v{TaxiBridge.VERSION} - AUDIO QUALITY UPGRADE",
+        f"🚀 Taxi Bridge v{TaxiBridge.VERSION} - OPUS 48kHz MODE",
         f"   Listening: {AUDIOSOCKET_HOST}:{AUDIOSOCKET_PORT}",
         f"   Endpoint:  {WS_URL.split('/')[-1]}",
         f"   Opus:      {opus_status} @ {OPUS_BITRATE//1000}kbps",
-        f"   Format:    {'ulaw locked' if LOCK_FORMAT_ULAW else 'auto-detect'}",
+        f"   ForceOpus: {'✅ on' if FORCE_OPUS else 'off'}",
         f"   Force16k:  {'on' if FORCE_SLIN16 else 'off'}",
         f"   DSP:       noise_gate + adaptive pre-emph + soft clip",
         f"   Reconnect: {MAX_RECONNECT_ATTEMPTS} attempts",
