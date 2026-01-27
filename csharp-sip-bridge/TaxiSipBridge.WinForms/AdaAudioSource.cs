@@ -265,7 +265,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
         else
         {
             // Jitter buffer priming for wideband codecs (Opus 48kHz) - always enabled
-            int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
             if (!_jitterBufferFilled && targetRate >= 48000)
             {
                 // Buffer 100ms (5 frames) before starting playback for Opus
@@ -283,6 +282,18 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns = 0;
                 audioFrame = ResampleLinear(pcm24, 24000, targetRate, samplesNeeded);
+                
+                // Crossfade from silence to audio to prevent spluttering
+                if (_lastFrameWasSilence && audioFrame.Length > 0)
+                {
+                    int crossfadeLen = Math.Min(40, audioFrame.Length); // ~0.8ms at 48kHz
+                    for (int i = 0; i < crossfadeLen; i++)
+                    {
+                        float t = (float)i / crossfadeLen;
+                        audioFrame[i] = (short)(audioFrame[i] * t);
+                    }
+                }
+                
                 _lastAudioFrame = (short[])audioFrame.Clone();
             }
             else
@@ -292,17 +303,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 if (_audioMode == AudioMode.JitterBuffer && _jitterBufferFilled && _consecutiveUnderruns > 10)
                     _jitterBufferFilled = false;
 
-                // Interpolation (skip if bypass mode - just send silence)
-                if (!_bypassDsp && _consecutiveUnderruns <= 6 && _lastAudioFrame != null)
-                {
-                    audioFrame = GenerateInterpolatedFrame(_lastAudioFrame, samplesNeeded, _consecutiveUnderruns);
-                    _interpolatedFrames++;
-                }
-                else
-                {
-                    SendSilence();
-                    return;
-                }
+                // On underrun: send silence immediately to prevent artifacts
+                // Interpolation was causing spluttering - simpler is better
+                SendSilence();
+                return;
             }
         }
 
