@@ -32,6 +32,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     // NAudio resampler for high-quality downsampling (replaces linear interpolation)
     private bool _useNAudioResampler = true;
+    
+    // Resampler state (for linear fallback)
+    private double _resamplePhase;
+    private short _lastInputSample;
 
     private Timer? _sendTimer;
     private bool _isStarted;
