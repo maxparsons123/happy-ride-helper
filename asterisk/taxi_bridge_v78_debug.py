@@ -1,11 +1,13 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Taxi AI Asterisk Bridge v7.8-DEBUG - FULL LOGGING MODE
-Architecture:
-Asterisk AudioSocket ←→ Bridge ←→ Edge Function (taxi-realtime-paired)
-
-DEBUG VERSION: Logs every audio frame, RMS values, format detection, and WS traffic.
-"""
+#
+# Taxi AI Asterisk Bridge v7.8-DEBUG - FULL LOGGING MODE
+#
+# Architecture:
+#   Asterisk AudioSocket <-> Bridge <-> Edge Function (taxi-realtime-paired)
+#
+# DEBUG VERSION: Logs every audio frame, RMS values, format detection, and WS traffic.
+#
 import asyncio
 import base64
 import json
