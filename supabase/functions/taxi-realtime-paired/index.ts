@@ -3517,6 +3517,33 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             if (userTruthUpdated) {
               await updateLiveCall(sessionState);
               console.log(`[${callId}] 💾 User Truth persisted immediately`);
+              
+              // CRITICAL FIX: Since we cancelled Ada's earlier response (hallucination blocking),
+              // we need to trigger a new response now that we have the real STT transcript.
+              // Inject context about what the user said and trigger Ada to continue the flow.
+              const nextStep = computeNextStep(sessionState.booking, sessionState.preSummaryDone);
+              const nextInstruction = getNextStepInstruction(nextStep, sessionState.booking, sessionState.userTruth, effectiveQuestionType, userText);
+              
+              console.log(`[${callId}] 🔄 Triggering Ada response after STT arrived (next: ${nextStep})`);
+              
+              openaiWs!.send(JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "system",
+                  content: [{
+                    type: "input_text",
+                    text: `[USER ANSWERED ${effectiveQuestionType.toUpperCase()}] The user said: "${userText}"
+
+${nextInstruction}
+
+Do NOT re-ask for ${effectiveQuestionType}. Move to the next step immediately.`
+                  }]
+                }
+              }));
+              
+              sessionState.lastQuestionAsked = nextStep;
+              safeResponseCreate(openaiWs!, sessionState, callId);
             }
             
             // === SUMMARY PHASE CONFIRMATION DETECTION (from simple) ===
