@@ -346,9 +346,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples @ {targetRate}Hz, peak={peak}");
         }
 
-        // PURE PASSTHROUGH: No DSP processing at all
-        // OpenAI's 24kHz output → Polyphase FIR resample → G.711 encode
-        // No fade-in, no crossfade, no limiter
+        // Preprocess: normalize → soft-clip → ready for PCMA
+        // This ensures clean audio without distortion artifacts
+        TtsPreprocessor.PreprocessPcm16(audioFrame);
 
         if (audioFrame.Length > 0)
         {
