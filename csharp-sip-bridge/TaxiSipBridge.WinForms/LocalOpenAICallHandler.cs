@@ -8,23 +8,21 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
+/// Uses AiSipAudioPlayout for proper 20ms timer-driven RTP pacing.
 /// </summary>
 public class LocalOpenAICallHandler : ICallHandler
 {
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
-    private readonly AudioMode _audioMode;
-    private readonly int _jitterBufferMs;
     
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     
     private VoIPMediaSession? _currentMediaSession;
-    private AdaAudioSource? _adaAudioSource;
+    private AiSipAudioPlayout? _aiPlayout;
     private OpenAIRealtimeClient? _aiClient;
-    private TtsLowPassFilter? _ttsFilter;
     private CancellationTokenSource? _callCts;
 
     private const int FLUSH_PACKETS = 25;
@@ -45,15 +43,11 @@ public class LocalOpenAICallHandler : ICallHandler
     public LocalOpenAICallHandler(
         string apiKey, 
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
-        string voice = "shimmer",
-        AudioMode audioMode = AudioMode.JitterBuffer, 
-        int jitterBufferMs = 200)
+        string voice = "shimmer")
     {
         _apiKey = apiKey;
         _model = model;
         _voice = voice;
-        _audioMode = audioMode;
-        _jitterBufferMs = jitterBufferMs;
     }
 
     public async Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller)
@@ -83,17 +77,13 @@ public class LocalOpenAICallHandler : ICallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session
-            _adaAudioSource = new AdaAudioSource(_audioMode, _jitterBufferMs);
-            _adaAudioSource.OnDebugLog += msg => Log(msg);
-            _adaAudioSource.OnQueueEmpty += () => 
-            { 
-                _isBotSpeaking = false;
-                Log($"🔇 [{callId}] Ada finished speaking");
+            // Setup media session with PCMA codec for SDP negotiation
+            var audioFormats = new List<AudioFormat>
+            {
+                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA)
             };
-
-            var mediaEndPoints = new MediaEndPoints { AudioSource = _adaAudioSource };
-            _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
+            
+            _currentMediaSession = new VoIPMediaSession(new MediaEndPoints(), audioFormats);
             _currentMediaSession.AcceptRtpFromAny = true;
 
             // Send ringing
@@ -124,6 +114,17 @@ public class LocalOpenAICallHandler : ICallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
+            // Create AI audio playout engine (proper 20ms timer-driven RTP)
+            _aiPlayout = new AiSipAudioPlayout(_currentMediaSession);
+            _aiPlayout.OnLog += msg => Log(msg);
+            _aiPlayout.OnQueueEmpty += () =>
+            {
+                _isBotSpeaking = false;
+                Log($"🔇 [{callId}] Ada finished speaking");
+            };
+            _aiPlayout.Start();
+            Log($"🎵 [{callId}] AI playout engine started");
+
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
             _aiClient.OnLog += msg => Log(msg);
@@ -132,9 +133,9 @@ public class LocalOpenAICallHandler : ICallHandler
             _aiClient.OnPcm24Audio += pcmBytes =>
             {
                 _isBotSpeaking = true;
-                _adaAudioSource?.EnqueuePcm24(pcmBytes);
+                _aiPlayout?.BufferAiAudio(pcmBytes);
             };
-            _aiClient.OnResponseStarted += () => _adaAudioSource?.ResetFadeIn();
+            _aiClient.OnResponseStarted += () => { /* No fade-in reset needed with new playout */ };
             _aiClient.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
             // Wire hangup
@@ -280,6 +281,14 @@ public class LocalOpenAICallHandler : ICallHandler
 
         try { ua.Hangup(); } catch { }
 
+        // Stop AI playout first
+        if (_aiPlayout != null)
+        {
+            try { _aiPlayout.Stop(); } catch { }
+            try { _aiPlayout.Dispose(); } catch { }
+            _aiPlayout = null;
+        }
+
         if (_aiClient != null)
         {
             try { await _aiClient.DisconnectAsync(); } catch { }
@@ -292,9 +301,6 @@ public class LocalOpenAICallHandler : ICallHandler
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
         }
-
-        try { _adaAudioSource?.Dispose(); } catch { }
-        _adaAudioSource = null;
 
         try { _callCts?.Dispose(); } catch { }
         _callCts = null;
@@ -314,9 +320,9 @@ public class LocalOpenAICallHandler : ICallHandler
         _disposed = true;
 
         try { _callCts?.Cancel(); } catch { }
+        try { _aiPlayout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
-        try { _adaAudioSource?.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
