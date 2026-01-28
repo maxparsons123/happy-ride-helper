@@ -62,6 +62,9 @@ public class PcmaRtpPlayout : IDisposable
 
     #endregion
 
+    /// <summary>
+    /// Create playout engine using VoIPMediaSession for RTP transmission.
+    /// </summary>
     public PcmaRtpPlayout(VoIPMediaSession mediaSession)
     {
         _mediaSession = mediaSession;

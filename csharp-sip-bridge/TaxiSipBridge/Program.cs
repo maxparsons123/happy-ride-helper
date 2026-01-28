@@ -1,93 +1,161 @@
-using Microsoft.Extensions.Logging;
-using TaxiSipBridge.Services;
+using System;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Threading.Tasks;
+using SIPSorcery.SIP;
+using SIPSorcery.SIP.App;
 
 namespace TaxiSipBridge;
 
-class Program
+internal class Program
 {
+    private const int MAX_CONCURRENT_CALLS = 5;
+
+    private static SIPTransport _sipTransport = null!;
+    private static readonly ConcurrentDictionary<string, TaxiBotCallSession> _sessions = new();
+
+    // Configuration from environment or defaults
+    private static readonly string SIP_LISTEN_ADDRESS = Environment.GetEnvironmentVariable("SIP_LISTEN_ADDRESS") ?? "0.0.0.0";
+    private static readonly int SIP_LISTEN_PORT = int.TryParse(Environment.GetEnvironmentVariable("SIP_LISTEN_PORT"), out var p) ? p : 5060;
+    private static readonly string SIP_USERNAME = Environment.GetEnvironmentVariable("SIP_USER") ?? "your-sip-username";
+    private static readonly string SIP_PASSWORD = Environment.GetEnvironmentVariable("SIP_PASSWORD") ?? "your-sip-password";
+    private static readonly string SIP_DOMAIN = Environment.GetEnvironmentVariable("SIP_SERVER") ?? "sip.provider.com";
+    private static readonly string OPENAI_API_KEY = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
+
     static async Task Main(string[] args)
     {
         Console.WriteLine("===========================================");
-        Console.WriteLine("  Taxi AI SIP Bridge - C# Edition");
-        Console.WriteLine("  Multi-user RTP/SIP to WebSocket Bridge");
+        Console.WriteLine("  Taxi SIP Bridge - Simplified Architecture");
+        Console.WriteLine("  Multi-call RTP/SIP to OpenAI Realtime");
         Console.WriteLine("===========================================\n");
 
-        using var loggerFactory = LoggerFactory.Create(builder =>
+        if (string.IsNullOrEmpty(OPENAI_API_KEY))
         {
-            builder
-                .SetMinimumLevel(LogLevel.Debug)
-                .AddConsole(options =>
-                {
-                    options.TimestampFormat = "[HH:mm:ss] ";
-                });
-        });
-
-        var config = new SipAdaBridgeConfig
-        {
-            SipServer = GetEnvString("SIP_SERVER", "206.189.123.28"),
-            SipPort = GetEnvInt("SIP_PORT", 5060),
-            SipUser = GetEnvString("SIP_USER", "max201"),
-            SipPassword = GetEnvString("SIP_PASSWORD", "qwe70954504118"),
-            Transport = GetEnvString("SIP_TRANSPORT", "UDP").ToUpper() == "TCP" 
-                ? SipTransportType.TCP 
-                : SipTransportType.UDP,
-            AudioMode = Enum.TryParse<AudioMode>(GetEnvString("AUDIO_MODE", "Standard"), out var mode) 
-                ? mode 
-                : AudioMode.Standard,
-            JitterBufferMs = GetEnvInt("JITTER_BUFFER_MS", 60),
-            MaxConcurrentCalls = GetEnvInt("MAX_CALLS", 50),
-            // IMPORTANT: Use .functions.supabase.co subdomain for reliability
-            AdaWsUrl = GetEnvString("ADA_WS_URL", "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-paired")
-        };
-
-        // Validate configuration
-        if (!config.IsValid(out var error))
-        {
-            Console.WriteLine($"❌ Configuration error: {error}");
-            return;
+            Console.WriteLine("⚠️ Warning: OPENAI_API_KEY not set. AI features will not work.");
         }
+
+        _sipTransport = new SIPTransport();
+
+        // Listen on UDP for incoming calls
+        var endPoint = new IPEndPoint(IPAddress.Parse(SIP_LISTEN_ADDRESS), SIP_LISTEN_PORT);
+        _sipTransport.AddSIPChannel(new SIPUDPChannel(endPoint));
+
+        // Optional: Register with provider
+        if (!string.IsNullOrEmpty(SIP_USERNAME) && SIP_USERNAME != "your-sip-username")
+        {
+            _ = RegisterWithProvider();
+        }
+
+        _sipTransport.SIPTransportRequestReceived += OnSipRequestReceived;
 
         Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  SIP Server: {config.SipServer}:{config.SipPort} ({config.Transport})");
-        Console.WriteLine($"  SIP User: {config.SipUser}");
-        Console.WriteLine($"  Audio Mode: {config.AudioMode}");
-        Console.WriteLine($"  Jitter Buffer: {config.JitterBufferMs}ms");
-        Console.WriteLine($"  Max Concurrent Calls: {config.MaxConcurrentCalls}");
-        Console.WriteLine($"  Ada WS URL: {config.AdaWsUrl}");
+        Console.WriteLine($"  Listen: udp:{endPoint}");
+        Console.WriteLine($"  Max Concurrent Calls: {MAX_CONCURRENT_CALLS}");
+        Console.WriteLine($"  SIP Domain: {SIP_DOMAIN}");
+        Console.WriteLine($"  OpenAI Key: {(string.IsNullOrEmpty(OPENAI_API_KEY) ? "NOT SET" : "***configured***")}");
         Console.WriteLine();
+        Console.WriteLine("Listening for SIP calls. Press ENTER to quit.");
+        Console.ReadLine();
 
-        var bridge = new SipBridgeService(config, loggerFactory);
-        
-        var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
+        // Cleanup
+        Console.WriteLine("Shutting down...");
+        foreach (var kv in _sessions)
         {
-            e.Cancel = true;
-            Console.WriteLine("\nShutdown requested...");
-            cts.Cancel();
-        };
+            await kv.Value?.Hangup("Server shutdown")!;
+        }
 
+        _sipTransport.Shutdown();
+        Console.WriteLine("Shutdown complete.");
+    }
+
+    /// <summary>
+    /// Handle incoming SIP requests.
+    /// </summary>
+    private static async Task OnSipRequestReceived(
+        SIPEndPoint localSIPEndPoint,
+        SIPEndPoint remoteEndPoint,
+        SIPRequest sipRequest)
+    {
         try
         {
-            await bridge.StartAsync(cts.Token);
-            Console.WriteLine("SIP Bridge is running. Press Ctrl+C to stop.\n");
-            await Task.Delay(Timeout.Infinite, cts.Token);
+            if (sipRequest.Method != SIPMethodsEnum.INVITE)
+            {
+                // Let SIPSorcery handle non-INVITE (OPTIONS, etc.)
+                return;
+            }
+
+            var caller = sipRequest.Header.From?.FriendlyDescription() ?? "Unknown";
+            Console.WriteLine($"[SIP] Incoming call from {caller}");
+
+            if (_sessions.Count >= MAX_CONCURRENT_CALLS)
+            {
+                Console.WriteLine("[SIP] Rejecting call: too many concurrent sessions.");
+                var busyResp = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.BusyHere, "Taxi bot busy");
+                await _sipTransport.SendResponseAsync(busyResp);
+                return;
+            }
+
+            // Create a new user agent for this call
+            var ua = new SIPUserAgent(_sipTransport, null);
+            var callId = sipRequest.Header.CallId;
+
+            var session = new TaxiBotCallSession(ua, OPENAI_API_KEY);
+            session.OnLog += msg => Console.WriteLine(msg);
+            session.OnCallFinished += id =>
+            {
+                _sessions.TryRemove(id, out _);
+                Console.WriteLine($"[CALL {id}] Session removed, active = {_sessions.Count}");
+            };
+
+            if (!_sessions.TryAdd(callId, session))
+            {
+                Console.WriteLine("[SIP] Failed to track new session, rejecting.");
+                var errResp = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.ServiceUnavailable, "Session error");
+                await _sipTransport.SendResponseAsync(errResp);
+                return;
+            }
+
+            // Accept the incoming call
+            bool answerOk = await session.AcceptIncomingCall(sipRequest);
+
+            if (!answerOk)
+            {
+                _sessions.TryRemove(callId, out _);
+            }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex)
         {
-            Console.WriteLine("Shutting down gracefully...");
-        }
-        finally
-        {
-            await bridge.StopAsync();
+            Console.WriteLine($"[SIP] Error processing request: {ex.Message}");
         }
     }
 
-    static string GetEnvString(string key, string defaultValue) =>
-        Environment.GetEnvironmentVariable(key) ?? defaultValue;
+    /// <summary>
+    /// Optional SIP registration with provider.
+    /// </summary>
+    private static async Task RegisterWithProvider()
+    {
+        try
+        {
+            var regUserAgent = new SIPRegistrationUserAgent(
+                _sipTransport,
+                SIP_USERNAME,
+                SIP_PASSWORD,
+                SIP_DOMAIN,
+                expiry: 300);
 
-    static int GetEnvInt(string key, int defaultValue) =>
-        int.TryParse(Environment.GetEnvironmentVariable(key), out var value) ? value : defaultValue;
+            regUserAgent.RegistrationFailed += (uri, resp, msg) =>
+                Console.WriteLine($"[SIP REG] Registration failed: {msg}");
+            regUserAgent.RegistrationTemporaryFailure += (uri, resp, msg) =>
+                Console.WriteLine($"[SIP REG] Registration temp failure: {msg}");
+            regUserAgent.RegistrationSuccessful += (uri, resp) =>
+                Console.WriteLine("[SIP REG] Registration successful.");
 
-    static bool GetEnvBool(string key, bool defaultValue) =>
-        bool.TryParse(Environment.GetEnvironmentVariable(key), out var value) ? value : defaultValue;
+            regUserAgent.Start();
+            await Task.Delay(100); // Let registration start
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SIP REG] Error: {ex.Message}");
+        }
+    }
 }
