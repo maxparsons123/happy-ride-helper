@@ -34,13 +34,15 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // High-quality resamplers (SpeexDSP preferred, polyphase FIR fallback)
+    // High-quality resamplers (SpeexDSP preferred, FFmpeg fallback, polyphase FIR last resort)
     private SpeexDspResampler? _speexResampler8k;
     private SpeexDspResampler? _speexResampler16k;
+    private FfmpegStreamingResampler? _ffmpegResampler8k;
     private PolyphaseFirResampler? _resampler8k;
     private PolyphaseFirResampler? _resampler16k;
     private PolyphaseFirResampler? _resampler48k;
-    private bool _speexAvailable = true;  // Try SpeexDSP first
+    private bool _speexAvailable = true;   // Try SpeexDSP first
+    private bool _ffmpegAvailable = true;  // Try FFmpeg second
     
     // Streaming preprocessor for 8kHz telephony (DC removal + lowpass + normalize + downsample)
     private readonly TtsPreConditioner _preConditioner8k = new();
@@ -212,6 +214,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // Reset SpeexDSP resamplers
         _speexResampler8k?.Reset();
         _speexResampler16k?.Reset();
+        
+        // Reset FFmpeg resampler
+        _ffmpegResampler8k?.Reset();
         
         // Reset polyphase FIR resamplers
         _resampler8k?.Reset();
@@ -457,8 +462,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// High-quality resampling using SpeexDSP (preferred) or polyphase FIR (fallback).
+    /// High-quality resampling using SpeexDSP (preferred), FFmpeg (fallback), or polyphase FIR (last resort).
     /// SpeexDSP is known for excellent audio quality in telephony applications.
+    /// FFmpeg uses libsoxr internally for high-quality resampling.
     /// </summary>
     private short[] ResamplePolyphase(short[] input, int fromRate, int toRate, int outputLen)
     {
@@ -469,7 +475,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
-        // Try SpeexDSP first (best quality)
+        // Try SpeexDSP first (best quality, lowest latency)
         if (_speexAvailable)
         {
             try
@@ -490,16 +496,55 @@ public class AdaAudioSource : IAudioSource, IDisposable
             catch (DllNotFoundException)
             {
                 _speexAvailable = false;
-                OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ libspeexdsp not found, falling back to polyphase FIR");
+                OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ libspeexdsp not found, trying FFmpeg");
             }
             catch (Exception ex)
             {
                 _speexAvailable = false;
-                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ SpeexDSP error: {ex.Message}, falling back to polyphase FIR");
+                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ SpeexDSP error: {ex.Message}, trying FFmpeg");
             }
         }
 
-        // Fallback: polyphase FIR resampler
+        // Try FFmpeg second (good quality, uses libsoxr)
+        if (_ffmpegAvailable && toRate == 8000)
+        {
+            try
+            {
+                _ffmpegResampler8k ??= new FfmpegStreamingResampler(fromRate, toRate);
+                if (!_ffmpegResampler8k.IsRunning)
+                {
+                    _ffmpegResampler8k.OnDebugLog += msg => OnDebugLog?.Invoke(msg);
+                    _ffmpegResampler8k.OnError += err => OnDebugLog?.Invoke($"[FFmpeg] {err}");
+                    if (!_ffmpegResampler8k.Start())
+                    {
+                        _ffmpegAvailable = false;
+                        OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ FFmpeg failed to start, falling back to polyphase FIR");
+                    }
+                }
+                
+                if (_ffmpegResampler8k.IsRunning)
+                {
+                    var resampled = _ffmpegResampler8k.Resample(input);
+                    
+                    if (_sentFrames == 0)
+                    {
+                        OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (FFmpeg soxr): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
+                    }
+                    
+                    if (resampled.Length == outputLen) return resampled;
+                    var result = new short[outputLen];
+                    Array.Copy(resampled, result, Math.Min(resampled.Length, outputLen));
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                _ffmpegAvailable = false;
+                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ FFmpeg error: {ex.Message}, falling back to polyphase FIR");
+            }
+        }
+
+        // Last resort: polyphase FIR resampler (pure C#, always works)
         PolyphaseFirResampler resampler = GetOrCreateResampler(fromRate, toRate);
         
         if (_sentFrames == 0)
@@ -735,6 +780,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _audioCts?.Cancel();
         _audioThread?.Join(100);
         _audioCts?.Dispose();
+        
+        // Stop FFmpeg resampler
+        _ffmpegResampler8k?.Dispose();
         
         ClearQueue();
         GC.SuppressFinalize(this);
