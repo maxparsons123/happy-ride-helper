@@ -27,6 +27,11 @@
     </Compile>
     <Compile Include="SipAdaBridgeConfig.cs" />
 
+    <!-- Unified SIP login + call delegation -->
+    <Compile Include="SipLoginManager.cs" />
+    <Compile Include="EdgeFunctionCallHandler.cs" />
+    <Compile Include="LocalOpenAICallHandler.cs" />
+
     <!-- Reuse shared audio utilities from the console bridge project -->
     <Compile Include="..\TaxiSipBridge\Audio\G711Codec.cs" Link="Audio\G711Codec.cs" />
     <Compile Include="..\TaxiSipBridge\Audio\AudioResampler.cs" Link="Audio\AudioResampler.cs" />
