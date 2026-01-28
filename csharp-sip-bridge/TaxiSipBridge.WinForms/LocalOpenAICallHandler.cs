@@ -10,7 +10,7 @@ namespace TaxiSipBridge;
 /// Call handler that routes audio directly to OpenAI Realtime API.
 /// Uses AiSipAudioPlayout for proper 20ms timer-driven RTP pacing.
 /// </summary>
-public class LocalOpenAICallHandler : ICallHandler
+public class LocalOpenAICallHandler : ISipCallHandler
 {
     private readonly string _apiKey;
     private readonly string _model;

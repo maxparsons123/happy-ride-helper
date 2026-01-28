@@ -20,7 +20,7 @@ public class SipLoginManager : IDisposable
     private volatile bool _disposed;
 
     // Call handler - receives incoming calls after registration
-    private ICallHandler? _callHandler;
+    private ISipCallHandler? _callHandler;
 
     #region Events
 
@@ -50,7 +50,7 @@ public class SipLoginManager : IDisposable
     /// <summary>
     /// Set the call handler that will process incoming calls.
     /// </summary>
-    public void SetCallHandler(ICallHandler handler)
+    public void SetCallHandler(ISipCallHandler handler)
     {
         _callHandler = handler;
         
