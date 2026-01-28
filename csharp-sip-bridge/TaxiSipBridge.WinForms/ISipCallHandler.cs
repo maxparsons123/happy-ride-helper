@@ -5,6 +5,9 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Interface for call handlers that process incoming SIP calls.
+/// Requires SIPTransport to be passed explicitly because SIPUserAgent
+/// does not expose its transport publicly, which is needed for sending
+/// SIP responses like 180 Ringing or 486 Busy Here.
 /// </summary>
 public interface ISipCallHandler : IDisposable
 {
@@ -15,5 +18,12 @@ public interface ISipCallHandler : IDisposable
 
     bool IsInCall { get; }
 
+    /// <summary>
+    /// Handle an incoming SIP call.
+    /// </summary>
+    /// <param name="transport">SIP transport for sending responses</param>
+    /// <param name="ua">SIP user agent managing the call</param>
+    /// <param name="req">The incoming INVITE request</param>
+    /// <param name="caller">Caller ID string</param>
     Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller);
 }
