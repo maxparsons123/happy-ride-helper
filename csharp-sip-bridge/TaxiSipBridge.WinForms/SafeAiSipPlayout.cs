@@ -7,14 +7,15 @@ using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
-using TaxiSipBridge.Audio;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Minimal AI → SIP playout engine with hold-state safety checks.
-/// ✅ Uses VoIPMediaSession.SendAudio() → auto-encodes to A-law (PCMA)
-/// ✅ Anti-aliased 24kHz→8kHz resampling
+/// Minimal AI → SIP playout engine with NAudio high-quality resampling.
+/// ✅ Uses NAudio WDL resampler for professional-grade 24kHz→8kHz conversion
+/// ✅ Anti-aliased downsampling with proper low-pass filtering
 /// ✅ Explicit hold/resume validation BEFORE playout starts
 /// ✅ Prevents MOH mixing by verifying call state
 /// </summary>
@@ -28,6 +29,10 @@ public class SafeAiSipPlayout : IDisposable
     private readonly VoIPMediaSession _mediaSession;
     private readonly SIPUserAgent? _ua;           // Optional for hold-state checks
     private readonly bool _useALaw;               // true = PCMA, false = PCMU
+
+    // NAudio Infrastructure for high-quality resampling
+    private readonly BufferedWaveProvider _inputBuffer;
+    private readonly WdlResamplingSampleProvider _resampler;
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -59,12 +64,23 @@ public class SafeAiSipPlayout : IDisposable
         
         if (codec != "PCMA" && codec != "PCMU")
             Log($"⚠️ Expected G.711 codec (PCMA/PCMU). Got: {codec}");
-        else
-            Log($"✅ Playout initialized | Codec: {codec}");
+
+        // Initialize NAudio Pipeline: 24kHz 16-bit Mono → 8kHz Mono
+        var inputFormat = new WaveFormat(24000, 16, 1);
+        _inputBuffer = new BufferedWaveProvider(inputFormat) 
+        { 
+            DiscardOnBufferOverflow = true,
+            BufferLength = 24000 * 2 * 2 // 2 seconds of 24kHz 16-bit mono
+        };
+        
+        // WdlResamplingSampleProvider provides professional-grade resampling with proper anti-aliasing
+        _resampler = new WdlResamplingSampleProvider(_inputBuffer.ToSampleProvider(), 8000);
+        
+        Log($"✅ Playout initialized | Codec: {codec} | Resampler: NAudio WDL");
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Resamples to 8kHz with anti-aliasing.
+    /// Buffer 24kHz PCM from OpenAI. Processes through NAudio WDL resampler to 8kHz.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -73,11 +89,24 @@ public class SafeAiSipPlayout : IDisposable
 
         try
         {
-            var pcm24k = BytesToShorts(pcm24kBytes);
-            var pcm8k = Resample24kTo8kAntiAliased(pcm24k);
+            // 1. Push raw 24kHz bytes into NAudio input buffer
+            _inputBuffer.AddSamples(pcm24kBytes, 0, pcm24kBytes.Length);
 
-            for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
+            // 2. Read from resampler (it pulls from inputBuffer and converts to 8kHz)
+            float[] sampleBuffer = new float[PCM8K_FRAME_SAMPLES];
+            int samplesRead;
+            
+            while ((samplesRead = _resampler.Read(sampleBuffer, 0, PCM8K_FRAME_SAMPLES)) > 0)
             {
+                // Convert Float32 samples back to Int16 (short)
+                var pcm8kFrame = new short[PCM8K_FRAME_SAMPLES];
+                for (int n = 0; n < samplesRead; n++)
+                {
+                    // Clamp to prevent overflow
+                    float sample = Math.Clamp(sampleBuffer[n], -1.0f, 1.0f);
+                    pcm8kFrame[n] = (short)(sample * short.MaxValue);
+                }
+
                 // Drop OLDEST frame on overflow (minimizes latency)
                 if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
                 {
@@ -85,15 +114,12 @@ public class SafeAiSipPlayout : IDisposable
                     Interlocked.Increment(ref _droppedFrames);
                 }
 
-                var frame = new short[PCM8K_FRAME_SAMPLES];
-                int len = Math.Min(PCM8K_FRAME_SAMPLES, pcm8k.Length - i);
-                Array.Copy(pcm8k, i, frame, 0, len);
-                _frameQueue.Enqueue(frame);
+                _frameQueue.Enqueue(pcm8kFrame);
             }
         }
         catch (Exception ex)
         {
-            Log($"⚠️ Buffer error: {ex.Message}");
+            Log($"⚠️ NAudio resampling error: {ex.Message}");
         }
     }
 
@@ -157,11 +183,19 @@ public class SafeAiSipPlayout : IDisposable
         Log($"⏹️ Playout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
     }
 
-    public void Clear() // Call on barge-in
+    /// <summary>
+    /// Clear all buffers on barge-in.
+    /// </summary>
+    public void Clear()
     {
+        // Clear NAudio internal buffer
+        _inputBuffer.ClearBuffer();
+        
+        // Clear frame queue
         int cleared = 0;
         while (_frameQueue.TryDequeue(out _)) cleared++;
-        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames (barge-in)");
+        
+        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames + NAudio buffer (barge-in)");
     }
 
     private void PlayoutLoop()
@@ -215,8 +249,7 @@ public class SafeAiSipPlayout : IDisposable
 
     /// <summary>
     /// Encode PCM to G.711 and send via RTP.
-    /// VoIPMediaSession.SendAudio() does NOT encode - it sends bytes directly to RTP.
-    /// We MUST encode PCM → G.711 here before sending.
+    /// Uses SIPSorcery's built-in G.711 encoders for reliable encoding.
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
@@ -228,12 +261,12 @@ public class SafeAiSipPlayout : IDisposable
             if (_useALaw)
             {
                 for (int i = 0; i < pcmFrame.Length; i++)
-                    encoded[i] = G711Codec.EncodeSampleALaw(pcmFrame[i]);
+                    encoded[i] = ALawEncoder.LinearToALawSample(pcmFrame[i]);
             }
             else
             {
                 for (int i = 0; i < pcmFrame.Length; i++)
-                    encoded[i] = G711Codec.EncodeSample(pcmFrame[i]);
+                    encoded[i] = MuLawEncoder.LinearToMuLawSample(pcmFrame[i]);
             }
 
             // RTP duration = 160 samples @ 8kHz clock rate
@@ -246,42 +279,6 @@ public class SafeAiSipPlayout : IDisposable
         {
             Log($"⚠️ RTP send error: {ex.Message}");
         }
-    }
-
-    /// <summary>
-    /// Anti-aliased 24kHz → 8kHz resampling (3-tap FIR low-pass + decimation).
-    /// Prevents high-frequency artifacts that cause "ringing" in telephony.
-    /// </summary>
-    private static short[] Resample24kTo8kAntiAliased(short[] pcm24k)
-    {
-        if (pcm24k.Length < 3) return Array.Empty<short>();
-
-        int outLen = pcm24k.Length / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int src = i * 3;
-
-            // 3-tap FIR: [0.25, 0.5, 0.25]
-            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
-            int s1 = pcm24k[src];
-            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
-
-            // Weighted sum: (s0 + 2*s1 + s2) / 4
-            int filtered = (s0 + (s1 << 1) + s2) >> 2;
-            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
-        }
-
-        return output;
-    }
-
-    private static short[] BytesToShorts(byte[] bytes)
-    {
-        if (bytes.Length % 2 != 0) return Array.Empty<short>();
-        var shorts = new short[bytes.Length / 2];
-        Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
-        return shorts;
     }
 
     private void Log(string msg) => OnLog?.Invoke($"[SafePlayout] {msg}");
