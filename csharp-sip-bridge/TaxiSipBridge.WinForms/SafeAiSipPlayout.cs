@@ -204,8 +204,8 @@ public class SafeAiSipPlayout : IDisposable
 
             nextFrameTime += FRAME_MS;
 
-            // Drift correction
-            if (now - nextFrameTime > 40)
+            // Drift correction (tighter 20ms threshold)
+            if (now - nextFrameTime > 20)
             {
                 Log($"⏱️ Drift correction: {now - nextFrameTime:F1}ms behind");
                 nextFrameTime = now + FRAME_MS;
