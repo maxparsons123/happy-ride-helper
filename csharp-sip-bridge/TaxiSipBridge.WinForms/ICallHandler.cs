@@ -1,7 +1,7 @@
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 
-namespace TaxiSipBridge;
+namespace TaxiSipBridge.WinForms;
 
 /// <summary>
 /// Interface for call handlers that process incoming SIP calls.
