@@ -137,7 +137,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 _aiPlayout?.BufferAiAudio(pcmBytes);
             };
             _aiClient.OnResponseStarted += () => { /* No fade-in reset needed with new playout */ };
-            _aiClient.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
+            if (_aiClient is OpenAIRealtimeClient rtc)
+                rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
             // Wire hangup
             ua.OnCallHungup += dialogue =>

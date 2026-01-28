@@ -24,10 +24,6 @@ public enum OutputCodecMode
 /// </summary>
 public class OpenAIRealtimeClient : IAudioAIClient
 {
-/// No edge function required - connects directly to OpenAI with dispatch webhook support.
-/// </summary>
-public class OpenAIRealtimeClient : IAudioAIClient
-{
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
@@ -88,6 +84,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public event Action<string>? OnAdaSpeaking;
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
+    public event Action<byte[]>? OnCallerAudioMonitor;
 
     // Tool call events for external handling
     public event Action<string, Dictionary<string, object>>? OnToolCall;
