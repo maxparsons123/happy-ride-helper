@@ -44,6 +44,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
     public event Action<byte[]>? OnCallerAudioMonitor;
 
     public bool IsInCall => _isInCall;
+    public bool IsOpusAvailable => _remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS);
+    public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
+    public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
 
     public LocalOpenAICallHandler(
         string apiKey, 
