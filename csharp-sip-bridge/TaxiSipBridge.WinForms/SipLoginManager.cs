@@ -53,7 +53,7 @@ public class SipLoginManager : IDisposable
     public void SetCallHandler(ISipCallHandler handler)
     {
         _callHandler = handler;
-        
+
         // Wire up events from handler
         _callHandler.OnLog += msg => OnLog?.Invoke(msg);
         _callHandler.OnCallStarted += (id, caller) => OnCallStarted?.Invoke(id, caller);
@@ -246,6 +246,7 @@ public class SipLoginManager : IDisposable
             return;
         }
 
+        // Pass transport so handler can send SIP responses (Ringing, etc.)
         await _callHandler.HandleIncomingCallAsync(_sipTransport!, ua, req, caller);
     }
 
