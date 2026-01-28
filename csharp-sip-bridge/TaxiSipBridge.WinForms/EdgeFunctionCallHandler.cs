@@ -12,7 +12,7 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Call handler that routes audio to Edge Function (Supabase).
 /// </summary>
-public class EdgeFunctionCallHandler : ICallHandler
+public class EdgeFunctionCallHandler : ISipCallHandler
 {
     private readonly string _wsUrl;
     private readonly AudioMode _audioMode;

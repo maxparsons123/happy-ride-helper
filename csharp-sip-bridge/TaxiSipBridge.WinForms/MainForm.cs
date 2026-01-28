@@ -7,7 +7,7 @@ public partial class MainForm : Form
     private SipAutoAnswer? _sipBridge;
     private SipOpenAIBridge? _sipLocalBridge;  // Legacy Local OpenAI mode
     private SipLoginManager? _sipLoginManager;  // NEW: Modular SIP login
-    private ICallHandler? _callHandler;  // NEW: Call handler with AiSipAudioPlayout
+    private ISipCallHandler? _callHandler;  // NEW: Call handler with AiSipAudioPlayout
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
     private volatile bool _isRunning = false;

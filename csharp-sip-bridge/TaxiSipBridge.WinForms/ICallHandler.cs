@@ -6,7 +6,7 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Interface for call handlers that process incoming SIP calls.
 /// </summary>
-public interface ICallHandler : IDisposable
+public interface ISipCallHandler : IDisposable
 {
     event Action<string>? OnLog;
     event Action<string, string>? OnCallStarted;
