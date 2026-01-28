@@ -163,9 +163,10 @@ public class AiSipAudioPlayout : IDisposable
     {
         var sw = Stopwatch.StartNew();
         double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
-        bool wasEmpty = false;
+        bool wasEmpty = true;  // Start as empty
         int diagnosticCounter = 0;
-        double lastDiagnosticTime = 0;
+        double firstAudioTimeMs = -1;  // Track when first audio arrived
+        double lastDiagnosticTime = -1;
 
         while (_running)
         {
@@ -187,14 +188,24 @@ public class AiSipAudioPlayout : IDisposable
             if (_frameQueue.TryDequeue(out var queuedFrame))
             {
                 frame = queuedFrame;
-                wasEmpty = false;
                 diagnosticCounter++;
                 
+                // Mark first audio time
+                if (firstAudioTimeMs < 0)
+                {
+                    firstAudioTimeMs = now;
+                    lastDiagnosticTime = now;
+                    Log($"🎵 First audio frame at {now:F0}ms, queue: {_frameQueue.Count + 1}");
+                }
+                
+                // Reset empty flag
+                wasEmpty = false;
+                
                 // Log every 250 frames (5 seconds) for rate diagnostics
-                if (diagnosticCounter % 250 == 0)
+                if (diagnosticCounter % 250 == 0 && lastDiagnosticTime >= 0)
                 {
                     double elapsed = now - lastDiagnosticTime;
-                    double framesPerSec = 250.0 / (elapsed / 1000.0);
+                    double framesPerSec = elapsed > 0 ? 250.0 / (elapsed / 1000.0) : 0;
                     Log($"📊 Playout rate: {framesPerSec:F1} fps (target: 50), queue: {_frameQueue.Count}");
                     lastDiagnosticTime = now;
                 }
@@ -208,6 +219,12 @@ public class AiSipAudioPlayout : IDisposable
                 if (!wasEmpty)
                 {
                     wasEmpty = true;
+                    // Log final stats when audio finishes
+                    if (firstAudioTimeMs >= 0)
+                    {
+                        double totalPlayMs = now - firstAudioTimeMs;
+                        Log($"📊 Audio finished: {diagnosticCounter} frames in {totalPlayMs:F0}ms ({diagnosticCounter * 20}ms expected)");
+                    }
                     OnQueueEmpty?.Invoke();
                 }
             }
