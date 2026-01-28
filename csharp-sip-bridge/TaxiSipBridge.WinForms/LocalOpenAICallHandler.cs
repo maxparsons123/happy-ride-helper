@@ -4,7 +4,7 @@ using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
 
-namespace TaxiSipBridge;
+namespace TaxiSipBridge.WinForms;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
