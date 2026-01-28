@@ -9,6 +9,18 @@ using TaxiSipBridge.Audio;
 namespace TaxiSipBridge;
 
 /// <summary>
+/// Output codec mode for AI audio output.
+/// </summary>
+public enum OutputCodecMode
+{
+    MuLaw,   // G.711 µ-law @ 8kHz (narrowband)
+    ALaw,    // G.711 A-law @ 8kHz (narrowband)
+    Opus     // Opus @ 48kHz (wideband)
+}
+
+namespace TaxiSipBridge;
+
+/// <summary>
 /// Direct OpenAI Realtime API client - FULLY LOCALIZED.
 /// No edge function required - connects directly to OpenAI with dispatch webhook support.
 /// </summary>
@@ -35,6 +47,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private const float PRE_EMPHASIS_COEFF = 0.97f;
     private short _lastSample = 0;
     private int _audioPacketsSent = 0;
+
+    // Output codec mode - set by SipOpenAIBridge based on negotiated codec
+    private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
+    private short[] _opusResampleBuffer = Array.Empty<short>();  // Buffer for 24kHz→48kHz upsampling
 
     // Session state
     private string? _callerId;
@@ -78,6 +94,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
     public int PendingFrameCount => _outboundQueue.Count;
+    public OutputCodecMode OutputCodec => _outputCodec;
+
+    /// <summary>
+    /// Set the output codec mode for AI audio.
+    /// Call this after codec negotiation to enable Opus output.
+    /// </summary>
+    public void SetOutputCodec(OutputCodecMode codec)
+    {
+        _outputCodec = codec;
+        Log($"🎵 Output codec set to: {codec}");
+    }
 
     /// <summary>
     /// Create a direct OpenAI Realtime client (FULLY LOCALIZED - no edge function).
@@ -1028,27 +1055,120 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // PASSTHROUGH MODE: No DSP, just simple point decimation 24kHz → 8kHz
-        // Pick every 3rd sample (no averaging, no filtering)
+        switch (_outputCodec)
+        {
+            case OutputCodecMode.Opus:
+                ProcessAdaAudioOpus(pcm24k);
+                break;
+            case OutputCodecMode.ALaw:
+                ProcessAdaAudioALaw(pcm24k);
+                break;
+            default:
+                ProcessAdaAudioMuLaw(pcm24k);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Process 24kHz PCM to Opus 48kHz frames.
+    /// </summary>
+    private void ProcessAdaAudioOpus(short[] pcm24k)
+    {
+        // Upsample 24kHz → 48kHz (2x linear interpolation)
+        var pcm48k = new short[pcm24k.Length * 2];
+        for (int i = 0; i < pcm24k.Length; i++)
+        {
+            pcm48k[i * 2] = pcm24k[i];
+            // Interpolate between samples
+            if (i < pcm24k.Length - 1)
+                pcm48k[i * 2 + 1] = (short)((pcm24k[i] + pcm24k[i + 1]) / 2);
+            else
+                pcm48k[i * 2 + 1] = pcm24k[i];
+        }
+
+        // Accumulate into buffer for 20ms Opus frames (960 samples @ 48kHz)
+        int newLen = _opusResampleBuffer.Length + pcm48k.Length;
+        var newBuffer = new short[newLen];
+        Array.Copy(_opusResampleBuffer, newBuffer, _opusResampleBuffer.Length);
+        Array.Copy(pcm48k, 0, newBuffer, _opusResampleBuffer.Length, pcm48k.Length);
+        _opusResampleBuffer = newBuffer;
+
+        // Encode complete 960-sample frames
+        const int OPUS_FRAME = 960;
+        while (_opusResampleBuffer.Length >= OPUS_FRAME)
+        {
+            var frame = new short[OPUS_FRAME];
+            Array.Copy(_opusResampleBuffer, frame, OPUS_FRAME);
+
+            // Encode to Opus
+            var opusFrame = AudioCodecs.OpusEncode(frame);
+
+            if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                _outboundQueue.TryDequeue(out _);
+
+            _outboundQueue.Enqueue(opusFrame);
+
+            // Remove processed samples
+            var remaining = new short[_opusResampleBuffer.Length - OPUS_FRAME];
+            Array.Copy(_opusResampleBuffer, OPUS_FRAME, remaining, 0, remaining.Length);
+            _opusResampleBuffer = remaining;
+        }
+    }
+
+    /// <summary>
+    /// Process 24kHz PCM to A-law 8kHz frames.
+    /// </summary>
+    private void ProcessAdaAudioALaw(short[] pcm24k)
+    {
+        // Decimate 24kHz → 8kHz (3:1)
         int outputLen = pcm24k.Length / 3;
         var pcm8k = new short[outputLen];
-
         for (int i = 0; i < outputLen; i++)
+            pcm8k[i] = pcm24k[i * 3];
+
+        // Encode to A-law
+        var alaw = AudioCodecs.ALawEncode(pcm8k);
+
+        // Split into 20ms frames (160 bytes @ 8kHz)
+        for (int i = 0; i < alaw.Length; i += 160)
         {
-            pcm8k[i] = pcm24k[i * 3];  // Just take every 3rd sample
+            int len = Math.Min(160, alaw.Length - i);
+            var frame = new byte[160];
+            Buffer.BlockCopy(alaw, i, frame, 0, len);
+
+            // Pad short frames with A-law silence (0xD5)
+            if (len < 160)
+                Array.Fill(frame, (byte)0xD5, len, 160 - len);
+
+            if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                _outboundQueue.TryDequeue(out _);
+
+            _outboundQueue.Enqueue(frame);
         }
+    }
+
+    /// <summary>
+    /// Process 24kHz PCM to µ-law 8kHz frames.
+    /// </summary>
+    private void ProcessAdaAudioMuLaw(short[] pcm24k)
+    {
+        // Decimate 24kHz → 8kHz (3:1)
+        int outputLen = pcm24k.Length / 3;
+        var pcm8k = new short[outputLen];
+        for (int i = 0; i < outputLen; i++)
+            pcm8k[i] = pcm24k[i * 3];
 
         // Encode to µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
-        // Split into 20ms frames (160 bytes @ 8kHz µ-law)
+        // Split into 20ms frames (160 bytes @ 8kHz)
         for (int i = 0; i < ulaw.Length; i += 160)
         {
             int len = Math.Min(160, ulaw.Length - i);
             var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
 
-            // Pad short frames with silence (0xFF = µ-law silence)
+            // Pad short frames with µ-law silence (0xFF)
             if (len < 160)
                 Array.Fill(frame, (byte)0xFF, len, 160 - len);
 

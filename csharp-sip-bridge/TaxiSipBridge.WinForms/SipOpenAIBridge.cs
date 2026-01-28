@@ -620,11 +620,20 @@ public class SipOpenAIBridge : IDisposable
             Log($"📡 [{_currentCallId}] RTP → {remoteRtp}");
             Log($"🎵 [{_currentCallId}] Negotiated codec: {codecName} @ {clockRate}Hz");
 
+            // Determine output codec mode based on negotiated codec
+            var outputCodecMode = codecName.ToUpperInvariant() switch
+            {
+                "OPUS" => OutputCodecMode.Opus,
+                "PCMA" => OutputCodecMode.ALaw,
+                _ => OutputCodecMode.MuLaw
+            };
+
             // Connect to OpenAI Realtime API
             _aiClient = new OpenAIRealtimeClient(
                 _apiKey,
                 model: "gpt-4o-mini-realtime-preview-2024-12-17"
             );
+            _aiClient.SetOutputCodec(outputCodecMode);  // Set before connecting
             _aiClient.OnLog += msg => Log(msg);
             _aiClient.OnTranscript += t =>
             {
@@ -636,7 +645,7 @@ public class SipOpenAIBridge : IDisposable
             _aiClient.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
             await _aiClient.ConnectAsync(caller, _callCts.Token);
-            Log($"🤖 [{_currentCallId}] Connected to OpenAI Realtime API");
+            Log($"🤖 [{_currentCallId}] Connected to OpenAI Realtime API (output: {outputCodecMode})");
 
             // Handle call hangup
             _userAgent.OnCallHungup += (dialogue) =>
