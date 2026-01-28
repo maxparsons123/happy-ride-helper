@@ -251,8 +251,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
             _isClosed = true;
             _sendTimer?.Dispose();
             _sendTimer = null;
+            
+            // Drain remaining audio before closing (up to 500ms worth)
+            int remaining = _pcmQueue.Count;
+            int drained = 0;
+            while (_pcmQueue.TryDequeue(out _) && drained < 25) // 25 frames = 500ms max
+            {
+                drained++;
+            }
+            
             ClearQueue();
-            OnDebugLog?.Invoke($"[AdaAudioSource] ⏹️ Closed (enq={_enqueuedFrames}, sent={_sentFrames})");
+            OnDebugLog?.Invoke($"[AdaAudioSource] ⏹️ Closed (enq={_enqueuedFrames}, sent={_sentFrames}, drained={drained}/{remaining})");
         }
         return Task.CompletedTask;
     }
@@ -278,13 +287,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
         else
         {
             // Jitter buffer priming for ALL codecs to prevent early underruns
-            // OpenAI sends audio in bursts - need substantial buffer before starting playback
-            // INCREASED: 50 frames (1000ms / 1 second) to prevent mid-sentence dropouts
+            // OpenAI sends audio in bursts - need some buffer before starting playback
+            // REDUCED: 12 frames (240ms) - balances latency vs stability
             if (!_jitterBufferFilled)
             {
-                // Buffer 50 frames (1 second) minimum for stable playback timing
-                // Higher buffer = more latency but eliminates mid-sentence stuttering
-                int minFrames = 50;
+                // Buffer 12 frames (240ms) minimum - enough for burst delivery
+                // Lower buffer = less latency, hear end of conversations
+                int minFrames = 12;
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
