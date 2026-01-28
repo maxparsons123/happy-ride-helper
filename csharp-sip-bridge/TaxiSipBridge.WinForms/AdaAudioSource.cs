@@ -65,9 +65,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer - SIP RTP timing requires adequate buffering
+    // Jitter buffer - SIP uses 20ms frames (50 packets/sec)
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 160;  // 160ms (8 frames) - SIP-friendly buffer
+    private int _jitterBufferMs = 200;  // 200ms (10 frames) - stable SIP playback
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -298,11 +298,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming - SIP RTP requires adequate buffering
-            // 8 frames (160ms) is the SIP-friendly sweet spot
+            // Jitter buffer priming - 10 frames (200ms) for stable SIP playback
+            // SIP uses 20ms frames at 50 packets/sec, need adequate buffer for network jitter
             if (!_jitterBufferFilled)
             {
-                int minFrames = 8;  // 160ms - SIP-optimized
+                int minFrames = 10;  // 200ms - stable SIP playback
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -338,8 +338,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 if (_jitterBufferFilled && _consecutiveUnderruns >= 3)
                 {
                     _jitterBufferFilled = false;
-                    // Keep 8 frames in buffer for SIP timing
-                    while (_pcmQueue.Count > 8) _pcmQueue.TryDequeue(out _);
+                    // Keep 10 frames in buffer for stable SIP timing
+                    while (_pcmQueue.Count > 10) _pcmQueue.TryDequeue(out _);
                     OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun ({_consecutiveUnderruns}x), re-priming");
                 }
 
