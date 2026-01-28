@@ -20,7 +20,7 @@ public class AiSipAudioPlayout : IDisposable
 {
     private const int PCM_FRAME_SAMPLES = 160;  // 20ms @ 8kHz = 160 samples
     private const int FRAME_MS = 20;            // 20ms per frame
-    private const int MAX_QUEUE_FRAMES = 25;    // 500ms max buffer (25 × 20ms)
+    private const int MAX_QUEUE_FRAMES = 500;   // 10 seconds max buffer (500 × 20ms)
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
