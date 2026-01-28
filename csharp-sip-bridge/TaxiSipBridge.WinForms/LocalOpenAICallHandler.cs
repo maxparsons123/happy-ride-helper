@@ -8,7 +8,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
-/// Uses AdaAudioSource with SpeexDSP high-quality resampling for RTP delivery.
+/// Uses SafeAiSipPlayout for timer-driven RTP delivery with raw PCM passthrough.
 /// </summary>
 public class LocalOpenAICallHandler : ISipCallHandler
 {
@@ -23,7 +23,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
     
     private VoIPMediaSession? _currentMediaSession;
-    private AdaAudioSource? _adaAudioSource;
+    private SafeAiSipPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
@@ -83,21 +83,13 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session with AdaAudioSource (SpeexDSP high-quality resampling)
-            _adaAudioSource = new AdaAudioSource(AudioMode.Standard, 60);
-            _adaAudioSource.OnDebugLog += msg => Log(msg);
-            _adaAudioSource.OnQueueEmpty += () =>
-            {
-                // Only trigger echo guard if Ada has actually spoken
-                if (_adaHasStartedSpeaking)
-                {
-                    _isBotSpeaking = false;
-                    _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
-                }
-            };
+            // Setup media session with default audio source (for RTP playout)
+            var audioSource = new AudioExtrasSource(
+                new AudioEncoder(),
+                new AudioSourceOptions { AudioSource = AudioSourcesEnum.None }
+            );
 
-            var mediaEndPoints = new MediaEndPoints { AudioSource = _adaAudioSource };
+            var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
             _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
 
@@ -129,8 +121,22 @@ public class LocalOpenAICallHandler : ISipCallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
+            // Create SafeAiSipPlayout (raw PCM → VoIPMediaSession handles encoding)
+            _playout = new SafeAiSipPlayout(_currentMediaSession, ua);
+            _playout.OnLog += msg => Log(msg);
+            _playout.OnQueueEmpty += () =>
+            {
+                if (_adaHasStartedSpeaking)
+                {
+                    _isBotSpeaking = false;
+                    _botStoppedSpeakingAt = DateTime.UtcNow;
+                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                }
+            };
+            _playout.Start();
+
             _adaHasStartedSpeaking = false;
-            Log($"🎵 [{callId}] AdaAudioSource started (SpeexDSP resampling)");
+            Log($"🎵 [{callId}] SafeAiSipPlayout started (raw PCM passthrough)");
 
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
@@ -141,9 +147,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
             {
                 _isBotSpeaking = true;
                 _adaHasStartedSpeaking = true;
-                _adaAudioSource?.EnqueuePcm24(pcmBytes);
+                _playout?.BufferAiAudio(pcmBytes);
             };
-            _aiClient.OnResponseStarted += () => _adaAudioSource?.ResetFadeIn();
+            _aiClient.OnResponseStarted += () => { }; // No fade-in needed with raw PCM
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
@@ -241,7 +247,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 Log($"✅ [{callId}] Inbound flush complete");
             }
 
-            // Early protection: ignore audio for first 2 seconds (carrier/PBX junk)
+            // Early protection: ignore audio for first N seconds (carrier/PBX junk)
             var msSinceCallStart = (DateTime.UtcNow - _callStartedAt).TotalMilliseconds;
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
@@ -305,16 +311,17 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _aiClient = null;
         }
 
+        if (_playout != null)
+        {
+            try { _playout.Stop(); } catch { }
+            try { _playout.Dispose(); } catch { }
+            _playout = null;
+        }
+
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
-        }
-
-        if (_adaAudioSource != null)
-        {
-            try { _adaAudioSource.Dispose(); } catch { }
-            _adaAudioSource = null;
         }
 
         try { _callCts?.Dispose(); } catch { }
@@ -335,7 +342,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
         _disposed = true;
 
         try { _callCts?.Cancel(); } catch { }
-        try { _adaAudioSource?.Dispose(); } catch { }
+        try { _playout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
 
