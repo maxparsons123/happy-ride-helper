@@ -21,7 +21,7 @@ public class TaxiBotCallSession
     private readonly string _apiKey;
     private readonly string _callId;
 
-    private VoIPMediaSession? _mediaSession;
+    private RTPMediaSession? _rtpSession;
     private PcmaRtpPlayout? _pcmaPlayout;
     private OpenAiRealtimeClient? _aiClient;
 
@@ -50,21 +50,26 @@ public class TaxiBotCallSession
 
         try
         {
-            // Create media session with PCMA codec
+            // Build media session with PCMA codec only
             var audioFormats = new List<AudioFormat>
             {
                 new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA)
             };
 
-            _mediaSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = null, AudioSink = null });
-            _mediaSession.AcceptRtpFromAny = true;
+            _rtpSession = new RTPMediaSession(new MediaEndPoints
+            {
+                AudioSink = null,
+                AudioSource = null
+            }, audioFormats);
+
+            _rtpSession.AcceptRtpFromAny = true;
 
             // Wire up inbound RTP
-            _mediaSession.OnRtpPacketReceived += OnRtpPacketReceived;
+            _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
             // Answer the call
             var uas = _ua.AcceptCall(invite);
-            bool answered = await _ua.Answer(uas, _mediaSession);
+            bool answered = await _ua.Answer(uas, _rtpSession);
 
             if (!answered)
             {
@@ -72,11 +77,22 @@ public class TaxiBotCallSession
                 return false;
             }
 
-            await _mediaSession.Start();
+            await _rtpSession.Start();
             Log("Call answered, RTP started");
 
-            // Create PCMA playout engine
-            _pcmaPlayout = new PcmaRtpPlayout(_mediaSession);
+            // Get RTP channel and remote endpoint for playout
+            var rtpChannel = _rtpSession.AudioRtpChannel;
+            var remoteEP = _rtpSession.AudioDestinationEndPoint;
+
+            if (rtpChannel == null || remoteEP == null)
+            {
+                Log("Missing RTP channel or remote endpoint");
+                await Hangup("RTP setup failed");
+                return false;
+            }
+
+            // Create PCMA playout engine with direct RTP control
+            _pcmaPlayout = new PcmaRtpPlayout(rtpChannel, remoteEP);
             _pcmaPlayout.OnDebugLog += msg => Log(msg);
             _pcmaPlayout.Start();
 
@@ -86,9 +102,10 @@ public class TaxiBotCallSession
                 _aiClient = new OpenAiRealtimeClient(_apiKey);
                 _aiClient.OnLog += msg => Log(msg);
                 _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
-                _aiClient.OnPcm24Audio += pcmBytes =>
+                _aiClient.OnPcm16kAudio += pcm16k =>
                 {
-                    _pcmaPlayout?.EnqueuePcm24(pcmBytes);
+                    // Downsample 16k → 8k and enqueue
+                    EnqueueAiAudio(pcm16k);
                 };
 
                 Log("Connecting to OpenAI Realtime API...");
@@ -139,7 +156,7 @@ public class TaxiBotCallSession
     }
 
     /// <summary>
-    /// Process inbound RTP: PCMA → PCM16@8k → resample to 24k → send to OpenAI.
+    /// Process inbound RTP: PCMA → PCM16@8k → resample to 16k → send to OpenAI.
     /// </summary>
     private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
@@ -150,53 +167,65 @@ public class TaxiBotCallSession
         if (payload == null || payload.Length == 0)
             return;
 
-        // Only handle PCMA (PT=8) for now
+        // Only handle PCMA (PT=8)
         if (rtpPacket.Header.PayloadType != 8)
             return;
 
         // Decode PCMA → PCM16 @ 8kHz
         var pcm8k = G711Codec.AlawToPcm16(payload);
 
-        // Resample 8k → 24k for OpenAI (simple 3x interpolation)
-        var pcm24k = Resample8kTo24k(pcm8k);
+        // Resample 8k → 16k for OpenAI (simple 2x interpolation)
+        var pcm16k = Resample8kTo16k(pcm8k);
 
         // Send to OpenAI
-        _aiClient.SendAudioToModel(pcm24k);
+        _aiClient.SendPcm16kToModel(pcm16k);
     }
 
     /// <summary>
-    /// Simple 8kHz → 24kHz upsampling (3x linear interpolation).
+    /// Simple 8kHz → 16kHz upsampling (2x linear interpolation).
     /// </summary>
-    private byte[] Resample8kTo24k(byte[] pcm8k)
+    private short[] Resample8kTo16k(byte[] pcm8kBytes)
     {
-        int samples8k = pcm8k.Length / 2;
-        int samples24k = samples8k * 3;
-        var pcm24k = new byte[samples24k * 2];
+        int samples8k = pcm8kBytes.Length / 2;
+        var pcm8k = new short[samples8k];
+        Buffer.BlockCopy(pcm8kBytes, 0, pcm8k, 0, pcm8kBytes.Length);
+
+        var pcm16k = new short[samples8k * 2];
 
         for (int i = 0; i < samples8k; i++)
         {
-            short sample = (short)(pcm8k[i * 2] | (pcm8k[i * 2 + 1] << 8));
-            short nextSample = (i + 1 < samples8k)
-                ? (short)(pcm8k[(i + 1) * 2] | (pcm8k[(i + 1) * 2 + 1] << 8))
-                : sample;
+            short sample = pcm8k[i];
+            short nextSample = (i + 1 < samples8k) ? pcm8k[i + 1] : sample;
 
-            // Write 3 interpolated samples
-            int outIdx = i * 3;
-            WriteSample(pcm24k, outIdx, sample);
-            WriteSample(pcm24k, outIdx + 1, (short)((sample * 2 + nextSample) / 3));
-            WriteSample(pcm24k, outIdx + 2, (short)((sample + nextSample * 2) / 3));
+            pcm16k[i * 2] = sample;
+            pcm16k[i * 2 + 1] = (short)((sample + nextSample) / 2);
         }
 
-        return pcm24k;
+        return pcm16k;
     }
 
-    private static void WriteSample(byte[] buffer, int sampleIndex, short value)
+    /// <summary>
+    /// Enqueue audio from OpenAI (PCM16@16k) → downsample to 8k → playout.
+    /// </summary>
+    private void EnqueueAiAudio(short[] pcm16k)
     {
-        int byteIndex = sampleIndex * 2;
-        if (byteIndex + 1 < buffer.Length)
+        if (_pcmaPlayout == null || _isHungup) return;
+
+        // Downsample 16k → 8k (take every 2nd sample)
+        var pcm8k = new short[pcm16k.Length / 2];
+        for (int i = 0; i < pcm8k.Length; i++)
         {
-            buffer[byteIndex] = (byte)(value & 0xFF);
-            buffer[byteIndex + 1] = (byte)((value >> 8) & 0xFF);
+            pcm8k[i] = pcm16k[i * 2];
+        }
+
+        // Split into 20ms frames (160 samples @ 8kHz)
+        const int frameSamples = 160;
+        for (int offset = 0; offset < pcm8k.Length; offset += frameSamples)
+        {
+            int len = Math.Min(frameSamples, pcm8k.Length - offset);
+            var frame = new short[frameSamples];
+            Array.Copy(pcm8k, offset, frame, 0, len);
+            _pcmaPlayout.EnqueuePcm8kFrame(frame);
         }
     }
 
@@ -218,7 +247,7 @@ public class TaxiBotCallSession
         }
         catch { }
 
-        try { _mediaSession?.Close(null); } catch { }
+        try { _rtpSession?.Close(null); } catch { }
 
         OnCallFinished?.Invoke(_callId);
         await Task.CompletedTask;
