@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
@@ -5,76 +7,46 @@ namespace TaxiSipBridge.Audio;
 
 /// <summary>
 /// High-quality audio resampler using NAudio's WDL resampler.
-/// Includes proper anti-aliasing for downsampling (24kHz → 8kHz).
-/// Also provides G.711 A-law encoding utilities.
 /// </summary>
 public static class NAudioResampler
 {
     /// <summary>
-    /// Resample PCM16 audio using NAudio's WDL resampler (high quality with anti-aliasing).
+    /// Resamples raw PCM bytes using NAudio's WDL resampler (gold standard anti-aliasing).
     /// </summary>
-    public static short[] Resample(short[] input, int fromRate, int toRate)
+    public static byte[] ResampleBytes(byte[] inputPcm, int inputRate, int outputRate)
     {
-        if (input.Length == 0 || fromRate == toRate)
-            return input;
+        if (inputPcm.Length == 0 || inputRate == outputRate)
+            return inputPcm;
 
-        // Convert shorts to bytes for NAudio
-        var inputBytes = new byte[input.Length * 2];
-        Buffer.BlockCopy(input, 0, inputBytes, 0, inputBytes.Length);
-
-        // Create wave format and memory stream
-        var inputFormat = new WaveFormat(fromRate, 16, 1);
-        using var inputStream = new RawSourceWaveStream(new MemoryStream(inputBytes), inputFormat);
+        // 1. Setup the input format (16-bit Mono PCM from OpenAI)
+        var inputFormat = new WaveFormat(inputRate, 16, 1);
         
-        // Use WDL resampler (high quality with proper anti-aliasing)
-        var resampler = new WdlResamplingSampleProvider(inputStream.ToSampleProvider(), toRate);
+        using var msInput = new MemoryStream(inputPcm);
+        using var rawProvider = new RawSourceWaveStream(msInput, inputFormat);
         
-        // Calculate expected output length
-        double ratio = (double)toRate / fromRate;
-        int expectedOutputSamples = (int)(input.Length * ratio);
+        // 2. Convert to Float32 for high-quality resampling
+        var sampleProvider = rawProvider.ToSampleProvider();
         
-        // Read resampled audio
-        var outputBuffer = new float[expectedOutputSamples + 100]; // Small buffer for any rounding
-        int samplesRead = resampler.Read(outputBuffer, 0, outputBuffer.Length);
+        // 3. WDL resampler - gold standard for anti-aliasing
+        var resampler = new WdlResamplingSampleProvider(sampleProvider, outputRate);
         
-        // Convert float samples back to short
-        var output = new short[samplesRead];
-        for (int i = 0; i < samplesRead; i++)
+        using var msOutput = new MemoryStream();
+        
+        // Drain the resampler
+        float[] buffer = new float[outputRate];
+        int samplesRead;
+        
+        while ((samplesRead = resampler.Read(buffer, 0, buffer.Length)) > 0)
         {
-            output[i] = (short)Math.Clamp(outputBuffer[i] * 32767f, short.MinValue, short.MaxValue);
+            for (int i = 0; i < samplesRead; i++)
+            {
+                short sample = (short)Math.Clamp(buffer[i] * short.MaxValue, short.MinValue, short.MaxValue);
+                byte[] bytes = BitConverter.GetBytes(sample);
+                msOutput.Write(bytes, 0, 2);
+            }
         }
-        
-        return output;
-    }
 
-    /// <summary>
-    /// Resample PCM16 bytes using NAudio's WDL resampler.
-    /// </summary>
-    public static byte[] ResampleBytes(byte[] inputBytes, int fromRate, int toRate)
-    {
-        if (inputBytes.Length == 0 || fromRate == toRate)
-            return inputBytes;
-
-        var inputFormat = new WaveFormat(fromRate, 16, 1);
-        using var inputStream = new RawSourceWaveStream(new MemoryStream(inputBytes), inputFormat);
-        
-        var resampler = new WdlResamplingSampleProvider(inputStream.ToSampleProvider(), toRate);
-        
-        double ratio = (double)toRate / fromRate;
-        int expectedOutputSamples = (int)((inputBytes.Length / 2) * ratio);
-        
-        var outputBuffer = new float[expectedOutputSamples + 100];
-        int samplesRead = resampler.Read(outputBuffer, 0, outputBuffer.Length);
-        
-        var outputBytes = new byte[samplesRead * 2];
-        for (int i = 0; i < samplesRead; i++)
-        {
-            short sample = (short)Math.Clamp(outputBuffer[i] * 32767f, short.MinValue, short.MaxValue);
-            outputBytes[i * 2] = (byte)(sample & 0xFF);
-            outputBytes[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
-        }
-        
-        return outputBytes;
+        return msOutput.ToArray();
     }
 
     /// <summary>
