@@ -78,20 +78,20 @@ public static class NAudioResampler
     public static byte LinearToALaw(short sample)
     {
         int sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
-        if (sample > 32635) sample = 32635;
+        int magnitude = (sign != 0) ? -sample : sample;
+        if (magnitude > 32635) magnitude = 32635;
 
         int exponent, mantissa;
-        if (sample >= 256)
+        if (magnitude >= 256)
         {
-            exponent = (int)Math.Floor(Math.Log(sample, 2)) - 7;
+            exponent = (int)Math.Floor(Math.Log(magnitude, 2)) - 7;
             if (exponent > 7) exponent = 7;
-            mantissa = (sample >> (exponent + 3)) & 0x0F;
+            mantissa = (magnitude >> (exponent + 3)) & 0x0F;
         }
         else
         {
             exponent = 0;
-            mantissa = sample >> 4;
+            mantissa = magnitude >> 4;
         }
 
         byte alaw = (byte)((exponent << 4) | mantissa);
