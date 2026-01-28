@@ -25,14 +25,13 @@ public class DirectRtpPlayout : IDisposable
     private const int MIN_STARTUP_FRAMES = 10;    // 200ms startup buffer
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
-    private readonly RTPChannel _rtpChannel;
-    private readonly IPEndPoint _remoteEndPoint;
+    private readonly RTPSession _rtpSession;
     private readonly byte[] _alawBuffer = new byte[PCM8K_FRAME_SAMPLES];
 
     // RTP state (RFC 3550 compliant)
     private ushort _sequenceNumber;
     private uint _timestamp;
-    private readonly uint _ssrc = (uint)new Random().Next(1, int.MaxValue);
+    private readonly uint _ssrc;
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -55,21 +54,14 @@ public class DirectRtpPlayout : IDisposable
     {
         if (mediaSession == null) throw new ArgumentNullException(nameof(mediaSession));
 
-        // Get RTP channel SAFELY (works in v5/v6+)
-        var audioStream = mediaSession.AudioStreams?.FirstOrDefault()
-                       ?? throw new ArgumentException("No audio stream found", nameof(mediaSession));
-
-        _rtpChannel = audioStream.GetRtpChannel()
-                      ?? throw new ArgumentException("RTP channel not available", nameof(mediaSession));
-
-        _remoteEndPoint = audioStream.RemoteEndPoint
-                        ?? throw new ArgumentException("Remote endpoint not set", nameof(mediaSession));
-
+        _rtpSession = mediaSession;
+        
         // Initialize RTP state
         _sequenceNumber = (ushort)new Random().Next(1, ushort.MaxValue);
         _timestamp = (uint)new Random().Next(1, int.MaxValue);
+        _ssrc = (uint)new Random().Next(1, int.MaxValue);
 
-        Log($"✅ Direct RTP playout initialized | Remote:{_remoteEndPoint} | SSRC:{_ssrc:X8}");
+        Log($"✅ Direct RTP playout initialized | SSRC:{_ssrc:X8}");
     }
 
     /// <summary>
@@ -207,8 +199,8 @@ public class DirectRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// ✅ SEND RAW RTP PACKET with properly encoded A-law payload.
-    /// Bypasses VoIPMediaSession.SendAudio() ambiguity entirely.
+    /// ✅ SEND RAW RTP PACKET using RTPSession.SendRtpRaw().
+    /// This is the correct SIPSorcery API for raw RTP transmission.
     /// </summary>
     private void SendRtpPacket(short[] pcmFrame)
     {
@@ -220,31 +212,23 @@ public class DirectRtpPlayout : IDisposable
                 _alawBuffer[i] = LinearToALaw(pcmFrame[i]);
             }
 
-            // 2. Build RTP packet (RFC 3550 compliant)
-            var rtpPacket = new RTPPacket(12 + PCM8K_FRAME_SAMPLES)
-            {
-                Header = new RTPHeader
-                {
-                    PayloadType = 8,          // PCMA = payload type 8 (RFC 3551)
-                    MarkerBit = 0,
-                    SequenceNumber = _sequenceNumber++,
-                    Timestamp = _timestamp,
-                    SyncSource = _ssrc
-                },
-                Payload = _alawBuffer
-            };
+            // 2. Send via RTPSession.SendRtpRaw (correct SIPSorcery API)
+            _rtpSession.SendRtpRaw(
+                SDPMediaTypesEnum.audio,
+                _alawBuffer,
+                _timestamp,
+                markerBit: 0,
+                payloadTypeID: 8  // PCMA
+            );
 
             _timestamp += (uint)PCM8K_FRAME_SAMPLES; // Increment by samples @ 8kHz
-
-            // 3. Send directly to remote endpoint
-            _rtpChannel.SendAsync(_remoteEndPoint, rtpPacket.GetBytes()).Wait();
 
             Interlocked.Increment(ref _framesSent);
 
             // Diagnostic: Verify first packet encoding
             if (_framesSent == 1)
             {
-                Log($"✅ First RTP sent | Seq:{rtpPacket.Header.SequenceNumber} | TS:{rtpPacket.Header.Timestamp} | Payload:160 bytes A-law (0x{_alawBuffer[0]:X2})");
+                Log($"✅ First RTP sent | TS:{_timestamp} | Payload:160 bytes A-law (0x{_alawBuffer[0]:X2})");
             }
         }
         catch (Exception ex)
