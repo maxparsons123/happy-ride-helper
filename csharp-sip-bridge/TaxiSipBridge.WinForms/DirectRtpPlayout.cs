@@ -24,6 +24,7 @@ public class DirectRtpPlayout : IDisposable
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
     private const int MAX_QUEUE_FRAMES = 500;     // 10s buffer (OpenAI sends audio in bursts)
+    private const int MIN_STARTUP_FRAMES = 10;    // 200ms buffer before starting playout
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
@@ -145,10 +146,34 @@ public class DirectRtpPlayout : IDisposable
         var sw = Stopwatch.StartNew();
         double nextFrameTime = sw.Elapsed.TotalMilliseconds;
         bool wasEmpty = true;
+        bool startupBuffering = true;
 
         while (_running)
         {
             double now = sw.Elapsed.TotalMilliseconds;
+
+            // Wait for startup buffer before beginning playout (absorbs OpenAI burst jitter)
+            if (startupBuffering)
+            {
+                if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
+                {
+                    startupBuffering = false;
+                    nextFrameTime = sw.Elapsed.TotalMilliseconds;
+                    Log($"📦 Startup buffer ready ({_frameQueue.Count} frames)");
+                }
+                else
+                {
+                    // Send silence while buffering
+                    if (now >= nextFrameTime)
+                    {
+                        SendRtpPacket(new short[PCM8K_FRAME_SAMPLES]);
+                        Interlocked.Increment(ref _silenceFrames);
+                        nextFrameTime += FRAME_MS;
+                    }
+                    Thread.Sleep(1);
+                    continue;
+                }
+            }
 
             if (now < nextFrameTime)
             {
