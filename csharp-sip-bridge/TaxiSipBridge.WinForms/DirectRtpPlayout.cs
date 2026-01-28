@@ -3,13 +3,17 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// Direct RTP playout engine for G.711 A-law (PCMA).
 /// Uses SendRtpRaw() for complete control over encoding.
+/// ✅ NAudio WDL resampler for professional-grade 24kHz→8kHz conversion
 /// ✅ 100% control over encoding/timestamps
 /// ✅ Works consistently across SIPSorcery versions
 /// ✅ Eliminates PCM hiss/static
@@ -18,11 +22,15 @@ public class DirectRtpPlayout : IDisposable
 {
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
-    private const int MAX_QUEUE_FRAMES = 25;      // 500ms buffer
+    private const int MAX_QUEUE_FRAMES = 500;     // 10s buffer (OpenAI sends audio in bursts)
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _alawBuffer = new byte[PCM8K_FRAME_SAMPLES];
+
+    // NAudio Infrastructure for high-quality resampling
+    private readonly BufferedWaveProvider _inputBuffer;
+    private readonly WdlResamplingSampleProvider _resampler;
 
     // RTP state
     private uint _timestamp;
@@ -49,11 +57,22 @@ public class DirectRtpPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _timestamp = (uint)new Random().Next(1, int.MaxValue);
 
-        Log($"✅ Direct RTP playout initialized");
+        // Initialize NAudio Pipeline: 24kHz 16-bit Mono → 8kHz Mono
+        var inputFormat = new WaveFormat(24000, 16, 1);
+        _inputBuffer = new BufferedWaveProvider(inputFormat) 
+        { 
+            DiscardOnBufferOverflow = true,
+            BufferLength = 24000 * 2 * 10 // 10 seconds of 24kHz 16-bit mono
+        };
+        
+        // WdlResamplingSampleProvider provides professional-grade resampling with proper anti-aliasing
+        _resampler = new WdlResamplingSampleProvider(_inputBuffer.ToSampleProvider(), 8000);
+
+        Log($"✅ Direct RTP playout initialized | Resampler: NAudio WDL");
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Resamples to 8kHz with anti-aliasing.
+    /// Buffer 24kHz PCM from OpenAI. Processes through NAudio WDL resampler to 8kHz.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -62,11 +81,24 @@ public class DirectRtpPlayout : IDisposable
 
         try
         {
-            var pcm24k = BytesToShorts(pcm24kBytes);
-            var pcm8k = Resample24kTo8kAntiAliased(pcm24k);
+            // 1. Push raw 24kHz bytes into NAudio input buffer
+            _inputBuffer.AddSamples(pcm24kBytes, 0, pcm24kBytes.Length);
 
-            for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
+            // 2. Read from resampler (it pulls from inputBuffer and converts to 8kHz)
+            float[] sampleBuffer = new float[PCM8K_FRAME_SAMPLES];
+            int samplesRead;
+            
+            while ((samplesRead = _resampler.Read(sampleBuffer, 0, PCM8K_FRAME_SAMPLES)) > 0)
             {
+                // Convert Float32 samples back to Int16 (short)
+                var pcm8kFrame = new short[PCM8K_FRAME_SAMPLES];
+                for (int n = 0; n < samplesRead; n++)
+                {
+                    // Clamp to prevent overflow
+                    float sample = Math.Clamp(sampleBuffer[n], -1.0f, 1.0f);
+                    pcm8kFrame[n] = (short)(sample * short.MaxValue);
+                }
+
                 // Drop OLDEST frame on overflow (minimizes latency)
                 if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
                 {
@@ -74,15 +106,12 @@ public class DirectRtpPlayout : IDisposable
                     Interlocked.Increment(ref _droppedFrames);
                 }
 
-                var frame = new short[PCM8K_FRAME_SAMPLES];
-                int len = Math.Min(PCM8K_FRAME_SAMPLES, pcm8k.Length - i);
-                Array.Copy(pcm8k, i, frame, 0, len);
-                _frameQueue.Enqueue(frame);
+                _frameQueue.Enqueue(pcm8kFrame);
             }
         }
         catch (Exception ex)
         {
-            Log($"⚠️ Buffer error: {ex.Message}");
+            Log($"⚠️ NAudio resampling error: {ex.Message}");
         }
     }
 
@@ -119,11 +148,19 @@ public class DirectRtpPlayout : IDisposable
         Log($"⏹️ Playout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
     }
 
+    /// <summary>
+    /// Clear all buffers on barge-in.
+    /// </summary>
     public void Clear()
     {
+        // Clear NAudio internal buffer
+        _inputBuffer.ClearBuffer();
+        
+        // Clear frame queue
         int cleared = 0;
         while (_frameQueue.TryDequeue(out _)) cleared++;
-        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames (barge-in)");
+        
+        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames + NAudio buffer (barge-in)");
     }
 
     private void PlayoutLoop()
@@ -176,16 +213,16 @@ public class DirectRtpPlayout : IDisposable
 
     /// <summary>
     /// ✅ SEND RAW RTP PACKET with properly encoded A-law payload.
-    /// Bypasses VoIPMediaSession.SendAudio() ambiguity entirely.
+    /// Uses SIPSorcery's built-in ALawEncoder for reliable encoding.
     /// </summary>
     private void SendRtpPacket(short[] pcmFrame)
     {
         try
         {
-            // 1. Encode PCM → A-law (ITU-T G.711)
+            // 1. Encode PCM → A-law using SIPSorcery's reliable encoder
             for (int i = 0; i < pcmFrame.Length; i++)
             {
-                _alawBuffer[i] = LinearToALaw(pcmFrame[i]);
+                _alawBuffer[i] = ALawEncoder.LinearToALawSample(pcmFrame[i]);
             }
 
             // 2. Send via SendRtpRaw (bypasses SendAudio encoding ambiguity)
@@ -211,66 +248,6 @@ public class DirectRtpPlayout : IDisposable
         {
             Log($"⚠️ RTP send error: {ex.Message}");
         }
-    }
-
-    // ===========================================================================================
-    // ITU-T G.711 A-law Encoder (RFC 3551 compliant) - NO EXTERNAL DEPENDENCIES
-    // ===========================================================================================
-
-    private static byte LinearToALaw(short sample)
-    {
-        int sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
-
-        sample = (short)((sample + 8) >> 4);
-
-        int exponent, mantissa;
-        if (sample >= 256) { exponent = 7; mantissa = (sample >> 4) & 0x0F; }
-        else if (sample >= 128) { exponent = 6; mantissa = sample & 0x0F; }
-        else if (sample >= 64) { exponent = 5; mantissa = sample & 0x0F; }
-        else if (sample >= 32) { exponent = 4; mantissa = sample & 0x0F; }
-        else if (sample >= 16) { exponent = 3; mantissa = sample & 0x0F; }
-        else if (sample >= 8) { exponent = 2; mantissa = sample & 0x0F; }
-        else if (sample >= 4) { exponent = 1; mantissa = sample & 0x0F; }
-        else { exponent = 0; mantissa = sample >> 1; }
-
-        byte alaw = (byte)((exponent << 4) | mantissa);
-        alaw ^= 0x55;                // Invert odd bits (G.711 requirement)
-        if (sign == 0) alaw |= 0x80; // Restore sign bit
-
-        return alaw;
-    }
-
-    /// <summary>
-    /// Anti-aliased 24kHz → 8kHz resampling (3-tap FIR low-pass).
-    /// </summary>
-    private static short[] Resample24kTo8kAntiAliased(short[] pcm24k)
-    {
-        if (pcm24k.Length < 3) return Array.Empty<short>();
-
-        int outLen = pcm24k.Length / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int src = i * 3;
-            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
-            int s1 = pcm24k[src];
-            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
-
-            int filtered = (s0 + (s1 << 1) + s2) >> 2;
-            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
-        }
-
-        return output;
-    }
-
-    private static short[] BytesToShorts(byte[] bytes)
-    {
-        if (bytes.Length % 2 != 0) return Array.Empty<short>();
-        var shorts = new short[bytes.Length / 2];
-        Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
-        return shorts;
     }
 
     private void Log(string msg) => OnLog?.Invoke($"[DirectRtp] {msg}");
