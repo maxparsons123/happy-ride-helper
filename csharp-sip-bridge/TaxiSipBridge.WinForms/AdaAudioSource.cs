@@ -65,9 +65,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer - REDUCED to minimize latency and prevent audio overlap
+    // Jitter buffer - balanced for smooth playback without overlap
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 60;  // 60ms - minimal buffer to prevent overlap artifacts
+    private int _jitterBufferMs = 100;  // 100ms - smooth playback, no overlap
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -298,12 +298,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming - MINIMAL to prevent audio overlap artifacts
-            // Previous 240ms buffer caused "audio on top of audio" layering effect
-            // Now using 3 frames (60ms) - just enough for burst delivery stability
+            // Jitter buffer priming - balanced for smooth audio without overlap
+            // 5 frames (100ms) provides stability without the "layered audio" artifact
             if (!_jitterBufferFilled)
             {
-                int minFrames = 3;  // 60ms - minimal buffer
+                int minFrames = 5;  // 100ms - smooth playback
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -335,13 +334,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns++;
 
-                // Quick re-prime on underrun - don't accumulate stale audio
-                if (_jitterBufferFilled && _consecutiveUnderruns >= 2)
+                // Re-prime after 3 consecutive underruns (more tolerant)
+                if (_jitterBufferFilled && _consecutiveUnderruns >= 3)
                 {
                     _jitterBufferFilled = false;
-                    // Clear any stale frames to prevent "layered audio" effect
-                    while (_pcmQueue.Count > 3) _pcmQueue.TryDequeue(out _);
-                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun ({_consecutiveUnderruns}x), cleared stale frames");
+                    // Clear excess stale frames but keep some buffer
+                    while (_pcmQueue.Count > 5) _pcmQueue.TryDequeue(out _);
+                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun ({_consecutiveUnderruns}x), re-priming");
                 }
 
                 // On underrun: send silence immediately
