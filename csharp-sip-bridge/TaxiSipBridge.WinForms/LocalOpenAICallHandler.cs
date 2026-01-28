@@ -23,7 +23,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
     
     private VoIPMediaSession? _currentMediaSession;
-    private G711AiSipPlayout? _playout;
+    private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
@@ -124,8 +124,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create G711AiSipPlayout (24kHz PCM → 8kHz → G.711 encoding)
-            _playout = new G711AiSipPlayout(_currentMediaSession, ua);
+            // Create DirectRtpPlayout (bypasses SendAudio, sends raw RTP packets)
+            _playout = new DirectRtpPlayout(_currentMediaSession);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -139,7 +139,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _playout.Start();
 
             _adaHasStartedSpeaking = false;
-            Log($"🎵 [{callId}] G711AiSipPlayout started (ITU-T G.711 encoding)");
+            Log($"🎵 [{callId}] DirectRtpPlayout started (raw RTP, A-law encoded)");
 
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
