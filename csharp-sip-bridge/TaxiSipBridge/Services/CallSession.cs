@@ -207,8 +207,8 @@ public class CallSession : IDisposable
             // 2. Apply DSP pipeline (high-pass, noise gate, AGC) - takes and returns byte[]
             var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16Bytes);
 
-            // 3. Resample 8kHz to 24kHz for Ada using NAudioResampler
-            var resampled = NAudioResampler.Resample(processed, 8000, 24000);
+            // 3. Resample 8kHz to 24kHz for Ada (keep as PCM16 byte[])
+            var resampled = NAudioResampler.ResampleBytes(processed, 8000, 24000);
 
             // 4. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
             _ = SendBinaryAudio(resampled);
