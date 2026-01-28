@@ -1,5 +1,4 @@
 using System.Windows.Forms;
-using TaxiSipBridge.WinForms;
 
 namespace TaxiSipBridge;
 
