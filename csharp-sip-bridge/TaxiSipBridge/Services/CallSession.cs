@@ -114,8 +114,9 @@ public class CallSession : IDisposable
             await _mediaSession.Start();
 
             // Create PcmaRtpPlayout with dedicated timing thread for outbound audio
-            var rtpChannel = _mediaSession.AudioRtpSession?.RtpChannel;
-            var remoteEp = _mediaSession.AudioRtpSession?.DestinationEndPoint;
+            // VoIPMediaSession exposes RtpChannel and DestinationEndPoint directly
+            var rtpChannel = _mediaSession.RtpChannel;
+            var remoteEp = _mediaSession.DestinationEndPoint;
             
             if (rtpChannel != null && remoteEp != null)
             {
@@ -224,8 +225,8 @@ public class CallSession : IDisposable
             var processedBytes = new byte[processed.Length * 2];
             Buffer.BlockCopy(processed, 0, processedBytes, 0, processedBytes.Length);
 
-            // 5. Resample 8kHz to 24kHz for Ada
-            var resampled = AudioResampler.Resample(processedBytes, 8000, 24000);
+            // 5. Resample 8kHz to 24kHz for Ada using NAudioResampler
+            var resampled = NAudioResampler.Resample(processedBytes, 8000, 24000);
 
             // 6. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
             _ = SendBinaryAudio(resampled);

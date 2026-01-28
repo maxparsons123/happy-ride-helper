@@ -300,7 +300,7 @@ public class PcmaRtpPlayout : IDisposable
             _ts += FRAME_SAMPLES_8K; // 160 samples @ 8kHz per 20ms
 
             byte[] rtpBytes = rtpPacket.GetBytes();
-            _ = _rtpChannel.SendAsync(_remoteEndPoint, rtpBytes);
+            _rtpChannel.Send(RTPChannelSocketsEnum.RTP, _remoteEndPoint, rtpBytes);
         }
         catch (Exception ex)
         {
