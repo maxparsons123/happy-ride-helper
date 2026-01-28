@@ -325,8 +325,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 else
                 {
                     audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
-                    // Apply basic preprocessing for non-8kHz paths
-                    TtsPreprocessor.PreprocessPcm16(audioFrame);
                 }
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
