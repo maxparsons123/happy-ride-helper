@@ -24,7 +24,7 @@ public class DirectRtpPlayout : IDisposable
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
     private const int MAX_QUEUE_FRAMES = 500;     // 10s buffer (OpenAI sends audio in bursts)
-    private const int MIN_STARTUP_FRAMES = 10;    // 200ms buffer before starting playout
+    private const int MIN_STARTUP_FRAMES = 25;    // 500ms buffer before starting playout
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
