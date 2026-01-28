@@ -372,8 +372,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns = 0;
                 
-                // PURE PASSTHROUGH: SpeexDSP resampling only, no preprocessing
-                // Testing SpeexDSP quality without any DSP filters
+                // Apply gentle high-frequency softening for "rounder" audio
+                // Single-pole IIR at ~6.5kHz - smooths harsh edges without phase artifacts
+                ApplySoftener(pcm24);
+                
+                // SpeexDSP resampling (quality 6) with 20-frame buffer
                 audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
