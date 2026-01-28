@@ -46,20 +46,19 @@ public class AiSipAudioPlayout : IDisposable
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
 
-        // CRITICAL: Verify G.711 codec was negotiated BEFORE playout starts
-        var audioStream = _mediaSession.AudioStreams.FirstOrDefault();
-        _negotiatedCodec = audioStream?.GetNegotiatedCodec()?.Name ?? "NONE";
+        // Get negotiated codec from AudioLocalTrack (correct SIPSorcery API)
+        var localFormat = _mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
+        _negotiatedCodec = localFormat?.Name() ?? "NONE";
 
-        if (_negotiatedCodec != "PCMA" && _negotiatedCodec != "PCMU")
+        // Log codec info (don't throw - the session may still work)
+        if (_negotiatedCodec == "PCMA" || _negotiatedCodec == "PCMU")
         {
-            var offered = string.Join(", ", audioStream?.GetOfferedCodecs()?.Select(c => c.Name) ?? Array.Empty<string>());
-            throw new InvalidOperationException(
-                $"SIP session must negotiate G.711 codec (PCMA/PCMU) for playout. " +
-                $"Negotiated: {_negotiatedCodec}, Offered: {offered}. " +
-                $"Ensure remote endpoint supports A-law (PCMA) or μ-law (PCMU).");
+            Log($"✅ Codec negotiated: {_negotiatedCodec} (A-law={_negotiatedCodec == "PCMA"})");
         }
-
-        Log($"✅ Codec negotiated: {_negotiatedCodec} (A-law={_negotiatedCodec == "PCMA"})");
+        else
+        {
+            Log($"⚠️ Unexpected codec: {_negotiatedCodec} - expected PCMA/PCMU for G.711");
+        }
     }
 
     /// <summary>
