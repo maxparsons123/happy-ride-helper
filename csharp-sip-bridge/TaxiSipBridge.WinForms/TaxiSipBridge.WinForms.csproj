@@ -30,7 +30,7 @@
     <!-- Unified SIP login + call delegation -->
     <Compile Include="SipLoginManager.cs" />
     <Compile Include="SipLoginConfig.cs" />
-    <Compile Include="ICallHandler.cs" />
+    <Compile Include="ISipCallHandler.cs" />
     <Compile Include="EdgeFunctionCallHandler.cs" />
     <Compile Include="LocalOpenAICallHandler.cs" />
 
