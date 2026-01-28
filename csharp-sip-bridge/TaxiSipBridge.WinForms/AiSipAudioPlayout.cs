@@ -199,9 +199,13 @@ public class AiSipAudioPlayout : IDisposable
     {
         try
         {
-            // VoIPMediaSession.SendAudio expects duration in ms and PCM samples
+            // Convert shorts to bytes for VoIPMediaSession
+            var pcmBytes = new byte[pcmFrame.Length * 2];
+            Buffer.BlockCopy(pcmFrame, 0, pcmBytes, 0, pcmBytes.Length);
+            
+            // VoIPMediaSession.SendAudio expects duration in ms and PCM bytes
             // It handles G.711 encoding internally based on negotiated codec
-            _mediaSession.SendAudio((uint)FRAME_MS, pcmFrame);
+            _mediaSession.SendAudio((uint)FRAME_MS, pcmBytes);
             
             Interlocked.Increment(ref _framesSent);
         }
