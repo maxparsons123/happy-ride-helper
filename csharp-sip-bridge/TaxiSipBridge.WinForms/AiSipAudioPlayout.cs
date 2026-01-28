@@ -14,7 +14,9 @@ namespace TaxiSipBridge;
 /// AI → SIP Audio Playout Engine.
 /// Receives 24kHz PCM from OpenAI, resamples to 8kHz, encodes to G.711 (A-law/μ-law),
 /// and sends via VoIPMediaSession at a stable 20ms cadence.
-/// ⚠️ IMPORTANT: VoIPMediaSession.SendAudio() expects PRE-ENCODED G.711 bytes, not raw PCM!
+/// 
+/// AUDIO PHILOSOPHY: Clean passthrough with high-quality resampling.
+/// No gain/limiting/DSP - just proper sample rate conversion.
 /// </summary>
 public class AiSipAudioPlayout : IDisposable
 {
@@ -22,16 +24,9 @@ public class AiSipAudioPlayout : IDisposable
     private const int FRAME_MS = 20;            // 20ms per frame
     private const int MAX_QUEUE_FRAMES = 500;   // 10 seconds max buffer (500 × 20ms)
 
-    // Outbound loudness tuning (telephony tends to sound quiet otherwise)
-    private const float OUTPUT_GAIN = 2.2f;     // gentle boost (soft-clipped below)
-    private const int LIMIT_THRESHOLD = 28000;  // start compressing above this
-
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly string _negotiatedCodec;
-
-    // Stateful FIR fallback to avoid “distant/muffled” audio from naive decimation
-    private readonly PolyphaseFirResampler _fir24kTo8k = new(24000, 8000);
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -71,7 +66,7 @@ public class AiSipAudioPlayout : IDisposable
 
     /// <summary>
     /// Buffer AI audio (PCM16 @ 24kHz) for playout.
-    /// Resamples to 8kHz PCM with anti-aliasing filter.
+    /// Resamples to 8kHz PCM with proper anti-aliasing.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -83,11 +78,8 @@ public class AiSipAudioPlayout : IDisposable
             // Convert bytes to shorts (little-endian)
             var pcm24k = BytesToShorts(pcm24kBytes);
 
-            // Resample 24kHz → 8kHz (high-quality)
-            var pcm8k = Resample24kTo8kHighQuality(pcm24k);
-
-            // Make Ada louder / less distant on G.711 by applying a gentle boost + limiter
-            ApplyGainAndLimiterInPlace(pcm8k);
+            // Resample 24kHz → 8kHz with proper anti-aliasing (clean passthrough, no DSP)
+            var pcm8k = Resample24kTo8k(pcm24k);
 
             // Split into 20ms frames (160 samples each) and queue
             for (int i = 0; i < pcm8k.Length; i += PCM_FRAME_SAMPLES)
@@ -225,7 +217,6 @@ public class AiSipAudioPlayout : IDisposable
 
     /// <summary>
     /// Encode PCM to A-law/μ-law and send via VoIPMediaSession.
-    /// VoIPMediaSession.SendAudio expects PRE-ENCODED G.711 bytes, not raw PCM!
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
@@ -259,58 +250,42 @@ public class AiSipAudioPlayout : IDisposable
     }
 
     /// <summary>
-    /// Resample 24kHz → 8kHz using the best available path.
-    /// Prefer SpeexDSP (very high quality). Fallback: stateful 21-tap FIR.
+    /// Resample 24kHz → 8kHz using simple linear interpolation decimation.
+    /// Clean passthrough - no gain, no limiting, no DSP artifacts.
+    /// 
+    /// Uses 3-point averaging before 3:1 decimation for anti-aliasing.
     /// </summary>
-    private short[] Resample24kTo8kHighQuality(short[] pcm24k)
+    private static short[] Resample24kTo8k(short[] pcm24k)
     {
         if (pcm24k.Length < 3) return Array.Empty<short>();
 
-        // Best path: SpeexDSP (if native library present)
-        if (SpeexDspResamplerHelper.IsAvailable)
+        int outputLen = pcm24k.Length / 3;
+        var output = new short[outputLen];
+
+        for (int i = 0; i < outputLen; i++)
         {
-            try
+            int srcIdx = i * 3;
+            
+            // Simple 3-point average for anti-aliasing (centered on output sample)
+            // This is clean and doesn't introduce warble/artifacts
+            int sum = pcm24k[srcIdx];
+            int count = 1;
+            
+            if (srcIdx + 1 < pcm24k.Length)
             {
-                return SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
+                sum += pcm24k[srcIdx + 1];
+                count++;
             }
-            catch (DllNotFoundException)
+            if (srcIdx + 2 < pcm24k.Length)
             {
-                // Helper flips IsAvailable=false internally; fall through to FIR
+                sum += pcm24k[srcIdx + 2];
+                count++;
             }
-            catch
-            {
-                // If Speex fails for any reason, don't break audio; fall back
-            }
+            
+            output[i] = (short)(sum / count);
         }
 
-        // Fallback: stateful FIR polyphase decimator
-        int outLen = pcm24k.Length / 3;
-        return _fir24kTo8k.Resample(pcm24k, outLen);
-    }
-
-    /// <summary>
-    /// Gentle gain + limiter to improve perceived loudness on narrowband telephony.
-    /// (Keeps it simple: no heavy DSP, just avoid clipping.)
-    /// </summary>
-    private static void ApplyGainAndLimiterInPlace(short[] samples)
-    {
-        for (int i = 0; i < samples.Length; i++)
-        {
-            int v = (int)(samples[i] * OUTPUT_GAIN);
-            int a = Math.Abs(v);
-
-            // Soft limiter above LIMIT_THRESHOLD
-            if (a > LIMIT_THRESHOLD)
-            {
-                int excess = a - LIMIT_THRESHOLD;
-                // Compress excess 4:1 (simple and cheap)
-                a = LIMIT_THRESHOLD + (excess / 4);
-                if (a > short.MaxValue) a = short.MaxValue;
-                v = v < 0 ? -a : a;
-            }
-
-            samples[i] = (short)Math.Clamp(v, short.MinValue, short.MaxValue);
-        }
+        return output;
     }
 
     /// <summary>
