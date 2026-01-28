@@ -8,7 +8,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
-/// Uses AiSipAudioPlayout for proper 20ms timer-driven RTP pacing.
+/// Uses AdaAudioSource with SpeexDSP high-quality resampling for RTP delivery.
 /// </summary>
 public class LocalOpenAICallHandler : ISipCallHandler
 {
@@ -23,7 +23,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
     
     private VoIPMediaSession? _currentMediaSession;
-    private AiSipAudioPlayout? _aiPlayout;
+    private AdaAudioSource? _adaAudioSource;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
@@ -33,7 +33,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
     private bool _adaHasStartedSpeaking; // Track if we've received any AI audio
-    private DateTime _adaFirstAudioAt = DateTime.MinValue; // When Ada started speaking
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
@@ -84,8 +83,22 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session with PCMA codec
-            _currentMediaSession = new VoIPMediaSession();
+            // Setup media session with AdaAudioSource (SpeexDSP high-quality resampling)
+            _adaAudioSource = new AdaAudioSource(AudioMode.Standard, 60);
+            _adaAudioSource.OnDebugLog += msg => Log(msg);
+            _adaAudioSource.OnQueueEmpty += () =>
+            {
+                // Only trigger echo guard if Ada has actually spoken
+                if (_adaHasStartedSpeaking)
+                {
+                    _isBotSpeaking = false;
+                    _botStoppedSpeakingAt = DateTime.UtcNow;
+                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                }
+            };
+
+            var mediaEndPoints = new MediaEndPoints { AudioSource = _adaAudioSource };
+            _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
 
             // Send ringing
@@ -116,22 +129,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create AI audio playout engine (proper 20ms timer-driven RTP)
-            _aiPlayout = new AiSipAudioPlayout(_currentMediaSession);
-            _aiPlayout.OnLog += msg => Log(msg);
-            _aiPlayout.OnQueueEmpty += () =>
-            {
-                // Only trigger echo guard if Ada has actually spoken (not on initial empty queue)
-                if (_adaHasStartedSpeaking)
-                {
-                    _isBotSpeaking = false;
-                    _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
-                }
-            };
-            _aiPlayout.Start();
             _adaHasStartedSpeaking = false;
-            Log($"🎵 [{callId}] AI playout engine started");
+            Log($"🎵 [{callId}] AdaAudioSource started (SpeexDSP resampling)");
 
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
@@ -142,9 +141,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
             {
                 _isBotSpeaking = true;
                 _adaHasStartedSpeaking = true;
-                _aiPlayout?.BufferAiAudio(pcmBytes);
+                _adaAudioSource?.EnqueuePcm24(pcmBytes);
             };
-            _aiClient.OnResponseStarted += () => { /* No fade-in reset needed with new playout */ };
+            _aiClient.OnResponseStarted += () => _adaAudioSource?.ResetFadeIn();
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
@@ -299,14 +298,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
         try { ua.Hangup(); } catch { }
 
-        // Stop AI playout first
-        if (_aiPlayout != null)
-        {
-            try { _aiPlayout.Stop(); } catch { }
-            try { _aiPlayout.Dispose(); } catch { }
-            _aiPlayout = null;
-        }
-
         if (_aiClient != null)
         {
             try { await _aiClient.DisconnectAsync(); } catch { }
@@ -318,6 +309,12 @@ public class LocalOpenAICallHandler : ISipCallHandler
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
+        }
+
+        if (_adaAudioSource != null)
+        {
+            try { _adaAudioSource.Dispose(); } catch { }
+            _adaAudioSource = null;
         }
 
         try { _callCts?.Dispose(); } catch { }
@@ -338,7 +335,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
         _disposed = true;
 
         try { _callCts?.Cancel(); } catch { }
-        try { _aiPlayout?.Dispose(); } catch { }
+        try { _adaAudioSource?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
 

@@ -23,7 +23,7 @@ public class EdgeFunctionCallHandler : ISipCallHandler
     private volatile bool _isBotSpeaking;
     
     private VoIPMediaSession? _currentMediaSession;
-    private AiSipAudioPlayout? _aiPlayout;
+    private AdaAudioSource? _adaAudioSource;
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _callCts;
 
@@ -71,8 +71,13 @@ public class EdgeFunctionCallHandler : ISipCallHandler
 
         try
         {
-            // Setup media session (no custom audio source - we use AiSipAudioPlayout instead)
-            _currentMediaSession = new VoIPMediaSession();
+            // Setup media session with AdaAudioSource (SpeexDSP high-quality resampling)
+            _adaAudioSource = new AdaAudioSource(_audioMode, _jitterBufferMs);
+            _adaAudioSource.OnDebugLog += msg => Log(msg);
+            _adaAudioSource.OnQueueEmpty += () => _isBotSpeaking = false;
+
+            var mediaEndPoints = new MediaEndPoints { AudioSource = _adaAudioSource };
+            _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
 
             Log($"☎️ [{callId}] Sending 180 Ringing...");
@@ -100,13 +105,6 @@ public class EdgeFunctionCallHandler : ISipCallHandler
 
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
-
-            // Create AI audio playout engine (proper 20ms timer-driven RTP)
-            _aiPlayout = new AiSipAudioPlayout(_currentMediaSession);
-            _aiPlayout.OnLog += msg => Log(msg);
-            _aiPlayout.OnQueueEmpty += () => _isBotSpeaking = false;
-            _aiPlayout.Start();
-            Log($"🎵 [{callId}] AI playout engine started");
 
             // Connect to WebSocket
             _ws = new ClientWebSocket();
@@ -216,7 +214,7 @@ public class EdgeFunctionCallHandler : ISipCallHandler
                 {
                     _isBotSpeaking = true;
                     var pcmBytes = Convert.FromBase64String(base64);
-                    _aiPlayout?.BufferAiAudio(pcmBytes);
+                    _adaAudioSource?.EnqueuePcm24(pcmBytes);
                 }
             }
             else if (typeStr == "audio" && doc.RootElement.TryGetProperty("audio", out var audioEl))
@@ -226,7 +224,7 @@ public class EdgeFunctionCallHandler : ISipCallHandler
                 {
                     _isBotSpeaking = true;
                     var pcmBytes = Convert.FromBase64String(base64);
-                    _aiPlayout?.BufferAiAudio(pcmBytes);
+                    _adaAudioSource?.EnqueuePcm24(pcmBytes);
                 }
             }
             else if (typeStr == "response.audio_transcript.delta" && doc.RootElement.TryGetProperty("delta", out var textEl))
@@ -235,11 +233,14 @@ public class EdgeFunctionCallHandler : ISipCallHandler
                 if (!string.IsNullOrEmpty(text))
                     OnTranscript?.Invoke($"🤖 {text}");
             }
+            else if (typeStr == "response.created" || typeStr == "response.audio.started")
+            {
+                _adaAudioSource?.ResetFadeIn();
+            }
             else if (typeStr == "keepalive")
             {
                 _ = SendKeepaliveAck(callId, doc);
             }
-        }
         catch { }
     }
 
@@ -291,18 +292,16 @@ public class EdgeFunctionCallHandler : ISipCallHandler
             _ws = null;
         }
 
-        // Stop AI playout first
-        if (_aiPlayout != null)
-        {
-            try { _aiPlayout.Stop(); } catch { }
-            try { _aiPlayout.Dispose(); } catch { }
-            _aiPlayout = null;
-        }
-
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
+        }
+
+        if (_adaAudioSource != null)
+        {
+            try { _adaAudioSource.Dispose(); } catch { }
+            _adaAudioSource = null;
         }
 
         try { _callCts?.Dispose(); } catch { }
@@ -324,8 +323,8 @@ public class EdgeFunctionCallHandler : ISipCallHandler
 
         try { _callCts?.Cancel(); } catch { }
         try { _ws?.Dispose(); } catch { }
-        try { _aiPlayout?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
+        try { _adaAudioSource?.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
