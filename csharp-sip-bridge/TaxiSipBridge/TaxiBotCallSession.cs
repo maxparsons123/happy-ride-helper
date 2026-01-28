@@ -102,10 +102,10 @@ public class TaxiBotCallSession
                 _aiClient = new OpenAiRealtimeClient(_apiKey);
                 _aiClient.OnLog += msg => Log(msg);
                 _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
-                _aiClient.OnPcm16kAudio += pcm16k =>
+                _aiClient.OnPcm24kAudio += pcm24k =>
                 {
-                    // Downsample 16k → 8k and enqueue
-                    EnqueueAiAudio(pcm16k);
+                    // Downsample 24k → 8k and enqueue
+                    EnqueueAiAudio(pcm24k);
                 };
 
                 Log("Connecting to OpenAI Realtime API...");
@@ -155,8 +155,11 @@ public class TaxiBotCallSession
         }
     }
 
+    // DSP state for pre-emphasis filter (maintains continuity across frames)
+    private short _lastSample = 0;
+
     /// <summary>
-    /// Process inbound RTP: PCMA → PCM16@8k → resample to 16k → send to OpenAI.
+    /// Process inbound RTP: PCMA → PCM16@8k → DSP → resample to 24k → send to OpenAI.
     /// </summary>
     private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
@@ -167,55 +170,98 @@ public class TaxiBotCallSession
         if (payload == null || payload.Length == 0)
             return;
 
-        // Only handle PCMA (PT=8)
+        // Only handle PCMA (PT=8) - UK carriers use A-law
         if (rtpPacket.Header.PayloadType != 8)
             return;
 
-        // Decode PCMA → PCM16 @ 8kHz
+        // 1. Decode PCMA (A-law) → PCM16 @ 8kHz
         var pcm8k = G711Codec.AlawToPcm16(payload);
 
-        // Resample 8k → 16k for OpenAI (simple 2x interpolation)
-        var pcm16k = Resample8kTo16k(pcm8k);
+        // 2. Apply DSP: volume boost + pre-emphasis for better VAD/STT
+        var pcm8kProcessed = ApplyInboundDsp(pcm8k);
 
-        // Send to OpenAI
-        _aiClient.SendPcm16kToModel(pcm16k);
+        // 3. Resample 8k → 24k directly (3x linear interpolation) for OpenAI
+        var pcm24k = Resample8kTo24k(pcm8kProcessed);
+
+        // 4. Send to OpenAI
+        _aiClient.SendPcm24kToModel(pcm24k);
     }
 
     /// <summary>
-    /// Simple 8kHz → 16kHz upsampling (2x linear interpolation).
+    /// Apply DSP to inbound audio: 2.5x volume boost + 0.97 pre-emphasis.
+    /// Improves VAD sensitivity and consonant clarity.
     /// </summary>
-    private short[] Resample8kTo16k(byte[] pcm8kBytes)
+    private short[] ApplyInboundDsp(byte[] pcm8kBytes)
     {
-        int samples8k = pcm8kBytes.Length / 2;
-        var pcm8k = new short[samples8k];
-        Buffer.BlockCopy(pcm8kBytes, 0, pcm8k, 0, pcm8kBytes.Length);
+        int samples = pcm8kBytes.Length / 2;
+        var pcm = new short[samples];
+        Buffer.BlockCopy(pcm8kBytes, 0, pcm, 0, pcm8kBytes.Length);
 
-        var pcm16k = new short[samples8k * 2];
+        const float volumeBoost = 2.5f;
+        const float preEmphasis = 0.97f;
 
-        for (int i = 0; i < samples8k; i++)
+        for (int i = 0; i < samples; i++)
         {
-            short sample = pcm8k[i];
-            short nextSample = (i + 1 < samples8k) ? pcm8k[i + 1] : sample;
+            // Pre-emphasis filter: y[n] = x[n] - α * x[n-1]
+            float current = pcm[i];
+            float previous = (i == 0) ? _lastSample : pcm[i - 1];
+            float emphasized = current - (preEmphasis * previous);
 
-            pcm16k[i * 2] = sample;
-            pcm16k[i * 2 + 1] = (short)((sample + nextSample) / 2);
+            // Volume boost
+            float boosted = emphasized * volumeBoost;
+
+            // Soft clip to prevent distortion
+            pcm[i] = SoftClip(boosted);
         }
 
-        return pcm16k;
+        // Save last sample for next frame continuity
+        if (samples > 0)
+            _lastSample = pcm[samples - 1];
+
+        return pcm;
+    }
+
+    private static short SoftClip(float sample)
+    {
+        if (sample > 32767) return 32767;
+        if (sample < -32768) return -32768;
+        return (short)sample;
     }
 
     /// <summary>
-    /// Enqueue audio from OpenAI (PCM16@16k) → downsample to 8k → playout.
+    /// 8kHz → 24kHz upsampling (3x linear interpolation).
     /// </summary>
-    private void EnqueueAiAudio(short[] pcm16k)
+    private static short[] Resample8kTo24k(short[] pcm8k)
+    {
+        int outLen = pcm8k.Length * 3;
+        var pcm24k = new short[outLen];
+
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short s0 = pcm8k[i];
+            short s1 = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : s0;
+
+            int outIdx = i * 3;
+            pcm24k[outIdx] = s0;
+            pcm24k[outIdx + 1] = (short)((s0 * 2 + s1) / 3);
+            pcm24k[outIdx + 2] = (short)((s0 + s1 * 2) / 3);
+        }
+
+        return pcm24k;
+    }
+
+    /// <summary>
+    /// Enqueue audio from OpenAI (PCM16@24k) → downsample to 8k → playout.
+    /// </summary>
+    private void EnqueueAiAudio(short[] pcm24k)
     {
         if (_pcmaPlayout == null || _isHungup) return;
 
-        // Downsample 16k → 8k (take every 2nd sample)
-        var pcm8k = new short[pcm16k.Length / 2];
+        // Downsample 24k → 8k (take every 3rd sample)
+        var pcm8k = new short[pcm24k.Length / 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
-            pcm8k[i] = pcm16k[i * 2];
+            pcm8k[i] = pcm24k[i * 3];
         }
 
         // Split into 20ms frames (160 samples @ 8kHz)

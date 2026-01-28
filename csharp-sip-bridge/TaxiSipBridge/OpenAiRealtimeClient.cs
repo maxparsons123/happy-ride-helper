@@ -25,8 +25,8 @@ public class OpenAiRealtimeClient : IDisposable
 
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
-    /// <summary>Fired when OpenAI sends PCM16@16kHz audio (short array).</summary>
-    public event Action<short[]>? OnPcm16kAudio;
+    /// <summary>Fired when OpenAI sends PCM16@24kHz audio (short array).</summary>
+    public event Action<short[]>? OnPcm24kAudio;
 
     public OpenAiRealtimeClient(string apiKey)
     {
@@ -107,10 +107,10 @@ public class OpenAiRealtimeClient : IDisposable
                         var base64 = delta.GetString();
                         if (!string.IsNullOrEmpty(base64))
                         {
-                            // OpenAI sends PCM16 @ 24kHz, we need to resample to 16kHz
+                            // OpenAI sends PCM16 @ 24kHz - pass through directly
                             var pcm24kBytes = Convert.FromBase64String(base64);
-                            var pcm16k = Resample24kTo16k(pcm24kBytes);
-                            OnPcm16kAudio?.Invoke(pcm16k);
+                            var pcm24k = BytesToShorts(pcm24kBytes);
+                            OnPcm24kAudio?.Invoke(pcm24k);
                         }
                     }
                     break;
@@ -180,16 +180,12 @@ Be conversational, confirm details, and keep responses brief for phone calls.",
     }
 
     /// <summary>
-    /// Send PCM16 audio (16kHz shorts) to OpenAI input buffer.
-    /// Resamples to 24kHz before sending.
+    /// Send PCM16 audio (24kHz shorts) directly to OpenAI input buffer.
     /// </summary>
-    public void SendPcm16kToModel(short[] pcm16k)
+    public void SendPcm24kToModel(short[] pcm24k)
     {
         if (!_sessionConfigured || _ws?.State != WebSocketState.Open)
             return;
-
-        // Upsample 16kHz → 24kHz (1.5x)
-        var pcm24k = Resample16kTo24k(pcm16k);
 
         // Convert to bytes
         var pcm24kBytes = new byte[pcm24k.Length * 2];
@@ -202,60 +198,13 @@ Be conversational, confirm details, and keep responses brief for phone calls.",
     }
 
     /// <summary>
-    /// Simple 16kHz → 24kHz upsampling (1.5x linear interpolation).
+    /// Convert byte array to short array.
     /// </summary>
-    private static short[] Resample16kTo24k(short[] pcm16k)
+    private static short[] BytesToShorts(byte[] bytes)
     {
-        // 16kHz → 24kHz = 3:2 ratio (output 3 samples for every 2 input)
-        int outLen = (pcm16k.Length * 3) / 2;
-        var output = new short[outLen];
-
-        for (int i = 0; i < pcm16k.Length - 1; i++)
-        {
-            int outIdx = (i * 3) / 2;
-            if (outIdx >= outLen) break;
-
-            short s0 = pcm16k[i];
-            short s1 = pcm16k[i + 1];
-
-            if (i % 2 == 0)
-            {
-                // Output 2 samples for this input sample
-                output[outIdx] = s0;
-                if (outIdx + 1 < outLen)
-                    output[outIdx + 1] = (short)((s0 + s1) / 2);
-            }
-            else
-            {
-                // Output 1 sample
-                output[outIdx] = s0;
-            }
-        }
-
-        return output;
-    }
-
-    /// <summary>
-    /// Simple 24kHz → 16kHz downsampling (2:3 ratio).
-    /// </summary>
-    private static short[] Resample24kTo16k(byte[] pcm24kBytes)
-    {
-        int samples24k = pcm24kBytes.Length / 2;
-        var pcm24k = new short[samples24k];
-        Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
-
-        // 24kHz → 16kHz = 2:3 ratio (output 2 samples for every 3 input)
-        int outLen = (samples24k * 2) / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int srcIdx = (i * 3) / 2;
-            if (srcIdx < samples24k)
-                output[i] = pcm24k[srcIdx];
-        }
-
-        return output;
+        var shorts = new short[bytes.Length / 2];
+        Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
+        return shorts;
     }
 
     private async Task SendJsonAsync(object obj)
