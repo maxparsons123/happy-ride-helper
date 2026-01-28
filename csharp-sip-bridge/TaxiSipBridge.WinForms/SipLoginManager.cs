@@ -3,7 +3,7 @@ using System.Net.Sockets;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 
-namespace TaxiSipBridge.WinForms;
+namespace TaxiSipBridge;
 
 /// <summary>
 /// Unified SIP login/registration manager.
