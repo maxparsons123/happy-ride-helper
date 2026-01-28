@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -25,6 +27,7 @@ public class SafeAiSipPlayout : IDisposable
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly SIPUserAgent? _ua;           // Optional for hold-state checks
+    private readonly bool _useALaw;               // true = PCMA, false = PCMU
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -48,9 +51,11 @@ public class SafeAiSipPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _ua = ua;
 
-        // Verify G.711 codec negotiated
+        // Detect negotiated codec for proper encoding
         var localFormat = _mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
         var codec = localFormat?.Name() ?? "NONE";
+        
+        _useALaw = codec == "PCMA";
         
         if (codec != "PCMA" && codec != "PCMU")
             Log($"⚠️ Expected G.711 codec (PCMA/PCMU). Got: {codec}");
@@ -209,18 +214,31 @@ public class SafeAiSipPlayout : IDisposable
     }
 
     /// <summary>
-    /// SEND RAW PCM → VoIPMediaSession handles A-law encoding internally.
-    /// ⚠️ NEVER pre-encode to A-law here → causes double-encoding → garbled audio.
+    /// Encode PCM to G.711 and send via RTP.
+    /// VoIPMediaSession.SendAudio() does NOT encode - it sends bytes directly to RTP.
+    /// We MUST encode PCM → G.711 here before sending.
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
         try
         {
-            var pcmBytes = new byte[pcmFrame.Length * 2];
-            Buffer.BlockCopy(pcmFrame, 0, pcmBytes, 0, pcmBytes.Length);
+            // Encode PCM16 to G.711 (160 samples → 160 bytes)
+            var encoded = new byte[pcmFrame.Length];
+            
+            if (_useALaw)
+            {
+                for (int i = 0; i < pcmFrame.Length; i++)
+                    encoded[i] = G711Codec.EncodeSampleALaw(pcmFrame[i]);
+            }
+            else
+            {
+                for (int i = 0; i < pcmFrame.Length; i++)
+                    encoded[i] = G711Codec.EncodeSample(pcmFrame[i]);
+            }
 
-            // ✅ CORRECT: Send raw PCM → SIPSorcery encodes to PCMA/PCMU internally
-            _mediaSession.SendAudio((uint)FRAME_MS, pcmBytes);
+            // RTP duration = 160 samples @ 8kHz clock rate
+            const uint RTP_DURATION = 160;
+            _mediaSession.SendAudio(RTP_DURATION, encoded);
 
             Interlocked.Increment(ref _framesSent);
         }
