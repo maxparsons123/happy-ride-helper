@@ -136,16 +136,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
         var pcm24All = new short[pcmBytes.Length / 2];
         Buffer.BlockCopy(pcmBytes, 0, pcm24All, 0, pcmBytes.Length);
 
-        // IMPORTANT: packetise into 20ms frames.
-        // Ada deltas can be variable length; RTP expects consistent 20ms frames.
-        const int PCM24_FRAME_SAMPLES = 24000 / 1000 * AUDIO_SAMPLE_PERIOD_MS; // 480
+        // CRITICAL: 20ms frame alignment constants
+        // 24kHz @ 20ms = 480 samples (MUST be exact for RTP timing)
+        const int PCM24_FRAME_SAMPLES = (24000 * AUDIO_SAMPLE_PERIOD_MS) / 1000; // 480
 
         int frameCount = 0;
         for (int offset = 0; offset < pcm24All.Length; offset += PCM24_FRAME_SAMPLES)
         {
             int len = Math.Min(PCM24_FRAME_SAMPLES, pcm24All.Length - offset);
 
-            // Pad last frame to full 20ms to keep timestamps stable.
+            // ALWAYS pad to exact 20ms frame - critical for RTP timing alignment
             var frame = new short[PCM24_FRAME_SAMPLES];
             Array.Copy(pcm24All, offset, frame, 0, len);
 
@@ -252,7 +252,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
             int channels = Math.Max(1, _audioFormatManager.SelectedFormat.ChannelCount);
-            int samplesPerChannel = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            
+            // CRITICAL: Exact 20ms frame alignment for RTP
+            // 8kHz = 160, 16kHz = 320, 24kHz = 480, 48kHz = 960 samples/channel
+            int samplesPerChannel = (targetRate * AUDIO_SAMPLE_PERIOD_MS) / 1000;
             int samplesNeeded = samplesPerChannel * channels;
             short[] audioFrame;
 
@@ -339,11 +342,14 @@ public class AdaAudioSource : IAudioSource, IDisposable
                         audioFrame = pcm24; // No resampling needed (already at target rate)
                     }
 
-                    // Hard-enforce exact 20ms frame size for RTP (total samples, includes channels)
+                    // CRITICAL: Enforce exact 20ms frame size for RTP alignment
+                    // This prevents timing drift and ensures consistent ptime=20
                     if (audioFrame.Length != samplesNeeded)
                     {
                         var fixedFrame = new short[samplesNeeded];
-                        Array.Copy(audioFrame, fixedFrame, Math.Min(audioFrame.Length, samplesNeeded));
+                        int copyLen = Math.Min(audioFrame.Length, samplesNeeded);
+                        Array.Copy(audioFrame, fixedFrame, copyLen);
+                        // Remaining samples are zero-padded (silence)
                         audioFrame = fixedFrame;
                     }
 
@@ -546,7 +552,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             int targetRate = _audioFormatManager.SelectedFormat.ClockRate;
             int channels = Math.Max(1, _audioFormatManager.SelectedFormat.ChannelCount);
-            int samplesPerChannel = targetRate / 1000 * AUDIO_SAMPLE_PERIOD_MS;
+            
+            // CRITICAL: Exact 20ms frame alignment for RTP silence
+            int samplesPerChannel = (targetRate * AUDIO_SAMPLE_PERIOD_MS) / 1000;
             int samplesNeeded = samplesPerChannel * channels;
             var silence = new short[samplesNeeded];
 
