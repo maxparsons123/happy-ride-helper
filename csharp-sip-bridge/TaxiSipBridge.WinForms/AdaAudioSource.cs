@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using TaxiSipBridge.Audio;
-using Timer = System.Threading.Timer;
 
 namespace TaxiSipBridge;
 
@@ -47,7 +47,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private float _softenerState = 0f;
     private const float SOFTENER_ALPHA = 0.65f;  // ~6.5kHz cutoff at 24kHz sample rate
 
-    private Timer? _sendTimer;
+    
     private bool _isStarted;
     private bool _isPaused;
     private bool _isClosed;
@@ -71,6 +71,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
+
+    // High-precision audio thread (replaces System.Threading.Timer)
+    private Thread? _audioThread;
+    private CancellationTokenSource? _audioCts;
+    private readonly Stopwatch _audioStopwatch = new();
 
     // Test tone
     private bool _testToneMode;
@@ -247,10 +252,55 @@ public class AdaAudioSource : IAudioSource, IDisposable
         if (!_isStarted)
         {
             _isStarted = true;
-            _sendTimer = new Timer(SendSample, null, 0, AUDIO_SAMPLE_PERIOD_MS);
-            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Started ({AUDIO_SAMPLE_PERIOD_MS}ms), format={_audioFormatManager.SelectedFormat.FormatName}");
+            _audioCts = new CancellationTokenSource();
+            _audioThread = new Thread(AudioThreadLoop)
+            {
+                Name = "AdaAudioSource",
+                Priority = ThreadPriority.Highest,
+                IsBackground = true
+            };
+            _audioThread.Start();
+            OnDebugLog?.Invoke($"[AdaAudioSource] ▶️ Started (high-precision {AUDIO_SAMPLE_PERIOD_MS}ms), format={_audioFormatManager.SelectedFormat.FormatName}");
         }
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// High-precision audio thread using Stopwatch for accurate 20ms intervals.
+    /// More reliable than System.Threading.Timer which has 15ms+ jitter.
+    /// </summary>
+    private void AudioThreadLoop()
+    {
+        var token = _audioCts?.Token ?? CancellationToken.None;
+        long nextFrameTicks = 0;
+        long periodTicks = Stopwatch.Frequency * AUDIO_SAMPLE_PERIOD_MS / 1000;
+        
+        _audioStopwatch.Restart();
+        
+        while (!token.IsCancellationRequested && !_isClosed && !_disposed)
+        {
+            try
+            {
+                // Wait until next frame time
+                while (_audioStopwatch.ElapsedTicks < nextFrameTicks && !token.IsCancellationRequested)
+                {
+                    // Spin-wait for precision (short sleeps for CPU efficiency)
+                    if (nextFrameTicks - _audioStopwatch.ElapsedTicks > periodTicks / 4)
+                        Thread.Sleep(1);
+                }
+                
+                nextFrameTicks += periodTicks;
+                
+                if (!_isPaused)
+                    SendSampleCore();
+            }
+            catch (Exception ex)
+            {
+                OnAudioSourceError?.Invoke($"Audio thread error: {ex.Message}");
+            }
+        }
+        
+        _audioStopwatch.Stop();
     }
 
     public Task PauseAudio() { _isPaused = true; return Task.CompletedTask; }
@@ -261,8 +311,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
         if (!_isClosed)
         {
             _isClosed = true;
-            _sendTimer?.Dispose();
-            _sendTimer = null;
+            
+            // Stop the high-precision audio thread
+            _audioCts?.Cancel();
+            _audioThread?.Join(100);  // Wait up to 100ms for clean shutdown
+            _audioCts?.Dispose();
+            _audioCts = null;
+            _audioThread = null;
             
             // Drain remaining audio before closing (up to 500ms worth)
             int remaining = _pcmQueue.Count;
@@ -276,14 +331,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] ⏹️ Closed (enq={_enqueuedFrames}, sent={_sentFrames}, drained={drained}/{remaining})");
         }
         return Task.CompletedTask;
-    }
-
-    private void SendSample(object? state)
-    {
-        if (_isClosed || _isPaused || _disposed) return;
-        if (!Monitor.TryEnter(_sendLock)) return;
-        try { SendSampleCore(); }
-        finally { Monitor.Exit(_sendLock); }
     }
 
     private void SendSampleCore()
@@ -610,7 +657,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _sendTimer?.Dispose();
+        
+        // Stop the high-precision audio thread
+        _audioCts?.Cancel();
+        _audioThread?.Join(100);
+        _audioCts?.Dispose();
+        
         ClearQueue();
         GC.SuppressFinalize(this);
     }
