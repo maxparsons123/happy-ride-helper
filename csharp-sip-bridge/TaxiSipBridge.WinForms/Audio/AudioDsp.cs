@@ -5,27 +5,24 @@ namespace TaxiSipBridge.Audio;
 /// <summary>
 /// High-quality DSP pipeline optimized for OpenAI Realtime API → telephony.
 /// Includes high-pass filtering, noise gating, AGC, adaptive pre-emphasis, and soft clipping.
-/// Ported from Python taxi_bridge_v78.py for feature parity.
 /// </summary>
 public class AudioDsp
 {
     // ========== INBOUND (Caller → AI) Configuration ==========
-    // Aligned with Python taxi_bridge_v78.py AudioProcessor
     private const int HighPassCutoff = 80;          // Hz - removes low-frequency rumble
     private const int SampleRate = 8000;
-    private const float NoiseGateThreshold = 80f;   // Soft gate threshold (v7.8: 80)
-    private const float TargetRms = 300f;           // Target RMS (v7.8: 300)
-    private const float AgcMaxGain = 15.0f;         // Max gain (v7.8: 15.0)
+    private const float NoiseGateThreshold = 80f;   // Soft gate threshold
+    private const float TargetRms = 300f;           // Target RMS
+    private const float AgcMaxGain = 15.0f;         // Max gain
     private const float AgcMinGain = 1.0f;          // Minimum gain
-    private const float AgcSmoothingFactor = 0.15f; // Gain smoothing (v7.8: 0.15)
-    private const float VolumeBoostFactor = 3.0f;   // Volume boost (v7.8: 3.0)
-    private const float VolumeBoostThreshold = 200f;// Only boost if RMS below this (v7.8: 200)
-    private const float AgcFloorRms = 10f;          // Minimum RMS to apply AGC (v7.8: 10)
-    private const float SoftClipThreshold = 32000f; // Soft clipping threshold (v7.8: 32000)
+    private const float AgcSmoothingFactor = 0.15f; // Gain smoothing
+    private const float VolumeBoostFactor = 3.0f;   // Volume boost
+    private const float VolumeBoostThreshold = 200f;// Only boost if RMS below this
+    private const float AgcFloorRms = 10f;          // Minimum RMS to apply AGC
+    private const float SoftClipThreshold = 32000f; // Soft clipping threshold
     
     // ========== OUTBOUND (AI → Caller) Configuration ==========
-    // v7.8 doesn't apply volume boost to outbound, just resample + soft clip
-    private const float OutboundVolumeBoost = 1.0f; // Unity gain (v7.8 style)
+    private const float OutboundVolumeBoost = 1.0f; // Unity gain
     
     // High-pass filter state (2nd order Butterworth)
     private readonly double[] _hpX = new double[3]; // input history
@@ -42,7 +39,6 @@ public class AudioDsp
 
     /// <summary>
     /// Applies full inbound DSP pipeline: high-pass → volume boost → AGC → adaptive pre-emphasis → soft clip
-    /// Ported from Python taxi_bridge_v78.py AudioProcessor.process_inbound()
     /// </summary>
     public (byte[] Audio, float Gain) ApplyNoiseReduction(byte[] pcmData, bool isHighQuality = false)
     {
@@ -77,7 +73,7 @@ public class AudioDsp
         // Step 4: AGC with smoothing
         float appliedGain = ApplySmoothedAgc(floatSamples, rms);
         
-        // Step 5: Adaptive pre-emphasis (spectral tilt detection from Python)
+        // Step 5: Adaptive pre-emphasis (spectral tilt detection)
         ApplyAdaptivePreEmphasis(floatSamples);
         
         // Step 6: Soft clipping (tanh-based, prevents hard clipping)
@@ -89,7 +85,6 @@ public class AudioDsp
 
     /// <summary>
     /// Applies outbound DSP: volume boost + soft clip for Ada → caller path
-    /// Ported from Python taxi_bridge_v78.py AudioProcessor.process_outbound()
     /// </summary>
     public byte[] ProcessOutbound(byte[] pcmData)
     {
@@ -132,7 +127,6 @@ public class AudioDsp
 
     /// <summary>
     /// Soft noise gate with fade transition (prevents clicks)
-    /// From Python: if rms < threshold, apply soft fade instead of hard cut
     /// </summary>
     private void ApplySoftNoiseGate(float[] samples, ref float rms)
     {
@@ -180,7 +174,6 @@ public class AudioDsp
 
     /// <summary>
     /// Adaptive pre-emphasis based on spectral tilt
-    /// From Python: analyze spectral tilt and adjust coefficient (0.92-0.97)
     /// </summary>
     private void ApplyAdaptivePreEmphasis(float[] samples)
     {
@@ -190,7 +183,7 @@ public class AudioDsp
             return;
         }
         
-        // Calculate spectral tilt from sample differences (simplified from Python)
+        // Calculate spectral tilt from sample differences
         float sumDiff = 0;
         int checkLen = Math.Min(1000, samples.Length - 1);
         for (int i = 0; i < checkLen; i++)
@@ -218,7 +211,6 @@ public class AudioDsp
 
     /// <summary>
     /// Soft clipping using tanh (prevents hard clipping distortion)
-    /// From Python: np.tanh(samples / threshold) * threshold
     /// </summary>
     private void ApplySoftClip(float[] samples)
     {
