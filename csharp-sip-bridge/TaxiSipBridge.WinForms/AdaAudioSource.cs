@@ -41,6 +41,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     // Fallback state for rates without dedicated resampler
     private double _resamplePhase;
     private short _lastInputSample;
+    
+    // Gentle high-frequency softening filter (single-pole IIR at ~6.5kHz)
+    // Makes audio "rounder" without causing phase artifacts
+    private float _softenerState = 0f;
+    private const float SOFTENER_ALPHA = 0.65f;  // ~6.5kHz cutoff at 24kHz sample rate
 
     private Timer? _sendTimer;
     private bool _isStarted;
@@ -211,6 +216,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _lastOutputSample = 0;
         _lastAudioFrame = null;
         _lastFrameWasSilence = true;
+        _softenerState = 0f;  // Reset high-frequency softener
         
         // Reset jitter buffer
         _jitterBufferFilled = false;
@@ -313,6 +319,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
             if (_pcmQueue.TryDequeue(out var pcm24))
             {
                 _consecutiveUnderruns = 0;
+                
+                // Apply gentle high-frequency softening for "rounder" audio
+                // Single-pole IIR at ~6.5kHz - smooths harsh edges without phase artifacts
+                ApplySoftener(pcm24);
                 
                 // PASSTHROUGH: Use polyphase FIR resampler for ALL rates
                 // TtsPreConditioner's one-pole lowpass + normalize caused warbling artifacts
@@ -430,6 +440,20 @@ public class AdaAudioSource : IAudioSource, IDisposable
         
         // Fallback: create new resampler (less efficient but handles any rate)
         return new PolyphaseFirResampler(fromRate, toRate);
+    }
+    
+    /// <summary>
+    /// Gentle high-frequency softening filter.
+    /// Single-pole IIR at ~6.5kHz - makes audio "rounder" without phase artifacts.
+    /// </summary>
+    private void ApplySoftener(short[] samples)
+    {
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float input = samples[i];
+            _softenerState = SOFTENER_ALPHA * input + (1f - SOFTENER_ALPHA) * _softenerState;
+            samples[i] = (short)Math.Clamp(_softenerState, short.MinValue, short.MaxValue);
+        }
     }
 
     // Legacy methods removed - now using PolyphaseFirResampler
