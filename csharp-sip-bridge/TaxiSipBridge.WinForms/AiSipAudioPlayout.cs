@@ -22,9 +22,16 @@ public class AiSipAudioPlayout : IDisposable
     private const int FRAME_MS = 20;            // 20ms per frame
     private const int MAX_QUEUE_FRAMES = 500;   // 10 seconds max buffer (500 × 20ms)
 
+    // Outbound loudness tuning (telephony tends to sound quiet otherwise)
+    private const float OUTPUT_GAIN = 2.2f;     // gentle boost (soft-clipped below)
+    private const int LIMIT_THRESHOLD = 28000;  // start compressing above this
+
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly string _negotiatedCodec;
+
+    // Stateful FIR fallback to avoid “distant/muffled” audio from naive decimation
+    private readonly PolyphaseFirResampler _fir24kTo8k = new(24000, 8000);
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -76,8 +83,11 @@ public class AiSipAudioPlayout : IDisposable
             // Convert bytes to shorts (little-endian)
             var pcm24k = BytesToShorts(pcm24kBytes);
 
-            // Resample 24kHz → 8kHz with anti-aliasing
-            var pcm8k = Resample24kTo8kWithAntiAliasing(pcm24k);
+            // Resample 24kHz → 8kHz (high-quality)
+            var pcm8k = Resample24kTo8kHighQuality(pcm24k);
+
+            // Make Ada louder / less distant on G.711 by applying a gentle boost + limiter
+            ApplyGainAndLimiterInPlace(pcm8k);
 
             // Split into 20ms frames (160 samples each) and queue
             for (int i = 0; i < pcm8k.Length; i += PCM_FRAME_SAMPLES)
@@ -198,7 +208,7 @@ public class AiSipAudioPlayout : IDisposable
                 }
             }
 
-            // SEND RAW PCM - VoIPMediaSession handles G.711 encoding internally
+            // Send encoded G.711 payload (160 samples -> 160 bytes)
             SendPcmFrame(frame);
 
             // Schedule next frame
@@ -249,46 +259,58 @@ public class AiSipAudioPlayout : IDisposable
     }
 
     /// <summary>
-    /// Resample 24kHz → 8kHz with basic anti-aliasing FIR filter.
-    /// Simple 3-tap [0.25, 0.5, 0.25] low-pass before 3:1 decimation.
-    /// Prevents high-frequency aliasing artifacts.
+    /// Resample 24kHz → 8kHz using the best available path.
+    /// Prefer SpeexDSP (very high quality). Fallback: stateful 21-tap FIR.
     /// </summary>
-    private static short[] Resample24kTo8kWithAntiAliasing(short[] pcm24k)
+    private short[] Resample24kTo8kHighQuality(short[] pcm24k)
     {
         if (pcm24k.Length < 3) return Array.Empty<short>();
 
-        int outputLen = pcm24k.Length / 3;
-        var output = new short[outputLen];
-
-        // Process in chunks of 3 samples
-        for (int i = 0; i < outputLen; i++)
+        // Best path: SpeexDSP (if native library present)
+        if (SpeexDspResamplerHelper.IsAvailable)
         {
-            int srcIdx = i * 3;
-
-            // Apply 3-tap FIR low-pass filter: [0.25, 0.5, 0.25]
-            int sum = 0;
-            int taps = 0;
-
-            if (srcIdx > 0)
+            try
             {
-                sum += pcm24k[srcIdx - 1] >> 2; // *0.25
-                taps++;
+                return SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
             }
-
-            sum += pcm24k[srcIdx] >> 1;         // *0.5
-            taps++;
-
-            if (srcIdx + 1 < pcm24k.Length)
+            catch (DllNotFoundException)
             {
-                sum += pcm24k[srcIdx + 1] >> 2; // *0.25
-                taps++;
+                // Helper flips IsAvailable=false internally; fall through to FIR
             }
-
-            // Normalize by actual taps used (handles edges)
-            output[i] = (short)(sum / taps);
+            catch
+            {
+                // If Speex fails for any reason, don't break audio; fall back
+            }
         }
 
-        return output;
+        // Fallback: stateful FIR polyphase decimator
+        int outLen = pcm24k.Length / 3;
+        return _fir24kTo8k.Resample(pcm24k, outLen);
+    }
+
+    /// <summary>
+    /// Gentle gain + limiter to improve perceived loudness on narrowband telephony.
+    /// (Keeps it simple: no heavy DSP, just avoid clipping.)
+    /// </summary>
+    private static void ApplyGainAndLimiterInPlace(short[] samples)
+    {
+        for (int i = 0; i < samples.Length; i++)
+        {
+            int v = (int)(samples[i] * OUTPUT_GAIN);
+            int a = Math.Abs(v);
+
+            // Soft limiter above LIMIT_THRESHOLD
+            if (a > LIMIT_THRESHOLD)
+            {
+                int excess = a - LIMIT_THRESHOLD;
+                // Compress excess 4:1 (simple and cheap)
+                a = LIMIT_THRESHOLD + (excess / 4);
+                if (a > short.MaxValue) a = short.MaxValue;
+                v = v < 0 ? -a : a;
+            }
+
+            samples[i] = (short)Math.Clamp(v, short.MinValue, short.MaxValue);
+        }
     }
 
     /// <summary>
