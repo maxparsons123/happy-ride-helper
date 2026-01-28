@@ -287,16 +287,19 @@ public class SipOpenAIBridge : IDisposable
                         if (_remotePtToCodec.Count > 0)
                             Log($"📥 [{_currentCallId}] Recognized: {string.Join(", ", _remotePtToCodec.Select(kvp => $"PT{kvp.Key}={kvp.Value}"))}");
                         
-                        // Detailed Opus parameters if present
-                        var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
-                            f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true ||
-                            f.Value.Name()?.Equals("opus1", StringComparison.OrdinalIgnoreCase) == true);
-                        if (!opusFormat.Value.IsEmpty())
+                        // Detailed Opus parameters if present (only log if Opus was actually found)
+                        if (remoteOffersOpus)
                         {
-                            remoteOpusPt = opusFormat.Key;
-                            remoteOpusChannels = Math.Max(1, opusFormat.Value.Channels());
-                            remoteOpusFmtp = opusFormat.Value.Fmtp;
-                            Log($"🔍 [{_currentCallId}] Remote Opus details: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
+                            var opusFormat = audioMedia.MediaFormats.FirstOrDefault(f =>
+                                f.Value.Name()?.Equals("opus", StringComparison.OrdinalIgnoreCase) == true ||
+                                f.Value.Name()?.Equals("opus1", StringComparison.OrdinalIgnoreCase) == true);
+                            if (!opusFormat.Value.IsEmpty())
+                            {
+                                remoteOpusPt = opusFormat.Key;
+                                remoteOpusChannels = Math.Max(1, opusFormat.Value.Channels());
+                                remoteOpusFmtp = opusFormat.Value.Fmtp;
+                                Log($"🔍 [{_currentCallId}] Opus params: PT={opusFormat.Key}, ClockRate={opusFormat.Value.ClockRate()}, Channels={remoteOpusChannels}, fmtp={remoteOpusFmtp ?? "none"}");
+                            }
                         }
                         
                         // Quality assessment
