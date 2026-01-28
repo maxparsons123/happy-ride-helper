@@ -10,15 +10,9 @@ public partial class MainForm : Form
     private ICallHandler? _callHandler;  // NEW: Call handler with AiSipAudioPlayout
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
-    private TextPipelineClient? _textPipelineClient;  // Stub for cheaper pipeline
-    private SimliAvatarClient? _simliClient;  // Stub for Simli avatar
-    private SimliAvatarForm? _simliForm;  // Stub for Simli avatar window
-    private AudioMonitor? _callerAudioMonitor;  // Stub for audio monitor
     private volatile bool _isRunning = false;
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
-    private bool _useSimliAvatar = false;
-    private bool _useCheaperPipeline = false;
 
     public MainForm()
     {
@@ -57,15 +51,9 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e)
-    {
-        // Placeholder for cheaper pipeline toggle
-    }
-
-    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e)
-    {
-        // Placeholder for Simli avatar toggle
-    }
+    // Stub handlers for Designer controls
+    private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
+    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) { }
 
     private void btnStartStop_Click(object sender, EventArgs e)
     {
