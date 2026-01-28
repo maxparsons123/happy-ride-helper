@@ -1,6 +1,7 @@
 using System.Windows.Forms;
+using TaxiSipBridge.WinForms;
 
-namespace TaxiSipBridge.Audio;
+namespace TaxiSipBridge;
 
 public partial class MainForm : Form
 {
