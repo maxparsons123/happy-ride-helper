@@ -628,12 +628,21 @@ public class SipOpenAIBridge : IDisposable
                 _ => OutputCodecMode.MuLaw
             };
 
+            // Log Opus connection path
+            if (outputCodecMode == OutputCodecMode.Opus)
+            {
+                Log($"🎧 [{_currentCallId}] ═══════════════════════════════════════════════════════");
+                Log($"🎧 [{_currentCallId}] OPUS CONNECTED! Wideband 48kHz audio path active");
+                Log($"🎧 [{_currentCallId}] Audio flow: OpenAI 24kHz → Resample 48kHz → Opus encode → RTP");
+                Log($"🎧 [{_currentCallId}] ═══════════════════════════════════════════════════════");
+            }
+
             // Connect to OpenAI Realtime API
             _aiClient = new OpenAIRealtimeClient(
                 _apiKey,
                 model: "gpt-4o-mini-realtime-preview-2024-12-17"
             );
-            _aiClient.SetOutputCodec(outputCodecMode);  // Set before connecting
+            _aiClient.SetOutputCodec(outputCodecMode);  // Set codec mode before connecting
             _aiClient.OnLog += msg => Log(msg);
             _aiClient.OnTranscript += t =>
             {

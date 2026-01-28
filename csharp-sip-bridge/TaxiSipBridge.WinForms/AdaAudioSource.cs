@@ -37,6 +37,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     // High-quality resamplers (SpeexDSP preferred, FFmpeg fallback, polyphase FIR last resort)
     private SpeexDspResampler? _speexResampler8k;
     private SpeexDspResampler? _speexResampler16k;
+    private SpeexDspResampler? _speexResampler48k;  // 24kHz→48kHz for Opus
     private FfmpegStreamingResampler? _ffmpegResampler8k;
     private PolyphaseFirResampler? _resampler8k;
     private PolyphaseFirResampler? _resampler16k;
@@ -214,6 +215,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         // Reset SpeexDSP resamplers
         _speexResampler8k?.Reset();
         _speexResampler16k?.Reset();
+        _speexResampler48k?.Reset();
         
         // Reset FFmpeg resampler
         _ffmpegResampler8k?.Reset();
@@ -571,6 +573,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
         {
             _speexResampler16k ??= new SpeexDspResampler(24000, 16000, 6);
             return _speexResampler16k.Resample(input);
+        }
+        
+        // 24kHz → 48kHz for Opus (high quality upsampling)
+        if (fromRate == 24000 && toRate == 48000)
+        {
+            _speexResampler48k ??= new SpeexDspResampler(24000, 48000, 8);  // Quality 8 for Opus
+            return _speexResampler48k.Resample(input);
         }
         
         // For other rates, create temporary resampler

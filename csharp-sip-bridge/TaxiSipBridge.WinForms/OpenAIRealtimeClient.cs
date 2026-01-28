@@ -18,10 +18,12 @@ public enum OutputCodecMode
     Opus     // Opus @ 48kHz (wideband)
 }
 
-namespace TaxiSipBridge;
-
 /// <summary>
 /// Direct OpenAI Realtime API client - FULLY LOCALIZED.
+/// No edge function required - connects directly to OpenAI with dispatch webhook support.
+/// </summary>
+public class OpenAIRealtimeClient : IAudioAIClient
+{
 /// No edge function required - connects directly to OpenAI with dispatch webhook support.
 /// </summary>
 public class OpenAIRealtimeClient : IAudioAIClient
