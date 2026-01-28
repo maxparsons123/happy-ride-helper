@@ -924,6 +924,9 @@ interface SessionState {
   deferredResponsePayload: any | null;
   // Pre-summary phase complete - user confirmed no changes needed
   preSummaryDone: boolean;
+  // RACE CONDITION FIX: Track when we're waiting for STT to arrive
+  // Set true when user starts speaking, cleared when transcript arrives
+  waitingForSttTranscript: boolean;
 }
 
 // Echo guard: short window after Ada finishes speaking where we reject likely echo.
@@ -1944,6 +1947,9 @@ function createSessionState(callId: string, callerPhone: string, language: strin
     deferredResponsePayload: null as any | null,
     // Pre-summary phase complete - user confirmed no changes needed
     preSummaryDone: false,
+    // RACE CONDITION FIX: Track when we're waiting for STT to arrive
+    // Set true when user starts speaking, cleared when transcript arrives
+    waitingForSttTranscript: false,
   };
 }
 
@@ -2767,6 +2773,15 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // Mark response as active immediately (before any audio)
           sessionState.openAiResponseActive = true;
           
+          // RACE CONDITION FIX: If we're still waiting for STT, cancel this response
+          // Ada is trying to speak before we have the user's transcript - she'll hallucinate
+          if (sessionState.waitingForSttTranscript && sessionState.lastQuestionAsked !== "none" && sessionState.lastQuestionAsked !== "confirmation") {
+            console.log(`[${callId}] 🚫 BLOCKING HALLUCINATION - Ada trying to respond before STT arrived (question: ${sessionState.lastQuestionAsked})`);
+            openaiWs!.send(JSON.stringify({ type: "response.cancel" }));
+            sessionState.openAiResponseActive = false; // We cancelled it
+            break;
+          }
+          
           // SILENCE MODE GUARD: If we're waiting for a quote, cancel any new responses
           if (sessionState.waitingForQuoteSilence && sessionState.saidOneMoment) {
             console.log(`[${callId}] 🤫 BLOCKING new response - in silence mode waiting for fare`);
@@ -3413,7 +3428,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
           // This ensures their answer is mapped to the question that was active when they began,
           // not the next question Ada may have already moved to by the time the transcript arrives
           sessionState.questionTypeAtSpeechStart = sessionState.lastQuestionAsked;
-          console.log(`[${callId}] 🎤 User started speaking (snapshotted question: ${sessionState.questionTypeAtSpeechStart})`);
+          // CRITICAL: Mark that we're waiting for transcript - don't let Ada respond until it arrives
+          sessionState.waitingForSttTranscript = true;
+          console.log(`[${callId}] 🎤 User started speaking (snapshotted question: ${sessionState.questionTypeAtSpeechStart}) - WAITING FOR STT`);
           break;
 
         case "conversation.item.input_audio_transcription.completed":
@@ -3443,6 +3460,9 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
             
             // Clear the snapshot after using it
             sessionState.questionTypeAtSpeechStart = null;
+            // CRITICAL: STT has arrived - clear the waiting flag
+            sessionState.waitingForSttTranscript = false;
+            console.log(`[${callId}] ✅ STT transcript arrived - waitingForSttTranscript cleared`);
             
             // === USER TRUTH CAPTURE (from simple) ===
             // Capture raw corrected STT output BEFORE any AI processing
