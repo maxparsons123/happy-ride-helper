@@ -798,21 +798,10 @@ public class SipOpenAIBridge : IDisposable
     {
         if (_disposed || _adaAudioSource == null) return;
 
-        // Preprocessing: Gentle low-pass filter to smooth harsh frequencies
-        // OpenAI TTS can be "raspy" - this removes harshness before telephony encoding
-        _ttsFilter ??= new TtsLowPassFilter();
-        
-        var pcm24k = new short[pcm24kBytes.Length / 2];
-        Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
-        
-        var filtered = _ttsFilter.Process(pcm24k);
-        
-        var filteredBytes = new byte[filtered.Length * 2];
-        Buffer.BlockCopy(filtered, 0, filteredBytes, 0, filteredBytes.Length);
-
-        // Pass filtered PCM24 to AdaAudioSource
-        // Only resampling (24kHz → 8kHz) and G.711 encoding applied after this
-        _adaAudioSource.EnqueuePcm24(filteredBytes);
+        // PASSTHROUGH: No DSP processing - just high-quality resampling in AdaAudioSource
+        // Previous filters (TtsLowPassFilter, TtsPreConditioner) caused warbling/phase artifacts
+        // OpenAI's audio is clean enough; resampler handles anti-aliasing
+        _adaAudioSource.EnqueuePcm24(pcm24kBytes);
     }
 
     public async Task EndCallAsync()
