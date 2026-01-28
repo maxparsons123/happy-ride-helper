@@ -77,13 +77,8 @@ public class LocalOpenAICallHandler : ICallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session with PCMA codec for SDP negotiation
-            var audioFormats = new List<AudioFormat>
-            {
-                new AudioFormat(SDPWellKnownMediaFormatsEnum.PCMA)
-            };
-            
-            _currentMediaSession = new VoIPMediaSession(new MediaEndPoints(), audioFormats);
+            // Setup media session with PCMA codec
+            _currentMediaSession = new VoIPMediaSession();
             _currentMediaSession.AcceptRtpFromAny = true;
 
             // Send ringing
