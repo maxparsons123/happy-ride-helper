@@ -155,6 +155,7 @@ public static class SpeexDspResamplerHelper
 
     /// <summary>
     /// Resample 24kHz to 8kHz using SpeexDSP.
+    /// Quality 8 = high quality for telephony (recommended 5-8 range).
     /// </summary>
     public static short[] Resample24kTo8k(short[] input)
     {
@@ -162,6 +163,8 @@ public static class SpeexDspResamplerHelper
         {
             try
             {
+                // Quality 8: excellent for 24kHz→8kHz telephony downsampling
+                // Higher than default, matches recommendation for narrowband output
                 _resampler24kTo8k ??= new SpeexDspResampler(24000, 8000, 8);
                 return _resampler24kTo8k.Resample(input);
             }
