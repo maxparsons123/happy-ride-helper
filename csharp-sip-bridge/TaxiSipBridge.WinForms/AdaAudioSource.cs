@@ -72,9 +72,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer - 20 frames for maximum SpeexDSP stability
+    // Jitter buffer - 10 frames for lower latency (accepts higher underrun risk)
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 400;  // 400ms (20 frames) - maximum stability
+    private int _jitterBufferMs = 200;  // 200ms (10 frames) - lower latency
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -359,7 +359,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             // Jitter buffer priming - 20 frames (400ms) for maximum SpeexDSP stability
             if (!_jitterBufferFilled)
             {
-                int minFrames = 20;  // 400ms - maximum stability with SpeexDSP
+                int minFrames = 10;  // 200ms - lower latency, accepts underrun risk
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
