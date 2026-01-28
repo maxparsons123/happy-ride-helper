@@ -6,14 +6,15 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// AI → SIP Audio Playout Engine.
-/// Receives 24kHz PCM from OpenAI, resamples to 8kHz PCM, and sends via VoIPMediaSession.
-/// ⚠️ IMPORTANT: VoIPMediaSession.SendAudio() EXPECTS RAW PCM and handles G.711 (A-law/μ-law)
-/// encoding internally based on negotiated SDP codec. DO NOT pre-encode to A-law.
+/// Receives 24kHz PCM from OpenAI, resamples to 8kHz, encodes to G.711 (A-law/μ-law),
+/// and sends via VoIPMediaSession at a stable 20ms cadence.
+/// ⚠️ IMPORTANT: VoIPMediaSession.SendAudio() expects PRE-ENCODED G.711 bytes, not raw PCM!
 /// </summary>
 public class AiSipAudioPlayout : IDisposable
 {
@@ -213,20 +214,31 @@ public class AiSipAudioPlayout : IDisposable
     }
 
     /// <summary>
-    /// Send raw PCM frame to VoIPMediaSession.
-    /// ⚠️ DO NOT pre-encode to A-law - SendAudio() handles G.711 encoding internally.
+    /// Encode PCM to A-law/μ-law and send via VoIPMediaSession.
+    /// VoIPMediaSession.SendAudio expects PRE-ENCODED G.711 bytes, not raw PCM!
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
         try
         {
-            // Convert shorts to bytes (little-endian)
-            var pcmBytes = new byte[pcmFrame.Length * 2];
-            Buffer.BlockCopy(pcmFrame, 0, pcmBytes, 0, pcmBytes.Length);
+            // Encode PCM to G.711 (160 samples → 160 bytes)
+            var encodedBytes = new byte[pcmFrame.Length];
+            
+            if (_negotiatedCodec == "PCMA")
+            {
+                // A-law encoding
+                for (int i = 0; i < pcmFrame.Length; i++)
+                    encodedBytes[i] = G711Codec.EncodeSampleALaw(pcmFrame[i]);
+            }
+            else
+            {
+                // μ-law encoding (PCMU)
+                for (int i = 0; i < pcmFrame.Length; i++)
+                    encodedBytes[i] = G711Codec.EncodeSample(pcmFrame[i]);
+            }
 
-            // VoIPMediaSession.SendAudio EXPECTS RAW PCM and will encode to G.711
-            // based on negotiated codec (PCMA = A-law, PCMU = μ-law)
-            _mediaSession.SendAudio((uint)FRAME_MS, pcmBytes);
+            // SendAudio expects: duration in RTP units (160 for 20ms @ 8kHz), encoded bytes
+            _mediaSession.SendAudio((uint)encodedBytes.Length, encodedBytes);
 
             Interlocked.Increment(ref _framesSent);
         }
