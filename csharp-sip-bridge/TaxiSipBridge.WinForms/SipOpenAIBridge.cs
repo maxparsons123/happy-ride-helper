@@ -29,6 +29,7 @@ public class SipOpenAIBridge : IDisposable
     private VoIPMediaSession? _mediaSession;
     private AdaAudioSource? _adaAudioSource;
     private OpenAIRealtimeClient? _aiClient;
+    private TtsLowPassFilter? _ttsFilter;
     private CancellationTokenSource? _callCts;
 
     // Remote SDP payload type → codec mapping (critical for endpoints that use dynamic PTs)
@@ -797,10 +798,21 @@ public class SipOpenAIBridge : IDisposable
     {
         if (_disposed || _adaAudioSource == null) return;
 
-        // DSP BYPASS: Pass raw PCM24 directly to AdaAudioSource
-        // Only resampling (24kHz → 8kHz) and G.711 encoding applied
-        // No pre-conditioning, no voice shaping - pure passthrough
-        _adaAudioSource.EnqueuePcm24(pcm24kBytes);
+        // Preprocessing: Gentle low-pass filter to smooth harsh frequencies
+        // OpenAI TTS can be "raspy" - this removes harshness before telephony encoding
+        _ttsFilter ??= new TtsLowPassFilter();
+        
+        var pcm24k = new short[pcm24kBytes.Length / 2];
+        Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
+        
+        var filtered = _ttsFilter.Process(pcm24k);
+        
+        var filteredBytes = new byte[filtered.Length * 2];
+        Buffer.BlockCopy(filtered, 0, filteredBytes, 0, filteredBytes.Length);
+
+        // Pass filtered PCM24 to AdaAudioSource
+        // Only resampling (24kHz → 8kHz) and G.711 encoding applied after this
+        _adaAudioSource.EnqueuePcm24(filteredBytes);
     }
 
     public async Task EndCallAsync()
