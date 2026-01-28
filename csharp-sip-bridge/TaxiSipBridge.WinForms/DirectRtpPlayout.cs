@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Threading;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -62,7 +61,7 @@ public class DirectRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Uses NAudio WDL resampler for high-quality 8kHz conversion.
+    /// Buffer 24kHz PCM from OpenAI. Resamples to 8kHz with anti-aliasing.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -71,9 +70,8 @@ public class DirectRtpPlayout : IDisposable
 
         try
         {
-            // Use NAudio WDL resampler (gold standard anti-aliasing)
-            var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
-            var pcm8k = BytesToShorts(pcm8kBytes);
+            var pcm24k = BytesToShorts(pcm24kBytes);
+            var pcm8k = Resample24kTo8kAntiAliased(pcm24k);
 
             for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
             {
@@ -246,6 +244,31 @@ public class DirectRtpPlayout : IDisposable
         alaw ^= 0x55;                // Invert odd bits (G.711 requirement)
         if (sign == 0) alaw |= 0x80; // Restore sign bit
         return alaw;
+    }
+
+    /// <summary>
+    /// Anti-aliased 24kHz → 8kHz resampling (3-tap FIR low-pass).
+    /// Prevents high-frequency artifacts that cause "ringing" in telephony.
+    /// </summary>
+    private static short[] Resample24kTo8kAntiAliased(short[] pcm24k)
+    {
+        if (pcm24k.Length < 3) return Array.Empty<short>();
+
+        int outLen = pcm24k.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int src = i * 3;
+            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
+            int s1 = pcm24k[src];
+            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
+
+            int filtered = (s0 + (s1 << 1) + s2) >> 2;
+            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
+        }
+
+        return output;
     }
 
     private static short[] BytesToShorts(byte[] bytes)
