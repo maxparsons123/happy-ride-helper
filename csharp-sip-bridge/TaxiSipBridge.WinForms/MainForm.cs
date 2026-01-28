@@ -3,7 +3,9 @@ namespace TaxiSipBridge;
 public partial class MainForm : Form
 {
     private SipAutoAnswer? _sipBridge;
-    private SipOpenAIBridge? _sipLocalBridge;  // For Local OpenAI mode
+    private SipOpenAIBridge? _sipLocalBridge;  // For Local OpenAI mode (legacy)
+    private SipLoginManager? _sipLoginManager;  // New modular SIP login
+    private ICallHandler? _callHandler;  // New call handler with AiSipAudioPlayout
     private AdaAudioClient? _micClient;
     private OpenAIRealtimeClient? _localAiClient;
     private TextPipelineClient? _textPipelineClient;  // Cheaper Deepgram+GPT+TTS pipeline
@@ -116,7 +118,7 @@ public partial class MainForm : Form
         {
             if (_useLocalOpenAI)
             {
-                // === LOCAL OPENAI SIP MODE ===
+                // === LOCAL OPENAI SIP MODE (NEW: AiSipAudioPlayout) ===
                 var apiKey = txtApiKey.Text.Trim();
                 // Accept both sk- and sk-proj- format keys
                 if (string.IsNullOrEmpty(apiKey) || (!apiKey.StartsWith("sk-") && !apiKey.StartsWith("sk-proj-")))
@@ -126,30 +128,40 @@ public partial class MainForm : Form
                     return;
                 }
 
-                _sipLocalBridge = new SipOpenAIBridge(
-                    apiKey,
-                    txtSipServer.Text.Trim(),
-                    int.Parse(txtSipPort.Text.Trim()),
-                    txtSipUser.Text.Trim(),
-                    txtSipPassword.Text.Trim(),
-                    cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP);
+                // Create SIP login manager
+                var loginConfig = new SipLoginConfig
+                {
+                    SipServer = txtSipServer.Text.Trim(),
+                    SipPort = int.Parse(txtSipPort.Text.Trim()),
+                    SipUser = txtSipUser.Text.Trim(),
+                    SipPassword = txtSipPassword.Text.Trim(),
+                    Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
+                };
 
-                _sipLocalBridge.OnLog += msg => SafeInvoke(() => AddLog(msg));
-                _sipLocalBridge.OnRegistered += () => SafeInvoke(() => SetStatus("🔒 LOCAL AI - Waiting for calls", Color.Green));
-                _sipLocalBridge.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
-                _sipLocalBridge.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
-                _sipLocalBridge.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
-                _sipLocalBridge.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
-                
+                _sipLoginManager = new SipLoginManager(loginConfig);
+                _sipLoginManager.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _sipLoginManager.OnRegistered += () => SafeInvoke(() => SetStatus("🔒 LOCAL AI - Waiting for calls", Color.Green));
+                _sipLoginManager.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
+                _sipLoginManager.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
+                _sipLoginManager.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
+                _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+
+                // Create the NEW call handler with AiSipAudioPlayout (20ms timer-driven RTP)
+                _callHandler = new LocalOpenAICallHandler(apiKey);
+                _sipLoginManager.SetCallHandler(_callHandler);
+
                 // Wire up caller audio monitor for SIP mode
                 _callerAudioMonitor?.Dispose();
                 _callerAudioMonitor = new AudioMonitor(usePcm24k: true);
                 _callerAudioMonitor.IsEnabled = true;
-                _sipLocalBridge.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
+                if (_callHandler is LocalOpenAICallHandler localHandler)
+                {
+                    localHandler.OnCallerAudioMonitor += data => _callerAudioMonitor?.AddFrame(data);
+                }
                 AddLog("🔊 Audio monitor enabled - you can hear the caller's processed voice");
 
-                _sipLocalBridge.Start();
-                AddLog("🔒 SIP LOCAL AI mode started - Calls go directly to OpenAI");
+                _sipLoginManager.Start();
+                AddLog("🔒 SIP LOCAL AI mode started - NEW AiSipAudioPlayout (20ms timer-driven RTP)");
             }
             else
             {
@@ -646,12 +658,25 @@ public partial class MainForm : Form
             _sipBridge = null;
         }
 
-        // Stop Local OpenAI bridge
+        // Stop Local OpenAI bridge (legacy)
         if (_sipLocalBridge != null)
         {
             _sipLocalBridge.Stop();
             _sipLocalBridge.Dispose();
             _sipLocalBridge = null;
+        }
+
+        // Stop NEW modular SIP login + call handler
+        if (_sipLoginManager != null)
+        {
+            _sipLoginManager.Stop();
+            _sipLoginManager.Dispose();
+            _sipLoginManager = null;
+        }
+        if (_callHandler != null)
+        {
+            _callHandler.Dispose();
+            _callHandler = null;
         }
 
         _isRunning = false;
