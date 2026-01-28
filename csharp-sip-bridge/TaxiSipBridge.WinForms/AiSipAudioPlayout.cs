@@ -9,31 +9,21 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// AI → SIP Audio Playout Engine.
-/// Implements proper SIP telephony with:
-/// ✔ 20ms frame packetization (160B)
-/// ✔ Timer-driven RTP pacing
-/// ✔ Underrun silence fill
-/// ✔ Timestamp + sequence management
-/// ✔ Multi-call readiness
-/// ✔ Clean stop/start
+/// Receives 24kHz PCM from OpenAI, resamples to 8kHz, and sends via VoIPMediaSession.
+/// VoIPMediaSession handles the G.711 encoding internally.
 /// </summary>
 public class AiSipAudioPlayout : IDisposable
 {
-    private const int FRAME_SIZE = 160;        // 20ms @ 8kHz PCMA = 160 samples = 160 bytes
-    private const int FRAME_MS = 20;           // 20ms per frame
-    private const byte ALAW_SILENCE = 0xD5;    // A-law silence value
-    private const int MAX_QUEUE_FRAMES = 50;   // 1 second max buffer (50 × 20ms)
+    private const int PCM_FRAME_SAMPLES = 160;  // 20ms @ 8kHz = 160 samples
+    private const int FRAME_MS = 20;            // 20ms per frame
+    private const int MAX_QUEUE_FRAMES = 50;    // 1 second max buffer (50 × 20ms)
     
-    private readonly ConcurrentQueue<byte[]> _frameQueue = new();
+    private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _disposed;
-    
-    // RTP state
-    private ushort _seq;
-    private uint _timestamp;
     
     // Stats
     private int _framesSent;
@@ -50,16 +40,11 @@ public class AiSipAudioPlayout : IDisposable
     public AiSipAudioPlayout(VoIPMediaSession mediaSession)
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
-        
-        // Initialize RTP state with random values
-        var rnd = new Random();
-        _seq = (ushort)rnd.Next(ushort.MaxValue);
-        _timestamp = (uint)rnd.Next(int.MaxValue);
     }
     
     /// <summary>
     /// Buffer AI audio (PCM16 @ 24kHz) for playout.
-    /// Resamples to 8kHz, encodes to A-law, and queues 20ms frames.
+    /// Resamples to 8kHz and queues 20ms PCM frames.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -71,29 +56,23 @@ public class AiSipAudioPlayout : IDisposable
             // Convert bytes to shorts
             var pcm24k = BytesToShorts(pcm24kBytes);
             
-            // Resample 24kHz → 8kHz
+            // Resample 24kHz → 8kHz using simple 3:1 decimation with averaging
             var pcm8k = Resample24kTo8k(pcm24k);
             
-            // Encode to A-law
-            var alaw = EncodeAlaw(pcm8k);
-            
-            // Split into 20ms frames and queue
-            for (int i = 0; i < alaw.Length; i += FRAME_SIZE)
+            // Split into 20ms frames (160 samples each) and queue
+            for (int i = 0; i < pcm8k.Length; i += PCM_FRAME_SAMPLES)
             {
                 // Check for overflow
                 if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
                 {
                     Interlocked.Increment(ref _droppedFrames);
-                    continue; // Drop oldest-ish frames by not enqueueing
+                    continue;
                 }
                 
-                var frame = new byte[FRAME_SIZE];
-                int len = Math.Min(FRAME_SIZE, alaw.Length - i);
-                Buffer.BlockCopy(alaw, i, frame, 0, len);
-                
-                // Pad with silence if needed
-                if (len < FRAME_SIZE)
-                    Array.Fill(frame, ALAW_SILENCE, len, FRAME_SIZE - len);
+                var frame = new short[PCM_FRAME_SAMPLES];
+                int len = Math.Min(PCM_FRAME_SAMPLES, pcm8k.Length - i);
+                Array.Copy(pcm8k, i, frame, 0, len);
+                // Remaining samples are already 0 (silence)
                 
                 _frameQueue.Enqueue(frame);
             }
@@ -178,7 +157,7 @@ public class AiSipAudioPlayout : IDisposable
             }
             
             // Get next frame or silence
-            byte[] frame;
+            short[] frame;
             if (_frameQueue.TryDequeue(out var queuedFrame))
             {
                 frame = queuedFrame;
@@ -187,8 +166,7 @@ public class AiSipAudioPlayout : IDisposable
             else
             {
                 // Underrun - send silence
-                frame = new byte[FRAME_SIZE];
-                Array.Fill(frame, ALAW_SILENCE);
+                frame = new short[PCM_FRAME_SAMPLES];
                 Interlocked.Increment(ref _silenceFrames);
                 
                 // Notify once when queue empties
@@ -199,8 +177,8 @@ public class AiSipAudioPlayout : IDisposable
                 }
             }
             
-            // Send RTP
-            SendRtpFrame(frame);
+            // Send via VoIPMediaSession (it handles G.711 encoding)
+            SendPcmFrame(frame);
             
             // Schedule next frame
             nextFrameMs += FRAME_MS;
@@ -215,19 +193,17 @@ public class AiSipAudioPlayout : IDisposable
     }
     
     /// <summary>
-    /// Send a single RTP frame.
+    /// Send a PCM frame to VoIPMediaSession for encoding and RTP transmission.
     /// </summary>
-    private void SendRtpFrame(byte[] frame)
+    private void SendPcmFrame(short[] pcmFrame)
     {
         try
         {
-            // Use SIPSorcery's built-in audio sending
-            // PT=8 is PCMA (A-law)
-            _mediaSession.SendAudio((uint)FRAME_MS, frame);
+            // VoIPMediaSession.SendAudio expects duration in ms and PCM samples
+            // It handles G.711 encoding internally based on negotiated codec
+            _mediaSession.SendAudio((uint)FRAME_MS, pcmFrame);
             
             Interlocked.Increment(ref _framesSent);
-            _seq++;
-            _timestamp += FRAME_SIZE;
         }
         catch (Exception ex)
         {
@@ -237,7 +213,6 @@ public class AiSipAudioPlayout : IDisposable
     
     /// <summary>
     /// Resample 24kHz PCM to 8kHz using simple 3:1 decimation with averaging.
-    /// This is fast and produces clear intelligible speech.
     /// </summary>
     private static short[] Resample24kTo8k(short[] pcm24k)
     {
@@ -265,42 +240,6 @@ public class AiSipAudioPlayout : IDisposable
         var shorts = new short[bytes.Length / 2];
         Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
         return shorts;
-    }
-    
-    /// <summary>
-    /// Encode PCM16 to A-law.
-    /// </summary>
-    private static byte[] EncodeAlaw(short[] pcm)
-    {
-        var alaw = new byte[pcm.Length];
-        for (int i = 0; i < pcm.Length; i++)
-        {
-            alaw[i] = LinearToAlaw(pcm[i]);
-        }
-        return alaw;
-    }
-    
-    /// <summary>
-    /// ITU-T G.711 A-law encoding.
-    /// </summary>
-    private static byte LinearToAlaw(short linear)
-    {
-        int sign = (linear >> 8) & 0x80;
-        if (sign != 0) linear = (short)-linear;
-        if (linear > 32635) linear = 32635;
-        
-        int exponent = 7;
-        int expMask = 0x4000;
-        
-        for (; exponent > 0; exponent--)
-        {
-            if ((linear & expMask) != 0) break;
-            expMask >>= 1;
-        }
-        
-        int mantissa = (linear >> (exponent == 0 ? 4 : exponent + 3)) & 0x0F;
-        byte alaw = (byte)(sign | (exponent << 4) | mantissa);
-        return (byte)(alaw ^ 0xD5); // Toggle even bits
     }
     
     private void Log(string msg) => OnLog?.Invoke($"[AiPlayout] {msg}");
