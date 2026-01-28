@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
-using SIPSorcery.Net;
+using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge.Audio;
 
@@ -24,24 +24,17 @@ public class PcmaRtpPlayout : IDisposable
     private const int FRAME_SAMPLES_24K = 480;
 
     private readonly ConcurrentQueue<short[]> _frameQueue8k = new();
-    private readonly byte[] _pcmaBuffer = new byte[FRAME_SAMPLES_8K];
-    private readonly RTPChannel _rtpChannel;
-    private readonly IPEndPoint _remoteEndPoint;
+    private readonly VoIPMediaSession _mediaSession;
 
     private Thread? _playoutThread;
     private volatile bool _running;
     private bool _jitterBufferPrimed;
-    private ushort _seq;
-    private uint _ts;
-    private readonly uint _ssrc;
+    private uint _rtpTimestamp;
 
     // SpeexDSP resampler handle
     private IntPtr _speexResampler = IntPtr.Zero;
     private readonly object _resamplerLock = new();
     private bool _speexAvailable;
-
-    // Fallback: simple decimation if SpeexDSP unavailable
-    private short[]? _resampleBuffer;
 
     // Stats
     private int _enqueuedFrames;
@@ -69,15 +62,12 @@ public class PcmaRtpPlayout : IDisposable
 
     #endregion
 
-    public PcmaRtpPlayout(RTPChannel rtpChannel, IPEndPoint remoteEndPoint)
+    public PcmaRtpPlayout(VoIPMediaSession mediaSession)
     {
-        _rtpChannel = rtpChannel;
-        _remoteEndPoint = remoteEndPoint;
+        _mediaSession = mediaSession;
 
         var rnd = new Random();
-        _seq = (ushort)rnd.Next(ushort.MaxValue);
-        _ts = (uint)rnd.Next(int.MaxValue);
-        _ssrc = (uint)rnd.Next(int.MaxValue);
+        _rtpTimestamp = (uint)rnd.Next(int.MaxValue);
 
         InitSpeexResampler();
     }
@@ -257,13 +247,14 @@ public class PcmaRtpPlayout : IDisposable
             }
 
             // Encode PCM16 → PCMA (G.711 A-law)
+            var pcmaBuffer = new byte[FRAME_SAMPLES_8K];
             for (int i = 0; i < FRAME_SAMPLES_8K; i++)
             {
-                _pcmaBuffer[i] = G711Codec.EncodeSampleALaw(frame[i]);
+                pcmaBuffer[i] = G711Codec.EncodeSampleALaw(frame[i]);
             }
 
-            // Build and send RTP packet
-            SendRtpPacket(_pcmaBuffer);
+            // Send via VoIPMediaSession
+            SendAudioFrame(pcmaBuffer);
             _sentFrames++;
 
             // Log stats every 5 seconds
@@ -279,32 +270,25 @@ public class PcmaRtpPlayout : IDisposable
 
     private void SendSilenceFrame()
     {
-        // Send encoded silence (A-law silence = 0xD5)
-        Array.Fill(_pcmaBuffer, (byte)0xD5);
-        SendRtpPacket(_pcmaBuffer);
+        // Encode silence (A-law silence = 0xD5)
+        var silenceBuffer = new byte[FRAME_SAMPLES_8K];
+        Array.Fill(silenceBuffer, (byte)0xD5);
+        SendAudioFrame(silenceBuffer);
         _silenceFrames++;
     }
 
-    private void SendRtpPacket(byte[] payload)
+    private void SendAudioFrame(byte[] pcmaPayload)
     {
         try
         {
-            var rtpPacket = new RTPPacket(12 + payload.Length);
-            rtpPacket.Header.SyncSource = _ssrc;
-            rtpPacket.Header.SequenceNumber = _seq++;
-            rtpPacket.Header.Timestamp = _ts;
-            rtpPacket.Header.PayloadType = 8; // PCMA
-            rtpPacket.Header.MarkerBit = 0;
-            rtpPacket.Payload = payload;
-
-            _ts += FRAME_SAMPLES_8K; // 160 samples @ 8kHz per 20ms
-
-            byte[] rtpBytes = rtpPacket.GetBytes();
-            _rtpChannel.Send(RTPChannelSocketsEnum.RTP, _remoteEndPoint, rtpBytes);
+            // Use VoIPMediaSession's SendAudio method which handles RTP encapsulation
+            // Duration in RTP clock ticks: 160 samples @ 8kHz = 160 ticks (20ms)
+            _mediaSession.SendAudio((uint)FRAME_SAMPLES_8K, pcmaPayload);
+            _rtpTimestamp += FRAME_SAMPLES_8K;
         }
         catch (Exception ex)
         {
-            OnDebugLog?.Invoke($"[PcmaRtpPlayout] ❌ RTP send error: {ex.Message}");
+            OnDebugLog?.Invoke($"[PcmaRtpPlayout] ❌ Send error: {ex.Message}");
         }
     }
 

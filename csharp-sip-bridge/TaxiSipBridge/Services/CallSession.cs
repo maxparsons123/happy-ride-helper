@@ -114,28 +114,18 @@ public class CallSession : IDisposable
             await _mediaSession.Start();
 
             // Create PcmaRtpPlayout with dedicated timing thread for outbound audio
-            // VoIPMediaSession exposes RtpChannel and DestinationEndPoint directly
-            var rtpChannel = _mediaSession.RtpChannel;
-            var remoteEp = _mediaSession.DestinationEndPoint;
-            
-            if (rtpChannel != null && remoteEp != null)
-            {
-                _rtpPlayout = new PcmaRtpPlayout(rtpChannel, remoteEp);
-                _rtpPlayout.OnDebugLog += msg => _logger.LogDebug("{Message}", msg);
-                _rtpPlayout.Start();
-                _logger.LogInformation("Call {CallId} - PcmaRtpPlayout started", _callId);
-            }
-            else
-            {
-                _logger.LogWarning("Call {CallId} - Could not get RTP channel/endpoint for direct playout", _callId);
-            }
+            // Pass the media session for RTP sending
+            _rtpPlayout = new PcmaRtpPlayout(_mediaSession);
+            _rtpPlayout.OnDebugLog += msg => _logger.LogDebug("{Message}", msg);
+            _rtpPlayout.Start();
+            _logger.LogInformation("Call {CallId} - PcmaRtpPlayout started", _callId);
 
             // Log negotiated codec
             var selectedFormat = _mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
             if (selectedFormat.HasValue && !selectedFormat.Value.IsEmpty())
             {
                 _logger.LogInformation("Call {CallId} answered - Codec: {Codec} @ {Rate}Hz",
-                    _callId, selectedFormat.Value.FormatName, selectedFormat.Value.ClockRate);
+                    _callId, selectedFormat.Value.Name, selectedFormat.Value.ClockRate);
             }
             else
             {
@@ -214,21 +204,13 @@ public class CallSession : IDisposable
             // 1. Decode μ-law to PCM16 bytes
             var pcm16Bytes = G711Codec.UlawToPcm16(payload);
 
-            // 2. Convert to short[] for DSP processing
-            var pcm16Samples = new short[pcm16Bytes.Length / 2];
-            Buffer.BlockCopy(pcm16Bytes, 0, pcm16Samples, 0, pcm16Bytes.Length);
+            // 2. Apply DSP pipeline (high-pass, noise gate, AGC) - takes and returns byte[]
+            var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16Bytes);
 
-            // 3. Apply DSP pipeline (high-pass, noise gate, AGC)
-            var (processed, _) = _audioDsp.ApplyNoiseReduction(pcm16Samples);
+            // 3. Resample 8kHz to 24kHz for Ada using NAudioResampler
+            var resampled = NAudioResampler.Resample(processed, 8000, 24000);
 
-            // 4. Convert back to bytes for resampling
-            var processedBytes = new byte[processed.Length * 2];
-            Buffer.BlockCopy(processed, 0, processedBytes, 0, processedBytes.Length);
-
-            // 5. Resample 8kHz to 24kHz for Ada using NAudioResampler
-            var resampled = NAudioResampler.Resample(processedBytes, 8000, 24000);
-
-            // 6. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
+            // 4. Send raw PCM bytes via binary WebSocket (33% more efficient than base64)
             _ = SendBinaryAudio(resampled);
         }
         catch (Exception ex)
