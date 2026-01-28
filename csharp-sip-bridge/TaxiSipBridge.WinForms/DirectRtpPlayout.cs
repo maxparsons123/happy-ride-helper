@@ -146,33 +146,37 @@ public class DirectRtpPlayout : IDisposable
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
-        double nextFrameTime = sw.Elapsed.TotalMilliseconds;
+        long framesSent = 0;
         bool wasEmpty = true;
         bool startupBuffering = true;
         int underrunCount = 0;
 
         while (_running)
         {
+            // Wall-clock timing: absolute time for each frame (no drift accumulation)
+            double targetTime = framesSent * FRAME_MS;
             double now = sw.Elapsed.TotalMilliseconds;
 
-            // Wait for startup buffer before beginning playout (absorbs OpenAI burst jitter)
+            // Wait for startup buffer before beginning playout
             if (startupBuffering)
             {
                 if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
                 {
                     startupBuffering = false;
-                    nextFrameTime = sw.Elapsed.TotalMilliseconds;
+                    framesSent = 0;
+                    sw.Restart(); // Reset clock when we start real playout
                     underrunCount = 0;
                     Log($"📦 Startup buffer ready ({_frameQueue.Count} frames)");
+                    continue;
                 }
                 else
                 {
-                    // Send silence while buffering
-                    if (now >= nextFrameTime)
+                    // Send silence while buffering (maintain RTP stream)
+                    if (now >= targetTime)
                     {
                         SendRtpPacket(new short[PCM8K_FRAME_SAMPLES]);
                         Interlocked.Increment(ref _silenceFrames);
-                        nextFrameTime += FRAME_MS;
+                        framesSent++;
                     }
                     Thread.Sleep(1);
                     continue;
@@ -183,7 +187,7 @@ public class DirectRtpPlayout : IDisposable
             if (_frameQueue.Count < MIN_RUNNING_FRAMES && _frameQueue.Count > 0)
             {
                 underrunCount++;
-                if (underrunCount >= 3) // 3 consecutive low-buffer frames = re-buffer
+                if (underrunCount >= 3)
                 {
                     Log($"⚠️ Buffer underrun ({_frameQueue.Count} frames) - re-buffering...");
                     startupBuffering = true;
@@ -195,17 +199,20 @@ public class DirectRtpPlayout : IDisposable
                 underrunCount = 0;
             }
 
-            // Precision timing with spin-wait for sub-millisecond accuracy
-            if (now < nextFrameTime)
+            // Precision wait until target time
+            double wait = targetTime - now;
+            if (wait > 3)
             {
-                double wait = nextFrameTime - now;
-                if (wait > 3) 
-                    Thread.Sleep((int)(wait - 2)); // Leave 2ms headroom
-                else if (wait > 0.1) 
-                    Thread.SpinWait(1000); // Tighter spin for precision
+                Thread.Sleep((int)(wait - 2));
+                continue;
+            }
+            else if (wait > 0.1)
+            {
+                Thread.SpinWait(1000);
                 continue;
             }
 
+            // Time to send frame
             short[] frame;
             if (_frameQueue.TryDequeue(out var queued))
             {
@@ -225,13 +232,15 @@ public class DirectRtpPlayout : IDisposable
             }
 
             SendRtpPacket(frame);
-            nextFrameTime += FRAME_MS;
+            framesSent++;
 
-            // Drift correction with configurable threshold
-            if (now - nextFrameTime > DRIFT_THRESHOLD_MS)
+            // Safety: if we fall too far behind, reset the clock
+            now = sw.Elapsed.TotalMilliseconds;
+            if (now - targetTime > DRIFT_THRESHOLD_MS)
             {
-                Log($"⏱️ Drift correction: {now - nextFrameTime:F1}ms behind");
-                nextFrameTime = now + FRAME_MS;
+                Log($"⏱️ Clock reset: {now - targetTime:F1}ms behind");
+                framesSent = 0;
+                sw.Restart();
             }
         }
     }
