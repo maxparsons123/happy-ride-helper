@@ -262,7 +262,8 @@ public class AiSipAudioPlayout : IDisposable
         
         // Fallback to polyphase FIR
         _firResampler ??= new PolyphaseFirResampler(24000, 8000);
-        return _firResampler.Resample(pcm24k);
+        int outputLength = pcm24k.Length / 3; // 24kHz → 8kHz = 1/3
+        return _firResampler.Resample(pcm24k, outputLength);
     }
     
     /// <summary>
@@ -321,7 +322,7 @@ public class AiSipAudioPlayout : IDisposable
         Stop();
         
         _speexResampler?.Dispose();
-        _firResampler?.Dispose();
+        _firResampler?.Reset(); // FIR doesn't implement IDisposable, just reset state
         
         GC.SuppressFinalize(this);
     }
