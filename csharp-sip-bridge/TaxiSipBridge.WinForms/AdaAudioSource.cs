@@ -316,16 +316,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns = 0;
                 
-                // Use TtsPreConditioner for 8kHz path (DC removal + 3.4kHz lowpass + normalize + downsample)
-                // For other rates, use polyphase FIR resampler
-                if (targetRate == 8000)
-                {
-                    audioFrame = _preConditioner8k.ProcessFrame(pcm24);
-                }
-                else
-                {
-                    audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
-                }
+                // PASSTHROUGH: Use polyphase FIR resampler for ALL rates
+                // TtsPreConditioner's one-pole lowpass + normalize caused warbling artifacts
+                // The polyphase FIR has proper anti-aliasing built-in (Kaiser-windowed sinc)
+                audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
             }
