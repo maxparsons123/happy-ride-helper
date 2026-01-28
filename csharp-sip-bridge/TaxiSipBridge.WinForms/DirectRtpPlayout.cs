@@ -21,8 +21,8 @@ public class DirectRtpPlayout : IDisposable
 {
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
-    private const int MAX_QUEUE_FRAMES = 25;      // 500ms buffer (NOT 10s!)
-    private const int MIN_STARTUP_FRAMES = 10;    // 200ms startup buffer
+    private const int MAX_QUEUE_FRAMES = 30;      // 600ms buffer
+    private const int MIN_STARTUP_FRAMES = 12;    // 240ms startup buffer
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly RTPSession _rtpSession;
@@ -140,38 +140,24 @@ public class DirectRtpPlayout : IDisposable
 
     private void PlayoutLoop()
     {
-        var sw = Stopwatch.StartNew();
-        long framesSent = 0;
         bool wasEmpty = true;
         bool startupBuffering = true;
 
         while (_running)
         {
-            double targetTime = framesSent * FRAME_MS;
-            double now = sw.Elapsed.TotalMilliseconds;
-
-            // Startup buffering phase
+            // Startup buffering phase - wait for enough frames
             if (startupBuffering)
             {
                 if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
                 {
                     startupBuffering = false;
-                    framesSent = 0;
-                    sw.Restart();
                     Log($"📦 Startup buffer ready ({_frameQueue.Count} frames / {MIN_STARTUP_FRAMES * FRAME_MS}ms)");
+                }
+                else
+                {
+                    Thread.Sleep(5);
                     continue;
                 }
-                Thread.Sleep(5);
-                continue;
-            }
-
-            // Timing loop
-            if (now < targetTime)
-            {
-                double wait = targetTime - now;
-                if (wait > 2) Thread.Sleep((int)(wait - 1));
-                else if (wait > 0.5) Thread.SpinWait(500);
-                continue;
             }
 
             // Get frame or generate silence
@@ -194,7 +180,9 @@ public class DirectRtpPlayout : IDisposable
             }
 
             SendRtpPacket(frame);
-            framesSent++;
+
+            // Simple 20ms timing
+            Thread.Sleep(FRAME_MS);
         }
     }
 
