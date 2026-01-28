@@ -9,11 +9,53 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// AI → SIP Audio Playout Engine.
-/// Receives 24kHz PCM from OpenAI, resamples to 8kHz, and sends via VoIPMediaSession.
-/// VoIPMediaSession handles the G.711 encoding internally.
+/// Receives 24kHz PCM from OpenAI, resamples to 8kHz, encodes to A-law, and sends via VoIPMediaSession.
 /// </summary>
 public class AiSipAudioPlayout : IDisposable
 {
+    // A-law encoding lookup table (PCM16 → A-law)
+    private static readonly byte[] PcmToAlawTable = BuildPcmToAlawTable();
+    
+    private static byte[] BuildPcmToAlawTable()
+    {
+        var table = new byte[65536];
+        for (int i = 0; i < 65536; i++)
+        {
+            short pcm = (short)i;
+            table[i] = EncodeAlawSample(pcm);
+        }
+        return table;
+    }
+    
+    private static byte EncodeAlawSample(short pcm)
+    {
+        int sign = (pcm < 0) ? 0x80 : 0;
+        int magnitude = Math.Abs(pcm);
+        
+        // Clamp to 15-bit
+        if (magnitude > 32635) magnitude = 32635;
+        
+        int exp, mantissa;
+        if (magnitude < 256)
+        {
+            exp = 0;
+            mantissa = magnitude >> 4;
+        }
+        else
+        {
+            exp = 1;
+            int temp = magnitude >> 5;
+            while (temp > 15)
+            {
+                exp++;
+                temp >>= 1;
+            }
+            mantissa = temp;
+        }
+        
+        // A-law encoding with XOR inversion
+        return (byte)((sign | (exp << 4) | mantissa) ^ 0x55);
+    }
     private const int PCM_FRAME_SAMPLES = 160;  // 20ms @ 8kHz = 160 samples
     private const int FRAME_MS = 20;            // 20ms per frame
     private const int MAX_QUEUE_FRAMES = 50;    // 1 second max buffer (50 × 20ms)
@@ -193,19 +235,24 @@ public class AiSipAudioPlayout : IDisposable
     }
     
     /// <summary>
-    /// Send a PCM frame to VoIPMediaSession for encoding and RTP transmission.
+    /// Send a PCM frame to VoIPMediaSession as A-law encoded audio.
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
         try
         {
-            // Convert shorts to bytes for VoIPMediaSession
-            var pcmBytes = new byte[pcmFrame.Length * 2];
-            Buffer.BlockCopy(pcmFrame, 0, pcmBytes, 0, pcmBytes.Length);
+            // Encode PCM to A-law (G.711a)
+            var alawBytes = new byte[pcmFrame.Length];
+            for (int i = 0; i < pcmFrame.Length; i++)
+            {
+                // Use lookup table for fast encoding
+                alawBytes[i] = PcmToAlawTable[(ushort)pcmFrame[i]];
+            }
             
-            // VoIPMediaSession.SendAudio expects duration in ms and PCM bytes
-            // It handles G.711 encoding internally based on negotiated codec
-            _mediaSession.SendAudio((uint)FRAME_MS, pcmBytes);
+            // SendAudio expects duration in RTP units (8kHz = 8000 units/sec)
+            // 20ms = 160 RTP units
+            const uint RTP_DURATION = 160;
+            _mediaSession.SendAudio(RTP_DURATION, alawBytes);
             
             Interlocked.Increment(ref _framesSent);
         }
