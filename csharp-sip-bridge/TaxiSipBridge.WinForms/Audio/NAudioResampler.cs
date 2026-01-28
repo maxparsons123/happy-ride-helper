@@ -6,8 +6,9 @@ namespace TaxiSipBridge.Audio;
 /// <summary>
 /// High-quality audio resampler using NAudio's WDL resampler.
 /// Includes proper anti-aliasing for downsampling (24kHz → 8kHz).
+/// Also provides G.711 A-law encoding utilities.
 /// </summary>
-public class NAudioResampler
+public static class NAudioResampler
 {
     /// <summary>
     /// Resample PCM16 audio using NAudio's WDL resampler (high quality with anti-aliasing).
@@ -75,90 +76,77 @@ public class NAudioResampler
         
         return outputBytes;
     }
-}
 
-/// <summary>
-/// Continuous NAudio resampler that maintains state across frames.
-/// Prevents glitches at frame boundaries for streaming audio.
-/// </summary>
-public class ContinuousNAudioResampler : IDisposable
-{
-    private readonly int _inputRate;
-    private readonly int _outputRate;
-    private readonly double _ratio;
-    private readonly List<short> _inputBuffer = new();
-    private readonly int _minInputSamples;
-    private bool _disposed;
-
-    public ContinuousNAudioResampler(int inputRate, int outputRate)
+    /// <summary>
+    /// Convert OpenAI TTS PCM (24kHz) directly to G.711 A-law bytes (8kHz).
+    /// Complete pipeline: resample + encode in one call.
+    /// </summary>
+    public static byte[] ConvertToALaw(byte[] pcm24kBytes)
     {
-        _inputRate = inputRate;
-        _outputRate = outputRate;
-        _ratio = (double)outputRate / inputRate;
-        // Buffer at least 2 frames worth for smooth resampling
-        _minInputSamples = inputRate / 1000 * 40; // 40ms
+        if (pcm24kBytes.Length == 0)
+            return Array.Empty<byte>();
+
+        // 1. Resample 24kHz → 8kHz with high-quality anti-aliasing
+        var pcm8kBytes = ResampleBytes(pcm24kBytes, 24000, 8000);
+        
+        // 2. Encode to A-law
+        var alawBytes = new byte[pcm8kBytes.Length / 2];
+        for (int i = 0; i < alawBytes.Length; i++)
+        {
+            short sample = (short)(pcm8kBytes[i * 2] | (pcm8kBytes[i * 2 + 1] << 8));
+            alawBytes[i] = LinearToALaw(sample);
+        }
+        
+        return alawBytes;
     }
 
     /// <summary>
-    /// Process a frame of audio, returning resampled output.
-    /// Maintains state across calls for glitch-free streaming.
+    /// ITU-T G.711 A-law encoder (RFC 3551 compliant).
     /// </summary>
-    public short[] Process(short[] input)
+    public static byte LinearToALaw(short sample)
     {
-        if (input.Length == 0)
-            return Array.Empty<short>();
+        int sign = (sample >> 8) & 0x80;
+        if (sign != 0) sample = (short)-sample;
+        if (sample > 32635) sample = 32635;
 
-        if (_inputRate == _outputRate)
-            return input;
-
-        // Add new samples to buffer
-        _inputBuffer.AddRange(input);
-
-        // Need minimum samples for quality resampling
-        if (_inputBuffer.Count < _minInputSamples)
-            return Array.Empty<short>();
-
-        // Resample accumulated buffer
-        var inputArray = _inputBuffer.ToArray();
-        var resampled = NAudioResampler.Resample(inputArray, _inputRate, _outputRate);
-
-        // Keep last few samples for continuity
-        int keepSamples = _inputRate / 1000 * 10; // Keep 10ms
-        if (_inputBuffer.Count > keepSamples)
+        int exponent, mantissa;
+        if (sample >= 256)
         {
-            _inputBuffer.RemoveRange(0, _inputBuffer.Count - keepSamples);
+            exponent = (int)Math.Floor(Math.Log(sample, 2)) - 7;
+            if (exponent > 7) exponent = 7;
+            mantissa = (sample >> (exponent + 3)) & 0x0F;
+        }
+        else
+        {
+            exponent = 0;
+            mantissa = sample >> 4;
         }
 
-        return resampled;
+        byte alaw = (byte)((exponent << 4) | mantissa);
+        alaw ^= 0xD5; // Invert odd bits + sign (G.711 requirement)
+        if (sign == 0) alaw |= 0x80;
+        return alaw;
     }
 
     /// <summary>
-    /// Flush any remaining audio in the buffer.
+    /// ITU-T G.711 mu-law encoder (RFC 3551 compliant).
     /// </summary>
-    public short[] Flush()
+    public static byte LinearToMuLaw(short sample)
     {
-        if (_inputBuffer.Count == 0)
-            return Array.Empty<short>();
+        const int MULAW_MAX = 0x1FFF;
+        const int MULAW_BIAS = 33;
 
-        var remaining = _inputBuffer.ToArray();
-        _inputBuffer.Clear();
+        int sign = (sample >> 8) & 0x80;
+        if (sign != 0) sample = (short)-sample;
         
-        if (_inputRate == _outputRate)
-            return remaining;
+        sample = (short)Math.Min(sample, MULAW_MAX);
+        sample = (short)(sample + MULAW_BIAS);
 
-        return NAudioResampler.Resample(remaining, _inputRate, _outputRate);
-    }
+        int exponent = 7;
+        for (int expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
 
-    public void Reset()
-    {
-        _inputBuffer.Clear();
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        _inputBuffer.Clear();
-        GC.SuppressFinalize(this);
+        int mantissa = (sample >> (exponent + 3)) & 0x0F;
+        byte ulaw = (byte)(~(sign | (exponent << 4) | mantissa));
+        return ulaw;
     }
 }
