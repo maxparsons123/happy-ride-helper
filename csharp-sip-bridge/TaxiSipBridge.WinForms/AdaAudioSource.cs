@@ -35,6 +35,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private PolyphaseFirResampler? _resampler16k;
     private PolyphaseFirResampler? _resampler48k;
     
+    // Streaming preprocessor for 8kHz telephony (DC removal + lowpass + normalize + downsample)
+    private readonly TtsPreConditioner _preConditioner8k = new();
+    
     // Fallback state for rates without dedicated resampler
     private double _resamplePhase;
     private short _lastInputSample;
@@ -194,6 +197,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _resampler16k?.Reset();
         _resampler48k?.Reset();
         
+        // Reset streaming preprocessor for 8kHz
+        _preConditioner8k.Reset();
+        
         // Reset fallback resampler state
         _resamplePhase = 0;
         _lastInputSample = 0;
@@ -309,10 +315,19 @@ public class AdaAudioSource : IAudioSource, IDisposable
             if (_pcmQueue.TryDequeue(out var pcm24))
             {
                 _consecutiveUnderruns = 0;
-                audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
-                // DISABLED: Crossfade was causing distortion artifacts
-                // Pure passthrough: just use resampled audio directly
+                // Use TtsPreConditioner for 8kHz path (DC removal + 3.4kHz lowpass + normalize + downsample)
+                // For other rates, use polyphase FIR resampler
+                if (targetRate == 8000)
+                {
+                    audioFrame = _preConditioner8k.ProcessFrame(pcm24);
+                }
+                else
+                {
+                    audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
+                    // Apply basic preprocessing for non-8kHz paths
+                    TtsPreprocessor.PreprocessPcm16(audioFrame);
+                }
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
             }
@@ -346,9 +361,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples @ {targetRate}Hz, peak={peak}");
         }
 
-        // Preprocess: normalize → soft-clip → ready for PCMA
-        // This ensures clean audio without distortion artifacts
-        TtsPreprocessor.PreprocessPcm16(audioFrame);
+        // Audio is already preprocessed (8kHz via PreConditioner, others via PreprocessPcm16)
 
         if (audioFrame.Length > 0)
         {

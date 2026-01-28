@@ -3,211 +3,231 @@ using System;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Pre-conditioning DSP for OpenAI TTS output before telephony encoding.
-/// Fixes digital artifacts, smooths synthetic dynamics, and prepares audio
-/// for G.711 quantization.
-/// 
-/// Pipeline: TTS PCM 24k → De-ess → Harmonic Soften → Micro-noise → Gain Norm
+/// Streaming preprocessor for OpenAI Realtime 24kHz output → clean 8kHz PCM for PCMA encoding.
+/// Pipeline: DC removal → 3.4kHz low-pass → normalize → soft-clip → downsample
 /// </summary>
-public static class TtsPreConditioner
+public class TtsPreConditioner
 {
-    // ===== De-esser (Sibilant Control) =====
-    // Targets 4-8kHz where "s", "sh", "ch" live
-    private const float DEESS_FREQ = 5500f;
-    private const float DEESS_Q = 1.5f;
-    private const float DEESS_THRESHOLD = 0.15f;  // When to start reducing
-    private const float DEESS_RATIO = 0.6f;       // How much to reduce (0.6 = 40% reduction)
+    // OpenAI Realtime outputs 24kHz, telephony needs 8kHz
+    public const int InputSampleRate = 24000;
+    public const int OutputSampleRate = 8000;
+    public const int FrameMs = 20;
+
+    public const int InputSamplesPerFrame = InputSampleRate * FrameMs / 1000;   // 480
+    public const int OutputSamplesPerFrame = OutputSampleRate * FrameMs / 1000; // 160
+
+    public const int InputBytesPerFrame = InputSamplesPerFrame * 2;   // 960 bytes
+    public const int OutputBytesPerFrame = OutputSamplesPerFrame * 2; // 320 bytes
+
+    // Low-pass filter state for continuity across frames
+    private double _lpPrev;
+    private bool _lpPrevInit;
     
-    // ===== Harmonic Softener (Anti-alias blur) =====
-    // Gentle 1-pole lowpass to smooth harsh digital edges
-    private const float SOFTEN_FREQ = 7000f;      // Cutoff frequency
-    private const float SOFTEN_AMOUNT = 0.3f;     // Blend: 0=off, 1=full filter
-    
-    // ===== Micro-noise Bed =====
-    // Very low level noise to mask quantization artifacts
-    private const float NOISE_LEVEL = 0.0008f;    // -62dB, barely perceptible
-    
-    // ===== Gain Normalization =====
-    private const float TARGET_RMS = 0.18f;       // Target RMS level
-    private const float MAX_GAIN = 2.5f;          // Limit gain boost
-    private const float MIN_GAIN = 0.5f;          // Limit gain reduction
-    
-    // Sample rate
-    private const float SR = 24000f;
-    
-    // Filter states
-    private static float _deessX1, _deessX2, _deessY1, _deessY2;
-    private static float _deessB0, _deessB1, _deessB2, _deessA1, _deessA2;
-    private static float _softenState;
-    private static float _softenCoeff;
-    private static bool _initialized;
-    private static readonly Random _rng = new Random();
-    private static readonly object _lock = new object();
-    
-    private static float DbToLin(float db) => (float)Math.Pow(10, db / 20.0);
-    
-    private static void Initialize()
-    {
-        if (_initialized) return;
-        _initialized = true;
-        
-        // Setup de-esser bandpass filter (to detect sibilants)
-        SetupBandpass(DEESS_FREQ, DEESS_Q);
-        
-        // Setup softener coefficient (1-pole lowpass)
-        float w = 2f * (float)Math.PI * SOFTEN_FREQ / SR;
-        _softenCoeff = 1f - (float)Math.Exp(-w);
-    }
-    
-    private static void SetupBandpass(float freq, float Q)
-    {
-        float w0 = 2f * (float)Math.PI * freq / SR;
-        float alpha = (float)Math.Sin(w0) / (2f * Q);
-        float cosw = (float)Math.Cos(w0);
-        
-        float b0 = alpha;
-        float b1 = 0f;
-        float b2 = -alpha;
-        float a0 = 1f + alpha;
-        float a1 = -2f * cosw;
-        float a2 = 1f - alpha;
-        
-        _deessB0 = b0 / a0;
-        _deessB1 = b1 / a0;
-        _deessB2 = b2 / a0;
-        _deessA1 = a1 / a0;
-        _deessA2 = a2 / a0;
-    }
-    
+    // DC removal state (stateful high-pass)
+    private double _dcAccum;
+    private const double DcAlpha = 0.995; // High-pass pole for DC blocking
+
     /// <summary>
-    /// Process 24kHz PCM audio through pre-conditioning pipeline.
-    /// Call this BEFORE TelephonyVoiceShaping.
+    /// Process a single 20ms 24kHz PCM16 mono frame → 20ms 8kHz PCM16 frame.
+    /// Output is ready for PCMA (G.711 A-Law) encoding.
     /// </summary>
-    public static short[] Process(short[] pcm)
+    public short[] ProcessFrame(short[] samples24k)
     {
-        if (pcm == null || pcm.Length == 0)
-            return pcm;
-        
-        lock (_lock)
+        if (samples24k == null || samples24k.Length == 0)
+            return Array.Empty<short>();
+
+        // Pad or truncate to exact frame size
+        short[] frame = EnsureFrameSize(samples24k, InputSamplesPerFrame);
+
+        // 1) Remove DC offset (stateful high-pass)
+        RemoveDc(frame);
+
+        // 2) Low-pass @ 3.4kHz for telephony band limiting
+        LowpassInPlace(frame, 3400.0, InputSampleRate);
+
+        // 3) Normalize to 90% and soft-clip
+        NormalizeAndClip(frame);
+
+        // 4) Downsample 24kHz → 8kHz (factor 3)
+        short[] samples8k = Downsample24kTo8k(frame);
+
+        return samples8k;
+    }
+
+    /// <summary>
+    /// Process raw bytes from OpenAI Realtime → ready for PCMA encoding.
+    /// </summary>
+    public byte[] ProcessFrameBytes(byte[] inputBytes)
+    {
+        short[] samples24k = BytesToPcm(inputBytes);
+        short[] samples8k = ProcessFrame(samples24k);
+        return PcmToBytes(samples8k);
+    }
+
+    /// <summary>
+    /// Reset filter state (call between calls/sessions).
+    /// </summary>
+    public void Reset()
+    {
+        _lpPrev = 0;
+        _lpPrevInit = false;
+        _dcAccum = 0;
+    }
+
+    /// <summary>
+    /// Ensure frame is exactly the expected size.
+    /// </summary>
+    private static short[] EnsureFrameSize(short[] samples, int targetSize)
+    {
+        if (samples.Length == targetSize)
+            return samples;
+
+        short[] result = new short[targetSize];
+        int copyLen = Math.Min(samples.Length, targetSize);
+        Array.Copy(samples, result, copyLen);
+        return result;
+    }
+
+    /// <summary>
+    /// Stateful DC blocking filter (high-pass).
+    /// </summary>
+    private void RemoveDc(short[] samples)
+    {
+        for (int i = 0; i < samples.Length; i++)
         {
-            Initialize();
-            
-            // Convert to float
-            float[] buf = new float[pcm.Length];
-            for (int i = 0; i < pcm.Length; i++)
-                buf[i] = pcm[i] / 32768f;
-            
-            // 1) De-ess (sibilant control)
-            ApplyDeEsser(buf);
-            
-            // 2) Harmonic soften (gentle anti-alias blur)
-            ApplyHarmonicSoften(buf);
-            
-            // 3) Micro-noise bed injection
-            ApplyMicroNoise(buf);
-            
-            // 4) Gain normalization
-            ApplyGainNorm(buf);
-            
-            // Convert back to short
-            short[] output = new short[buf.Length];
-            for (int i = 0; i < buf.Length; i++)
-                output[i] = (short)(Math.Clamp(buf[i], -1f, 1f) * 32767f);
-            
-            return output;
+            double input = samples[i];
+            double output = input - _dcAccum;
+            _dcAccum = DcAlpha * _dcAccum + (1 - DcAlpha) * input;
+            samples[i] = (short)Math.Clamp(output, short.MinValue, short.MaxValue);
         }
     }
-    
-    private static void ApplyDeEsser(float[] buf)
+
+    /// <summary>
+    /// One-pole low-pass filter @ 3.4kHz with state across frames.
+    /// Classic telephony band limiting.
+    /// </summary>
+    private void LowpassInPlace(short[] samples, double cutoffHz, int sampleRate)
     {
-        // Sidechain: detect sibilant energy via bandpass
-        // When sibilant detected, reduce gain in that region
-        
-        for (int i = 0; i < buf.Length; i++)
+        double rc = 1.0 / (2 * Math.PI * cutoffHz);
+        double dt = 1.0 / sampleRate;
+        double alpha = dt / (rc + dt);
+
+        for (int i = 0; i < samples.Length; i++)
         {
-            float x = buf[i];
-            
-            // Bandpass filter to detect sibilants
-            float bp = _deessB0 * x + _deessB1 * _deessX1 + _deessB2 * _deessX2
-                     - _deessA1 * _deessY1 - _deessA2 * _deessY2;
-            
-            _deessX2 = _deessX1;
-            _deessX1 = x;
-            _deessY2 = _deessY1;
-            _deessY1 = bp;
-            
-            // Envelope follower (detect sibilant energy)
-            float env = Math.Abs(bp);
-            
-            // If sibilant energy exceeds threshold, reduce gain
-            if (env > DEESS_THRESHOLD)
+            double cur = samples[i];
+
+            if (!_lpPrevInit)
             {
-                float reduction = 1f - ((env - DEESS_THRESHOLD) * (1f - DEESS_RATIO));
-                reduction = Math.Clamp(reduction, DEESS_RATIO, 1f);
-                buf[i] *= reduction;
+                _lpPrev = cur;
+                _lpPrevInit = true;
+            }
+
+            _lpPrev = _lpPrev + alpha * (cur - _lpPrev);
+            samples[i] = (short)Math.Clamp(_lpPrev, short.MinValue, short.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Normalize to 90% of full-scale and soft-clip peaks.
+    /// </summary>
+    private static void NormalizeAndClip(short[] samples)
+    {
+        // Find peak (handle short.MinValue edge case)
+        int peak = 0;
+        foreach (short s in samples)
+        {
+            int abs = s == short.MinValue ? 32768 : Math.Abs(s);
+            if (abs > peak) peak = abs;
+        }
+
+        if (peak > 0)
+        {
+            double scale = 0.90 * 32767.0 / peak;
+            
+            // Only normalize if significantly off target
+            if (scale < 0.95 || scale > 1.1)
+            {
+                for (int i = 0; i < samples.Length; i++)
+                {
+                    double v = samples[i] * scale;
+                    samples[i] = (short)Math.Clamp(v, short.MinValue, short.MaxValue);
+                }
             }
         }
+
+        // Soft-clip any remaining peaks
+        for (int i = 0; i < samples.Length; i++)
+            samples[i] = SoftClip(samples[i]);
     }
-    
-    private static void ApplyHarmonicSoften(float[] buf)
-    {
-        // Gentle 1-pole lowpass blended with original
-        // Smooths harsh digital edges without losing clarity
-        
-        for (int i = 0; i < buf.Length; i++)
-        {
-            float x = buf[i];
-            
-            // 1-pole lowpass
-            _softenState += _softenCoeff * (x - _softenState);
-            
-            // Blend: mix filtered with original
-            buf[i] = x * (1f - SOFTEN_AMOUNT) + _softenState * SOFTEN_AMOUNT;
-        }
-    }
-    
-    private static void ApplyMicroNoise(float[] buf)
-    {
-        // Inject very low-level noise to mask quantization artifacts
-        // This helps with the "too clean" digital silence issue
-        
-        for (int i = 0; i < buf.Length; i++)
-        {
-            // Generate white noise (-1 to 1)
-            float noise = (float)(_rng.NextDouble() * 2.0 - 1.0);
-            buf[i] += noise * NOISE_LEVEL;
-        }
-    }
-    
-    private static void ApplyGainNorm(float[] buf)
-    {
-        // Calculate RMS of input
-        double sum = 0;
-        for (int i = 0; i < buf.Length; i++)
-            sum += buf[i] * buf[i];
-        
-        float rms = (float)Math.Sqrt(sum / buf.Length);
-        
-        if (rms < 0.001f) return; // Too quiet, skip
-        
-        // Calculate gain needed to reach target RMS
-        float gain = TARGET_RMS / rms;
-        gain = Math.Clamp(gain, MIN_GAIN, MAX_GAIN);
-        
-        // Apply gain
-        for (int i = 0; i < buf.Length; i++)
-            buf[i] *= gain;
-    }
-    
+
     /// <summary>
-    /// Reset all filter states between calls/sessions.
+    /// Gentle soft-clip above 90% using exponential knee.
+    /// Prevents hard clipping artifacts in PCMA encoding.
     /// </summary>
-    public static void Reset()
+    private static short SoftClip(short x)
     {
-        lock (_lock)
+        const double threshold = 0.90;
+        double v = x / 32768.0;
+        double absV = Math.Abs(v);
+
+        if (absV <= threshold)
+            return x;
+
+        double sign = v >= 0 ? 1.0 : -1.0;
+        double over = absV - threshold;
+        double range = 1.0 - threshold;
+
+        // Exponential compression of the last 10%
+        double y = threshold + range * (1.0 - Math.Exp(-over / range));
+
+        return (short)(sign * y * 32767.0);
+    }
+
+    /// <summary>
+    /// Downsample 24kHz → 8kHz (factor 3) with averaging.
+    /// Audio is already low-passed at 3.4kHz so aliasing is minimal.
+    /// </summary>
+    private static short[] Downsample24kTo8k(short[] input)
+    {
+        int outLen = input.Length / 3;
+        short[] output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
         {
-            _deessX1 = _deessX2 = _deessY1 = _deessY2 = 0;
-            _softenState = 0;
+            int idx = i * 3;
+            // Average 3 samples for smoother decimation
+            int sum = input[idx];
+            if (idx + 1 < input.Length) sum += input[idx + 1];
+            if (idx + 2 < input.Length) sum += input[idx + 2];
+            output[i] = (short)(sum / 3);
         }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Convert 16-bit little-endian PCM bytes to short[].
+    /// </summary>
+    public static short[] BytesToPcm(byte[] buf)
+    {
+        if (buf == null || buf.Length == 0)
+            return Array.Empty<short>();
+            
+        short[] pcm = new short[buf.Length / 2];
+        Buffer.BlockCopy(buf, 0, pcm, 0, buf.Length);
+        return pcm;
+    }
+
+    /// <summary>
+    /// Convert short[] samples to 16-bit little-endian PCM bytes.
+    /// </summary>
+    public static byte[] PcmToBytes(short[] samples)
+    {
+        if (samples == null || samples.Length == 0)
+            return Array.Empty<byte>();
+            
+        byte[] buf = new byte[samples.Length * 2];
+        Buffer.BlockCopy(samples, 0, buf, 0, buf.Length);
+        return buf;
     }
 }
