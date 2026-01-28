@@ -27,11 +27,12 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
-    private const int FLUSH_PACKETS = 50;      // Flush first 1 second of audio (carrier junk)
-    private const int EARLY_PROTECTION_MS = 2000; // Ignore inbound for 2s after call starts
+    private const int FLUSH_PACKETS = 100;     // Flush first 2 seconds of audio (carrier/PBX junk)
+    private const int EARLY_PROTECTION_MS = 4000; // Ignore inbound for 4s after call starts (PBX hold music)
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
+    private bool _adaHasStartedSpeaking; // Track if we've received any AI audio
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
@@ -119,11 +120,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _aiPlayout.OnLog += msg => Log(msg);
             _aiPlayout.OnQueueEmpty += () =>
             {
-                _isBotSpeaking = false;
-                _botStoppedSpeakingAt = DateTime.UtcNow;
-                Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                // Only trigger echo guard if Ada has actually spoken (not on initial empty queue)
+                if (_adaHasStartedSpeaking)
+                {
+                    _isBotSpeaking = false;
+                    _botStoppedSpeakingAt = DateTime.UtcNow;
+                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                }
             };
             _aiPlayout.Start();
+            _adaHasStartedSpeaking = false;
             Log($"🎵 [{callId}] AI playout engine started");
 
             // Create OpenAI client
@@ -134,6 +140,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _aiClient.OnPcm24Audio += pcmBytes =>
             {
                 _isBotSpeaking = true;
+                _adaHasStartedSpeaking = true;
                 _aiPlayout?.BufferAiAudio(pcmBytes);
             };
             _aiClient.OnResponseStarted += () => { /* No fade-in reset needed with new playout */ };

@@ -250,10 +250,9 @@ public class AiSipAudioPlayout : IDisposable
     }
 
     /// <summary>
-    /// Resample 24kHz → 8kHz using simple linear interpolation decimation.
-    /// Clean passthrough - no gain, no limiting, no DSP artifacts.
-    /// 
-    /// Uses 3-point averaging before 3:1 decimation for anti-aliasing.
+    /// Resample 24kHz → 8kHz using proper anti-aliasing filter.
+    /// Clean passthrough - uses weighted 3-tap FIR [0.25, 0.5, 0.25] before 3:1 decimation.
+    /// No aggressive gain/limiting - just proper sample rate conversion.
     /// </summary>
     private static short[] Resample24kTo8k(short[] pcm24k)
     {
@@ -266,23 +265,17 @@ public class AiSipAudioPlayout : IDisposable
         {
             int srcIdx = i * 3;
             
-            // Simple 3-point average for anti-aliasing (centered on output sample)
-            // This is clean and doesn't introduce warble/artifacts
-            int sum = pcm24k[srcIdx];
-            int count = 1;
+            // 3-tap FIR filter with coefficients [0.25, 0.5, 0.25] for anti-aliasing
+            // This preserves energy better than simple averaging (coeffs sum to 1.0)
+            int s0 = srcIdx > 0 ? pcm24k[srcIdx - 1] : pcm24k[srcIdx];
+            int s1 = pcm24k[srcIdx];
+            int s2 = srcIdx + 1 < pcm24k.Length ? pcm24k[srcIdx + 1] : pcm24k[srcIdx];
             
-            if (srcIdx + 1 < pcm24k.Length)
-            {
-                sum += pcm24k[srcIdx + 1];
-                count++;
-            }
-            if (srcIdx + 2 < pcm24k.Length)
-            {
-                sum += pcm24k[srcIdx + 2];
-                count++;
-            }
+            // Weighted sum: 0.25*s0 + 0.5*s1 + 0.25*s2 = (s0 + 2*s1 + s2) / 4
+            int filtered = (s0 + (s1 << 1) + s2) >> 2;
             
-            output[i] = (short)(sum / count);
+            // Clamp to short range
+            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
         }
 
         return output;
