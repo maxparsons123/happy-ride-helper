@@ -25,6 +25,8 @@ public class DirectRtpPlayout : IDisposable
     private const int FRAME_MS = 20;
     private const int MAX_QUEUE_FRAMES = 500;     // 10s buffer (OpenAI sends audio in bursts)
     private const int MIN_STARTUP_FRAMES = 25;    // 500ms buffer before starting playout
+    private const int MIN_RUNNING_FRAMES = 5;     // 100ms - re-buffer if drops below this
+    private const int DRIFT_THRESHOLD_MS = 40;    // Reset timing if we fall this far behind
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
@@ -147,6 +149,7 @@ public class DirectRtpPlayout : IDisposable
         double nextFrameTime = sw.Elapsed.TotalMilliseconds;
         bool wasEmpty = true;
         bool startupBuffering = true;
+        int underrunCount = 0;
 
         while (_running)
         {
@@ -159,6 +162,7 @@ public class DirectRtpPlayout : IDisposable
                 {
                     startupBuffering = false;
                     nextFrameTime = sw.Elapsed.TotalMilliseconds;
+                    underrunCount = 0;
                     Log($"📦 Startup buffer ready ({_frameQueue.Count} frames)");
                 }
                 else
@@ -175,11 +179,30 @@ public class DirectRtpPlayout : IDisposable
                 }
             }
 
+            // Adaptive re-buffering: if queue drops too low, pause and refill
+            if (_frameQueue.Count < MIN_RUNNING_FRAMES && _frameQueue.Count > 0)
+            {
+                underrunCount++;
+                if (underrunCount >= 3) // 3 consecutive low-buffer frames = re-buffer
+                {
+                    Log($"⚠️ Buffer underrun ({_frameQueue.Count} frames) - re-buffering...");
+                    startupBuffering = true;
+                    continue;
+                }
+            }
+            else
+            {
+                underrunCount = 0;
+            }
+
+            // Precision timing with spin-wait for sub-millisecond accuracy
             if (now < nextFrameTime)
             {
                 double wait = nextFrameTime - now;
-                if (wait > 2) Thread.Sleep((int)(wait - 1));
-                else if (wait > 0.5) Thread.SpinWait(500);
+                if (wait > 3) 
+                    Thread.Sleep((int)(wait - 2)); // Leave 2ms headroom
+                else if (wait > 0.1) 
+                    Thread.SpinWait(1000); // Tighter spin for precision
                 continue;
             }
 
@@ -204,8 +227,8 @@ public class DirectRtpPlayout : IDisposable
             SendRtpPacket(frame);
             nextFrameTime += FRAME_MS;
 
-            // Drift correction
-            if (now - nextFrameTime > 20)
+            // Drift correction with configurable threshold
+            if (now - nextFrameTime > DRIFT_THRESHOLD_MS)
             {
                 Log($"⏱️ Drift correction: {now - nextFrameTime:F1}ms behind");
                 nextFrameTime = now + FRAME_MS;
