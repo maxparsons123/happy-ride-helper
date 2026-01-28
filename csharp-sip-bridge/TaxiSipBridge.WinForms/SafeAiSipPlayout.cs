@@ -22,7 +22,7 @@ public class SafeAiSipPlayout : IDisposable
 {
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
-    private const int MAX_QUEUE_FRAMES = 60;      // 1.2s buffer
+    private const int MAX_QUEUE_FRAMES = 250;     // 5s buffer (OpenAI delivers faster than real-time)
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
