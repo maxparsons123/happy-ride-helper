@@ -68,9 +68,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer - SIP uses 20ms frames (50 packets/sec)
+    // Jitter buffer - increased for SpeexDSP stability
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 200;  // 200ms (10 frames) - stable SIP playback
+    private int _jitterBufferMs = 240;  // 240ms (12 frames) - stable with SpeexDSP
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -352,11 +352,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming - 10 frames (200ms) for stable SIP playback
-            // SIP uses 20ms frames at 50 packets/sec, need adequate buffer for network jitter
+            // Jitter buffer priming - 12 frames (240ms) for stable SpeexDSP playback
             if (!_jitterBufferFilled)
             {
-                int minFrames = 10;  // 200ms - stable SIP playback
+                int minFrames = 12;  // 240ms - stable with SpeexDSP resampling
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -493,24 +492,25 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
     
     /// <summary>
-    /// Resample using SpeexDSP library (quality level 8 = high quality for telephony).
+    /// Resample using SpeexDSP library (quality level 6 = good quality, smooth for telephony).
     /// </summary>
     private short[] ResampleSpeexDsp(short[] input, int fromRate, int toRate)
     {
+        // Quality 6 is smoother than 8, less internal processing = less choppiness
         if (fromRate == 24000 && toRate == 8000)
         {
-            _speexResampler8k ??= new SpeexDspResampler(24000, 8000, 8);
+            _speexResampler8k ??= new SpeexDspResampler(24000, 8000, 6);
             return _speexResampler8k.Resample(input);
         }
         
         if (fromRate == 24000 && toRate == 16000)
         {
-            _speexResampler16k ??= new SpeexDspResampler(24000, 16000, 8);
+            _speexResampler16k ??= new SpeexDspResampler(24000, 16000, 6);
             return _speexResampler16k.Resample(input);
         }
         
         // For other rates, create temporary resampler
-        using var resampler = new SpeexDspResampler((uint)fromRate, (uint)toRate, 8);
+        using var resampler = new SpeexDspResampler((uint)fromRate, (uint)toRate, 6);
         return resampler.Resample(input);
     }
     
