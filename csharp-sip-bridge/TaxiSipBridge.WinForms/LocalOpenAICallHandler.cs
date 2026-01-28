@@ -19,6 +19,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
+    private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
+    private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
     
     private VoIPMediaSession? _currentMediaSession;
     private AiSipAudioPlayout? _aiPlayout;
@@ -115,7 +117,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _aiPlayout.OnQueueEmpty += () =>
             {
                 _isBotSpeaking = false;
-                Log($"🔇 [{callId}] Ada finished speaking");
+                _botStoppedSpeakingAt = DateTime.UtcNow;
+                Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
             };
             _aiPlayout.Start();
             Log($"🎵 [{callId}] AI playout engine started");
@@ -227,8 +230,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 Log($"✅ [{callId}] Inbound flush complete");
             }
 
-            // Skip while bot is speaking (echo prevention)
+            // Skip while bot is speaking OR during echo guard period
             if (_isBotSpeaking) return;
+            
+            var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
+            if (msSinceBotStopped < ECHO_GUARD_MS) return;
 
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
