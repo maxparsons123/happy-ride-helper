@@ -157,13 +157,15 @@ public class AiSipAudioPlayout : IDisposable
     }
 
     /// <summary>
-    /// High-precision 20ms playout loop.
+    /// High-precision 20ms playout loop with diagnostics.
     /// </summary>
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
         double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
         bool wasEmpty = false;
+        int diagnosticCounter = 0;
+        double lastDiagnosticTime = 0;
 
         while (_running)
         {
@@ -186,6 +188,16 @@ public class AiSipAudioPlayout : IDisposable
             {
                 frame = queuedFrame;
                 wasEmpty = false;
+                diagnosticCounter++;
+                
+                // Log every 250 frames (5 seconds) for rate diagnostics
+                if (diagnosticCounter % 250 == 0)
+                {
+                    double elapsed = now - lastDiagnosticTime;
+                    double framesPerSec = 250.0 / (elapsed / 1000.0);
+                    Log($"📊 Playout rate: {framesPerSec:F1} fps (target: 50), queue: {_frameQueue.Count}");
+                    lastDiagnosticTime = now;
+                }
             }
             else
             {
@@ -217,6 +229,7 @@ public class AiSipAudioPlayout : IDisposable
 
     /// <summary>
     /// Encode PCM to A-law/μ-law and send via VoIPMediaSession.
+    /// Uses correct RTP duration (160 timestamp units for 20ms @ 8kHz).
     /// </summary>
     private void SendPcmFrame(short[] pcmFrame)
     {
@@ -238,8 +251,10 @@ public class AiSipAudioPlayout : IDisposable
                     encodedBytes[i] = G711Codec.EncodeSample(pcmFrame[i]);
             }
 
-            // SendAudio expects: duration in RTP units (160 for 20ms @ 8kHz), encoded bytes
-            _mediaSession.SendAudio((uint)encodedBytes.Length, encodedBytes);
+            // RTP duration = 160 timestamp units (samples @ 8kHz clock rate)
+            // This MUST match the number of samples, not bytes (though they're equal for G.711)
+            const uint RTP_DURATION = 160; // 20ms @ 8kHz = 160 samples
+            _mediaSession.SendAudio(RTP_DURATION, encodedBytes);
 
             Interlocked.Increment(ref _framesSent);
         }

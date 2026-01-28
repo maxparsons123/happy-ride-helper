@@ -27,12 +27,13 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
-    private const int FLUSH_PACKETS = 100;     // Flush first 2 seconds of audio (carrier/PBX junk)
-    private const int EARLY_PROTECTION_MS = 4000; // Ignore inbound for 4s after call starts (PBX hold music)
+    private const int FLUSH_PACKETS = 150;     // Flush first 3 seconds of audio (carrier/PBX junk)
+    private const int EARLY_PROTECTION_MS = 6000; // Ignore inbound for 6s after call starts (PBX hold music)
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
     private bool _adaHasStartedSpeaking; // Track if we've received any AI audio
+    private DateTime _adaFirstAudioAt = DateTime.MinValue; // When Ada started speaking
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
