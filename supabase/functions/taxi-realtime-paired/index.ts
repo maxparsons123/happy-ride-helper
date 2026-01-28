@@ -4535,6 +4535,7 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
             // This prevents the AI from putting data in the wrong field
             const expectedField = sessionState.lastQuestionAsked;
             let fieldUpdated: string | null = null;
+            let waitingForStt = false; // Track if we're waiting for STT (suppress response)
             
             // Validate and update ONLY the expected field
             // STRATEGY: Use Ada's extraction if it's GROUNDED in user STT (shares tokens)
@@ -4548,10 +4549,20 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
 
                 // RACE CONDITION FIX: If no STT yet, DON'T accept Ada's guess - it's often hallucinated.
                 // The transcript will arrive shortly and set userTruth.pickup directly.
-                // We mark fieldUpdated=null so the response is suppressed, letting the transcript handler drive.
+                // We set waitingForStt=true to SUPPRESS the response entirely - let transcript handler drive.
                 if (!userStt) {
-                  console.log(`[${callId}] ⏳ Waiting for STT before accepting pickup (Ada guessed: "${extractedPickup}")`);
-                  // DON'T set fieldUpdated - let transcript handler set the value
+                  console.log(`[${callId}] ⏳ WAITING for STT before responding (Ada guessed: "${extractedPickup}") - RESPONSE SUPPRESSED`);
+                  waitingForStt = true;
+                  // Send a minimal tool output to satisfy OpenAI, but DON'T trigger response.create
+                  openaiWs!.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "function_call_output",
+                      call_id: data.call_id,
+                      output: JSON.stringify({ success: true, waiting_for_stt: true })
+                    }
+                  }));
+                  // DO NOT call safeResponseCreate - wait for transcript handler
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it (allows cleaning like "52A" → "52A David Road")
                   sessionState.booking.pickup = extractedPickup;
@@ -4573,10 +4584,19 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 const userStt = sessionState.userTruth.destination || "";
                 const isGrounded = isGroundedInUserText(extractedDest, userStt);
 
-                // RACE CONDITION FIX: If no STT yet, DON'T accept Ada's guess
+                // RACE CONDITION FIX: If no STT yet, DON'T accept Ada's guess - SUPPRESS response
                 if (!userStt) {
-                  console.log(`[${callId}] ⏳ Waiting for STT before accepting destination (Ada guessed: "${extractedDest}")`);
-                  // DON'T set fieldUpdated - let transcript handler set the value
+                  console.log(`[${callId}] ⏳ WAITING for STT before responding (Ada guessed dest: "${extractedDest}") - RESPONSE SUPPRESSED`);
+                  waitingForStt = true;
+                  openaiWs!.send(JSON.stringify({
+                    type: "conversation.item.create",
+                    item: {
+                      type: "function_call_output",
+                      call_id: data.call_id,
+                      output: JSON.stringify({ success: true, waiting_for_stt: true })
+                    }
+                  }));
+                  // DO NOT call safeResponseCreate
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it
                   sessionState.booking.destination = extractedDest;
@@ -4619,8 +4639,17 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    // RACE CONDITION FIX: Don't accept - wait for STT
-                    console.log(`[${callId}] ⏳ Waiting for STT before accepting pickup (fallback, Ada guessed: "${val}")`);
+                    // RACE CONDITION FIX: Don't accept - wait for STT, suppress response
+                    console.log(`[${callId}] ⏳ WAITING for STT (fallback pickup, Ada guessed: "${val}") - RESPONSE SUPPRESSED`);
+                    waitingForStt = true;
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "function_call_output",
+                        call_id: data.call_id,
+                        output: JSON.stringify({ success: true, waiting_for_stt: true })
+                      }
+                    }));
                   } else {
                     sessionState.booking.pickup = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.pickup = val;
@@ -4635,8 +4664,17 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    // RACE CONDITION FIX: Don't accept - wait for STT
-                    console.log(`[${callId}] ⏳ Waiting for STT before accepting destination (fallback, Ada guessed: "${val}")`);
+                    // RACE CONDITION FIX: Don't accept - wait for STT, suppress response
+                    console.log(`[${callId}] ⏳ WAITING for STT (fallback dest, Ada guessed: "${val}") - RESPONSE SUPPRESSED`);
+                    waitingForStt = true;
+                    openaiWs!.send(JSON.stringify({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "function_call_output",
+                        call_id: data.call_id,
+                        output: JSON.stringify({ success: true, waiting_for_stt: true })
+                      }
+                    }));
                   } else {
                     sessionState.booking.destination = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.destination = val;
@@ -4656,6 +4694,12 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 sessionState.userTruth.time = val;
                 fieldUpdated = "time"; 
               }
+            }
+            
+            // If we're waiting for STT, we already sent the tool output above - just return
+            if (waitingForStt) {
+              console.log(`[${callId}] 🔇 Response suppressed - waiting for STT transcript`);
+              break; // Exit the tool handler without triggering response
             }
             
             // If validation rejected the value (garbage), ask the same question again
