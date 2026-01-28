@@ -27,9 +27,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
-    private const int FLUSH_PACKETS = 25;
+    private const int FLUSH_PACKETS = 50;      // Flush first 1 second of audio (carrier junk)
+    private const int EARLY_PROTECTION_MS = 2000; // Ignore inbound for 2s after call starts
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
+    private DateTime _callStartedAt;
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
@@ -70,6 +72,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
         var cts = _callCts;
         _inboundPacketCount = 0;
         _inboundFlushComplete = false;
+        _callStartedAt = DateTime.UtcNow;
         _remotePtToCodec.Clear();
 
         OnCallStarted?.Invoke(callId, caller);
@@ -217,18 +220,23 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
             _inboundPacketCount++;
 
-            // Flush initial packets
+            // Flush initial packets (carrier ringback/hold audio)
             if (!_inboundFlushComplete)
             {
                 if (_inboundPacketCount <= FLUSH_PACKETS)
                 {
                     if (_inboundPacketCount == 1)
-                        Log($"🧹 [{callId}] Flushing inbound audio...");
+                        Log($"🧹 [{callId}] Flushing inbound audio ({FLUSH_PACKETS} packets)...");
                     return;
                 }
                 _inboundFlushComplete = true;
                 Log($"✅ [{callId}] Inbound flush complete");
             }
+
+            // Early protection: ignore audio for first 2 seconds (carrier/PBX junk)
+            var msSinceCallStart = (DateTime.UtcNow - _callStartedAt).TotalMilliseconds;
+            if (msSinceCallStart < EARLY_PROTECTION_MS)
+                return;
 
             // Skip while bot is speaking OR during echo guard period
             if (_isBotSpeaking) return;
