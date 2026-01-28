@@ -46,11 +46,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private bool _needsFadeIn = true;
     private bool _isFirstPacket = true;
     private volatile bool _disposed;
-    private bool _enableFadeIn = true;      // Enable fade-in processing
+    private bool _enableFadeIn = false;      // DISABLED: fade-in causes artifacts
     
-    // DSP control flags
-    private bool _bypassDsp = false;        // Use edge function DSP
-    private float _limiterGain = 1.0f;      // Soft limiter gain state
+    // DSP control flags - ALL BYPASSED for pure passthrough
+    private bool _bypassDsp = true;          // Force DSP bypass
+    private float _limiterGain = 1.0f;       // Soft limiter gain state (unused)
 
     // State tracking
     private short _lastOutputSample;
@@ -302,16 +302,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 _consecutiveUnderruns = 0;
                 audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
-                // Crossfade from silence to audio to prevent spluttering
-                if (_lastFrameWasSilence && audioFrame.Length > 0)
-                {
-                    int crossfadeLen = Math.Min(40, audioFrame.Length); // ~0.8ms at 48kHz
-                    for (int i = 0; i < crossfadeLen; i++)
-                    {
-                        float t = (float)i / crossfadeLen;
-                        audioFrame[i] = (short)(audioFrame[i] * t);
-                    }
-                }
+                // DISABLED: Crossfade was causing distortion artifacts
+                // Pure passthrough: just use resampled audio directly
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
             }
@@ -345,19 +337,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
             OnDebugLog?.Invoke($"[AdaAudioSource] 🔊 Frame {_sentFrames}: {audioFrame.Length} samples @ {targetRate}Hz, peak={peak}");
         }
 
-        // Apply outbound DSP pipeline (skip for A-law - cleaner codec needs no processing)
-        var currentCodec = _audioFormatManager.SelectedFormat.Codec;
-        bool skipDsp = _bypassDsp || currentCodec == SIPSorceryMedia.Abstractions.AudioCodecsEnum.PCMA;
-        if (!skipDsp)
-        {
-            audioFrame = ApplyOutboundDsp(audioFrame, targetRate);
-        }
-        else
-        {
-            // A-law path: pure passthrough - no processing at all
-            // OpenAI's output is already clean and normalized
-            // Any DSP (even soft limiting) introduces artifacts
-        }
+        // PURE PASSTHROUGH: No DSP processing at all
+        // OpenAI's 24kHz output → Polyphase FIR resample → G.711 encode
+        // No fade-in, no crossfade, no limiter
 
         if (audioFrame.Length > 0)
         {
