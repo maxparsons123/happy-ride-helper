@@ -60,9 +60,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer
+    // Jitter buffer - REDUCED to minimize latency and prevent audio overlap
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 240;  // 240ms default for network jitter
+    private int _jitterBufferMs = 60;  // 60ms - minimal buffer to prevent overlap artifacts
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -292,14 +292,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming for ALL codecs to prevent early underruns
-            // OpenAI sends audio in bursts - need some buffer before starting playback
-            // REDUCED: 12 frames (240ms) - balances latency vs stability
+            // Jitter buffer priming - MINIMAL to prevent audio overlap artifacts
+            // Previous 240ms buffer caused "audio on top of audio" layering effect
+            // Now using 3 frames (60ms) - just enough for burst delivery stability
             if (!_jitterBufferFilled)
             {
-                // Buffer 12 frames (240ms) minimum - enough for burst delivery
-                // Lower buffer = less latency, hear end of conversations
-                int minFrames = 12;
+                int minFrames = 3;  // 60ms - minimal buffer
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -327,15 +325,16 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns++;
 
-                // Aggressive re-prime: if we hit 3 underruns, force buffer refill
-                // This prevents cascading dropouts from network jitter
-                if (_jitterBufferFilled && _consecutiveUnderruns >= 3)
+                // Quick re-prime on underrun - don't accumulate stale audio
+                if (_jitterBufferFilled && _consecutiveUnderruns >= 2)
                 {
                     _jitterBufferFilled = false;
-                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun detected ({_consecutiveUnderruns}x), re-priming buffer");
+                    // Clear any stale frames to prevent "layered audio" effect
+                    while (_pcmQueue.Count > 3) _pcmQueue.TryDequeue(out _);
+                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun ({_consecutiveUnderruns}x), cleared stale frames");
                 }
 
-                // On underrun: send silence immediately to prevent artifacts
+                // On underrun: send silence immediately
                 SendSilence();
                 return;
             }
