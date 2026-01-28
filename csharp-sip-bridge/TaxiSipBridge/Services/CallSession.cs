@@ -32,7 +32,7 @@ public class CallSession : IDisposable
     private ClientWebSocket? _webSocket;
     private SIPUserAgent? _sipUserAgent;
     private VoIPMediaSession? _mediaSession;
-    private AdaAudioSource? _adaAudioSource;
+    private PcmaRtpPlayout? _rtpPlayout;
     private CancellationTokenSource? _cts;
     private readonly AudioDsp _audioDsp = new();
     private bool _isDisposed;
@@ -75,15 +75,11 @@ public class CallSession : IDisposable
 
         try
         {
-            // Create AdaAudioSource - handles resampling, encoding, jitter buffer, RTP timing
-            _adaAudioSource = new AdaAudioSource(_config.AudioMode, _config.JitterBufferMs);
-            _adaAudioSource.OnDebugLog += msg => _logger.LogDebug("[AdaAudioSource] {Message}", msg);
-            _adaAudioSource.OnAudioSourceError += err => _logger.LogWarning("[AdaAudioSource] {Error}", err);
-
-            // Create VoIPMediaSession with AdaAudioSource for outbound audio
+            // Create VoIPMediaSession for SDP negotiation and RTP reception
+            // We use a null AudioSource since we'll send RTP directly via PcmaRtpPlayout
             var mediaEndPoints = new MediaEndPoints
             {
-                AudioSource = _adaAudioSource,
+                AudioSource = null,
                 AudioSink = null  // We handle inbound audio manually via OnRtpPacketReceived
             };
             _mediaSession = new VoIPMediaSession(mediaEndPoints);
@@ -114,8 +110,24 @@ public class CallSession : IDisposable
                 return;
             }
 
-            // Start the media session (triggers AdaAudioSource.StartAudio)
+            // Start the media session
             await _mediaSession.Start();
+
+            // Create PcmaRtpPlayout with dedicated timing thread for outbound audio
+            var rtpChannel = _mediaSession.AudioRtpSession?.RtpChannel;
+            var remoteEp = _mediaSession.AudioRtpSession?.DestinationEndPoint;
+            
+            if (rtpChannel != null && remoteEp != null)
+            {
+                _rtpPlayout = new PcmaRtpPlayout(rtpChannel, remoteEp);
+                _rtpPlayout.OnDebugLog += msg => _logger.LogDebug("{Message}", msg);
+                _rtpPlayout.Start();
+                _logger.LogInformation("Call {CallId} - PcmaRtpPlayout started", _callId);
+            }
+            else
+            {
+                _logger.LogWarning("Call {CallId} - Could not get RTP channel/endpoint for direct playout", _callId);
+            }
 
             // Log negotiated codec
             var selectedFormat = _mediaSession.AudioLocalTrack?.Capabilities?.FirstOrDefault();
@@ -297,15 +309,15 @@ public class CallSession : IDisposable
                     if (!string.IsNullOrEmpty(audioData))
                     {
                         var pcm24kBytes = Convert.FromBase64String(audioData);
-                        // Feed to AdaAudioSource - it handles resampling, encoding, and RTP timing
-                        _adaAudioSource?.EnqueuePcm24(pcm24kBytes);
+                        // Feed to PcmaRtpPlayout - handles resampling (24k→8k), PCMA encoding, and RTP timing
+                        _rtpPlayout?.EnqueuePcm24(pcm24kBytes);
                     }
                     break;
 
                 case "response.created":
                 case "response.audio.started":
-                    // Reset fade-in for new response
-                    _adaAudioSource?.ResetFadeIn();
+                    // Clear queue on new response to prevent stale audio
+                    _rtpPlayout?.Clear();
                     break;
 
                 case "response.audio_transcript.delta":
@@ -445,7 +457,10 @@ public class CallSession : IDisposable
             catch { }
         }
 
-        // Stop media session (this will call AdaAudioSource.CloseAudio)
+        // Stop RTP playout
+        try { _rtpPlayout?.Dispose(); } catch { }
+
+        // Stop media session
         try { _mediaSession?.Close("Call ended"); } catch { }
 
         OnCallEnded?.Invoke(this, EventArgs.Empty);
@@ -460,7 +475,7 @@ public class CallSession : IDisposable
         _cts?.Dispose();
         _webSocket?.Dispose();
         _mediaSession?.Dispose();
-        _adaAudioSource?.Dispose();
+        _rtpPlayout?.Dispose();
 
         GC.SuppressFinalize(this);
     }
