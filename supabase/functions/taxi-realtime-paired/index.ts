@@ -1289,6 +1289,15 @@ const STT_CORRECTIONS: Record<string, string> = {
   "this is qa david rhoades": "52A David Road",
   "52 qa david": "52A David Road",
   "qa david": "52A David",
+  // "Circuits awaiting, David Roach" observed Whisper hallucination of "52A David Road"
+  "circuits awaiting, david roach": "52A David Road",
+  "circuits awaiting david roach": "52A David Road",
+  "circuits awaiting, david roach.": "52A David Road",
+  "circuit awaiting, david roach": "52A David Road",
+  "circuit awaiting david roach": "52A David Road",
+  "circuits a waiting david roach": "52A David Road",
+  "david roach": "David Road",
+  "david roach.": "David Road",
   "high street": "High Street",
   "hi street": "High Street",
   "church road": "Church Road",
@@ -4537,16 +4546,12 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 const userStt = sessionState.userTruth.pickup || "";
                 const isGrounded = isGroundedInUserText(extractedPickup, userStt);
 
-                // RACE CONDITION FIX: If we don't have userTruth yet (transcript hasn't arrived),
-                // ACCEPT Ada's extraction on first capture. The tool call can arrive before
-                // the transcript event due to OpenAI's parallel processing.
-                // We'll store Ada's extraction and it can be corrected later if needed.
+                // RACE CONDITION FIX: If no STT yet, DON'T accept Ada's guess - it's often hallucinated.
+                // The transcript will arrive shortly and set userTruth.pickup directly.
+                // We mark fieldUpdated=null so the response is suppressed, letting the transcript handler drive.
                 if (!userStt) {
-                  // First capture - trust Ada's extraction (no STT yet to validate against)
-                  sessionState.booking.pickup = extractedPickup;
-                  sessionState.userTruth.pickup = extractedPickup; // Store as truth until STT arrives
-                  console.log(`[${callId}] 📌 Ada pickup FIRST CAPTURE (no STT yet): "${extractedPickup}"`);
-                  fieldUpdated = "pickup";
+                  console.log(`[${callId}] ⏳ Waiting for STT before accepting pickup (Ada guessed: "${extractedPickup}")`);
+                  // DON'T set fieldUpdated - let transcript handler set the value
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it (allows cleaning like "52A" → "52A David Road")
                   sessionState.booking.pickup = extractedPickup;
@@ -4568,12 +4573,10 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 const userStt = sessionState.userTruth.destination || "";
                 const isGrounded = isGroundedInUserText(extractedDest, userStt);
 
-                // RACE CONDITION FIX: Accept first capture when no STT yet
+                // RACE CONDITION FIX: If no STT yet, DON'T accept Ada's guess
                 if (!userStt) {
-                  sessionState.booking.destination = extractedDest;
-                  sessionState.userTruth.destination = extractedDest;
-                  console.log(`[${callId}] 📌 Ada destination FIRST CAPTURE (no STT yet): "${extractedDest}"`);
-                  fieldUpdated = "destination";
+                  console.log(`[${callId}] ⏳ Waiting for STT before accepting destination (Ada guessed: "${extractedDest}")`);
+                  // DON'T set fieldUpdated - let transcript handler set the value
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it
                   sessionState.booking.destination = extractedDest;
@@ -4616,11 +4619,8 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    // RACE CONDITION FIX: Accept first capture
-                    sessionState.booking.pickup = val;
-                    sessionState.userTruth.pickup = val;
-                    console.log(`[${callId}] 📌 Ada pickup FIRST CAPTURE (fallback, no STT yet): "${val}"`);
-                    fieldUpdated = "pickup";
+                    // RACE CONDITION FIX: Don't accept - wait for STT
+                    console.log(`[${callId}] ⏳ Waiting for STT before accepting pickup (fallback, Ada guessed: "${val}")`);
                   } else {
                     sessionState.booking.pickup = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.pickup = val;
@@ -4635,11 +4635,8 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    // RACE CONDITION FIX: Accept first capture
-                    sessionState.booking.destination = val;
-                    sessionState.userTruth.destination = val;
-                    console.log(`[${callId}] 📌 Ada destination FIRST CAPTURE (fallback, no STT yet): "${val}"`);
-                    fieldUpdated = "destination";
+                    // RACE CONDITION FIX: Don't accept - wait for STT
+                    console.log(`[${callId}] ⏳ Waiting for STT before accepting destination (fallback, Ada guessed: "${val}")`);
                   } else {
                     sessionState.booking.destination = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.destination = val;
