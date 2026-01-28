@@ -70,15 +70,15 @@ public static class AudioCodecs
 
     /// <summary>
     /// Encode PCM16 samples to A-law (G.711) using NAudio for high-quality encoding.
-    /// Applies TelephonyVoiceShaping (EQ + compression) before encoding.
+    /// DSP BYPASS: No voice shaping applied - pure encoding only.
     /// </summary>
-    public static byte[] ALawEncode(short[] pcm, bool applyShaping = true)
+    public static byte[] ALawEncode(short[] pcm, bool applyShaping = false)
     {
-        var shaped = applyShaping ? TelephonyVoiceShaping.Process(pcm) : pcm;
-        var alaw = new byte[shaped.Length];
-        for (int i = 0; i < shaped.Length; i++)
+        // DSP bypass: always use raw PCM, ignore applyShaping parameter
+        var alaw = new byte[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++)
         {
-            alaw[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(shaped[i]);
+            alaw[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(pcm[i]);
         }
         return alaw;
     }
@@ -474,21 +474,13 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// Process TTS output through full pre-conditioning pipeline before telephony encoding.
-    /// Pipeline: 24kHz PCM → Pre-condition → Resample 8kHz → Voice Shaping → G.711
+    /// Process TTS output for telephony - RESAMPLE ONLY, no DSP.
+    /// Pipeline: 24kHz PCM → Resample 8kHz (pure passthrough)
     /// </summary>
     public static short[] ProcessTtsForTelephony(short[] pcm24k)
     {
-        // 1) Pre-condition: de-ess, soften, micro-noise, gain norm
-        var conditioned = TtsPreConditioner.Process(pcm24k);
-        
-        // 2) Resample 24kHz → 8kHz
-        var pcm8k = Resample24kTo8k(conditioned);
-        
-        // 3) Voice shaping (warmth, presence, compression) applied during encoding
-        // Note: TelephonyVoiceShaping is applied in ALawEncode/MuLawEncode
-        
-        return pcm8k;
+        // DSP BYPASS: Only high-quality resampling, no pre-conditioning or shaping
+        return Resample24kTo8k(pcm24k);
     }
 }
 
