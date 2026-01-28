@@ -13,5 +13,7 @@ public interface ICallHandler : IDisposable
     event Action<string>? OnCallEnded;
     event Action<string>? OnTranscript;
 
+    bool IsInCall { get; }
+
     Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller);
 }
