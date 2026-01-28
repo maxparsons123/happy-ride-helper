@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Threading;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -35,9 +34,6 @@ public class AiSipAudioPlayout : IDisposable
     // RTP state
     private ushort _seq;
     private uint _timestamp;
-    
-    // Resampler (24kHz → 8kHz) - using NAudio's WDL resampler
-    private readonly object _resamplerLock = new();
     
     // Stats
     private int _framesSent;
@@ -240,14 +236,25 @@ public class AiSipAudioPlayout : IDisposable
     }
     
     /// <summary>
-    /// Resample 24kHz PCM to 8kHz using NAudio's WDL resampler.
+    /// Resample 24kHz PCM to 8kHz using simple 3:1 decimation with averaging.
+    /// This is fast and produces clear intelligible speech.
     /// </summary>
-    private short[] Resample24kTo8k(short[] pcm24k)
+    private static short[] Resample24kTo8k(short[] pcm24k)
     {
-        lock (_resamplerLock)
+        int outputLen = pcm24k.Length / 3;
+        var output = new short[outputLen];
+        
+        for (int i = 0; i < outputLen; i++)
         {
-            return NAudioResampler.Resample(pcm24k, 24000, 8000);
+            int srcIdx = i * 3;
+            // Average 3 samples to prevent aliasing artifacts
+            int sum = pcm24k[srcIdx];
+            if (srcIdx + 1 < pcm24k.Length) sum += pcm24k[srcIdx + 1];
+            if (srcIdx + 2 < pcm24k.Length) sum += pcm24k[srcIdx + 2];
+            output[i] = (short)(sum / 3);
         }
+        
+        return output;
     }
     
     /// <summary>
