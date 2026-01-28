@@ -19,6 +19,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private const int AUDIO_SAMPLE_PERIOD_MS = 20;
     private const int MAX_QUEUED_FRAMES = 5000;
     
+    // Overflow control - drop frames to prevent lag buildup
+    private const int OVERFLOW_THRESHOLD_FRAMES = 25;  // 500ms max queue depth
+    private const int OVERFLOW_TARGET_FRAMES = 15;     // Drop to 300ms on overflow
+    
     // Outbound DSP configuration - MATCHES EDGE FUNCTION
     private const int FADE_IN_SAMPLES = 80;      // Same as edge function
     private const int CROSSFADE_SAMPLES = 40;    // Same as edge function
@@ -366,6 +370,17 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 }
                 _jitterBufferFilled = true;
                 OnDebugLog?.Invoke($"[AdaAudioSource] 🎯 Jitter buffer primed: {_pcmQueue.Count} frames ({minFrames * AUDIO_SAMPLE_PERIOD_MS}ms) @ {targetRate}Hz");
+            }
+            
+            // Overflow control - drop oldest frames to prevent lag buildup
+            if (_pcmQueue.Count > OVERFLOW_THRESHOLD_FRAMES)
+            {
+                int dropped = 0;
+                while (_pcmQueue.Count > OVERFLOW_TARGET_FRAMES && _pcmQueue.TryDequeue(out _))
+                    dropped++;
+                
+                if (dropped > 0)
+                    OnDebugLog?.Invoke($"[AdaAudioSource] ⚡ Overflow: dropped {dropped} frames ({dropped * AUDIO_SAMPLE_PERIOD_MS}ms) to prevent lag");
             }
 
             if (_pcmQueue.TryDequeue(out var pcm24))
