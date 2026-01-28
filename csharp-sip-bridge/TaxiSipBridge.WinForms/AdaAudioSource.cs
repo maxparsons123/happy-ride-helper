@@ -278,32 +278,34 @@ public class AdaAudioSource : IAudioSource, IDisposable
 
     /// <summary>
     /// High-precision audio thread using Stopwatch for accurate 20ms intervals.
-    /// More reliable than System.Threading.Timer which has 15ms+ jitter.
+    /// Uses double accumulation to prevent integer drift over long calls.
     /// </summary>
     private void AudioThreadLoop()
     {
         var token = _audioCts?.Token ?? CancellationToken.None;
-        long nextFrameTicks = 0;
-        long periodTicks = Stopwatch.Frequency * AUDIO_SAMPLE_PERIOD_MS / 1000;
-        
-        _audioStopwatch.Restart();
+        var sw = Stopwatch.StartNew();
+        double next = 0.0;
+        const double frame = AUDIO_SAMPLE_PERIOD_MS;  // 20ms
         
         while (!token.IsCancellationRequested && !_isClosed && !_disposed)
         {
             try
             {
-                // Wait until next frame time
-                while (_audioStopwatch.ElapsedTicks < nextFrameTicks && !token.IsCancellationRequested)
+                double now = sw.ElapsedMilliseconds;
+                
+                if (now >= next)
                 {
-                    // Spin-wait for precision (short sleeps for CPU efficiency)
-                    if (nextFrameTicks - _audioStopwatch.ElapsedTicks > periodTicks / 4)
+                    if (!_isPaused)
+                        SendSampleCore();
+                    
+                    next += frame;
+                }
+                else
+                {
+                    double sleep = next - now;
+                    if (sleep > 1)
                         Thread.Sleep(1);
                 }
-                
-                nextFrameTicks += periodTicks;
-                
-                if (!_isPaused)
-                    SendSampleCore();
             }
             catch (Exception ex)
             {
@@ -311,7 +313,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             }
         }
         
-        _audioStopwatch.Stop();
+        sw.Stop();
     }
 
     public Task PauseAudio() { _isPaused = true; return Task.CompletedTask; }
