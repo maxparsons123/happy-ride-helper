@@ -373,13 +373,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
             {
                 _consecutiveUnderruns = 0;
                 
-                // Apply gentle high-frequency softening for "rounder" audio
-                // Single-pole IIR at ~6.5kHz - smooths harsh edges without phase artifacts
-                ApplySoftener(pcm24);
-                
-                // PASSTHROUGH: Use polyphase FIR resampler for ALL rates
-                // TtsPreConditioner's one-pole lowpass + normalize caused warbling artifacts
-                // The polyphase FIR has proper anti-aliasing built-in (Kaiser-windowed sinc)
+                // PURE PASSTHROUGH: SpeexDSP resampling only, no preprocessing
+                // Testing SpeexDSP quality without any DSP filters
                 audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
