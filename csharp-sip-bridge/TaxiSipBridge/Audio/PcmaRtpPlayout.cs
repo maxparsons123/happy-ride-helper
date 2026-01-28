@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Net;
 using System.Threading;
 using SIPSorcery.Net;
-using NAudio.Codecs;
 
 namespace TaxiSipBridge.Audio;
 
@@ -15,21 +14,19 @@ namespace TaxiSipBridge.Audio;
 public class PcmaRtpPlayout : IDisposable
 {
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
-    private readonly byte[] _pcmaBuffer = new byte[160]; // 20ms @ 8kHz PCMA
-
-    private const int FRAME_SAMPLES = 160;
-    private const int FRAME_MS = 20;
+    private readonly byte[] _pcmaBuffer = new byte[160];   // 20ms @ 8kHz PCMA
+    private readonly ushort _clockRate = 8000;
+    private readonly int _frameSamples = 160;              // 20ms * 8000Hz
+    private readonly int _frameMs = 20;
 
     private readonly RTPChannel _rtpChannel;
     private readonly IPEndPoint _remoteEndPoint;
 
     private Thread? _playoutThread;
-    private volatile bool _running;
+    private bool _running;
     private ushort _seq;
     private uint _ts;
     private readonly uint _ssrc;
-
-    public event Action<string>? OnDebugLog;
 
     public PcmaRtpPlayout(RTPChannel rtpChannel, IPEndPoint remoteEndPoint)
     {
@@ -49,27 +46,24 @@ public class PcmaRtpPlayout : IDisposable
         _playoutThread = new Thread(PlayoutLoop)
         {
             IsBackground = true,
-            Priority = ThreadPriority.AboveNormal,
-            Name = "PcmaRtpPlayout"
+            Priority = ThreadPriority.AboveNormal
         };
         _playoutThread.Start();
-        OnDebugLog?.Invoke("[PcmaRtpPlayout] ▶️ Started playout thread");
     }
 
     public void Stop()
     {
         _running = false;
-        try { _playoutThread?.Join(500); } catch { }
-        OnDebugLog?.Invoke("[PcmaRtpPlayout] ⏹️ Stopped");
+        _playoutThread?.Join();
     }
 
     /// <summary>
-    /// Enqueue one 20ms 8kHz PCM16 frame (160 samples).
+    /// Enqueue one 20ms frame of 8kHz PCM16 (160 samples).
     /// </summary>
     public void EnqueuePcm8kFrame(short[] pcm8kFrame)
     {
-        if (pcm8kFrame == null || pcm8kFrame.Length != FRAME_SAMPLES)
-            throw new ArgumentException($"Expected {FRAME_SAMPLES} samples.", nameof(pcm8kFrame));
+        if (pcm8kFrame == null || pcm8kFrame.Length != _frameSamples)
+            throw new ArgumentException($"Expected {_frameSamples} samples.", nameof(pcm8kFrame));
 
         _frameQueue.Enqueue(pcm8kFrame);
     }
@@ -84,28 +78,23 @@ public class PcmaRtpPlayout : IDisposable
             double now = sw.Elapsed.TotalMilliseconds;
             if (now < nextMs)
             {
-                var sleepMs = nextMs - now;
-                if (sleepMs > 1)
-                    Thread.Sleep((int)sleepMs);
-                else
-                    Thread.SpinWait(500);
+                var sleep = nextMs - now;
+                if (sleep > 1) Thread.Sleep((int)sleep);
+                else Thread.SpinWait(500); // fine-tune near the deadline
                 continue;
             }
 
-            // Time to send one frame
+            // time to play one frame
             if (!_frameQueue.TryDequeue(out var frame))
             {
-                // Underrun: play silence
-                frame = new short[FRAME_SAMPLES];
+                // underrun: send silence
+                frame = new short[_frameSamples];
             }
 
-            // Encode PCM16 → PCMA (G.711 A-law)
-            for (int i = 0; i < FRAME_SAMPLES; i++)
-            {
-                _pcmaBuffer[i] = ALawEncoder.LinearToALawSample(frame[i]);
-            }
+            // A-law encode this frame into _pcmaBuffer
+            for (int i = 0; i < _frameSamples; i++)
+                _pcmaBuffer[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(frame[i]);
 
-            // Build RTP packet
             var rtpPacket = new RTPPacket(12 + _pcmaBuffer.Length);
             var header = rtpPacket.Header;
             header.SyncSource = _ssrc;
@@ -116,26 +105,14 @@ public class PcmaRtpPlayout : IDisposable
 
             rtpPacket.Payload = _pcmaBuffer;
 
-            _ts += FRAME_SAMPLES; // 160 samples @ 8kHz per 20ms
+            _ts += (uint)_frameSamples; // 160 samples per 20ms at 8kHz
 
-            byte[] rtpBytes = rtpPacket.GetBytes();
-            _ = _rtpChannel.SendAsync(_remoteEndPoint, rtpBytes);
+            var rtpBytes = rtpPacket.GetBytes();
+            _rtpChannel.SendAsync(_remoteEndPoint, rtpBytes);
 
-            nextMs += FRAME_MS;
+            nextMs += _frameMs;
         }
     }
 
-    /// <summary>
-    /// Clear all queued audio.
-    /// </summary>
-    public void Clear()
-    {
-        while (_frameQueue.TryDequeue(out _)) { }
-    }
-
-    public void Dispose()
-    {
-        Stop();
-        GC.SuppressFinalize(this);
-    }
+    public void Dispose() => Stop();
 }
