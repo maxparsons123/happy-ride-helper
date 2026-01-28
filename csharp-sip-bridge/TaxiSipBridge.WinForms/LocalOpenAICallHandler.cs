@@ -56,7 +56,7 @@ public class LocalOpenAICallHandler : ICallHandler
         _jitterBufferMs = jitterBufferMs;
     }
 
-    public async Task HandleIncomingCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
+    public async Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller)
     {
         if (_disposed) return;
 
@@ -64,7 +64,7 @@ public class LocalOpenAICallHandler : ICallHandler
         {
             Log("⚠️ Already in a call, rejecting");
             var busyResponse = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.BusyHere, null);
-            await ua.SIPTransport.SendResponseAsync(busyResponse);
+            await transport.SendResponseAsync(busyResponse);
             return;
         }
 
@@ -103,7 +103,7 @@ public class LocalOpenAICallHandler : ICallHandler
             try
             {
                 var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
-                await ua.SIPTransport.SendResponseAsync(ringing);
+                await transport.SendResponseAsync(ringing);
             }
             catch (Exception ex)
             {

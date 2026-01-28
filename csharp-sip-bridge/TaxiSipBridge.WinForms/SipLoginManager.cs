@@ -246,7 +246,7 @@ public class SipLoginManager : IDisposable
             return;
         }
 
-        await _callHandler.HandleIncomingCallAsync(ua, req, caller);
+        await _callHandler.HandleIncomingCallAsync(_sipTransport!, ua, req, caller);
     }
 
     #endregion
@@ -304,5 +304,5 @@ public interface ICallHandler : IDisposable
     event Action<string>? OnCallEnded;
     event Action<string>? OnTranscript;
 
-    Task HandleIncomingCallAsync(SIPUserAgent ua, SIPRequest req, string caller);
+    Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller);
 }
