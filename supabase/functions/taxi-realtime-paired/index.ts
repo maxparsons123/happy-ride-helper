@@ -610,6 +610,27 @@ function buildSystemPrompt(language: string): string {
 7. If YES/confirm → Call book_taxi(action="confirmed")
 8. Thank them, give booking ref → Call end_call()
 
+# FIELD VALIDATION (CHECK BEFORE ACCEPTING)
+Before saving each field, verify it sounds reasonable:
+
+PICKUP/DESTINATION:
+✅ Valid: House numbers + street names (e.g., "52A David Road", "7 Russell Street")
+✅ Valid: Landmarks/venues (e.g., "Tesco", "the train station", "Sweet Spot")
+✅ Valid: Postcodes (e.g., "CV1 2AB")
+❌ Invalid: Random words, nonsense, fragments (e.g., "Circuits awaiting", "Chile David")
+❌ Invalid: Ada's own prompts echoed back (e.g., "Where would you like")
+→ If invalid: Ask "Sorry, could you repeat the address?"
+
+PASSENGERS:
+✅ Valid: Numbers 1-8
+❌ Invalid: 0, negative, or more than 8
+→ If invalid: Ask "How many passengers will be traveling?"
+
+TIME:
+✅ Valid: "now", specific times (e.g., "3pm", "in 10 minutes", "half an hour")
+❌ Invalid: Unclear or unrelated phrases
+→ Interpret "for now" or "in for now" as "now"
+
 # ANTI-HALLUCINATION RULES (CRITICAL)
 ❌ NEVER make up, guess, or alter addresses - repeat EXACTLY what user said
 ❌ NEVER substitute street names (e.g., don't change 'David Road' to 'David Close')
@@ -631,8 +652,8 @@ Map user responses to the question you just asked:
 - Asked TIME → response is pickup time
 
 # CRITICAL RULES
-✅ Accept ANY address exactly as spoken - NEVER ask for clarification
-✅ Move to next question immediately after each answer
+✅ Accept ANY valid address exactly as spoken - NEVER ask for clarification on valid addresses
+✅ Move to next question immediately after each valid answer
 ✅ When customer confirms (yes, yeah, go ahead, book it) → IMMEDIATELY call book_taxi(action="confirmed")
 ✅ Ask ONLY ONE question per response - never combine questions
 
@@ -1350,6 +1371,19 @@ const STT_CORRECTIONS: Record<string, string> = {
   "drop off at": "drop off at",
   "drop of at": "drop off at",
   
+  // Time-related mishearings ("four" → "for" in time context)
+  "in four now": "for now",
+  "four now": "for now",
+  "in for now": "for now",
+  "get in four now": "get in for now",
+  "can i get in four now": "can I get in for now",
+  "for now please": "for now please",
+  "four now please": "for now please",
+  "as soon as possible": "now",
+  "right now": "now",
+  "straight away": "now",
+  "immediately": "now",
+  
   // House number suffixes
   "a high": "A High",
   "b high": "B High",
@@ -1388,6 +1422,50 @@ function correctTranscript(text: string): string {
   
   // Capitalize first letter and return
   return corrected.charAt(0).toUpperCase() + corrected.slice(1);
+}
+
+// Normalize pickup time to standard format
+// "Can I get in for now please" → "now"
+// "at 3pm" → "3pm"
+// "in about 10 minutes" → "10 minutes"
+function normalizePickupTime(rawTime: string): string {
+  if (!rawTime) return "now";
+  
+  const lower = rawTime.toLowerCase().trim();
+  
+  // Patterns that mean "now"
+  const nowPatterns = [
+    /\b(now|asap|straight away|right away|immediately|as soon as|right now)\b/i,
+    /\bfor now\b/i,
+    /\bget in.*now/i,
+    /\bnow.*please/i,
+  ];
+  
+  for (const pattern of nowPatterns) {
+    if (pattern.test(lower)) {
+      return "now";
+    }
+  }
+  
+  // Extract specific time if mentioned (e.g., "at 3pm", "3 o'clock", "15:00")
+  const timeMatch = lower.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm|o'?clock)?)/i);
+  if (timeMatch) {
+    return timeMatch[1].trim();
+  }
+  
+  // Extract duration (e.g., "in 10 minutes", "in half an hour")
+  const durationMatch = lower.match(/in\s+(\d+\s*(?:minutes?|mins?|hours?|hrs?))/i);
+  if (durationMatch) {
+    return `in ${durationMatch[1]}`;
+  }
+  
+  // Half hour variants
+  if (lower.includes("half an hour") || lower.includes("half hour")) {
+    return "in 30 minutes";
+  }
+  
+  // If nothing specific found but contains time-like words, return as-is but cleaned
+  return rawTime.replace(/^(can i get |i need |i want |please |make it )/gi, "").trim() || "now";
 }
 
 // Remove "Number" prefix from addresses (e.g., "Number 1, Lifford Lane" -> "1 Lifford Lane")
@@ -3505,10 +3583,11 @@ DO NOT say "booked" or "confirmed" until book_taxi with action: "confirmed" retu
                 console.log(`[${callId}] ⚠️ TIME MISMATCH: User said "${userText}" which looks like an address, not a time. Treating as correction.`);
                 // DON'T store as time - let the correction detection handle it
               } else {
-                // Normal time response
-                sessionState.userTruth.time = userText;
-                sessionState.booking.pickupTime = userText; // Sync to booking
-                console.log(`[${callId}] 📌 User Truth: time = "${userText}"`);
+                // Normal time response - normalize to standard format
+                const normalizedTime = normalizePickupTime(userText);
+                sessionState.userTruth.time = normalizedTime;
+                sessionState.booking.pickupTime = normalizedTime; // Sync to booking
+                console.log(`[${callId}] 📌 User Truth: time = "${normalizedTime}" (raw: "${userText}")`);
                 userTruthUpdated = true;
               }
             }
@@ -4584,12 +4663,14 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
               }
               fieldUpdated = "passengers";
             } else if (expectedField === "time" && toolArgs.pickup_time) {
-              const extractedTime = String(toolArgs.pickup_time);
+              const rawTime = String(toolArgs.pickup_time);
+              const extractedTime = normalizePickupTime(rawTime);
               sessionState.booking.pickupTime = extractedTime;
               // Time is less likely to hallucinate - can update userTruth if empty
               if (!sessionState.userTruth.time) {
                 sessionState.userTruth.time = extractedTime;
               }
+              console.log(`[${callId}] ⏰ Time normalized: "${rawTime}" → "${extractedTime}"`);
               fieldUpdated = "time";
             } else {
               // AI tried to update wrong field - still accept but log warning
@@ -4652,7 +4733,8 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 fieldUpdated = "passengers"; 
               }
               else if (toolArgs.pickup_time) { 
-                const val = String(toolArgs.pickup_time);
+                const rawVal = String(toolArgs.pickup_time);
+                const val = normalizePickupTime(rawVal);
                 sessionState.booking.pickupTime = val; 
                 sessionState.userTruth.time = val;
                 fieldUpdated = "time"; 
