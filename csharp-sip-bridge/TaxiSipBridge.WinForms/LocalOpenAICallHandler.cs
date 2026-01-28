@@ -8,7 +8,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
-/// Uses SafeAiSipPlayout for timer-driven RTP delivery with raw PCM passthrough.
+/// Uses G711AiSipPlayout for timer-driven RTP delivery with proper G.711 encoding.
 /// </summary>
 public class LocalOpenAICallHandler : ISipCallHandler
 {
@@ -23,7 +23,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
     
     private VoIPMediaSession? _currentMediaSession;
-    private SafeAiSipPlayout? _playout;
+    private G711AiSipPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
@@ -121,8 +121,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create SafeAiSipPlayout (raw PCM → VoIPMediaSession handles encoding)
-            _playout = new SafeAiSipPlayout(_currentMediaSession, ua);
+            // Create G711AiSipPlayout (24kHz PCM → 8kHz → G.711 encoding)
+            _playout = new G711AiSipPlayout(_currentMediaSession, ua);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -136,7 +136,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _playout.Start();
 
             _adaHasStartedSpeaking = false;
-            Log($"🎵 [{callId}] SafeAiSipPlayout started (raw PCM passthrough)");
+            Log($"🎵 [{callId}] G711AiSipPlayout started (ITU-T G.711 encoding)");
 
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
