@@ -7,6 +7,7 @@ using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -27,10 +28,6 @@ public class DirectRtpPlayout : IDisposable
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _alawBuffer = new byte[PCM8K_FRAME_SAMPLES];
-
-    // NAudio Infrastructure for high-quality resampling
-    private readonly BufferedWaveProvider _inputBuffer;
-    private readonly WdlResamplingSampleProvider _resampler;
 
     // RTP state
     private uint _timestamp;
@@ -57,22 +54,11 @@ public class DirectRtpPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _timestamp = (uint)new Random().Next(1, int.MaxValue);
 
-        // Initialize NAudio Pipeline: 24kHz 16-bit Mono → 8kHz Mono
-        var inputFormat = new WaveFormat(24000, 16, 1);
-        _inputBuffer = new BufferedWaveProvider(inputFormat) 
-        { 
-            DiscardOnBufferOverflow = true,
-            BufferLength = 24000 * 2 * 10 // 10 seconds of 24kHz 16-bit mono
-        };
-        
-        // WdlResamplingSampleProvider provides professional-grade resampling with proper anti-aliasing
-        _resampler = new WdlResamplingSampleProvider(_inputBuffer.ToSampleProvider(), 8000);
-
-        Log($"✅ Direct RTP playout initialized | Resampler: NAudio WDL");
+        Log($"✅ Direct RTP playout initialized | Resampler: NAudio WDL (per-chunk)");
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Processes through NAudio WDL resampler to 8kHz.
+    /// Buffer 24kHz PCM from OpenAI. Uses NAudio WDL resampler per-chunk for high quality.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -81,24 +67,16 @@ public class DirectRtpPlayout : IDisposable
 
         try
         {
-            // 1. Push raw 24kHz bytes into NAudio input buffer
-            _inputBuffer.AddSamples(pcm24kBytes, 0, pcm24kBytes.Length);
-
-            // 2. Read from resampler (it pulls from inputBuffer and converts to 8kHz)
-            float[] sampleBuffer = new float[PCM8K_FRAME_SAMPLES];
-            int samplesRead;
+            // Use NAudio's high-quality WDL resampler per-chunk (avoids runaway buffering)
+            var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
             
-            while ((samplesRead = _resampler.Read(sampleBuffer, 0, PCM8K_FRAME_SAMPLES)) > 0)
-            {
-                // Convert Float32 samples back to Int16 (short)
-                var pcm8kFrame = new short[PCM8K_FRAME_SAMPLES];
-                for (int n = 0; n < samplesRead; n++)
-                {
-                    // Clamp to prevent overflow
-                    float sample = Math.Clamp(sampleBuffer[n], -1.0f, 1.0f);
-                    pcm8kFrame[n] = (short)(sample * short.MaxValue);
-                }
+            // Convert bytes to shorts
+            var pcm8k = new short[pcm8kBytes.Length / 2];
+            Buffer.BlockCopy(pcm8kBytes, 0, pcm8k, 0, pcm8kBytes.Length);
 
+            // Frame into 160-sample (20ms) chunks
+            for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
+            {
                 // Drop OLDEST frame on overflow (minimizes latency)
                 if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
                 {
@@ -106,7 +84,10 @@ public class DirectRtpPlayout : IDisposable
                     Interlocked.Increment(ref _droppedFrames);
                 }
 
-                _frameQueue.Enqueue(pcm8kFrame);
+                var frame = new short[PCM8K_FRAME_SAMPLES];
+                int len = Math.Min(PCM8K_FRAME_SAMPLES, pcm8k.Length - i);
+                Array.Copy(pcm8k, i, frame, 0, len);
+                _frameQueue.Enqueue(frame);
             }
         }
         catch (Exception ex)
@@ -149,18 +130,14 @@ public class DirectRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Clear all buffers on barge-in.
+    /// Clear queue on barge-in.
     /// </summary>
     public void Clear()
     {
-        // Clear NAudio internal buffer
-        _inputBuffer.ClearBuffer();
-        
-        // Clear frame queue
         int cleared = 0;
         while (_frameQueue.TryDequeue(out _)) cleared++;
         
-        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames + NAudio buffer (barge-in)");
+        if (cleared > 0) Log($"🗑️ Cleared {cleared} frames (barge-in)");
     }
 
     private void PlayoutLoop()
