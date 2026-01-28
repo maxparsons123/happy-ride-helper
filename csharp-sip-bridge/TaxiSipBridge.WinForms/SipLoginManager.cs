@@ -16,6 +16,7 @@ public class SipLoginManager : IDisposable
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _regUserAgent;
     private SIPUserAgent? _userAgent;
+    private string? _resolvedHost;
     private IPAddress? _localIp;
     private volatile bool _disposed;
 
@@ -75,6 +76,9 @@ public class SipLoginManager : IDisposable
         _localIp = GetLocalIp();
         Log($"➡ Local IP: {_localIp}");
 
+        // Resolve DNS once and cache it
+        _resolvedHost = ResolveDns(_config.SipServer);
+
         InitializeSipTransport();
         InitializeRegistration();
         InitializeUserAgent();
@@ -127,9 +131,6 @@ public class SipLoginManager : IDisposable
     {
         _sipTransport = new SIPTransport();
 
-        // Resolve DNS if needed (SIPSorcery works better with IP addresses)
-        string resolvedHost = ResolveDns(_config.SipServer);
-
         switch (_config.Transport)
         {
             case SipTransportType.UDP:
@@ -145,13 +146,11 @@ public class SipLoginManager : IDisposable
 
     private void InitializeRegistration()
     {
-        string resolvedHost = ResolveDns(_config.SipServer);
-
         _regUserAgent = new SIPRegistrationUserAgent(
             _sipTransport,
             _config.SipUser,
             _config.SipPassword,
-            resolvedHost,
+            _resolvedHost!,
             120);
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
