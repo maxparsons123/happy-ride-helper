@@ -109,15 +109,15 @@ public static class NAudioResampler
         const int MULAW_BIAS = 33;
 
         int sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
+        int magnitude = (sign != 0) ? -sample : sample;
         
-        sample = (short)Math.Min(sample, MULAW_MAX);
-        sample = (short)(sample + MULAW_BIAS);
+        magnitude = Math.Min(magnitude, MULAW_MAX);
+        magnitude += MULAW_BIAS;
 
         int exponent = 7;
-        for (int expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
+        for (int expMask = 0x4000; (magnitude & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
 
-        int mantissa = (sample >> (exponent + 3)) & 0x0F;
+        int mantissa = (magnitude >> (exponent + 3)) & 0x0F;
         byte ulaw = (byte)(~(sign | (exponent << 4) | mantissa));
         return ulaw;
     }
