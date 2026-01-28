@@ -30,10 +30,13 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // High-quality polyphase FIR resamplers (one per target rate)
+    // High-quality resamplers (SpeexDSP preferred, polyphase FIR fallback)
+    private SpeexDspResampler? _speexResampler8k;
+    private SpeexDspResampler? _speexResampler16k;
     private PolyphaseFirResampler? _resampler8k;
     private PolyphaseFirResampler? _resampler16k;
     private PolyphaseFirResampler? _resampler48k;
+    private bool _speexAvailable = true;  // Try SpeexDSP first
     
     // Streaming preprocessor for 8kHz telephony (DC removal + lowpass + normalize + downsample)
     private readonly TtsPreConditioner _preConditioner8k = new();
@@ -201,6 +204,10 @@ public class AdaAudioSource : IAudioSource, IDisposable
     public void Reset()
     {
         ClearQueue();
+        
+        // Reset SpeexDSP resamplers
+        _speexResampler8k?.Reset();
+        _speexResampler16k?.Reset();
         
         // Reset polyphase FIR resamplers
         _resampler8k?.Reset();
@@ -437,8 +444,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// High-quality polyphase FIR resampling with proper anti-aliasing.
-    /// Uses Kaiser-windowed sinc filter for clean, artifact-free audio.
+    /// High-quality resampling using SpeexDSP (preferred) or polyphase FIR (fallback).
+    /// SpeexDSP is known for excellent audio quality in telephony applications.
     /// </summary>
     private short[] ResamplePolyphase(short[] input, int fromRate, int toRate, int outputLen)
     {
@@ -449,7 +456,37 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
-        // Get or create the appropriate polyphase resampler
+        // Try SpeexDSP first (best quality)
+        if (_speexAvailable)
+        {
+            try
+            {
+                var resampled = ResampleSpeexDsp(input, fromRate, toRate);
+                
+                if (_sentFrames == 0)
+                {
+                    OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (SpeexDSP Q8): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
+                }
+                
+                // Ensure correct output length
+                if (resampled.Length == outputLen) return resampled;
+                var result = new short[outputLen];
+                Array.Copy(resampled, result, Math.Min(resampled.Length, outputLen));
+                return result;
+            }
+            catch (DllNotFoundException)
+            {
+                _speexAvailable = false;
+                OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ libspeexdsp not found, falling back to polyphase FIR");
+            }
+            catch (Exception ex)
+            {
+                _speexAvailable = false;
+                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ SpeexDSP error: {ex.Message}, falling back to polyphase FIR");
+            }
+        }
+
+        // Fallback: polyphase FIR resampler
         PolyphaseFirResampler resampler = GetOrCreateResampler(fromRate, toRate);
         
         if (_sentFrames == 0)
@@ -458,6 +495,28 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         return resampler.Resample(input, outputLen);
+    }
+    
+    /// <summary>
+    /// Resample using SpeexDSP library (quality level 8 = high quality for telephony).
+    /// </summary>
+    private short[] ResampleSpeexDsp(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == 24000 && toRate == 8000)
+        {
+            _speexResampler8k ??= new SpeexDspResampler(24000, 8000, 8);
+            return _speexResampler8k.Resample(input);
+        }
+        
+        if (fromRate == 24000 && toRate == 16000)
+        {
+            _speexResampler16k ??= new SpeexDspResampler(24000, 16000, 8);
+            return _speexResampler16k.Resample(input);
+        }
+        
+        // For other rates, create temporary resampler
+        using var resampler = new SpeexDspResampler((uint)fromRate, (uint)toRate, 8);
+        return resampler.Resample(input);
     }
     
     /// <summary>
