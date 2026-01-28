@@ -1,9 +1,10 @@
+using System.Collections.Concurrent;
 using System.Net;
-using System.Net.WebSockets;
 using System.Net.Http;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Collections.Concurrent;
+using taxibridgemain;
 using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
@@ -20,7 +21,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private readonly string _systemPrompt;
     private readonly string? _dispatchWebhookUrl;
     private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
-    
+
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
     private volatile bool _disposed = false;
@@ -30,11 +31,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
-    
-    // DSP processor for high-quality inbound audio (ported from Python bridge)
-    private readonly AudioDsp _audioDsp = new();
+
+    // Pre-emphasis for telephony clarity (matches edge function)
+    private const float PRE_EMPHASIS_COEFF = 0.97f;
+    private short _lastSample = 0;
     private int _audioPacketsSent = 0;
-    
+
     // Session state
     private string? _callerId;
     private string _callId;
@@ -43,20 +45,20 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _greetingSent = false;
     private bool _waitingForQuote = false;
     private bool _responseActive = false;
-    
+
     // Retry logic for transient OpenAI errors
     private int _greetingRetryCount = 0;
     private const int MAX_GREETING_RETRIES = 3;
     private bool _pendingGreetingRetry = false;
-    
+
     // Echo guard timing - REDUCED for confirmation responsiveness
     // 300ms is enough to filter Ada's echo but not block quick "Yes!" responses
     private const int ECHO_GUARD_MS = 300;
     private long _lastAdaFinishedAt = 0;
-    
+
     // Confirmation awareness - disable echo guard when waiting for yes/no
     private bool _awaitingConfirmation = false;
-    
+
     // Audio buffer tracking - prevent "buffer too small" errors on commit
     // OpenAI requires at least 100ms of audio before commit
     private double _inputBufferedMs = 0;
@@ -69,10 +71,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public event Action<string>? OnAdaSpeaking;
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
-    
-    // Audio monitoring - fires with processed PCM24 audio from caller (for local playback)
-    public event Action<byte[]>? OnCallerAudioMonitor;
-    
+
     // Tool call events for external handling
     public event Action<string, Dictionary<string, object>>? OnToolCall;
     public event Action<BookingState>? OnBookingUpdated;
@@ -107,7 +106,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(OpenAIRealtimeClient));
-        
+
         _callerId = caller;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _greetingSent = false;
@@ -115,15 +114,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _lastQuestionAsked = "pickup";
 
         _ws = new ClientWebSocket();
-        
+
         // OpenAI Realtime API requires specific subprotocols
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
-        
+
         // Resolve api.openai.com to IP address for reliable connection
         const string openAiHost = "api.openai.com";
         string resolvedIp = openAiHost;
-        
+
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(openAiHost);
@@ -139,13 +138,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             Log($"⚠️ DNS resolution failed, using hostname: {ex.Message}");
         }
-        
+
         // For WebSocket with TLS, we must use the original hostname for SNI
         // The DNS resolution is for logging/debugging - ClientWebSocket handles the rest
         var uri = new Uri($"wss://{openAiHost}/v1/realtime?model={_model}");
-        
+
         Log($"🔌 Connecting to OpenAI Realtime: {_model} (IP: {resolvedIp})");
-        
+
         try
         {
             await _ws.ConnectAsync(uri, _cts.Token);
@@ -164,7 +163,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
-        
+
         // Echo guard - ignore audio right after Ada finishes speaking
         // BUT: Skip guard if awaiting confirmation (user saying "yes" is critical!)
         if (!_awaitingConfirmation)
@@ -175,34 +174,40 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
-        var pcm8kBytes = AudioCodecs.ShortsToBytes(pcm8k);
-        
-        // Apply full DSP pipeline (high-pass, volume boost, AGC, pre-emphasis, soft clip)
-        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcm8kBytes, isHighQuality: false);
-        
-        // Log DSP gain on first few packets
-        if (_audioPacketsSent < 3)
-            Log($"📊 µ-law DSP gain: {gain:F1}x for inbound audio");
-        
+
+        // Apply pre-emphasis for consonant clarity (matches edge function)
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
+            _lastSample = current;
+        }
+
+        // Volume boost for telephony - INCREASED to 2.5x for better VAD detection
+        // Telephony audio is often very quiet compared to desktop mics
+        for (int i = 0; i < pcm8k.Length; i++)
+            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
+
         // Resample 8kHz → 24kHz
-        var processedPcm8k = AudioCodecs.BytesToShorts(processedBytes);
-        var pcm24k = AudioCodecs.Resample(processedPcm8k, 8000, 24000);
+        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
 
         // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
+        // durationMs = (bytes / 8000) * 1000
         var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
         _inputBufferedMs += durationMs;
 
-        // Send as JSON text
+        // Send as JSON text (matches edge function expectation)
+        // Edge function expects: { type: "input_audio_buffer.append", audio: "base64..." }
         var base64 = Convert.ToBase64String(pcmBytes);
         var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-        
+
         try
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent µ-law #{_audioPacketsSent}: {ulawData.Length}b → {pcmBytes.Length}b PCM24 (DSP gain: {gain:F1}x)");
-            
+                Log($"📤 Sent audio #{_audioPacketsSent}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24, {base64.Length} chars base64");
+
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
                 WebSocketMessageType.Text,
@@ -215,7 +220,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Send PCM16 audio at 8kHz (already decoded from µ-law via NAudio).
-    /// Uses AudioDsp for full processing pipeline (ported from Python bridge).
+    /// This matches the SIPSorcery example pattern using NAudio.Codecs.MuLawDecoder.
     /// </summary>
     public async Task SendPcm8kAsync(byte[] pcm8kBytes)
     {
@@ -229,32 +234,19 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Apply full DSP pipeline (high-pass, volume boost, AGC, pre-emphasis, soft clip)
-        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcm8kBytes, isHighQuality: false);
-        
-        // Log DSP gain on first few packets
-        if (_audioPacketsSent < 3)
-            Log($"📊 DSP gain: {gain:F1}x for inbound audio");
+        // Convert bytes to shorts
+        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
 
-        // Convert processed bytes to shorts
-        var pcm8k = AudioCodecs.BytesToShorts(processedBytes);
-
-        // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
+        // PASSTHROUGH MODE: No DSP - just simple point upsampling 8kHz → 24kHz
+        // Pick each sample 3x (no filtering, no boost, no pre-emphasis)
         var pcm24k = new short[pcm8k.Length * 3];
         for (int i = 0; i < pcm8k.Length; i++)
         {
-            short current = pcm8k[i];
-            short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
-            
-            int outIdx = i * 3;
-            pcm24k[outIdx] = current;
-            pcm24k[outIdx + 1] = (short)((current * 2 + next) / 3);     // 1/3 towards next
-            pcm24k[outIdx + 2] = (short)((current + next * 2) / 3);     // 2/3 towards next
+            pcm24k[i * 3] = pcm8k[i];
+            pcm24k[i * 3 + 1] = pcm8k[i];
+            pcm24k[i * 3 + 2] = pcm8k[i];
         }
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
-
-        // Fire audio monitor event so caller can hear their processed voice
-        OnCallerAudioMonitor?.Invoke(pcmBytes);
 
         // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
         var sampleCount = pcm8kBytes.Length / 2;
@@ -268,74 +260,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24 (DSP gain: {gain:F1}x)");
-
-            await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
-                true,
-                _cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
-    }
-
-    /// <summary>
-    /// Send PCM16 audio at 8kHz WITHOUT DSP processing.
-    /// Used for A-law codec which is cleaner and doesn't need enhancement.
-    /// </summary>
-    public async Task SendPcm8kNoDspAsync(byte[] pcm8kBytes)
-    {
-        if (_disposed || _ws?.State != WebSocketState.Open) return;
-        if (_cts?.Token.IsCancellationRequested == true) return;
-
-        // Echo guard (still needed)
-        if (!_awaitingConfirmation)
-        {
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-                return;
-        }
-
-        // NO DSP - but apply volume boost for A-law path
-        const float ALAW_VOLUME_BOOST = 2.5f;
-        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
-        
-        // Apply volume boost
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * ALAW_VOLUME_BOOST, short.MinValue, short.MaxValue);
-        }
-
-        // High-quality linear interpolation upsampling 8kHz → 24kHz (3x)
-        var pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            short current = pcm8k[i];
-            short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
-            
-            int outIdx = i * 3;
-            pcm24k[outIdx] = current;
-            pcm24k[outIdx + 1] = (short)((current * 2 + next) / 3);
-            pcm24k[outIdx + 2] = (short)((current + next * 2) / 3);
-        }
-        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
-
-        // Fire audio monitor event
-        OnCallerAudioMonitor?.Invoke(pcmBytes);
-
-        // Track buffered audio duration
-        var sampleCount = pcm8kBytes.Length / 2;
-        var durationMs = (double)sampleCount * 1000.0 / 8000.0;
-        _inputBufferedMs += durationMs;
-
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
-        try
-        {
-            _audioPacketsSent++;
-            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent A-law (no DSP) #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
+                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
 
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
@@ -359,33 +284,20 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Apply full DSP pipeline for high-quality audio (Opus, etc.)
-        var (processedBytes, gain) = _audioDsp.ApplyNoiseReduction(pcmData, isHighQuality: true);
-        
-        // Log DSP gain on first few packets
-        if (_audioPacketsSent < 3)
-            Log($"📊 HD DSP gain: {gain:F1}x for inbound audio");
+        byte[] audioToSend;
 
-        // Convert processed bytes to shorts for resampling
-        var samples = AudioCodecs.BytesToShorts(processedBytes);
-
-        // Resample to 24kHz if needed (e.g., 48kHz Opus → 24kHz)
-        short[] pcm24;
         if (sampleRate != 24000)
         {
-            pcm24 = AudioCodecs.Resample(samples, sampleRate, 24000);
+            var samples = AudioCodecs.BytesToShorts(pcmData);
+            var resampled = AudioCodecs.Resample(samples, sampleRate, 24000);
+            audioToSend = AudioCodecs.ShortsToBytes(resampled);
         }
         else
         {
-            pcm24 = samples;
+            audioToSend = pcmData;
         }
 
-        var audioToSend = AudioCodecs.ShortsToBytes(pcm24);
-
-        // Fire audio monitor event so caller can hear their processed voice
-        OnCallerAudioMonitor?.Invoke(audioToSend);
-
-        // Track buffered duration for PCM24 path
+        // Track buffered duration for PCM24 path (covers browser/WebRTC scenarios)
         var sampleCount = audioToSend.Length / 2; // 2 bytes per sample
         var durationMs = (double)sampleCount * 1000.0 / 24000.0;
         _inputBufferedMs += durationMs;
@@ -397,8 +309,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent HD audio #{_audioPacketsSent}: {sampleRate}Hz {pcmData.Length}b → 24kHz {audioToSend.Length}b (DSP gain: {gain:F1}x)");
-            
+                Log($"📤 Sent PCM audio #{_audioPacketsSent}: {pcmData.Length}b → {base64.Length} chars base64");
+
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
                 WebSocketMessageType.Text,
@@ -465,7 +377,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private async Task ProcessMessageAsync(string json)
     {
         if (_disposed) return;
-        
+
         try
         {
             using var doc = JsonDocument.Parse(json);
@@ -473,7 +385,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
 
             var type = typeEl.GetString();
-            
+
             // Verbose logging for debugging - show all response events
             if (type?.StartsWith("response.") == true && type != "response.audio.delta")
             {
@@ -486,7 +398,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     Log("📋 Session created - configuring...");
                     await ConfigureSessionAsync();
                     break;
-                    
+
                 case "session.updated":
                     Log("✅ Session configured - sending greeting");
                     await SendGreetingAsync();
@@ -546,7 +458,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     _responseActive = false;
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _inputBufferedMs = 0; // Reset buffer tracking after response
-                    
+
                     // DO NOT commit after greeting — SIP callers wait silently.
                     // Wait for VAD speech_stopped instead.
                     if (_greetingSent && !_awaitingConfirmation)
@@ -563,7 +475,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         {
                             OnTranscript?.Invoke($"You: {transcript}");
                             Log($"👤 User: \"{transcript}\"");
-                            
+
                             // Send context pairing hint to OpenAI
                             await SendContextHintAsync(transcript);
                         }
@@ -578,16 +490,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     if (doc.RootElement.TryGetProperty("error", out var err))
                     {
                         var msg = err.TryGetProperty("message", out var m) ? m.GetString() : "Unknown error";
-                        
+
                         // Ignore "buffer too small" errors - these happen when VAD triggers on background noise
                         if (msg?.Contains("buffer too small") == true)
                         {
                             // Don't log as error - just noise from background audio
                             break;
                         }
-                        
+
                         Log($"❌ OpenAI error: {msg}");
-                        
+
                         // Retry greeting on transient server errors
                         if (msg?.Contains("server had an error") == true || msg?.Contains("retry") == true)
                         {
@@ -639,7 +551,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         };
 
         Log("🎧 Config: VAD=0.4, prefix=400ms, silence=1000ms, volume=2.5x (telephony-optimized)");
-        
+
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
             new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
@@ -678,16 +590,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 instructions = "IMPORTANT: You are starting a new taxi booking call. Greet the customer warmly and ask for their pickup location. Say: 'Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?' Do NOT call any tools yet - just greet the user and wait for their response."
             }
         };
-        
+
         await SendJsonAsync(responseCreate);
-        
+
         Log($"🎤 Greeting triggered (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})");
     }
 
     private async Task HandleTransientErrorRetryAsync()
     {
         _greetingRetryCount++;
-        
+
         if (_greetingRetryCount >= MAX_GREETING_RETRIES)
         {
             Log($"❌ Max retries ({MAX_GREETING_RETRIES}) reached - giving up");
@@ -697,9 +609,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Exponential backoff: 500ms, 1000ms, 2000ms
         var delayMs = 500 * (1 << (_greetingRetryCount - 1));
         Log($"🔄 Retrying in {delayMs}ms (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})...");
-        
+
         await Task.Delay(delayMs);
-        
+
         // If WebSocket closed, attempt full reconnection
         if (_ws?.State != WebSocketState.Open)
         {
@@ -707,14 +619,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
             await ReconnectAsync();
             return; // Greeting will be triggered by session.updated after reconnect
         }
-        
+
         // Clear any stale state and retry
         await SendJsonAsync(new { type = "input_audio_buffer.clear" });
         await SendGreetingRequestAsync();
-        
+
         // Give OpenAI a moment to respond - if it closes immediately, we'll catch it
         await Task.Delay(200);
-        
+
         if (_ws?.State != WebSocketState.Open)
         {
             Log("🔄 WebSocket closed after retry - attempting full reconnection...");
@@ -725,26 +637,26 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private async Task ReconnectAsync()
     {
         if (_disposed) return;
-        
+
         try
         {
             // Dispose old WebSocket
             _ws?.Dispose();
-            
+
             // Create new WebSocket
             _ws = new ClientWebSocket();
             _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
             _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
-            
+
             var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
             Log($"🔄 Reconnecting to OpenAI...");
-            
+
             await _ws.ConnectAsync(uri, _cts?.Token ?? CancellationToken.None);
             Log("✅ Reconnected to OpenAI Realtime API");
-            
+
             // Reset greeting flag so it triggers again after session.updated
             _greetingSent = false;
-            
+
             // Restart receive loop
             _ = ReceiveLoopAsync();
         }
@@ -781,7 +693,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (!root.TryGetProperty("name", out var nameEl)) return;
         var toolName = nameEl.GetString();
-        
+
         var args = new Dictionary<string, object>();
         if (root.TryGetProperty("arguments", out var argsEl))
         {
@@ -827,20 +739,20 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     _booking.PickupTime = time.ToString();
                 if (args.TryGetValue("last_question_asked", out var lastQ))
                     _lastQuestionAsked = lastQ.ToString() ?? "none";
-                
+
                 OnBookingUpdated?.Invoke(_booking);
-                
+
                 await SendToolResultAsync(callId, new { success = true, state = _booking });
                 break;
 
             case "book_taxi":
                 var action = args.TryGetValue("action", out var a) ? a.ToString() : "unknown";
                 Log($"📦 Book taxi: {action}");
-                
+
                 if (action == "request_quote")
                 {
                     _waitingForQuote = true;
-                    
+
                     // Call real dispatch webhook if configured
                     if (!string.IsNullOrEmpty(_dispatchWebhookUrl))
                     {
@@ -850,17 +762,19 @@ public class OpenAIRealtimeClient : IAudioAIClient
                             _booking.Fare = quoteResult.fare;
                             _booking.Eta = quoteResult.eta;
                             OnBookingUpdated?.Invoke(_booking);
-                            await SendToolResultAsync(callId, new { 
-                                success = true, 
-                                fare = quoteResult.fare, 
+                            await SendToolResultAsync(callId, new
+                            {
+                                success = true,
+                                fare = quoteResult.fare,
                                 eta = quoteResult.eta,
                                 message = quoteResult.message ?? $"Your fare is {quoteResult.fare} and the driver will arrive in {quoteResult.eta}"
                             });
                         }
                         else
                         {
-                            await SendToolResultAsync(callId, new { 
-                                success = false, 
+                            await SendToolResultAsync(callId, new
+                            {
+                                success = false,
                                 error = quoteResult.error ?? "Failed to get quote"
                             });
                         }
@@ -868,15 +782,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     else
                     {
                         // Mock response for testing without webhook
-                        await SendToolResultAsync(callId, new { 
-                            success = true, 
-                            fare = "£12.50", 
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = true,
+                            fare = "£12.50",
                             eta = "5 minutes",
                             message = "Your fare is £12.50 and your driver will arrive in 5 minutes. Would you like me to book that?"
                         });
                     }
                     _waitingForQuote = false;
-                    
+
                     // CRITICAL: Enable confirmation mode - bypass echo guard for "yes" responses
                     _awaitingConfirmation = true;
                     Log("🎯 Awaiting confirmation - echo guard disabled for quick 'yes' responses");
@@ -894,8 +809,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                             _booking.Confirmed = true;
                             _booking.BookingRef = confirmResult.bookingRef;
                             OnBookingUpdated?.Invoke(_booking);
-                            await SendToolResultAsync(callId, new { 
-                                success = true, 
+                            await SendToolResultAsync(callId, new
+                            {
+                                success = true,
                                 booking_ref = confirmResult.bookingRef,
                                 message = confirmResult.message ?? "Your taxi is booked!"
                             });
@@ -910,8 +826,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         _booking.Confirmed = true;
                         _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
                         OnBookingUpdated?.Invoke(_booking);
-                        await SendToolResultAsync(callId, new { 
-                            success = true, 
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = true,
                             booking_ref = _booking.BookingRef,
                             message = "Your taxi is booked! Your driver will arrive shortly."
                         });
@@ -930,7 +847,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 break;
         }
     }
-    
+
     /// <summary>
     /// Call the dispatch webhook for quotes and confirmations.
     /// </summary>
@@ -950,33 +867,33 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 pickup_time = _booking.PickupTime ?? "now",
                 timestamp = DateTime.UtcNow.ToString("o")
             };
-            
+
             var json = JsonSerializer.Serialize(payload);
             Log($"📡 Calling dispatch: {action}");
-            
+
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             content.Headers.Add("X-Call-ID", _callId);
-            
+
             var response = await _httpClient.PostAsync(_dispatchWebhookUrl, content);
             var responseBody = await response.Content.ReadAsStringAsync();
-            
+
             Log($"📬 Dispatch response: {response.StatusCode}");
-            
+
             if (!response.IsSuccessStatusCode)
             {
                 return (false, null, null, null, null, $"HTTP {(int)response.StatusCode}");
             }
-            
+
             using var doc = JsonDocument.Parse(responseBody);
             var root = doc.RootElement;
-            
-            var fare = root.TryGetProperty("fare", out var f) ? f.GetString() : 
+
+            var fare = root.TryGetProperty("fare", out var f) ? f.GetString() :
                        root.TryGetProperty("estimated_fare", out var ef) ? ef.GetString() : null;
-            var eta = root.TryGetProperty("eta", out var e) ? e.GetString() : 
+            var eta = root.TryGetProperty("eta", out var e) ? e.GetString() :
                       root.TryGetProperty("eta_minutes", out var em) ? $"{em.GetInt32()} minutes" : null;
             var bookingRef = root.TryGetProperty("booking_ref", out var br) ? br.GetString() : null;
             var message = root.TryGetProperty("message", out var m) ? m.GetString() : null;
-            
+
             return (true, fare, eta, bookingRef, message, null);
         }
         catch (Exception ex)
@@ -1008,7 +925,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private async Task SendJsonAsync(object obj)
     {
         if (_ws?.State != WebSocketState.Open) return;
-        
+
         var json = JsonSerializer.Serialize(obj);
         await _ws.SendAsync(
             new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
@@ -1052,30 +969,20 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private void ProcessAdaAudio(byte[] pcm24kBytes)
     {
         if (_disposed) return;
-        
+
         var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
 
-        // 8kHz MODE: 24kHz → 8kHz (3:1 ratio) using weighted linear interpolation
-        // G.711 µ-law is fundamentally an 8kHz codec - cannot use higher sample rates
+        // PASSTHROUGH MODE: No DSP, just simple point decimation 24kHz → 8kHz
+        // Pick every 3rd sample (no averaging, no filtering)
         int outputLen = pcm24k.Length / 3;
         var pcm8k = new short[outputLen];
-        
+
         for (int i = 0; i < outputLen; i++)
         {
-            int srcIdx = i * 3;
-            // Weighted blend: 25% first, 50% middle, 25% last for smoother decimation
-            if (srcIdx + 2 < pcm24k.Length)
-            {
-                int blended = (pcm24k[srcIdx] + pcm24k[srcIdx + 1] * 2 + pcm24k[srcIdx + 2]) / 4;
-                pcm8k[i] = (short)Math.Clamp(blended, short.MinValue, short.MaxValue);
-            }
-            else
-            {
-                pcm8k[i] = pcm24k[srcIdx];
-            }
+            pcm8k[i] = pcm24k[i * 3];  // Just take every 3rd sample
         }
 
-        // Encode to µ-law (8-bit companded)
+        // Encode to µ-law
         var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
         // Split into 20ms frames (160 bytes @ 8kHz µ-law)
@@ -1084,14 +991,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
             int len = Math.Min(160, ulaw.Length - i);
             var frame = new byte[160];
             Buffer.BlockCopy(ulaw, i, frame, 0, len);
-            
+
             // Pad short frames with silence (0xFF = µ-law silence)
             if (len < 160)
                 Array.Fill(frame, (byte)0xFF, len, 160 - len);
-            
+
             if (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);
-            
+
             _outboundQueue.Enqueue(frame);
         }
     }
@@ -1216,10 +1123,7 @@ Map user responses to the question you just asked:
     public async Task DisconnectAsync()
     {
         if (_disposed) return;
-        
-        // Reset DSP state for next call
-        _audioDsp.Reset();
-        
+
         try { _cts?.Cancel(); } catch { }
 
         if (_ws?.State == WebSocketState.Open)
@@ -1240,11 +1144,11 @@ Map user responses to the question you just asked:
     {
         if (_disposed) return;
         _disposed = true;
-        
+
         try { _cts?.Cancel(); } catch { }
         try { _ws?.Dispose(); } catch { }
         try { _cts?.Dispose(); } catch { }
-        
+
         ClearPendingFrames();
         GC.SuppressFinalize(this);
     }
