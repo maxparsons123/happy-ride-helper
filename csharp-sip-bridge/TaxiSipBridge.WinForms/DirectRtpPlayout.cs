@@ -1,18 +1,17 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
 using System.Threading;
-using SIPSorcery.Net;
 using SIPSorcery.Media;
+using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// Direct RTP playout engine for G.711 A-law (PCMA).
-/// Bypasses VoIPMediaSession.SendAudio() ambiguity by sending raw RTP packets.
+/// Uses SendRtpRaw() for complete control over encoding.
 /// ✅ 100% control over encoding/timestamps
-/// ✅ Works consistently across SIPSorcery v5/v6+
+/// ✅ Works consistently across SIPSorcery versions
 /// ✅ Eliminates PCM hiss/static
 /// </summary>
 public class DirectRtpPlayout : IDisposable
@@ -22,14 +21,11 @@ public class DirectRtpPlayout : IDisposable
     private const int MAX_QUEUE_FRAMES = 25;      // 500ms buffer
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
-    private readonly RTPChannel _rtpChannel;
-    private readonly IPEndPoint _remoteEndPoint;
+    private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _alawBuffer = new byte[PCM8K_FRAME_SAMPLES];
 
-    // RTP state (RFC 3550 compliant)
-    private ushort _sequenceNumber;
+    // RTP state
     private uint _timestamp;
-    private readonly uint _ssrc = (uint)new Random().Next(1, int.MaxValue);
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -50,21 +46,10 @@ public class DirectRtpPlayout : IDisposable
 
     public DirectRtpPlayout(VoIPMediaSession mediaSession)
     {
-        // Get RTP channel and remote endpoint SAFELY (works in v5/v6+)
-        var audioStream = mediaSession.AudioStreams?.FirstOrDefault()
-                       ?? throw new ArgumentException("No audio stream found");
-
-        _rtpChannel = audioStream.GetRtpChannel()
-                      ?? throw new ArgumentException("RTP channel not available");
-
-        _remoteEndPoint = audioStream.RemoteEndPoint
-                        ?? throw new ArgumentException("Remote endpoint not set");
-
-        // Initialize RTP state
-        _sequenceNumber = (ushort)new Random().Next(1, ushort.MaxValue);
+        _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _timestamp = (uint)new Random().Next(1, int.MaxValue);
 
-        Log($"✅ Direct RTP playout initialized | Remote: {_remoteEndPoint} | SSRC: {_ssrc:X8}");
+        Log($"✅ Direct RTP playout initialized");
     }
 
     /// <summary>
@@ -203,31 +188,23 @@ public class DirectRtpPlayout : IDisposable
                 _alawBuffer[i] = LinearToALaw(pcmFrame[i]);
             }
 
-            // 2. Build RTP packet (RFC 3550 compliant)
-            var rtpPacket = new RTPPacket(12 + PCM8K_FRAME_SAMPLES)
-            {
-                Header =
-                {
-                    PayloadType = 8,          // PCMA = payload type 8 (RFC 3551)
-                    MarkerBit = 0,
-                    SequenceNumber = _sequenceNumber++,
-                    Timestamp = _timestamp,
-                    SyncSource = _ssrc
-                },
-                Payload = _alawBuffer
-            };
+            // 2. Send via SendRtpRaw (bypasses SendAudio encoding ambiguity)
+            // PayloadType 8 = PCMA (A-law), MarkerBit 0 = continuation
+            _mediaSession.SendRtpRaw(
+                SDPMediaTypesEnum.audio,
+                _alawBuffer,
+                _timestamp,
+                markerBit: 0,
+                payloadTypeID: 8  // PCMA
+            );
 
             _timestamp += (uint)PCM8K_FRAME_SAMPLES; // Increment by samples @ 8kHz
-
-            // 3. Send directly to remote endpoint
-            _rtpChannel.SendAsync(_remoteEndPoint, rtpPacket.GetBytes()).Wait();
-
             Interlocked.Increment(ref _framesSent);
 
             // Diagnostic: Verify first packet encoding
             if (_framesSent == 1)
             {
-                Log($"✅ First RTP packet sent | Seq:{rtpPacket.Header.SequenceNumber} | TS:{rtpPacket.Header.Timestamp} | Payload:160 bytes A-law");
+                Log($"✅ First RTP packet sent | TS:{_timestamp} | Payload:160 bytes A-law | First byte: 0x{_alawBuffer[0]:X2}");
             }
         }
         catch (Exception ex)
