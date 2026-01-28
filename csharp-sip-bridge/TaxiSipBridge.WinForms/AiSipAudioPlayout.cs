@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Threading;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -35,10 +36,8 @@ public class AiSipAudioPlayout : IDisposable
     private ushort _seq;
     private uint _timestamp;
     
-    // Resampler (24kHz → 8kHz)
-    private SpeexDspResampler? _speexResampler;
-    private PolyphaseFirResampler? _firResampler;
-    private bool _speexAvailable = true;
+    // Resampler (24kHz → 8kHz) - using NAudio's WDL resampler
+    private readonly object _resamplerLock = new();
     
     // Stats
     private int _framesSent;
@@ -241,29 +240,14 @@ public class AiSipAudioPlayout : IDisposable
     }
     
     /// <summary>
-    /// Resample 24kHz PCM to 8kHz using SpeexDSP or polyphase FIR fallback.
+    /// Resample 24kHz PCM to 8kHz using NAudio's WDL resampler.
     /// </summary>
     private short[] Resample24kTo8k(short[] pcm24k)
     {
-        // Try SpeexDSP first (best quality)
-        if (_speexAvailable)
+        lock (_resamplerLock)
         {
-            try
-            {
-                _speexResampler ??= new SpeexDspResampler(24000, 8000, 8);
-                return _speexResampler.Resample(pcm24k);
-            }
-            catch
-            {
-                _speexAvailable = false;
-                Log("⚠️ SpeexDSP unavailable, using polyphase FIR");
-            }
+            return NAudioResampler.Resample(pcm24k, 24000, 8000);
         }
-        
-        // Fallback to polyphase FIR
-        _firResampler ??= new PolyphaseFirResampler(24000, 8000);
-        int outputLength = pcm24k.Length / 3; // 24kHz → 8kHz = 1/3
-        return _firResampler.Resample(pcm24k, outputLength);
     }
     
     /// <summary>
@@ -320,9 +304,6 @@ public class AiSipAudioPlayout : IDisposable
         _disposed = true;
         
         Stop();
-        
-        _speexResampler?.Dispose();
-        _firResampler?.Reset(); // FIR doesn't implement IDisposable, just reset state
         
         GC.SuppressFinalize(this);
     }
