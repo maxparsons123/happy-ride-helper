@@ -65,9 +65,9 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private short[]? _lastAudioFrame;
     private bool _lastFrameWasSilence = true;
 
-    // Jitter buffer - balanced for smooth playback without overlap
+    // Jitter buffer - SIP RTP timing requires adequate buffering
     private AudioMode _audioMode = AudioMode.Standard;
-    private int _jitterBufferMs = 100;  // 100ms - smooth playback, no overlap
+    private int _jitterBufferMs = 160;  // 160ms (8 frames) - SIP-friendly buffer
     private bool _jitterBufferFilled;
     private int _consecutiveUnderruns;
     private bool _markEndOfSpeech;
@@ -298,11 +298,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming - balanced for smooth audio without overlap
-            // 5 frames (100ms) provides stability without the "layered audio" artifact
+            // Jitter buffer priming - SIP RTP requires adequate buffering
+            // 8 frames (160ms) is the SIP-friendly sweet spot
             if (!_jitterBufferFilled)
             {
-                int minFrames = 5;  // 100ms - smooth playback
+                int minFrames = 8;  // 160ms - SIP-optimized
                 if (_audioMode == AudioMode.JitterBuffer)
                     minFrames = Math.Max(minFrames, _jitterBufferMs / AUDIO_SAMPLE_PERIOD_MS);
                 
@@ -338,8 +338,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 if (_jitterBufferFilled && _consecutiveUnderruns >= 3)
                 {
                     _jitterBufferFilled = false;
-                    // Clear excess stale frames but keep some buffer
-                    while (_pcmQueue.Count > 5) _pcmQueue.TryDequeue(out _);
+                    // Keep 8 frames in buffer for SIP timing
+                    while (_pcmQueue.Count > 8) _pcmQueue.TryDequeue(out _);
                     OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ Underrun ({_consecutiveUnderruns}x), re-priming");
                 }
 
