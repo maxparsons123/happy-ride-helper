@@ -4537,12 +4537,16 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 const userStt = sessionState.userTruth.pickup || "";
                 const isGrounded = isGroundedInUserText(extractedPickup, userStt);
 
-                // If we don't have any user transcript to ground against, never accept a guessed address.
-                // This is the root cause of "Victoria Station" being accepted when STT was empty.
+                // RACE CONDITION FIX: If we don't have userTruth yet (transcript hasn't arrived),
+                // ACCEPT Ada's extraction on first capture. The tool call can arrive before
+                // the transcript event due to OpenAI's parallel processing.
+                // We'll store Ada's extraction and it can be corrected later if needed.
                 if (!userStt) {
-                  console.log(
-                    `[${callId}] 🚫 Rejecting Ada pickup (no STT to ground against): "${extractedPickup}"`
-                  );
+                  // First capture - trust Ada's extraction (no STT yet to validate against)
+                  sessionState.booking.pickup = extractedPickup;
+                  sessionState.userTruth.pickup = extractedPickup; // Store as truth until STT arrives
+                  console.log(`[${callId}] 📌 Ada pickup FIRST CAPTURE (no STT yet): "${extractedPickup}"`);
+                  fieldUpdated = "pickup";
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it (allows cleaning like "52A" → "52A David Road")
                   sessionState.booking.pickup = extractedPickup;
@@ -4564,10 +4568,12 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                 const userStt = sessionState.userTruth.destination || "";
                 const isGrounded = isGroundedInUserText(extractedDest, userStt);
 
+                // RACE CONDITION FIX: Accept first capture when no STT yet
                 if (!userStt) {
-                  console.log(
-                    `[${callId}] 🚫 Rejecting Ada destination (no STT to ground against): "${extractedDest}"`
-                  );
+                  sessionState.booking.destination = extractedDest;
+                  sessionState.userTruth.destination = extractedDest;
+                  console.log(`[${callId}] 📌 Ada destination FIRST CAPTURE (no STT yet): "${extractedDest}"`);
+                  fieldUpdated = "destination";
                 } else if (isGrounded) {
                   // Ada's extraction is valid - use it
                   sessionState.booking.destination = extractedDest;
@@ -4610,7 +4616,11 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    console.log(`[${callId}] 🚫 Rejecting Ada pickup (no STT to ground against): "${val}"`);
+                    // RACE CONDITION FIX: Accept first capture
+                    sessionState.booking.pickup = val;
+                    sessionState.userTruth.pickup = val;
+                    console.log(`[${callId}] 📌 Ada pickup FIRST CAPTURE (fallback, no STT yet): "${val}"`);
+                    fieldUpdated = "pickup";
                   } else {
                     sessionState.booking.pickup = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.pickup = val;
@@ -4625,7 +4635,11 @@ Current booking: pickup=${sessionState.booking.pickup || "NOT SET"}, destination
                   const isGrounded = isGroundedInUserText(val, userStt);
 
                   if (!userStt) {
-                    console.log(`[${callId}] 🚫 Rejecting Ada destination (no STT to ground against): "${val}"`);
+                    // RACE CONDITION FIX: Accept first capture
+                    sessionState.booking.destination = val;
+                    sessionState.userTruth.destination = val;
+                    console.log(`[${callId}] 📌 Ada destination FIRST CAPTURE (fallback, no STT yet): "${val}"`);
+                    fieldUpdated = "destination";
                   } else {
                     sessionState.booking.destination = isGrounded ? val : userStt;
                     if (isGrounded) sessionState.userTruth.destination = val;
