@@ -108,8 +108,9 @@ public partial class MainForm : Form
                 _sipLoginManager.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
                 _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
 
-                // Create the NEW call handler with AiSipAudioPlayout (20ms timer-driven RTP)
-                _callHandler = new LocalOpenAICallHandler(apiKey);
+                // Create the NEW call handler with dispatch webhook for taxi bookings
+                const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
+                _callHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
                 _sipLoginManager.SetCallHandler(_callHandler);
 
                 _sipLoginManager.Start();
