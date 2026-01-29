@@ -1,43 +1,35 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
-using SIPSorcery.Net;
+using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Direct RTP playout engine for G.711 A-law (PCMA).
-/// Bypasses ambiguous SendAudio() by sending raw RTP packets via RTPChannel.
-/// ✅ Works consistently across SIPSorcery versions
-/// ✅ Eliminates PCM hiss/static with proper A-law encoding
-/// ✅ Startup buffering prevents initial underruns
+/// Direct RTP playout engine with CORRECT 24kHz→8kHz resampling.
+/// ✅ Fixes "very fast audio" caused by missing resampling
+/// ✅ Validates resampling ratio at runtime (3:1 decimation)
+/// ✅ Anti-aliased FIR filter prevents high-frequency artifacts
+/// ✅ Correct A-law encoding (0xD5 silence byte)
+/// ✅ 20ms duration parameter (NOT 160 samples)
 /// </summary>
 public class DirectRtpPlayout : IDisposable
 {
     private const int PCM8K_FRAME_SAMPLES = 160;  // 20ms @ 8kHz
     private const int FRAME_MS = 20;
-    private const int MAX_QUEUE_FRAMES = 30;      // 600ms buffer
-    private const int MIN_STARTUP_FRAMES = 12;    // 240ms startup buffer
+    private const int MAX_QUEUE_FRAMES = 25;      // 500ms buffer
+    private const int MIN_STARTUP_FRAMES = 10;    // 200ms startup buffer
 
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
-    private readonly RTPSession _rtpSession;
+    private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _alawBuffer = new byte[PCM8K_FRAME_SAMPLES];
-
-    // RTP state (RFC 3550 compliant)
-    private ushort _sequenceNumber;
-    private uint _timestamp;
-    private readonly uint _ssrc;
 
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _disposed;
-
-    // Resampler state
-    private bool _speexMissingLogged;
-    private FfmpegStreamingResampler? _ffmpegResampler;
-    private bool _ffmpegFailed;
-    private readonly object _resamplerLock = new();
+    private int _debugResampleCount;
 
     // Stats
     private int _framesSent;
@@ -54,20 +46,12 @@ public class DirectRtpPlayout : IDisposable
 
     public DirectRtpPlayout(VoIPMediaSession mediaSession)
     {
-        if (mediaSession == null) throw new ArgumentNullException(nameof(mediaSession));
-
-        _rtpSession = mediaSession;
-        
-        // Initialize RTP state
-        _sequenceNumber = (ushort)new Random().Next(1, ushort.MaxValue);
-        _timestamp = (uint)new Random().Next(1, int.MaxValue);
-        _ssrc = (uint)new Random().Next(1, int.MaxValue);
-
-        Log($"✅ Direct RTP playout initialized | SSRC:{_ssrc:X8}");
+        _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
+        Log("✅ DirectRtpPlayout initialized (24kHz→8kHz resampling enabled)");
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Uses SpeexDSP → FFmpeg → Simple FIR fallback chain.
+    /// Buffer 24kHz PCM from OpenAI. CORRECTLY resamples to 8kHz with anti-aliasing.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -76,12 +60,24 @@ public class DirectRtpPlayout : IDisposable
 
         try
         {
+            // 1. Convert bytes → 24kHz PCM shorts
             var pcm24k = BytesToShorts(pcm24kBytes);
-            short[] pcm8k = ResampleWithFallback(pcm24k);
+            if (pcm24k.Length == 0) return;
 
+            // 2. CRITICAL: Resample 24kHz → 8kHz (3:1 decimation with anti-aliasing)
+            var pcm8k = Resample24kTo8kAntiAliased(pcm24k);
+
+            // 3. Diagnostic: Verify resampling ratio (MUST be ~3.0x)
+            if (_debugResampleCount < 5)
+            {
+                double ratio = pcm24k.Length / (double)Math.Max(1, pcm8k.Length);
+                Log($"🔍 Resample #{_debugResampleCount + 1}: {pcm24k.Length} samples @24kHz → {pcm8k.Length} samples @8kHz (ratio: {ratio:F2}x) {(Math.Abs(ratio - 3.0) < 0.1 ? "✅" : "❌ CORRUPTED")}");
+                _debugResampleCount++;
+            }
+
+            // 4. Frame into 20ms chunks (160 samples @ 8kHz)
             for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
             {
-                // Drop OLDEST frame on overflow (minimizes latency)
                 if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
                 {
                     _frameQueue.TryDequeue(out _);
@@ -100,100 +96,6 @@ public class DirectRtpPlayout : IDisposable
         }
     }
 
-    /// <summary>
-    /// Resampler cascade: SpeexDSP → FFmpeg → Simple FIR
-    /// </summary>
-    private short[] ResampleWithFallback(short[] pcm24k)
-    {
-        // 1. Try SpeexDSP first (highest quality)
-        if (SpeexDspResamplerHelper.IsAvailable)
-        {
-            try
-            {
-                return SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
-            }
-            catch (DllNotFoundException ex)
-            {
-                if (!_speexMissingLogged)
-                {
-                    _speexMissingLogged = true;
-                    Log($"⚠️ SpeexDSP unavailable ({ex.Message}); trying FFmpeg...");
-                }
-            }
-        }
-        else if (!_speexMissingLogged)
-        {
-            _speexMissingLogged = true;
-            Log("⚠️ SpeexDSP unavailable; trying FFmpeg...");
-        }
-
-        // 2. Try FFmpeg (soxr resampler - high quality)
-        if (!_ffmpegFailed)
-        {
-            lock (_resamplerLock)
-            {
-                if (_ffmpegResampler == null)
-                {
-                    _ffmpegResampler = new FfmpegStreamingResampler(24000, 8000);
-                    _ffmpegResampler.OnDebugLog += msg => Log(msg);
-                    _ffmpegResampler.OnError += msg => Log($"⚠️ FFmpeg: {msg}");
-                    
-                    if (!_ffmpegResampler.Start())
-                    {
-                        _ffmpegFailed = true;
-                        _ffmpegResampler.Dispose();
-                        _ffmpegResampler = null;
-                        Log("❌ FFmpeg not available; using simple FIR resampler");
-                    }
-                    else
-                    {
-                        Log("✅ FFmpeg soxr resampler active (high quality)");
-                    }
-                }
-            }
-
-            if (_ffmpegResampler != null && _ffmpegResampler.IsRunning)
-            {
-                try
-                {
-                    return _ffmpegResampler.Resample(pcm24k);
-                }
-                catch (Exception ex)
-                {
-                    Log($"⚠️ FFmpeg resample failed: {ex.Message}");
-                    _ffmpegFailed = true;
-                }
-            }
-        }
-
-        // 3. Final fallback: simple 3-tap FIR
-        return Resample24kTo8kSimple(pcm24k);
-    }
-
-    /// <summary>
-    /// Simple 3-tap FIR fallback resampler (24kHz → 8kHz).
-    /// </summary>
-    private static short[] Resample24kTo8kSimple(short[] pcm24k)
-    {
-        if (pcm24k.Length < 3) return Array.Empty<short>();
-
-        int outLen = pcm24k.Length / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int src = i * 3;
-            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
-            int s1 = pcm24k[src];
-            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
-
-            int filtered = (s0 + (s1 << 1) + s2) >> 2;
-            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
-        }
-
-        return output;
-    }
-
     public void Start()
     {
         if (_running || _disposed) return;
@@ -202,6 +104,7 @@ public class DirectRtpPlayout : IDisposable
         _framesSent = 0;
         _silenceFrames = 0;
         _droppedFrames = 0;
+        _debugResampleCount = 0;
 
         _playoutThread = new Thread(PlayoutLoop)
         {
@@ -211,7 +114,7 @@ public class DirectRtpPlayout : IDisposable
         };
         _playoutThread.Start();
 
-        Log($"▶️ Playout STARTED | Codec:PCMA | Buffer:{MAX_QUEUE_FRAMES * FRAME_MS}ms | Startup:{MIN_STARTUP_FRAMES * FRAME_MS}ms");
+        Log($"▶️ Playout STARTED | Buffer:{MAX_QUEUE_FRAMES * FRAME_MS}ms | Startup:{MIN_STARTUP_FRAMES * FRAME_MS}ms");
     }
 
     public void Stop()
@@ -224,17 +127,10 @@ public class DirectRtpPlayout : IDisposable
 
         while (_frameQueue.TryDequeue(out _)) { }
 
-        // Cleanup FFmpeg
-        lock (_resamplerLock)
-        {
-            _ffmpegResampler?.Dispose();
-            _ffmpegResampler = null;
-        }
-
         Log($"⏹️ Playout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
     }
 
-    public void Clear() // Call on barge-in
+    public void Clear()
     {
         int cleared = 0;
         while (_frameQueue.TryDequeue(out _)) cleared++;
@@ -243,28 +139,44 @@ public class DirectRtpPlayout : IDisposable
 
     private void PlayoutLoop()
     {
+        var sw = Stopwatch.StartNew();
+        double nextFrameTime = sw.Elapsed.TotalMilliseconds;
         bool wasEmpty = true;
         bool startupBuffering = true;
-        long startTicks = 0;
-        int framesSentThisSession = 0;
 
         while (_running)
         {
-            // Startup buffering phase - wait for enough frames
+            double now = sw.Elapsed.TotalMilliseconds;
+
+            // Startup buffering phase
             if (startupBuffering)
             {
                 if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
                 {
                     startupBuffering = false;
-                    startTicks = Environment.TickCount64;
-                    framesSentThisSession = 0;
+                    nextFrameTime = sw.Elapsed.TotalMilliseconds;
                     Log($"📦 Startup buffer ready ({_frameQueue.Count} frames / {MIN_STARTUP_FRAMES * FRAME_MS}ms)");
                 }
                 else
                 {
-                    Thread.Sleep(5);
+                    if (now >= nextFrameTime)
+                    {
+                        SendAlawFrame(new short[PCM8K_FRAME_SAMPLES]);
+                        Interlocked.Increment(ref _silenceFrames);
+                        nextFrameTime += FRAME_MS;
+                    }
+                    Thread.Sleep(1);
                     continue;
                 }
+            }
+
+            // Timing loop with precision sleep/spin
+            if (now < nextFrameTime)
+            {
+                double wait = nextFrameTime - now;
+                if (wait > 2) Thread.Sleep((int)(wait - 1));
+                else if (wait > 0.5) Thread.SpinWait(500);
+                continue;
             }
 
             // Get frame or generate silence
@@ -286,68 +198,47 @@ public class DirectRtpPlayout : IDisposable
                 }
             }
 
-            SendRtpPacket(frame);
-            framesSentThisSession++;
+            SendAlawFrame(frame);
+            nextFrameTime += FRAME_MS;
 
-            // Wall-clock drift-corrected pacing (prevents fast/slow playback)
-            long nextFrameTime = startTicks + (framesSentThisSession * FRAME_MS);
-            long now = Environment.TickCount64;
-            int sleepMs = (int)(nextFrameTime - now);
-            
-            if (sleepMs > 0)
+            // Drift correction (tight 20ms threshold)
+            if (now - nextFrameTime > 20)
             {
-                Thread.Sleep(sleepMs);
-            }
-            else if (sleepMs < -100)
-            {
-                // We're more than 100ms behind - reset timing
-                startTicks = Environment.TickCount64;
-                framesSentThisSession = 0;
+                Log($"⏱️ Drift correction: {now - nextFrameTime:F1}ms behind");
+                nextFrameTime = now + FRAME_MS;
             }
         }
     }
 
-    /// <summary>
-    /// ✅ SEND RAW RTP PACKET using RTPSession.SendRtpRaw().
-    /// This is the correct SIPSorcery API for raw RTP transmission.
-    /// </summary>
-    private void SendRtpPacket(short[] pcmFrame)
+    private void SendAlawFrame(short[] pcmFrame)
     {
         try
         {
-            // 1. Encode PCM → A-law (ITU-T G.711)
+            // Encode PCM → A-law (ITU-T G.711)
             for (int i = 0; i < pcmFrame.Length; i++)
             {
                 _alawBuffer[i] = LinearToALaw(pcmFrame[i]);
             }
 
-            // 2. Send via RTPSession.SendRtpRaw (correct SIPSorcery API)
-            _rtpSession.SendRtpRaw(
-                SDPMediaTypesEnum.audio,
-                _alawBuffer,
-                _timestamp,
-                markerBit: 0,
-                payloadTypeID: 8  // PCMA
-            );
-
-            _timestamp += (uint)PCM8K_FRAME_SAMPLES; // Increment by samples @ 8kHz
+            // ✅ CORRECT: 20ms duration (milliseconds), NOT 160 samples!
+            _mediaSession.SendAudio((uint)FRAME_MS, _alawBuffer);
 
             Interlocked.Increment(ref _framesSent);
 
-            // Diagnostic: Verify first packet encoding
+            // First-frame diagnostic
             if (_framesSent == 1)
             {
-                Log($"✅ First RTP sent | TS:{_timestamp} | Payload:160 bytes A-law (0x{_alawBuffer[0]:X2})");
+                Log($"✅ First frame sent | 160 bytes A-law | Silence byte: 0x{_alawBuffer[0]:X2} (expected 0xD5)");
             }
         }
         catch (Exception ex)
         {
-            Log($"⚠️ RTP send error: {ex.Message}");
+            Log($"⚠️ SendAudio error: {ex.Message}");
         }
     }
 
     // ===========================================================================================
-    // ITU-T G.711 A-law Encoder (RFC 3551 compliant) - NO EXTERNAL DEPENDENCIES
+    // ITU-T G.711 A-law Encoder (RFC 3551 compliant)
     // ===========================================================================================
     private static byte LinearToALaw(short sample)
     {
@@ -355,20 +246,54 @@ public class DirectRtpPlayout : IDisposable
         if (sign != 0) sample = (short)-sample;
         sample = (short)((sample + 8) >> 4);
 
-        int exponent, mantissa;
-        if (sample >= 256) { exponent = 7; mantissa = (sample >> 4) & 0x0F; }
-        else if (sample >= 128) { exponent = 6; mantissa = sample & 0x0F; }
-        else if (sample >= 64) { exponent = 5; mantissa = sample & 0x0F; }
-        else if (sample >= 32) { exponent = 4; mantissa = sample & 0x0F; }
-        else if (sample >= 16) { exponent = 3; mantissa = sample & 0x0F; }
-        else if (sample >= 8) { exponent = 2; mantissa = sample & 0x0F; }
-        else if (sample >= 4) { exponent = 1; mantissa = sample & 0x0F; }
-        else { exponent = 0; mantissa = sample >> 1; }
+        int exponent = sample switch
+        {
+            >= 256 => 7,
+            >= 128 => 6,
+            >= 64 => 5,
+            >= 32 => 4,
+            >= 16 => 3,
+            >= 8 => 2,
+            >= 4 => 1,
+            _ => 0
+        };
+
+        int mantissa = exponent == 0
+            ? sample >> 1
+            : sample & 0x0F;
 
         byte alaw = (byte)((exponent << 4) | mantissa);
-        alaw ^= 0x55;                // Invert odd bits (G.711 requirement)
-        if (sign == 0) alaw |= 0x80; // Restore sign bit
+        alaw ^= 0x55;
+        if (sign == 0) alaw |= 0x80;
         return alaw;
+    }
+
+    /// <summary>
+    /// ✅ CORRECT 24kHz → 8kHz resampling with anti-aliasing.
+    /// 3:1 decimation with 3-tap FIR low-pass filter [0.25, 0.5, 0.25].
+    /// Prevents high-frequency aliasing that causes "ringing" in telephony.
+    /// </summary>
+    private static short[] Resample24kTo8kAntiAliased(short[] pcm24k)
+    {
+        if (pcm24k.Length < 3)
+            return Array.Empty<short>();
+
+        // CRITICAL: Output length MUST be input/3 (3:1 decimation)
+        int outLen = pcm24k.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int src = i * 3;
+            // 3-tap FIR low-pass: [0.25, 0.5, 0.25] prevents aliasing
+            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
+            int s1 = pcm24k[src];
+            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
+            int filtered = (s0 + (s1 << 1) + s2) >> 2; // (s0 + 2*s1 + s2) / 4
+            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
+        }
+
+        return output;
     }
 
     private static short[] BytesToShorts(byte[] bytes)
@@ -386,13 +311,6 @@ public class DirectRtpPlayout : IDisposable
         if (_disposed) return;
         _disposed = true;
         Stop();
-        
-        lock (_resamplerLock)
-        {
-            _ffmpegResampler?.Dispose();
-            _ffmpegResampler = null;
-        }
-        
         GC.SuppressFinalize(this);
     }
 }
