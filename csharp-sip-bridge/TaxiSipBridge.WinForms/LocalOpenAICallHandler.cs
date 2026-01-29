@@ -101,38 +101,34 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Setup media session with UnifiedAudioEncoder (Opus + G.722 + G.711)
             var audioEncoder = new UnifiedAudioEncoder();
             AudioCodecs.ResetAllCodecs(); // Reset codec state for new call
-            
+
+            // Build codec list with Opus prioritized if remote offers it
+            List<AudioFormat> preferredFormats;
+            if (IsOpusAvailable)
+            {
+                var opusPt = _remotePtToCodec.FirstOrDefault(kv => kv.Value == AudioCodecsEnum.OPUS).Key;
+                var opusFormat = new AudioFormat(AudioCodecsEnum.OPUS, opusPt, 48000, 2, "opus");
+                preferredFormats = new List<AudioFormat> { opusFormat };
+                preferredFormats.AddRange(audioEncoder.SupportedFormats.Where(f => f.Codec != AudioCodecsEnum.OPUS));
+                Log($"🎧 [{callId}] Opus prioritized (PT{opusPt})");
+            }
+            else
+            {
+                preferredFormats = audioEncoder.SupportedFormats.ToList();
+            }
+
+            // Create audio source with prioritized codecs
             var audioSource = new AudioExtrasSource(
                 audioEncoder,
                 new AudioSourceOptions { AudioSource = AudioSourcesEnum.None }
             );
 
+            // Restrict to our preferred format order
+            audioSource.RestrictFormats(fmt => preferredFormats.Any(p => p.Codec == fmt.Codec));
+
             var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
             _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
-
-            // Force Opus codec preference if remote offers it (WhatsApp/mobile)
-            if (IsOpusAvailable)
-            {
-                // Find the remote's Opus payload type
-                var opusPt = _remotePtToCodec.FirstOrDefault(kv => kv.Value == AudioCodecsEnum.OPUS).Key;
-                if (opusPt > 0)
-                {
-                    // Create Opus format with remote's PT (must match for SDP answer)
-                    var opusFormat = new AudioFormat(AudioCodecsEnum.OPUS, opusPt, 48000, 2, "opus");
-                    
-                    // Add to media session's audio track
-                    var audioTrack = _currentMediaSession.AudioLocalTrack;
-                    if (audioTrack != null)
-                    {
-                        // Clear existing and add Opus first for priority
-                        var capabilities = new List<AudioFormat> { opusFormat };
-                        capabilities.AddRange(audioEncoder.SupportedFormats.Where(f => f.Codec != AudioCodecsEnum.OPUS));
-                        audioTrack.Capabilities = capabilities;
-                        Log($"🎧 [{callId}] Opus prioritized (PT{opusPt})");
-                    }
-                }
-            }
 
             // Send ringing
             Log($"☎️ [{callId}] Sending 180 Ringing...");
