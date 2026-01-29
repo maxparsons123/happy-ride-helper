@@ -147,11 +147,67 @@ public static class SpeexDspResamplerHelper
     private static SpeexDspResampler? _resampler16kTo24k;
     private static readonly object _lock = new();
     private static bool _available = true;
+    private static bool _checkedAtStartup;
 
     /// <summary>
     /// Check if libspeexdsp is available.
     /// </summary>
     public static bool IsAvailable => _available;
+
+    /// <summary>
+    /// Logs startup diagnostics: exe directory, DLL presence, and load test.
+    /// Call this early in app startup (e.g., MainForm constructor).
+    /// </summary>
+    public static void LogStartupDiagnostics(Action<string>? log = null)
+    {
+        if (_checkedAtStartup) return;
+        _checkedAtStartup = true;
+
+        var exeDir = AppContext.BaseDirectory;
+        var dllPath = Path.Combine(exeDir, "libspeexdsp.dll");
+        var dllExists = File.Exists(dllPath);
+
+        log?.Invoke($"📂 Exe directory: {exeDir}");
+        log?.Invoke($"📦 libspeexdsp.dll present: {(dllExists ? "YES ✅" : "NO ❌")}");
+
+        if (!dllExists)
+        {
+            // Check for alternate names
+            var altNames = new[] { "libspeexdsp-1.dll", "speexdsp.dll" };
+            foreach (var alt in altNames)
+            {
+                var altPath = Path.Combine(exeDir, alt);
+                if (File.Exists(altPath))
+                {
+                    log?.Invoke($"⚠️ Found '{alt}' — rename to 'libspeexdsp.dll' to enable");
+                }
+            }
+            _available = false;
+            log?.Invoke("🔇 SpeexDSP: DISABLED (will use simple FIR resampler)");
+            return;
+        }
+
+        // Try to actually load it
+        try
+        {
+            using var testResampler = new SpeexDspResampler(24000, 8000, 8);
+            var testInput = new short[240]; // 10ms of 24kHz
+            var testOutput = testResampler.Resample(testInput);
+            _available = true;
+            log?.Invoke($"🎵 SpeexDSP: LOADED ✅ (Quality 8, test resample {testInput.Length}→{testOutput.Length} samples)");
+        }
+        catch (DllNotFoundException ex)
+        {
+            _available = false;
+            log?.Invoke($"❌ SpeexDSP load failed: {ex.Message}");
+            log?.Invoke("⚠️ DLL found but won't load — check architecture (x64 vs x86) matches your app");
+        }
+        catch (Exception ex)
+        {
+            _available = false;
+            log?.Invoke($"❌ SpeexDSP init error: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// Resample 24kHz to 8kHz using SpeexDSP.
