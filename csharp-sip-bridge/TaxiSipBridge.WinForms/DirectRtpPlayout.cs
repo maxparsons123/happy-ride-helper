@@ -11,8 +11,9 @@ public class DirectRtpPlayout : IDisposable
     private const int PCM_8K_SAMPLES = 160;
     private const int FRAME_MS = 20;
 
-    // 160ms (8 frames) cushion - absorbs OpenAI burst jitter without feeling laggy
-    private const int MIN_SAMPLES_TO_START = PCM_8K_SAMPLES * 8;
+    // 300ms (15 frames) cushion - absorbs OpenAI burst jitter and network clumping
+    // Increased from 160ms to fix stuttering at start of AI responses
+    private const int MIN_SAMPLES_TO_START = PCM_8K_SAMPLES * 15;
 
     private readonly ConcurrentQueue<short> _sampleBuffer = new();
     private readonly RTPSession _rtpSession;
@@ -72,7 +73,7 @@ public class DirectRtpPlayout : IDisposable
     public void Start()
     {
         _rtpTimer = new System.Threading.Timer(SendFrame, null, 0, FRAME_MS);
-        Log("▶️ Playout started (160ms startup buffer)");
+        Log("▶️ Playout started (300ms startup buffer)");
     }
 
     private void SendFrame(object? state)
@@ -144,13 +145,17 @@ public class DirectRtpPlayout : IDisposable
         _timestamp += PCM_8K_SAMPLES;
     }
 
+    /// <summary>
+    /// Clear the audio buffer. Call this on response.created to flush stale data
+    /// and ensure the new AI response starts cleanly without collision.
+    /// </summary>
     public void Clear()
     {
         while (_sampleBuffer.TryDequeue(out _)) { }
         _isCurrentlySpeaking = false;
         _filterState = 0;
         _lastSample = 0;
-        Log("🗑️ Buffer cleared (barge-in)");
+        Log("🗑️ Buffer cleared for new response");
     }
 
     public void Stop()
