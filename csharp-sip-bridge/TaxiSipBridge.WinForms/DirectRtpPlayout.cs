@@ -33,6 +33,9 @@ public class DirectRtpPlayout : IDisposable
     private volatile bool _running;
     private volatile bool _disposed;
 
+    // Avoid spamming logs/exceptions if native SpeexDSP library isn't present.
+    private bool _speexMissingLogged;
+
     // Stats
     private int _framesSent;
     private int _silenceFrames;
@@ -71,9 +74,34 @@ public class DirectRtpPlayout : IDisposable
         try
         {
             var pcm24k = BytesToShorts(pcm24kBytes);
-            
-            // Use SpeexDSP resampler (quality 8 - excellent for telephony)
-            var pcm8k = SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
+
+            short[] pcm8k;
+            if (SpeexDspResamplerHelper.IsAvailable)
+            {
+                try
+                {
+                    // Use SpeexDSP resampler (quality 8 - excellent for telephony)
+                    pcm8k = SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
+                }
+                catch (DllNotFoundException)
+                {
+                    if (!_speexMissingLogged)
+                    {
+                        _speexMissingLogged = true;
+                        Log("⚠️ libspeexdsp not found (Speex disabled); using simple resampler");
+                    }
+                    pcm8k = Resample24kTo8kSimple(pcm24k);
+                }
+            }
+            else
+            {
+                if (!_speexMissingLogged)
+                {
+                    _speexMissingLogged = true;
+                    Log("⚠️ SpeexDSP unavailable; using simple resampler");
+                }
+                pcm8k = Resample24kTo8kSimple(pcm24k);
+            }
 
             for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
             {
@@ -90,38 +118,9 @@ public class DirectRtpPlayout : IDisposable
                 _frameQueue.Enqueue(frame);
             }
         }
-        catch (DllNotFoundException)
-        {
-            // Fallback to simple resampler if libspeexdsp not available
-            Log($"⚠️ libspeexdsp not found, falling back to simple resampler");
-            BufferAiAudioFallback(pcm24kBytes);
-        }
         catch (Exception ex)
         {
             Log($"⚠️ Buffer error: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Fallback buffer method using simple 3-tap FIR if SpeexDSP unavailable.
-    /// </summary>
-    private void BufferAiAudioFallback(byte[] pcm24kBytes)
-    {
-        var pcm24k = BytesToShorts(pcm24kBytes);
-        var pcm8k = Resample24kTo8kSimple(pcm24k);
-
-        for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
-        {
-            if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
-            {
-                _frameQueue.TryDequeue(out _);
-                Interlocked.Increment(ref _droppedFrames);
-            }
-
-            var frame = new short[PCM8K_FRAME_SAMPLES];
-            int len = Math.Min(PCM8K_FRAME_SAMPLES, pcm8k.Length - i);
-            Array.Copy(pcm8k, i, frame, 0, len);
-            _frameQueue.Enqueue(frame);
         }
     }
 
