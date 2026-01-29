@@ -83,12 +83,13 @@ public class DirectRtpPlayout : IDisposable
                     // Use SpeexDSP resampler (quality 8 - excellent for telephony)
                     pcm8k = SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
                 }
-                catch (DllNotFoundException)
+                catch (DllNotFoundException ex)
                 {
                     if (!_speexMissingLogged)
                     {
                         _speexMissingLogged = true;
-                        Log("⚠️ libspeexdsp not found (Speex disabled); using simple resampler");
+                        // Covers: missing DLL, wrong architecture (BadImageFormatException), missing native deps, etc.
+                        Log($"⚠️ SpeexDSP unavailable ({ex.Message}); using simple resampler");
                     }
                     pcm8k = Resample24kTo8kSimple(pcm24k);
                 }
