@@ -71,13 +71,19 @@ public class DirectRtpPlayout : IDisposable
         // Check if remote endpoint changed (NAT rebinding or initial discovery)
         if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
         {
-            Log($"🔄 NAT: Remote endpoint updated → {remoteEndPoint}");
+            bool isFirst = _lastRemoteEndpoint == null;
             _lastRemoteEndpoint = remoteEndPoint;
             
-            // Update session's destination to match actual source
+            // Update session's destination to match actual source (symmetric RTP)
             try
             {
                 _session.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
+                
+                // Log first discovery loudly, subsequent changes quietly
+                if (isFirst)
+                    Log($"🔄 NAT: Symmetric RTP locked → {remoteEndPoint}");
+                else
+                    Log($"🔄 NAT: Endpoint rebind → {remoteEndPoint}");
             }
             catch (Exception ex)
             {
