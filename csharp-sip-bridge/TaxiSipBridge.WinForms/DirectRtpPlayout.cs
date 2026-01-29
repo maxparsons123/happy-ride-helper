@@ -193,6 +193,8 @@ public class DirectRtpPlayout : IDisposable
     {
         bool wasEmpty = true;
         bool startupBuffering = true;
+        long startTicks = 0;
+        int framesSentThisSession = 0;
 
         while (_running)
         {
@@ -202,6 +204,8 @@ public class DirectRtpPlayout : IDisposable
                 if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
                 {
                     startupBuffering = false;
+                    startTicks = Environment.TickCount64;
+                    framesSentThisSession = 0;
                     Log($"📦 Startup buffer ready ({_frameQueue.Count} frames / {MIN_STARTUP_FRAMES * FRAME_MS}ms)");
                 }
                 else
@@ -231,9 +235,23 @@ public class DirectRtpPlayout : IDisposable
             }
 
             SendRtpPacket(frame);
+            framesSentThisSession++;
 
-            // Simple 20ms timing
-            Thread.Sleep(FRAME_MS);
+            // Wall-clock drift-corrected pacing (prevents fast/slow playback)
+            long nextFrameTime = startTicks + (framesSentThisSession * FRAME_MS);
+            long now = Environment.TickCount64;
+            int sleepMs = (int)(nextFrameTime - now);
+            
+            if (sleepMs > 0)
+            {
+                Thread.Sleep(sleepMs);
+            }
+            else if (sleepMs < -100)
+            {
+                // We're more than 100ms behind - reset timing
+                startTicks = Environment.TickCount64;
+                framesSentThisSession = 0;
+            }
         }
     }
 
