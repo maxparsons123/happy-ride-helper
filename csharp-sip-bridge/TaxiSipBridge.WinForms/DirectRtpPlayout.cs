@@ -33,8 +33,11 @@ public class DirectRtpPlayout : IDisposable
     private volatile bool _running;
     private volatile bool _disposed;
 
-    // Avoid spamming logs/exceptions if native SpeexDSP library isn't present.
+    // Resampler state
     private bool _speexMissingLogged;
+    private FfmpegStreamingResampler? _ffmpegResampler;
+    private bool _ffmpegFailed;
+    private readonly object _resamplerLock = new();
 
     // Stats
     private int _framesSent;
@@ -64,7 +67,7 @@ public class DirectRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Uses SpeexDSP for high-quality 8kHz resampling.
+    /// Buffer 24kHz PCM from OpenAI. Uses SpeexDSP → FFmpeg → Simple FIR fallback chain.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -74,35 +77,7 @@ public class DirectRtpPlayout : IDisposable
         try
         {
             var pcm24k = BytesToShorts(pcm24kBytes);
-
-            short[] pcm8k;
-            if (SpeexDspResamplerHelper.IsAvailable)
-            {
-                try
-                {
-                    // Use SpeexDSP resampler (quality 8 - excellent for telephony)
-                    pcm8k = SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
-                }
-                catch (DllNotFoundException ex)
-                {
-                    if (!_speexMissingLogged)
-                    {
-                        _speexMissingLogged = true;
-                        // Covers: missing DLL, wrong architecture (BadImageFormatException), missing native deps, etc.
-                        Log($"⚠️ SpeexDSP unavailable ({ex.Message}); using simple resampler");
-                    }
-                    pcm8k = Resample24kTo8kSimple(pcm24k);
-                }
-            }
-            else
-            {
-                if (!_speexMissingLogged)
-                {
-                    _speexMissingLogged = true;
-                    Log("⚠️ SpeexDSP unavailable; using simple resampler");
-                }
-                pcm8k = Resample24kTo8kSimple(pcm24k);
-            }
+            short[] pcm8k = ResampleWithFallback(pcm24k);
 
             for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
             {
@@ -123,6 +98,76 @@ public class DirectRtpPlayout : IDisposable
         {
             Log($"⚠️ Buffer error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Resampler cascade: SpeexDSP → FFmpeg → Simple FIR
+    /// </summary>
+    private short[] ResampleWithFallback(short[] pcm24k)
+    {
+        // 1. Try SpeexDSP first (highest quality)
+        if (SpeexDspResamplerHelper.IsAvailable)
+        {
+            try
+            {
+                return SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
+            }
+            catch (DllNotFoundException ex)
+            {
+                if (!_speexMissingLogged)
+                {
+                    _speexMissingLogged = true;
+                    Log($"⚠️ SpeexDSP unavailable ({ex.Message}); trying FFmpeg...");
+                }
+            }
+        }
+        else if (!_speexMissingLogged)
+        {
+            _speexMissingLogged = true;
+            Log("⚠️ SpeexDSP unavailable; trying FFmpeg...");
+        }
+
+        // 2. Try FFmpeg (soxr resampler - high quality)
+        if (!_ffmpegFailed)
+        {
+            lock (_resamplerLock)
+            {
+                if (_ffmpegResampler == null)
+                {
+                    _ffmpegResampler = new FfmpegStreamingResampler(24000, 8000);
+                    _ffmpegResampler.OnDebugLog += msg => Log(msg);
+                    _ffmpegResampler.OnError += msg => Log($"⚠️ FFmpeg: {msg}");
+                    
+                    if (!_ffmpegResampler.Start())
+                    {
+                        _ffmpegFailed = true;
+                        _ffmpegResampler.Dispose();
+                        _ffmpegResampler = null;
+                        Log("❌ FFmpeg not available; using simple FIR resampler");
+                    }
+                    else
+                    {
+                        Log("✅ FFmpeg soxr resampler active (high quality)");
+                    }
+                }
+            }
+
+            if (_ffmpegResampler != null && _ffmpegResampler.IsRunning)
+            {
+                try
+                {
+                    return _ffmpegResampler.Resample(pcm24k);
+                }
+                catch (Exception ex)
+                {
+                    Log($"⚠️ FFmpeg resample failed: {ex.Message}");
+                    _ffmpegFailed = true;
+                }
+            }
+        }
+
+        // 3. Final fallback: simple 3-tap FIR
+        return Resample24kTo8kSimple(pcm24k);
     }
 
     /// <summary>
@@ -178,6 +223,13 @@ public class DirectRtpPlayout : IDisposable
         _playoutThread = null;
 
         while (_frameQueue.TryDequeue(out _)) { }
+
+        // Cleanup FFmpeg
+        lock (_resamplerLock)
+        {
+            _ffmpegResampler?.Dispose();
+            _ffmpegResampler = null;
+        }
 
         Log($"⏹️ Playout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
     }
@@ -334,6 +386,13 @@ public class DirectRtpPlayout : IDisposable
         if (_disposed) return;
         _disposed = true;
         Stop();
+        
+        lock (_resamplerLock)
+        {
+            _ffmpegResampler?.Dispose();
+            _ffmpegResampler = null;
+        }
+        
         GC.SuppressFinalize(this);
     }
 }
