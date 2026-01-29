@@ -835,18 +835,19 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         try
         {
+            // Payload matches AdaDispatchRequest schema
             var payload = new
             {
-                job_id = Guid.NewGuid().ToString(),
                 call_id = _callId,
-                caller_phone = _callerId,
+                caller_phone = _callerId ?? "unknown",
                 action = action,
-                ada_pickup = _booking.Pickup,
-                ada_destination = _booking.Destination,
+                pickup = _booking.Pickup,
+                destination = _booking.Destination,
                 passengers = _booking.Passengers ?? 1,
-                pickup_time = _booking.PickupTime ?? "now",
-                timestamp = DateTime.UtcNow.ToString("o")
+                time = _booking.PickupTime ?? "now"
             };
+
+            Log($"📡 Webhook payload: {JsonSerializer.Serialize(payload)}");
 
             var json = JsonSerializer.Serialize(payload);
             Log($"📡 Calling dispatch: {action}");
