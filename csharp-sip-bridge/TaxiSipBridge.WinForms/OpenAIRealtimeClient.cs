@@ -829,28 +829,75 @@ public class OpenAIRealtimeClient : IAudioAIClient
     }
 
     /// <summary>
+    /// Format phone number for WhatsApp:
+    /// - Remove leading "00" (international prefix)
+    /// - For Dutch numbers (+31): remove leading "0" from local part
+    /// </summary>
+    private string FormatPhoneForWhatsApp(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "";
+        
+        var cleaned = phone.Trim();
+        
+        // Remove leading "00" international prefix → use "+" instead
+        if (cleaned.StartsWith("00"))
+        {
+            cleaned = "+" + cleaned.Substring(2);
+        }
+        
+        // Dutch numbers: +310612345678 or +31 0612345678 → +31612345678
+        if (cleaned.StartsWith("+31") || cleaned.StartsWith("31"))
+        {
+            var prefix = cleaned.StartsWith("+31") ? "+31" : "31";
+            var rest = cleaned.Substring(prefix.Length);
+            
+            // Remove leading 0 from local number
+            if (rest.StartsWith("0"))
+            {
+                rest = rest.Substring(1);
+            }
+            cleaned = "+31" + rest;
+        }
+        
+        // Ensure starts with + if it looks like an international number
+        if (!cleaned.StartsWith("+") && cleaned.Length > 10)
+        {
+            cleaned = "+" + cleaned;
+        }
+        
+        // Remove any spaces or dashes
+        cleaned = cleaned.Replace(" ", "").Replace("-", "");
+        
+        return cleaned;
+    }
+
+    /// <summary>
     /// Call the dispatch webhook for quotes and confirmations.
     /// </summary>
     private async Task<(bool success, string? fare, string? eta, string? bookingRef, string? message, string? error)> CallDispatchWebhookAsync(string action)
     {
         try
         {
-            // Payload matches AdaDispatchRequest schema
+            // Format caller phone for WhatsApp
+            var whatsappPhone = FormatPhoneForWhatsApp(_callerId);
+            
+            // Payload matches AdaDispatchRequest schema (same as taxi-realtime-simple)
             var payload = new
             {
                 call_id = _callId,
-                caller_phone = _callerId ?? "unknown",
+                caller_phone = !string.IsNullOrEmpty(whatsappPhone) ? whatsappPhone : "unknown",
                 action = action,
-                pickup = _booking.Pickup,
-                destination = _booking.Destination,
+                pickup = _booking.Pickup ?? "",
+                destination = _booking.Destination ?? "",
                 passengers = _booking.Passengers ?? 1,
-                time = _booking.PickupTime ?? "now"
+                pickup_time = _booking.PickupTime ?? "now",
+                locale = "GB",
+                currency = "GBP"
             };
 
-            Log($"📡 Webhook payload: {JsonSerializer.Serialize(payload)}");
-
             var json = JsonSerializer.Serialize(payload);
-            Log($"📡 Calling dispatch: {action}");
+            Log($"📤 Dispatch webhook: {action}");
+            Log($"   Payload: {json}");
 
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             content.Headers.Add("X-Call-ID", _callId);
@@ -858,11 +905,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
             var response = await _httpClient.PostAsync(_dispatchWebhookUrl, content);
             var responseBody = await response.Content.ReadAsStringAsync();
 
-            Log($"📬 Dispatch response: {response.StatusCode}");
+            Log($"📥 Dispatch response: {response.StatusCode} - {responseBody}");
 
             if (!response.IsSuccessStatusCode)
             {
-                return (false, null, null, null, null, $"HTTP {(int)response.StatusCode}");
+                return (false, null, null, null, null, $"HTTP {(int)response.StatusCode}: {responseBody}");
             }
 
             using var doc = JsonDocument.Parse(responseBody);
