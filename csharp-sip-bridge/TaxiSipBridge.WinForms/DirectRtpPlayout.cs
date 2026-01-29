@@ -1,25 +1,31 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Direct RTP playout using VoIPMediaSession.SendAudio with proper 24kHz→8kHz resampling.
+/// Direct RTP playout with symmetric NAT traversal and proper 24kHz→8kHz resampling.
 /// </summary>
 public class DirectRtpPlayout : IDisposable
 {
     private const int SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
     private const int PCM_8K_SAMPLES = (SAMPLE_RATE / 1000) * FRAME_MS; // 160 samples
+    private const byte ALAW_SILENCE = 0xD5; // G.711 A-law silence byte for NAT keepalive
 
     private const int MAX_QUEUE_FRAMES = 100;   // 2 seconds @ 20ms
     private const int MIN_STARTUP_FRAMES = 10;  // 200ms startup buffer
 
-    private static readonly short[] SilenceFrame = new short[PCM_8K_SAMPLES];
+    // Pre-allocated A-law silence frame for NAT keepalive
+    private static readonly byte[] AlawSilenceFrame;
+    private static readonly short[] PcmSilenceFrame = new short[PCM_8K_SAMPLES];
 
     private readonly VoIPMediaSession _session;
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
@@ -28,6 +34,15 @@ public class DirectRtpPlayout : IDisposable
     private bool _running;
     private Task? _playoutTask;
     private int _debugResampleCount;
+    private IPEndPoint? _lastRemoteEndpoint;
+
+    static DirectRtpPlayout()
+    {
+        // Pre-fill A-law silence buffer with 0xD5 for NAT keepalive
+        AlawSilenceFrame = new byte[PCM_8K_SAMPLES];
+        for (int i = 0; i < PCM_8K_SAMPLES; i++)
+            AlawSilenceFrame[i] = ALAW_SILENCE;
+    }
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -35,7 +50,40 @@ public class DirectRtpPlayout : IDisposable
     public DirectRtpPlayout(VoIPMediaSession session)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
-        Log("✅ DirectRtpPlayout initialized (24kHz→8kHz resampling enabled)");
+        
+        // Enable symmetric RTP: accept audio from any address (critical for NAT)
+        _session.AcceptRtpFromAny = true;
+        
+        // Subscribe to inbound RTP to implement symmetric NAT traversal
+        _session.OnRtpPacketReceived += OnRtpPacketReceived;
+        
+        Log("✅ DirectRtpPlayout initialized (symmetric RTP + NAT keepalive enabled)");
+    }
+
+    /// <summary>
+    /// Symmetric RTP handler: dynamically update remote endpoint based on where packets arrive from.
+    /// This punches through NAT by sending audio back to the actual source address.
+    /// </summary>
+    private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    {
+        if (mediaType != SDPMediaTypesEnum.audio) return;
+        
+        // Check if remote endpoint changed (NAT rebinding or initial discovery)
+        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
+        {
+            Log($"🔄 NAT: Remote endpoint updated → {remoteEndPoint}");
+            _lastRemoteEndpoint = remoteEndPoint;
+            
+            // Update session's destination to match actual source
+            try
+            {
+                _session.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ NAT endpoint update failed: {ex.Message}");
+            }
+        }
     }
 
     public void Start()
@@ -44,12 +92,13 @@ public class DirectRtpPlayout : IDisposable
         _running = true;
         _debugResampleCount = 0;
         _playoutTask = Task.Run(PlayoutLoop, _cts.Token);
-        Log("▶️ Playout started using VoIPMediaSession Direct Send.");
+        Log("▶️ Playout started (symmetric RTP + NAT keepalive).");
     }
 
     public void Stop()
     {
         _running = false;
+        _session.OnRtpPacketReceived -= OnRtpPacketReceived;
         if (!_cts.IsCancellationRequested) _cts.Cancel();
         try { _playoutTask?.Wait(500); } catch { }
         while (_frameQueue.TryDequeue(out _)) { }
@@ -129,7 +178,7 @@ public class DirectRtpPlayout : IDisposable
                 {
                     if (now >= nextFrameTime)
                     {
-                        SendRtp(SilenceFrame);
+                        SendSilence(); // NAT keepalive with 0xD5
                         nextFrameTime += FRAME_MS;
                     }
                     Thread.Sleep(1);
@@ -154,7 +203,7 @@ public class DirectRtpPlayout : IDisposable
             }
             else
             {
-                SendRtp(SilenceFrame);
+                SendSilence(); // NAT keepalive with 0xD5
                 if (!wasEmpty)
                 {
                     wasEmpty = true;
@@ -171,6 +220,19 @@ public class DirectRtpPlayout : IDisposable
                 nextFrameTime = now + FRAME_MS;
             }
         }
+    }
+
+    /// <summary>
+    /// Send proper A-law silence (0xD5) for NAT keepalive.
+    /// This keeps the NAT port mapping "hot" during AI silence.
+    /// </summary>
+    private void SendSilence()
+    {
+        try
+        {
+            _session.SendAudio((uint)FRAME_MS, AlawSilenceFrame);
+        }
+        catch { }
     }
 
     private void SendRtp(short[] pcmSamples)
