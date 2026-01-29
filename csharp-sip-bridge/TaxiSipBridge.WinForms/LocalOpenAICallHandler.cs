@@ -34,6 +34,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
     private bool _adaHasStartedSpeaking; // Track if we've received any AI audio
+    private bool _needsFadeIn; // Apply fade-in to first audio delta of each response
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
@@ -160,12 +161,23 @@ public class LocalOpenAICallHandler : ISipCallHandler
             {
                 _isBotSpeaking = true;
                 _adaHasStartedSpeaking = true;
-                _playout?.BufferAiAudio(pcmBytes);
+
+                // Apply fade-in to first audio delta to prevent speaker pop
+                byte[] processedBytes = pcmBytes;
+                if (_needsFadeIn)
+                {
+                    processedBytes = ApplyFadeIn(pcmBytes);
+                    _needsFadeIn = false;
+                    Log($"🔊 [{callId}] Applied anti-glitch fade-in");
+                }
+
+                _playout?.BufferAiAudio(processedBytes);
             };
             _aiClient.OnResponseStarted += () => 
             {
-                // Clear buffer on new response to flush stale silence/noise
+                // Clear buffer and mark for fade-in on new response
                 _playout?.Clear();
+                _needsFadeIn = true;
             };
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
@@ -345,6 +357,30 @@ public class LocalOpenAICallHandler : ISipCallHandler
         _callCts = null;
 
         OnCallEnded?.Invoke(callId);
+    }
+
+    /// <summary>
+    /// Apply a fade-in ramp to the first PCM24 audio delta to prevent speaker pop.
+    /// Ramps from 0% to 100% over ~2ms (48 samples at 24kHz).
+    /// </summary>
+    private byte[] ApplyFadeIn(byte[] pcmBytes)
+    {
+        // Convert bytes to shorts (PCM16 24kHz)
+        short[] samples = new short[pcmBytes.Length / 2];
+        Buffer.BlockCopy(pcmBytes, 0, samples, 0, pcmBytes.Length);
+
+        // Fade over 48 samples (~2ms at 24kHz)
+        int fadeLength = Math.Min(samples.Length, 48);
+        for (int i = 0; i < fadeLength; i++)
+        {
+            float multiplier = (float)i / fadeLength;
+            samples[i] = (short)(samples[i] * multiplier);
+        }
+
+        // Convert back to bytes
+        byte[] fadedBytes = new byte[pcmBytes.Length];
+        Buffer.BlockCopy(samples, 0, fadedBytes, 0, pcmBytes.Length);
+        return fadedBytes;
     }
 
     private void Log(string msg)
