@@ -488,11 +488,16 @@ public class UnifiedAudioEncoder : IAudioEncoder
     // Use mono Opus for better SIP carrier compatibility (many reject stereo)
     private const int SDP_OPUS_CHANNELS = 1;
 
-    private static readonly AudioFormat OpusFormat106 = new AudioFormat(
-        AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus");
-
-    private static readonly AudioFormat OpusFormat111 = new AudioFormat(
-        AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus");
+    // Common Opus payload types - carriers may use various dynamic PTs (96-127)
+    private static readonly AudioFormat[] OpusFormats = new AudioFormat[]
+    {
+        new AudioFormat(AudioCodecsEnum.OPUS, 96, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+        new AudioFormat(AudioCodecsEnum.OPUS, 106, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+        new AudioFormat(AudioCodecsEnum.OPUS, 111, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+        new AudioFormat(AudioCodecsEnum.OPUS, 116, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+        new AudioFormat(AudioCodecsEnum.OPUS, 117, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+        new AudioFormat(AudioCodecsEnum.OPUS, 120, AudioCodecs.OPUS_SAMPLE_RATE, SDP_OPUS_CHANNELS, "opus"),
+    };
 
     private static readonly AudioFormat G722Format = new AudioFormat(
         AudioCodecsEnum.G722, 9, AudioCodecs.G722_SAMPLE_RATE, 1, "G722");
@@ -506,12 +511,11 @@ public class UnifiedAudioEncoder : IAudioEncoder
     {
         get
         {
-            var formats = new List<AudioFormat>
-            {
-                OpusFormat106,
-                OpusFormat111,
-                G722Format
-            };
+            var formats = new List<AudioFormat>();
+            
+            // Add all Opus PT variants for maximum carrier compatibility
+            formats.AddRange(OpusFormats);
+            formats.Add(G722Format);
 
             // Add base formats but exclude Opus/G722 to avoid conflicts
             formats.AddRange(_baseEncoder.SupportedFormats.Where(f =>
