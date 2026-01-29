@@ -242,11 +242,22 @@ public class LocalOpenAICallHandler : ISipCallHandler
         try
         {
             var sdpBody = req.Body;
-            if (string.IsNullOrEmpty(sdpBody)) return;
+            if (string.IsNullOrEmpty(sdpBody))
+            {
+                Log($"⚠️ [{callId}] No SDP body in INVITE");
+                return;
+            }
+
+            // Log raw SDP for debugging codec offers
+            Log($"📋 [{callId}] Raw SDP:\n{sdpBody}");
 
             var sdp = SDP.ParseSDPDescription(sdpBody);
             var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
-            if (audioMedia == null) return;
+            if (audioMedia == null)
+            {
+                Log($"⚠️ [{callId}] No audio media in SDP");
+                return;
+            }
 
             foreach (var f in audioMedia.MediaFormats)
             {
