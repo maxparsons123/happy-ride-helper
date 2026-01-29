@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Media;
@@ -14,6 +15,11 @@ public class DirectRtpPlayout : IDisposable
     private const int SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
     private const int PCM_8K_SAMPLES = (SAMPLE_RATE / 1000) * FRAME_MS; // 160 samples
+
+    private const int MAX_QUEUE_FRAMES = 100;   // 2 seconds @ 20ms
+    private const int MIN_STARTUP_FRAMES = 10;  // 200ms startup buffer
+
+    private static readonly short[] SilenceFrame = new short[PCM_8K_SAMPLES];
 
     private readonly VoIPMediaSession _session;
     private readonly ConcurrentQueue<short[]> _frameQueue = new();
@@ -88,6 +94,9 @@ public class DirectRtpPlayout : IDisposable
                 int len = Math.Min(PCM_8K_SAMPLES, pcm8k.Length - i);
                 Array.Copy(pcm8k, i, frame, 0, len);
                 _frameQueue.Enqueue(frame);
+
+                // Bound queue (drop-oldest) to avoid runaway latency and mid-call desync.
+                while (_frameQueue.Count > MAX_QUEUE_FRAMES && _frameQueue.TryDequeue(out _)) { }
             }
         }
         catch (Exception ex)
@@ -98,38 +107,68 @@ public class DirectRtpPlayout : IDisposable
 
     private void PlayoutLoop()
     {
-        long totalSamplesSent = 0;
-        DateTime startTime = DateTime.UtcNow;
-        bool wasEmpty = false;
+        var sw = Stopwatch.StartNew();
+        double nextFrameTime = sw.Elapsed.TotalMilliseconds;
+        bool startupBuffering = true;
+        bool wasEmpty = true;
 
         while (_running && !_cts.IsCancellationRequested)
         {
-            double elapsedMs = (DateTime.UtcNow - startTime).TotalMilliseconds;
-            double scheduledMs = (totalSamplesSent / (double)SAMPLE_RATE) * 1000;
+            double now = sw.Elapsed.TotalMilliseconds;
 
-            if (scheduledMs > elapsedMs)
+            // Startup buffering: keep stream alive with silence until we have enough audio queued.
+            if (startupBuffering)
             {
-                int sleepTime = (int)(scheduledMs - elapsedMs);
-                if (sleepTime > 0) Thread.Sleep(sleepTime);
+                if (_frameQueue.Count >= MIN_STARTUP_FRAMES)
+                {
+                    startupBuffering = false;
+                    nextFrameTime = sw.Elapsed.TotalMilliseconds;
+                    Log($"📦 Startup buffer ready ({_frameQueue.Count} frames / {MIN_STARTUP_FRAMES * FRAME_MS}ms)");
+                }
+                else
+                {
+                    if (now >= nextFrameTime)
+                    {
+                        SendRtp(SilenceFrame);
+                        nextFrameTime += FRAME_MS;
+                    }
+                    Thread.Sleep(1);
+                    continue;
+                }
             }
 
+            // Master clock pacing
+            if (now < nextFrameTime)
+            {
+                double wait = nextFrameTime - now;
+                if (wait > 2) Thread.Sleep((int)(wait - 1));
+                else if (wait > 0.5) Thread.SpinWait(500);
+                continue;
+            }
+
+            // Audio frame or keepalive silence
             if (_frameQueue.TryDequeue(out var frame))
             {
                 SendRtp(frame);
-                totalSamplesSent += frame.Length;
                 wasEmpty = false;
             }
             else
             {
-                // Send silence to keep the RTP stream alive during gaps
-                SendRtp(new short[PCM_8K_SAMPLES]);
-                totalSamplesSent += PCM_8K_SAMPLES;
-
+                SendRtp(SilenceFrame);
                 if (!wasEmpty)
                 {
                     wasEmpty = true;
                     OnQueueEmpty?.Invoke();
                 }
+            }
+
+            nextFrameTime += FRAME_MS;
+
+            // Drift correction (avoid long-term timing creep)
+            if (now - nextFrameTime > 100)
+            {
+                Log($"⏱️ Drift correction: {now - nextFrameTime:F1}ms behind");
+                nextFrameTime = now + FRAME_MS;
             }
         }
     }
