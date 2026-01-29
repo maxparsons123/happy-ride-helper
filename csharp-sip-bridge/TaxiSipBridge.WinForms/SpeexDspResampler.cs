@@ -168,6 +168,8 @@ public static class SpeexDspResamplerHelper
         var dllExists = File.Exists(dllPath);
 
         log?.Invoke($"📂 Exe directory: {exeDir}");
+        log?.Invoke($"🧠 Process: {(Environment.Is64BitProcess ? "x64" : "x86")} | OS: {(Environment.Is64BitOperatingSystem ? "x64" : "x86")}");
+        log?.Invoke($"🧩 Runtime: {RuntimeInformation.FrameworkDescription} | ProcArch: {RuntimeInformation.ProcessArchitecture} | OSArch: {RuntimeInformation.OSArchitecture}");
         log?.Invoke($"📦 libspeexdsp.dll present: {(dllExists ? "YES ✅" : "NO ❌")}");
 
         if (!dllExists)
@@ -229,6 +231,12 @@ public static class SpeexDspResamplerHelper
                 _available = false;
                 throw;
             }
+            catch (BadImageFormatException ex)
+            {
+                // DLL is present but wrong architecture (x86 vs x64)
+                _available = false;
+                throw new DllNotFoundException("SpeexDSP DLL load failed (wrong architecture)", ex);
+            }
         }
     }
 
@@ -248,6 +256,11 @@ public static class SpeexDspResamplerHelper
             {
                 _available = false;
                 throw;
+            }
+            catch (BadImageFormatException ex)
+            {
+                _available = false;
+                throw new DllNotFoundException("SpeexDSP DLL load failed (wrong architecture)", ex);
             }
         }
     }
@@ -269,6 +282,11 @@ public static class SpeexDspResamplerHelper
                 _available = false;
                 throw;
             }
+            catch (BadImageFormatException ex)
+            {
+                _available = false;
+                throw new DllNotFoundException("SpeexDSP DLL load failed (wrong architecture)", ex);
+            }
         }
     }
 
@@ -288,6 +306,11 @@ public static class SpeexDspResamplerHelper
             {
                 _available = false;
                 throw;
+            }
+            catch (BadImageFormatException ex)
+            {
+                _available = false;
+                throw new DllNotFoundException("SpeexDSP DLL load failed (wrong architecture)", ex);
             }
         }
     }
