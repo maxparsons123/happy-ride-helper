@@ -162,7 +162,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 _adaHasStartedSpeaking = true;
                 _playout?.BufferAiAudio(pcmBytes);
             };
-            _aiClient.OnResponseStarted += () => { }; // No fade-in needed with raw PCM
+            _aiClient.OnResponseStarted += () => 
+            {
+                // Clear buffer on new response to flush stale silence/noise
+                _playout?.Clear();
+            };
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
