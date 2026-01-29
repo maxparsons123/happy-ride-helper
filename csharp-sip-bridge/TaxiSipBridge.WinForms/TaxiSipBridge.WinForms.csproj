@@ -53,6 +53,8 @@
     <Compile Include="PassthroughWebhook.cs" />
     <Compile Include="SimliAvatarClient.cs" />
     <Compile Include="SimliAvatarForm.cs" />
+    <Compile Include="DirectRtpPlayout.cs" />
+    <Compile Include="SymmetricRtpHelper.cs" />
   </ItemGroup>
 
 </Project>
