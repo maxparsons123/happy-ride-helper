@@ -55,7 +55,6 @@
     <Compile Include="SimliAvatarForm.cs" />
     <Compile Include="DirectRtpPlayout.cs" />
     <Compile Include="DirectRtpPlayoutExtensions.cs" />
-    <Compile Include="SymmetricRtpHelper.cs" />
   </ItemGroup>
 
 </Project>
