@@ -18,6 +18,9 @@ public partial class MainForm : Form
     {
         InitializeComponent();
         LoadSettings();
+        
+        // Run SpeexDSP diagnostics at startup
+        SpeexDspResamplerHelper.LogStartupDiagnostics(msg => AddLog(msg));
     }
 
     private void LoadSettings()
