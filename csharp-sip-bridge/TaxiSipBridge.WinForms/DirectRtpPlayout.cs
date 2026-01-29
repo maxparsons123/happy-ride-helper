@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.Net;
 using System.Threading;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -17,6 +16,7 @@ public class DirectRtpPlayout : IDisposable
 
     private readonly ConcurrentQueue<short> _sampleBuffer = new();
     private readonly RTPSession _rtpSession;
+    private readonly SymmetricRtpHelper _natHelper;
     private readonly byte[] _alawBuffer = new byte[PCM_8K_SAMPLES];
 
     private System.Threading.Timer? _rtpTimer;
@@ -24,7 +24,6 @@ public class DirectRtpPlayout : IDisposable
     private float _filterState = 0;
     private bool _isCurrentlySpeaking = false;
     private short _lastSample = 0;
-    private IPEndPoint? _lastRemoteEndpoint;
 
     public event Action? OnQueueEmpty;
     public event Action<string>? OnLog;
@@ -33,44 +32,12 @@ public class DirectRtpPlayout : IDisposable
     {
         _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
 
-        // Enable symmetric RTP: accept audio from any address (critical for NAT)
-        _rtpSession.AcceptRtpFromAny = true;
+        // Enable symmetric RTP NAT traversal via helper
+        _natHelper = new SymmetricRtpHelper(_rtpSession);
+        _natHelper.OnLog += msg => OnLog?.Invoke(msg);
+        _natHelper.EnableSymmetricRtp();
 
-        // Subscribe to inbound RTP to implement symmetric NAT traversal
-        _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
-
-        Log("✅ DirectRtpPlayout initialized (symmetric RTP + NAT keepalive)");
-    }
-
-    /// <summary>
-    /// Symmetric RTP handler: dynamically update remote endpoint based on where packets arrive from.
-    /// This punches through NAT by sending audio back to the actual source address.
-    /// </summary>
-    private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
-    {
-        if (mediaType != SDPMediaTypesEnum.audio) return;
-
-        // Check if remote endpoint changed (NAT rebinding or initial discovery)
-        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
-        {
-            bool isFirst = _lastRemoteEndpoint == null;
-            _lastRemoteEndpoint = remoteEndPoint;
-
-            // Update session's destination to match actual source (symmetric RTP)
-            try
-            {
-                _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
-
-                if (isFirst)
-                    Log($"🔄 NAT: Symmetric RTP locked → {remoteEndPoint}");
-                else
-                    Log($"🔄 NAT: Endpoint rebind → {remoteEndPoint}");
-            }
-            catch (Exception ex)
-            {
-                Log($"⚠️ NAT endpoint update failed: {ex.Message}");
-            }
-        }
+        Log("✅ DirectRtpPlayout initialized");
     }
 
     public void BufferAiAudio(byte[] pcm24kBytes)
@@ -189,7 +156,7 @@ public class DirectRtpPlayout : IDisposable
     public void Stop()
     {
         _rtpTimer?.Dispose();
-        _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
+        _natHelper?.Dispose();
         Log("⏹️ Playout stopped");
     }
 
