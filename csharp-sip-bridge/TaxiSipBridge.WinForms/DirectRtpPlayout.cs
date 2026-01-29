@@ -61,7 +61,7 @@ public class DirectRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Buffer 24kHz PCM from OpenAI. Resamples to 8kHz with anti-aliasing.
+    /// Buffer 24kHz PCM from OpenAI. Uses SpeexDSP for high-quality 8kHz resampling.
     /// </summary>
     public void BufferAiAudio(byte[] pcm24kBytes)
     {
@@ -71,7 +71,9 @@ public class DirectRtpPlayout : IDisposable
         try
         {
             var pcm24k = BytesToShorts(pcm24kBytes);
-            var pcm8k = Resample24kTo8kAntiAliased(pcm24k);
+            
+            // Use SpeexDSP resampler (quality 8 - excellent for telephony)
+            var pcm8k = SpeexDspResamplerHelper.Resample24kTo8k(pcm24k);
 
             for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
             {
@@ -88,10 +90,63 @@ public class DirectRtpPlayout : IDisposable
                 _frameQueue.Enqueue(frame);
             }
         }
+        catch (DllNotFoundException)
+        {
+            // Fallback to simple resampler if libspeexdsp not available
+            Log($"⚠️ libspeexdsp not found, falling back to simple resampler");
+            BufferAiAudioFallback(pcm24kBytes);
+        }
         catch (Exception ex)
         {
             Log($"⚠️ Buffer error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Fallback buffer method using simple 3-tap FIR if SpeexDSP unavailable.
+    /// </summary>
+    private void BufferAiAudioFallback(byte[] pcm24kBytes)
+    {
+        var pcm24k = BytesToShorts(pcm24kBytes);
+        var pcm8k = Resample24kTo8kSimple(pcm24k);
+
+        for (int i = 0; i < pcm8k.Length; i += PCM8K_FRAME_SAMPLES)
+        {
+            if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
+            {
+                _frameQueue.TryDequeue(out _);
+                Interlocked.Increment(ref _droppedFrames);
+            }
+
+            var frame = new short[PCM8K_FRAME_SAMPLES];
+            int len = Math.Min(PCM8K_FRAME_SAMPLES, pcm8k.Length - i);
+            Array.Copy(pcm8k, i, frame, 0, len);
+            _frameQueue.Enqueue(frame);
+        }
+    }
+
+    /// <summary>
+    /// Simple 3-tap FIR fallback resampler (24kHz → 8kHz).
+    /// </summary>
+    private static short[] Resample24kTo8kSimple(short[] pcm24k)
+    {
+        if (pcm24k.Length < 3) return Array.Empty<short>();
+
+        int outLen = pcm24k.Length / 3;
+        var output = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int src = i * 3;
+            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
+            int s1 = pcm24k[src];
+            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
+
+            int filtered = (s0 + (s1 << 1) + s2) >> 2;
+            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
+        }
+
+        return output;
     }
 
     public void Start()
@@ -244,31 +299,6 @@ public class DirectRtpPlayout : IDisposable
         alaw ^= 0x55;                // Invert odd bits (G.711 requirement)
         if (sign == 0) alaw |= 0x80; // Restore sign bit
         return alaw;
-    }
-
-    /// <summary>
-    /// Anti-aliased 24kHz → 8kHz resampling (3-tap FIR low-pass).
-    /// Prevents high-frequency artifacts that cause "ringing" in telephony.
-    /// </summary>
-    private static short[] Resample24kTo8kAntiAliased(short[] pcm24k)
-    {
-        if (pcm24k.Length < 3) return Array.Empty<short>();
-
-        int outLen = pcm24k.Length / 3;
-        var output = new short[outLen];
-
-        for (int i = 0; i < outLen; i++)
-        {
-            int src = i * 3;
-            int s0 = src > 0 ? pcm24k[src - 1] : pcm24k[src];
-            int s1 = pcm24k[src];
-            int s2 = src + 1 < pcm24k.Length ? pcm24k[src + 1] : pcm24k[src];
-
-            int filtered = (s0 + (s1 << 1) + s2) >> 2;
-            output[i] = (short)Math.Clamp(filtered, short.MinValue, short.MaxValue);
-        }
-
-        return output;
     }
 
     private static short[] BytesToShorts(byte[] bytes)
