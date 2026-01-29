@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
 using System.Text;
@@ -139,36 +138,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _lastQuestionAsked = "pickup";
 
         _ws = new ClientWebSocket();
-
-        // OpenAI Realtime API requires specific subprotocols
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
-        // Resolve api.openai.com to IP address for reliable connection
-        const string openAiHost = "api.openai.com";
-        string resolvedIp = openAiHost;
-
-        try
-        {
-            var addresses = await Dns.GetHostAddressesAsync(openAiHost);
-            if (addresses.Length > 0)
-            {
-                // Prefer IPv4 for compatibility
-                var ipv4 = addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-                resolvedIp = (ipv4 ?? addresses[0]).ToString();
-                Log($"📡 Resolved {openAiHost} → {resolvedIp}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠️ DNS resolution failed, using hostname: {ex.Message}");
-        }
-
-        // For WebSocket with TLS, we must use the original hostname for SNI
-        // The DNS resolution is for logging/debugging - ClientWebSocket handles the rest
-        var uri = new Uri($"wss://{openAiHost}/v1/realtime?model={_model}");
-
-        Log($"🔌 Connecting to OpenAI Realtime: {_model} (IP: {resolvedIp})");
+        var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
+        Log($"🔌 Connecting to OpenAI Realtime: {_model}");
 
         try
         {
@@ -184,23 +158,68 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
     }
 
+    #region Audio Input Methods
+
+    /// <summary>
+    /// Check echo guard - returns true if audio should be ignored.
+    /// Bypasses guard when awaiting confirmation for quick "yes" responses.
+    /// </summary>
+    private bool ShouldIgnoreForEchoGuard()
+    {
+        if (_awaitingConfirmation) return false;
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS;
+    }
+
+    /// <summary>
+    /// Send audio to OpenAI and track buffer duration.
+    /// </summary>
+    private async Task SendAudioToOpenAIAsync(byte[] pcm24kBytes, double durationMs)
+    {
+        _inputBufferedMs += durationMs;
+        var base64 = Convert.ToBase64String(pcm24kBytes);
+        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
+
+        try
+        {
+            _audioPacketsSent++;
+            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
+                Log($"📤 Audio #{_audioPacketsSent}: {pcm24kBytes.Length}b PCM24");
+
+            await _ws.SendAsync(
+                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
+                WebSocketMessageType.Text,
+                true,
+                _cts?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Upsample 8kHz PCM to 24kHz using 3x point replication.
+    /// </summary>
+    private static short[] Upsample8kTo24k(short[] pcm8k)
+    {
+        var pcm24k = new short[pcm8k.Length * 3];
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            pcm24k[i * 3] = pcm8k[i];
+            pcm24k[i * 3 + 1] = pcm8k[i];
+            pcm24k[i * 3 + 2] = pcm8k[i];
+        }
+        return pcm24k;
+    }
+
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
-
-        // Echo guard - ignore audio right after Ada finishes speaking
-        // BUT: Skip guard if awaiting confirmation (user saying "yes" is critical!)
-        if (!_awaitingConfirmation)
-        {
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-                return;
-        }
+        if (ShouldIgnoreForEchoGuard()) return;
 
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
 
-        // Apply pre-emphasis for consonant clarity (matches edge function)
+        // Apply pre-emphasis for consonant clarity
         for (int i = 0; i < pcm8k.Length; i++)
         {
             short current = pcm8k[i];
@@ -208,166 +227,63 @@ public class OpenAIRealtimeClient : IAudioAIClient
             _lastSample = current;
         }
 
-        // Volume boost for telephony - INCREASED to 2.5x for better VAD detection
-        // Telephony audio is often very quiet compared to desktop mics
+        // 2.5x volume boost for telephony
         for (int i = 0; i < pcm8k.Length; i++)
             pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
 
-        // Resample 8kHz → 24kHz
         var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        var durationMs = ulawData.Length * 1000.0 / 8000.0;
 
-        // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
-        // durationMs = (bytes / 8000) * 1000
-        var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
-        _inputBufferedMs += durationMs;
-
-        // Send as JSON text (matches edge function expectation)
-        // Edge function expects: { type: "input_audio_buffer.append", audio: "base64..." }
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
-        try
-        {
-            _audioPacketsSent++;
-            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent audio #{_audioPacketsSent}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24, {base64.Length} chars base64");
-
-            await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
-                true,
-                _cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+        await SendAudioToOpenAIAsync(pcmBytes, durationMs);
     }
 
     /// <summary>
-    /// Send PCM16 audio at 8kHz (already decoded from µ-law via NAudio).
-    /// This matches the SIPSorcery example pattern using NAudio.Codecs.MuLawDecoder.
+    /// Send PCM16 audio at 8kHz (passthrough - no DSP).
     /// </summary>
     public async Task SendPcm8kAsync(byte[] pcm8kBytes)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
+        if (ShouldIgnoreForEchoGuard()) return;
 
-        // Echo guard
-        if (!_awaitingConfirmation)
-        {
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-                return;
-        }
-
-        // Convert bytes to shorts
         var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
-
-        // PASSTHROUGH MODE: No DSP - just simple point upsampling 8kHz → 24kHz
-        // Pick each sample 3x (no filtering, no boost, no pre-emphasis)
-        var pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            pcm24k[i * 3] = pcm8k[i];
-            pcm24k[i * 3 + 1] = pcm8k[i];
-            pcm24k[i * 3 + 2] = pcm8k[i];
-        }
+        var pcm24k = Upsample8kTo24k(pcm8k);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        var durationMs = (pcm8kBytes.Length / 2) * 1000.0 / 8000.0;
 
-        // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
-        var sampleCount = pcm8kBytes.Length / 2;
-        var durationMs = (double)sampleCount * 1000.0 / 8000.0;
-        _inputBufferedMs += durationMs;
-
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
-        try
-        {
-            _audioPacketsSent++;
-            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM8k #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
-
-            await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
-                true,
-                _cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+        await SendAudioToOpenAIAsync(pcmBytes, durationMs);
     }
 
     /// <summary>
-    /// Send PCM16 audio at 8kHz with minimal DSP (for A-law path).
-    /// Only applies volume boost, no pre-emphasis or noise gate.
+    /// Send PCM16 audio at 8kHz with 2.5x volume boost (for A-law path).
     /// </summary>
     public async Task SendPcm8kNoDspAsync(byte[] pcm8kBytes)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
+        if (ShouldIgnoreForEchoGuard()) return;
 
-        // Echo guard
-        if (!_awaitingConfirmation)
-        {
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-                return;
-        }
-
-        // Convert bytes to shorts
         var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
 
-        // Apply 2.5x volume boost only (no pre-emphasis, no noise gate)
+        // 2.5x volume boost only
         for (int i = 0; i < pcm8k.Length; i++)
             pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
 
-        // Simple point upsampling 8kHz → 24kHz
-        var pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            pcm24k[i * 3] = pcm8k[i];
-            pcm24k[i * 3 + 1] = pcm8k[i];
-            pcm24k[i * 3 + 2] = pcm8k[i];
-        }
+        var pcm24k = Upsample8kTo24k(pcm8k);
         var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        var durationMs = (pcm8kBytes.Length / 2) * 1000.0 / 8000.0;
 
-        // Track buffered audio duration
-        var sampleCount = pcm8kBytes.Length / 2;
-        var durationMs = (double)sampleCount * 1000.0 / 8000.0;
-        _inputBufferedMs += durationMs;
-
-        var base64 = Convert.ToBase64String(pcmBytes);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
-        try
-        {
-            _audioPacketsSent++;
-            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM8k (A-law) #{_audioPacketsSent}: {pcm8kBytes.Length}b → {pcmBytes.Length}b PCM24");
-
-            await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
-                true,
-                _cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException ex) { Log($"⚠️ WS send error: {ex.Message}"); }
+        await SendAudioToOpenAIAsync(pcmBytes, durationMs);
     }
 
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
-
-        // Echo guard for HD audio path (same logic as µ-law)
-        if (!_awaitingConfirmation)
-        {
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
-                return;
-        }
+        if (ShouldIgnoreForEchoGuard()) return;
 
         byte[] audioToSend;
-
         if (sampleRate != 24000)
         {
             var samples = AudioCodecs.BytesToShorts(pcmData);
@@ -379,29 +295,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
             audioToSend = pcmData;
         }
 
-        // Track buffered duration for PCM24 path (covers browser/WebRTC scenarios)
-        var sampleCount = audioToSend.Length / 2; // 2 bytes per sample
-        var durationMs = (double)sampleCount * 1000.0 / 24000.0;
-        _inputBufferedMs += durationMs;
-
-        var base64 = Convert.ToBase64String(audioToSend);
-        var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
-
-        try
-        {
-            _audioPacketsSent++;
-            if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent PCM audio #{_audioPacketsSent}: {pcmData.Length}b → {base64.Length} chars base64");
-
-            await _ws.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                WebSocketMessageType.Text,
-                true,
-                _cts?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+        var durationMs = (audioToSend.Length / 2) * 1000.0 / 24000.0;
+        await SendAudioToOpenAIAsync(audioToSend, durationMs);
     }
+
+    #endregion
 
     public byte[]? GetNextMuLawFrame()
     {
