@@ -111,6 +111,29 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
 
+            // Force Opus codec preference if remote offers it (WhatsApp/mobile)
+            if (IsOpusAvailable)
+            {
+                // Find the remote's Opus payload type
+                var opusPt = _remotePtToCodec.FirstOrDefault(kv => kv.Value == AudioCodecsEnum.OPUS).Key;
+                if (opusPt > 0)
+                {
+                    // Create Opus format with remote's PT (must match for SDP answer)
+                    var opusFormat = new AudioFormat(AudioCodecsEnum.OPUS, opusPt, 48000, 2, "opus");
+                    
+                    // Add to media session's audio track
+                    var audioTrack = _currentMediaSession.AudioLocalTrack;
+                    if (audioTrack != null)
+                    {
+                        // Clear existing and add Opus first for priority
+                        var capabilities = new List<AudioFormat> { opusFormat };
+                        capabilities.AddRange(audioEncoder.SupportedFormats.Where(f => f.Codec != AudioCodecsEnum.OPUS));
+                        audioTrack.Capabilities = capabilities;
+                        Log($"🎧 [{callId}] Opus prioritized (PT{opusPt})");
+                    }
+                }
+            }
+
             // Send ringing
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
