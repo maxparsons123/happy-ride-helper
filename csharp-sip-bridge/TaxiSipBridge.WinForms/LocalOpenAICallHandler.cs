@@ -97,9 +97,15 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session with default audio source (for RTP playout)
+            // Setup media session with OPUS + G.711 codecs for WhatsApp/SIP compatibility
+            var audioEncoder = new AudioEncoder();
+            
+            // Add OPUS support (required for WhatsApp calls which only offer OPUS)
+            var opusFormat = new AudioFormat(AudioCodecsEnum.OPUS, 116, 48000, 2);
+            audioEncoder.SupportedFormats.Add(opusFormat);
+            
             var audioSource = new AudioExtrasSource(
-                new AudioEncoder(),
+                audioEncoder,
                 new AudioSourceOptions { AudioSource = AudioSourcesEnum.None }
             );
 
