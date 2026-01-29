@@ -15,6 +15,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
+    private readonly string? _dispatchWebhookUrl;
     
     private volatile bool _isInCall;
     private volatile bool _disposed;
@@ -48,14 +49,23 @@ public class LocalOpenAICallHandler : ISipCallHandler
     public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
 
+    /// <summary>
+    /// Create a local OpenAI call handler with optional dispatch webhook.
+    /// </summary>
+    /// <param name="apiKey">OpenAI API key</param>
+    /// <param name="model">Model name</param>
+    /// <param name="voice">Voice name</param>
+    /// <param name="dispatchWebhookUrl">Optional webhook URL for taxi dispatch (e.g., Supabase edge function)</param>
     public LocalOpenAICallHandler(
         string apiKey, 
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
-        string voice = "shimmer")
+        string voice = "shimmer",
+        string? dispatchWebhookUrl = null)
     {
         _apiKey = apiKey;
         _model = model;
         _voice = voice;
+        _dispatchWebhookUrl = dispatchWebhookUrl;
     }
 
     public async Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller)
@@ -141,8 +151,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _adaHasStartedSpeaking = false;
             Log($"🎵 [{callId}] DirectRtpPlayout started (raw RTP, A-law encoded)");
 
-            // Create OpenAI client
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice);
+            // Create OpenAI client with dispatch webhook support
+            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
             _aiClient.OnLog += msg => Log(msg);
             _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
             _aiClient.OnAdaSpeaking += msg => { };
