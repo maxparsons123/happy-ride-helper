@@ -300,6 +300,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
             // Decode to PCM16
             short[] pcm16;
+            int sampleRate = 8000; // Default for G.711
+
             switch (codec)
             {
                 case AudioCodecsEnum.PCMU:
@@ -308,8 +310,51 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 case AudioCodecsEnum.PCMA:
                     pcm16 = payload.Select(b => SIPSorcery.Media.ALawDecoder.ALawToLinearSample(b)).ToArray();
                     break;
+                case AudioCodecsEnum.OPUS:
+                    try
+                    {
+                        var pcm48 = TaxiSipBridge.Audio.AudioCodecs.OpusDecode(payload);
+                        
+                        // Downmix stereo to mono if needed
+                        short[] mono;
+                        if (TaxiSipBridge.Audio.AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
+                        {
+                            mono = new short[pcm48.Length / 2];
+                            for (int j = 0; j < mono.Length; j++)
+                                mono[j] = (short)((pcm48[j * 2] + pcm48[j * 2 + 1]) / 2);
+                        }
+                        else
+                        {
+                            mono = pcm48;
+                        }
+                        
+                        // Decimate 48kHz → 24kHz (2:1) for OpenAI
+                        pcm16 = new short[mono.Length / 2];
+                        for (int j = 0; j < pcm16.Length; j++)
+                            pcm16[j] = mono[j * 2];
+                        
+                        sampleRate = 24000; // Already at 24kHz after decimation
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] Opus decode error: {ex.Message}");
+                        return;
+                    }
+                    break;
+                case AudioCodecsEnum.G722:
+                    try
+                    {
+                        pcm16 = TaxiSipBridge.Audio.AudioCodecs.G722Decode(payload);
+                        sampleRate = 16000; // G.722 is 16kHz
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] G.722 decode error: {ex.Message}");
+                        return;
+                    }
+                    break;
                 default:
-                    // For now, only support G.711
+                    // Unsupported codec
                     return;
             }
 
@@ -317,10 +362,10 @@ public class LocalOpenAICallHandler : ISipCallHandler
             var pcmBytes = new byte[pcm16.Length * 2];
             Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-            // Send to OpenAI (8kHz PCM16)
+            // Send to OpenAI with correct sample rate
             try
             {
-                await _aiClient.SendAudioAsync(pcmBytes, 8000);
+                await _aiClient.SendAudioAsync(pcmBytes, sampleRate);
             }
             catch { }
         };
