@@ -17,13 +17,13 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private readonly string _model;
     private readonly string _voice;
     private readonly string? _dispatchWebhookUrl;
-    
+
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
     private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
-    
+
     private VoIPMediaSession? _currentMediaSession;
     private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
@@ -59,7 +59,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     /// <param name="voice">Voice name</param>
     /// <param name="dispatchWebhookUrl">Optional webhook URL for taxi dispatch (e.g., Supabase edge function)</param>
     public LocalOpenAICallHandler(
-        string apiKey, 
+        string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
         string voice = "shimmer",
         string? dispatchWebhookUrl = null)
@@ -196,7 +196,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
                 _playout?.BufferAiAudio(processedBytes);
             };
-            _aiClient.OnResponseStarted += () => 
+            _aiClient.OnResponseStarted += () =>
             {
                 // Clear buffer and mark for fade-in on new response
                 _playout?.Clear();
@@ -242,22 +242,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
         try
         {
             var sdpBody = req.Body;
-            if (string.IsNullOrEmpty(sdpBody))
-            {
-                Log($"⚠️ [{callId}] No SDP body in INVITE");
-                return;
-            }
-
-            // Log raw SDP for debugging codec offers
-            Log($"📋 [{callId}] Raw SDP:\n{sdpBody}");
+            if (string.IsNullOrEmpty(sdpBody)) return;
 
             var sdp = SDP.ParseSDPDescription(sdpBody);
             var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
-            if (audioMedia == null)
-            {
-                Log($"⚠️ [{callId}] No audio media in SDP");
-                return;
-            }
+            if (audioMedia == null) return;
 
             foreach (var f in audioMedia.MediaFormats)
             {
@@ -317,7 +306,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
             // Skip while bot is speaking OR during echo guard period
             if (_isBotSpeaking) return;
-            
+
             var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
             if (msSinceBotStopped < ECHO_GUARD_MS) return;
 
@@ -347,11 +336,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 case AudioCodecsEnum.OPUS:
                     try
                     {
-                        var pcm48 = TaxiSipBridge.Audio.AudioCodecs.OpusDecode(payload);
-                        
+                        var pcm48 = AudioCodecs.OpusDecode(payload);
+
                         // Downmix stereo to mono if needed
                         short[] mono;
-                        if (TaxiSipBridge.Audio.AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
+                        if (AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
                         {
                             mono = new short[pcm48.Length / 2];
                             for (int j = 0; j < mono.Length; j++)
@@ -361,12 +350,12 @@ public class LocalOpenAICallHandler : ISipCallHandler
                         {
                             mono = pcm48;
                         }
-                        
+
                         // Decimate 48kHz → 24kHz (2:1) for OpenAI
                         pcm16 = new short[mono.Length / 2];
                         for (int j = 0; j < pcm16.Length; j++)
                             pcm16[j] = mono[j * 2];
-                        
+
                         sampleRate = 24000; // Already at 24kHz after decimation
                     }
                     catch (Exception ex)
@@ -378,7 +367,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 case AudioCodecsEnum.G722:
                     try
                     {
-                        pcm16 = TaxiSipBridge.Audio.AudioCodecs.G722Decode(payload);
+                        pcm16 = AudioCodecs.G722Decode(payload);
                         sampleRate = 16000; // G.722 is 16kHz
                     }
                     catch (Exception ex)
