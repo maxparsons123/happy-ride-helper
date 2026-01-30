@@ -22,15 +22,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
-    private const int ECHO_GUARD_MS = 400; // Suppress inbound audio for 400ms after Ada stops
+    private const int ECHO_GUARD_MS = 200; // Suppress inbound audio for 200ms after Ada stops (reduced for faster response)
 
     private VoIPMediaSession? _currentMediaSession;
     private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
 
-    private const int FLUSH_PACKETS = 150;     // Flush first 3 seconds of audio (carrier/PBX junk)
-    private const int EARLY_PROTECTION_MS = 6000; // Ignore inbound for 6s after call starts (PBX hold music)
+    private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
+    private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
+    private const int HANGUP_GRACE_MS = 1500;     // Wait for final audio to play before hangup
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
@@ -198,13 +199,15 @@ public class LocalOpenAICallHandler : ISipCallHandler
             };
             _aiClient.OnResponseStarted += () =>
             {
-                // Clear buffer and mark for fade-in on new response
-                _playout?.Clear();
+                // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
             };
-            _aiClient.OnCallEnded += () =>
+            _aiClient.OnCallEnded += async () =>
             {
-                Log($"📞 [{callId}] AI requested call end");
+                Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
+                // Wait for final audio to finish playing before hangup
+                await Task.Delay(HANGUP_GRACE_MS);
+                Log($"📴 [{callId}] Grace period complete, ending call");
                 try { cts.Cancel(); } catch { }
             };
             if (_aiClient is OpenAIRealtimeClient rtc)
