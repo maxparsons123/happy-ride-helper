@@ -221,7 +221,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Detect language from phone number country code prefix.
-    /// Handles both + prefix (international) and 00 prefix (European dialing).
+    /// Handles:
+    /// - + prefix (international): +31612345678
+    /// - 00 prefix (European dialing): 0031612345678
+    /// - National Dutch format: 0652328530 (starts with 06, 10 digits)
     /// </summary>
     private static string DetectLanguageFromPhone(string? phoneNumber)
     {
@@ -229,6 +232,20 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         // Normalize: remove spaces, dashes, parentheses
         var normalized = phoneNumber.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        // Detect Dutch national format: starts with 06, exactly 10 digits
+        // Dutch mobile numbers: 06XXXXXXXX (10 digits total)
+        if (normalized.StartsWith("06") && normalized.Length == 10 && normalized.All(char.IsDigit))
+        {
+            return "nl"; // Dutch national mobile number
+        }
+
+        // Detect Dutch national landline: starts with 0 + area code (not 06), 10 digits
+        // e.g., 020XXXXXXX (Amsterdam), 010XXXXXXX (Rotterdam)
+        if (normalized.StartsWith("0") && !normalized.StartsWith("00") && normalized.Length == 10 && normalized.All(char.IsDigit))
+        {
+            return "nl"; // Dutch national landline
+        }
 
         // Convert 00 prefix to + (common in European SIP trunks)
         // e.g., 0031612345678 → +31612345678
