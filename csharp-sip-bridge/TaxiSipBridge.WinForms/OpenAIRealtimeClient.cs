@@ -49,9 +49,21 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
     private short[] _opusResampleBuffer = Array.Empty<short>();  // Buffer for 24kHz→48kHz upsampling
 
+    // Language detection from caller phone number
+    private static readonly Dictionary<string, string> CountryCodeToLanguage = new()
+    {
+        { "+31", "nl" }, // Netherlands
+        { "+32", "nl" }, // Belgium (Dutch)
+        { "+33", "fr" }, // France
+        { "+41", "de" }, // Switzerland (German)
+        { "+43", "de" }, // Austria
+        { "+49", "de" }, // Germany
+    };
+
     // Session state
     private string? _callerId;
     private string _callId;
+    private string _detectedLanguage = "en"; // Default to English
     private string _lastQuestionAsked = "pickup";
     private BookingState _booking = new();
     private bool _greetingSent = false;
@@ -132,6 +144,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_disposed) throw new ObjectDisposedException(nameof(OpenAIRealtimeClient));
 
         _callerId = caller;
+        _detectedLanguage = DetectLanguageFromPhone(caller);
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _greetingSent = false;
         _booking = new BookingState();
@@ -142,7 +155,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
         var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
-        Log($"🔌 Connecting to OpenAI Realtime: {_model}");
+        Log($"🔌 Connecting to OpenAI Realtime: {_model} (language: {_detectedLanguage})");
 
         try
         {
@@ -156,6 +169,33 @@ public class OpenAIRealtimeClient : IAudioAIClient
             Log($"❌ Failed to connect: {ex.Message}");
             throw;
         }
+    }
+
+    /// <summary>
+    /// Detect language from phone number country code.
+    /// </summary>
+    private static string DetectLanguageFromPhone(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "en";
+
+        var cleaned = phone.Trim();
+        
+        // Handle "00" international prefix
+        if (cleaned.StartsWith("00"))
+            cleaned = "+" + cleaned.Substring(2);
+        
+        // Ensure starts with +
+        if (!cleaned.StartsWith("+") && cleaned.Length > 10)
+            cleaned = "+" + cleaned;
+
+        // Check each country code prefix
+        foreach (var (prefix, lang) in CountryCodeToLanguage)
+        {
+            if (cleaned.StartsWith(prefix))
+                return lang;
+        }
+
+        return "en"; // Default to English
     }
 
     #region Audio Input Methods
@@ -504,6 +544,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (_ws?.State != WebSocketState.Open) return;
 
+        // Get language-specific system prompt
+        var systemPrompt = GetLocalizedSystemPrompt(_detectedLanguage);
+
         // EXACT MATCH to taxi-realtime-desktop edge function settings
         // See: supabase/functions/taxi-realtime-desktop/index.ts lines 693-707
         var sessionUpdate = new
@@ -512,7 +555,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             session = new
             {
                 modalities = new[] { "text", "audio" },  // Text first (matches edge function)
-                instructions = _systemPrompt,
+                instructions = systemPrompt,
                 voice = _voice,
                 input_audio_format = "pcm16",
                 output_audio_format = "pcm16",
@@ -530,7 +573,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log("🎧 Config: VAD=0.4, prefix=400ms, silence=1000ms, volume=2.5x (telephony-optimized)");
+        Log($"🎧 Config: lang={_detectedLanguage}, VAD=0.4, prefix=400ms, silence=1000ms");
 
         var json = JsonSerializer.Serialize(sessionUpdate);
         await _ws.SendAsync(
@@ -558,7 +601,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         _lastQuestionAsked = "pickup";
 
-        // EXACT MATCH to taxi-realtime-desktop edge function (lines 664-672)
+        // Get localized greeting based on detected language
+        var greetingInstruction = GetLocalizedGreeting(_detectedLanguage);
+
         // Uses response.create with modalities ["text", "audio"] and inline instructions
         // DO NOT pre-create an assistant message - let the model generate it with audio
         var responseCreate = new
@@ -567,14 +612,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
             response = new
             {
                 modalities = new[] { "text", "audio" },  // Text first (matches edge function exactly)
-                instructions = "IMPORTANT: You are starting a new taxi booking call. Greet the customer warmly and ask for their pickup location. Say: 'Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?' Do NOT call any tools yet - just greet the user and wait for their response."
+                instructions = greetingInstruction
             }
         };
 
         await SendJsonAsync(responseCreate);
 
-        Log($"🎤 Greeting triggered (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})");
+        Log($"🎤 Greeting triggered in {_detectedLanguage} (attempt {_greetingRetryCount + 1}/{MAX_GREETING_RETRIES})");
     }
+
+    /// <summary>
+    /// Get localized greeting instruction for the response.create call.
+    /// </summary>
+    private static string GetLocalizedGreeting(string lang) => lang switch
+    {
+        "nl" => "BELANGRIJK: Je begint een nieuw taxi-reserveringsgesprek. Begroet de klant hartelijk IN HET NEDERLANDS en vraag naar hun ophaaladres. Zeg: 'Hallo, welkom bij de Taxibot demo. Ik ben Ada, uw taxi-reserveringsassistent. Ik help u graag met het boeken van een taxi. Laten we beginnen. Waar wilt u worden opgehaald?' Roep GEEN tools aan - begroet alleen de gebruiker en wacht op hun antwoord.",
+        
+        "de" => "WICHTIG: Du beginnst ein neues Taxi-Buchungsgespräch. Begrüße den Kunden herzlich AUF DEUTSCH und frage nach der Abholadresse. Sage: 'Hallo und willkommen bei der Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich helfe Ihnen gerne bei der Buchung eines Taxis. Lassen Sie uns beginnen. Wo möchten Sie abgeholt werden?' Rufe KEINE Tools auf - begrüße nur den Benutzer und warte auf seine Antwort.",
+        
+        "fr" => "IMPORTANT: Vous commencez un nouvel appel de réservation de taxi. Saluez le client chaleureusement EN FRANÇAIS et demandez son adresse de prise en charge. Dites: 'Bonjour et bienvenue sur la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour vous aider à réserver un taxi facilement. Commençons. Où souhaitez-vous être pris en charge?' N'appelez AUCUN outil - saluez simplement l'utilisateur et attendez sa réponse.",
+        
+        _ => "IMPORTANT: You are starting a new taxi booking call. Greet the customer warmly and ask for their pickup location. Say: 'Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?' Do NOT call any tools yet - just greet the user and wait for their response."
+    };
 
     private async Task HandleTransientErrorRetryAsync()
     {
@@ -1185,7 +1244,93 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
     };
 
-    private static string GetDefaultSystemPrompt() => @"You are Ada, a professional taxi booking assistant for a UK taxi company.
+    /// <summary>
+    /// Get language-specific system prompt.
+    /// </summary>
+    private static string GetLocalizedSystemPrompt(string lang) => lang switch
+    {
+        "nl" => @"Je bent Ada, een professionele taxi-reserveringsassistent. Spreek ALTIJD Nederlands.
+
+# PERSOONLIJKHEID
+- Warm, efficiënt en professioneel
+- Korte antwoorden (max 20 woorden)
+- Natuurlijk Nederlands
+
+# RESERVERINGSFLOW (STRIKTE VOLGORDE)
+1. Begroet → Vraag naar OPHAALADRES
+2. Bevestig kort → Vraag naar BESTEMMING
+3. Bevestig kort → Vraag naar AANTAL PASSAGIERS
+4. Bevestig kort → Vraag of NU of ingepland
+5. Vat samen met EXACTE adressen → Roep book_taxi(action=""request_quote"") aan
+6. Bij ontvangst prijs/ETA, vertel klant en vraag: ""Wilt u dat ik dit boek?""
+7. Bij JA/bevestiging → Roep book_taxi(action=""confirmed"") aan
+8. Bedank, geef boekingsreferentie → Roep end_call() aan
+
+# ANTI-HALLUCINATIE REGELS (KRITIEK)
+❌ NOOIT adressen verzinnen of wijzigen - herhaal EXACT wat gebruiker zei
+❌ NOOIT huisnummers of toevoegingen weglaten (52A blijft 52A)
+❌ Bij twijfel, VRAAG om herhaling - niet raden
+
+# TOOLS
+- sync_booking_data: Sla elk veld EXACT op zoals gesproken
+- book_taxi: action=""request_quote"" voor prijs, action=""confirmed"" na ja
+- end_call: Na bevestigde boeking en afscheid",
+
+        "de" => @"Du bist Ada, eine professionelle Taxi-Buchungsassistentin. Sprich IMMER Deutsch.
+
+# PERSÖNLICHKEIT
+- Warm, effizient und professionell
+- Kurze Antworten (max 20 Wörter)
+- Natürliches Deutsch
+
+# BUCHUNGSABLAUF (STRIKTE REIHENFOLGE)
+1. Begrüßen → Nach ABHOLADRESSE fragen
+2. Kurz bestätigen → Nach ZIEL fragen
+3. Kurz bestätigen → Nach ANZAHL PASSAGIERE fragen
+4. Kurz bestätigen → Fragen ob JETZT oder geplant
+5. Mit EXAKTEN Adressen zusammenfassen → book_taxi(action=""request_quote"") aufrufen
+6. Bei Erhalt Preis/ETA, Kunde informieren und fragen: ""Soll ich das buchen?""
+7. Bei JA/Bestätigung → book_taxi(action=""confirmed"") aufrufen
+8. Danken, Buchungsreferenz geben → end_call() aufrufen
+
+# ANTI-HALLUZINATIONS-REGELN (KRITISCH)
+❌ NIEMALS Adressen erfinden oder ändern - EXAKT wiederholen was Benutzer sagte
+❌ NIEMALS Hausnummern oder Zusätze weglassen (52A bleibt 52A)
+❌ Bei Unsicherheit, BITTEN um Wiederholung - nicht raten
+
+# TOOLS
+- sync_booking_data: Jedes Feld EXAKT speichern wie gesprochen
+- book_taxi: action=""request_quote"" für Preis, action=""confirmed"" nach ja
+- end_call: Nach bestätigter Buchung und Verabschiedung",
+
+        "fr" => @"Tu es Ada, une assistante professionnelle de réservation de taxi. Parle TOUJOURS français.
+
+# PERSONNALITÉ
+- Chaleureuse, efficace et professionnelle
+- Réponses courtes (max 20 mots)
+- Français naturel
+
+# FLUX DE RÉSERVATION (ORDRE STRICT)
+1. Saluer → Demander l'ADRESSE DE PRISE EN CHARGE
+2. Confirmer brièvement → Demander la DESTINATION
+3. Confirmer brièvement → Demander le NOMBRE DE PASSAGERS
+4. Confirmer brièvement → Demander si MAINTENANT ou programmé
+5. Résumer avec les adresses EXACTES → Appeler book_taxi(action=""request_quote"")
+6. À réception prix/ETA, informer client et demander: ""Voulez-vous que je réserve?""
+7. Si OUI/confirmation → Appeler book_taxi(action=""confirmed"")
+8. Remercier, donner référence → Appeler end_call()
+
+# RÈGLES ANTI-HALLUCINATION (CRITIQUE)
+❌ JAMAIS inventer ou modifier les adresses - répéter EXACTEMENT ce que l'utilisateur a dit
+❌ JAMAIS omettre les numéros de rue ou suffixes (52A reste 52A)
+❌ En cas de doute, DEMANDER de répéter - ne pas deviner
+
+# OUTILS
+- sync_booking_data: Sauvegarder chaque champ EXACTEMENT comme dit
+- book_taxi: action=""request_quote"" pour prix, action=""confirmed"" après oui
+- end_call: Après réservation confirmée et au revoir",
+
+        _ => @"You are Ada, a professional taxi booking assistant for a UK taxi company.
 
 # PERSONALITY
 - Warm, efficient, and professional
@@ -1233,7 +1378,10 @@ Map user responses to the question you just asked:
 # TOOLS
 - sync_booking_data: Save each field EXACTLY as spoken
 - book_taxi: action=""request_quote"" for pricing, action=""confirmed"" after yes
-- end_call: After confirmed booking and goodbye";
+- end_call: After confirmed booking and goodbye"
+    };
+
+    private static string GetDefaultSystemPrompt() => GetLocalizedSystemPrompt("en");
 
     private void Log(string message)
     {
