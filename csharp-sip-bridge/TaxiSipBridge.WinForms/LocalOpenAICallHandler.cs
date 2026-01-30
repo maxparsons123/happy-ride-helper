@@ -28,7 +28,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
-    private SIPUserAgent.CallHungupDelegate? _currentHungupHandler; // Track to prevent stale handlers
+    private Action<SIPDialogue>? _currentHungupHandler; // Track to prevent stale handlers
 
     private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
     private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
