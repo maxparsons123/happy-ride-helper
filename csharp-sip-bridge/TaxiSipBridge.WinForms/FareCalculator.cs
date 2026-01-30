@@ -19,15 +19,16 @@ public static class FareCalculator
     /// <summary>Minimum fare in pounds</summary>
     public const decimal MIN_FARE = 4.00m;
 
-    private static readonly HttpClient _httpClient = new()
+    // Lazy-initialized to avoid static constructor failures
+    private static HttpClient? _httpClientBacking;
+    private static HttpClient GetHttpClient()
     {
-        Timeout = TimeSpan.FromSeconds(5)
-    };
-
-    static FareCalculator()
-    {
-        // OpenStreetMap requires a User-Agent header
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/1.0");
+        if (_httpClientBacking == null)
+        {
+            _httpClientBacking = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            _httpClientBacking.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/1.0");
+        }
+        return _httpClientBacking;
     }
 
     /// <summary>
@@ -97,8 +98,7 @@ public static class FareCalculator
             }
 
             var url = $"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(searchAddress)}&format=json&limit=1";
-            
-            var response = await _httpClient.GetStringAsync(url);
+            var response = await GetHttpClient().GetStringAsync(url);
             var results = JsonSerializer.Deserialize<JsonElement[]>(response);
 
             if (results != null && results.Length > 0)
