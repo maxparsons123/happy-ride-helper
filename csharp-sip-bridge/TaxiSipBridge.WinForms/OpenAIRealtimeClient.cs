@@ -980,6 +980,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Send WhatsApp booking notification via BSQD webhook.
+    /// Uses POST with Bearer token and JSON body.
     /// Fire-and-forget - errors are logged but don't affect booking.
     /// </summary>
     private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
@@ -992,17 +993,32 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         try
         {
-            var cli = FormatPhoneForWhatsApp(phoneNumber);
-            var webhookUrl = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={cli}";
+            var formattedPhone = FormatPhoneForWhatsApp(phoneNumber);
+            var webhookUrl = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya";
             
-            Log($"📱 Sending WhatsApp notification to {cli}...");
+            Log($"📱 Sending WhatsApp notification to {formattedPhone}...");
             
-            var response = await HttpClient.GetAsync(webhookUrl);
+            // Create request with Bearer auth
+            var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", "sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v");
+            
+            // JSON payload with phoneNumber
+            var payload = new { phoneNumber = formattedPhone };
+            request.Content = new StringContent(
+                System.Text.Json.JsonSerializer.Serialize(payload),
+                System.Text.Encoding.UTF8,
+                "application/json");
+            
+            var response = await HttpClient.SendAsync(request);
             
             if (response.IsSuccessStatusCode)
-                Log($"✅ WhatsApp notification sent to {cli}");
+                Log($"✅ WhatsApp notification sent to {formattedPhone}");
             else
-                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode}");
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode} - {errorBody}");
+            }
         }
         catch (Exception ex)
         {
