@@ -1,8 +1,12 @@
+using System.Net.Http;
+using System.Text.Json;
+
 namespace TaxiSipBridge;
 
 /// <summary>
 /// Local fare calculator for taxi bookings.
-/// Uses a simple formula: base fare + per-mile rate.
+/// Uses real geocoding (OpenStreetMap) + Haversine formula for accurate distance.
+/// Fallback to keyword-based estimation if geocoding fails.
 /// </summary>
 public static class FareCalculator
 {
@@ -15,137 +19,152 @@ public static class FareCalculator
     /// <summary>Minimum fare in pounds</summary>
     public const decimal MIN_FARE = 4.00m;
 
-    /// <summary>
-    /// UK city coordinates for distance estimation.
-    /// </summary>
-    private static readonly Dictionary<string, (double Lat, double Lon)> CityCoordinates = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HttpClient _httpClient = new()
     {
-        // Major UK cities
-        { "london", (51.5074, -0.1278) },
-        { "birmingham", (52.4862, -1.8904) },
-        { "manchester", (53.4808, -2.2426) },
-        { "leeds", (53.8008, -1.5491) },
-        { "liverpool", (53.4084, -2.9916) },
-        { "sheffield", (53.3811, -1.4701) },
-        { "bristol", (51.4545, -2.5879) },
-        { "newcastle", (54.9783, -1.6178) },
-        { "nottingham", (52.9548, -1.1581) },
-        { "glasgow", (55.8642, -4.2518) },
-        { "edinburgh", (55.9533, -3.1883) },
-        
-        // Common areas/suburbs
-        { "heathrow", (51.4700, -0.4543) },
-        { "gatwick", (51.1537, -0.1821) },
-        { "stansted", (51.8860, 0.2389) },
-        { "luton", (51.8747, -0.3683) },
-        { "city airport", (51.5053, 0.0553) },
-        
-        // Dutch cities (for testing)
-        { "amsterdam", (52.3676, 4.9041) },
-        { "rotterdam", (51.9244, 4.4777) },
-        { "utrecht", (52.0907, 5.1214) },
-        { "den haag", (52.0705, 4.3007) },
-        { "the hague", (52.0705, 4.3007) },
-        { "eindhoven", (51.4416, 5.4697) },
+        Timeout = TimeSpan.FromSeconds(5)
     };
 
+    static FareCalculator()
+    {
+        // OpenStreetMap requires a User-Agent header
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/1.0");
+    }
+
     /// <summary>
-    /// Calculate fare based on pickup and destination addresses.
-    /// Uses coordinate lookup for known locations, or estimates based on address parsing.
+    /// Calculate fare based on pickup and destination addresses using real geocoding.
+    /// This is the async version that uses OpenStreetMap for accurate distances.
     /// </summary>
-    /// <param name="pickup">Pickup address</param>
-    /// <param name="destination">Destination address</param>
-    /// <returns>Calculated fare as formatted string (e.g., "£12.50")</returns>
+    public static async Task<(string Fare, string Eta, double DistanceMiles)> CalculateFareAsync(string? pickup, string? destination)
+    {
+        if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
+            return (FormatFare(MIN_FARE), "5 minutes", 0);
+
+        try
+        {
+            // Geocode both addresses in parallel
+            var pickupTask = GeocodeAddressAsync(pickup);
+            var destTask = GeocodeAddressAsync(destination);
+            
+            await Task.WhenAll(pickupTask, destTask);
+            
+            var pickupCoord = await pickupTask;
+            var destCoord = await destTask;
+
+            if (pickupCoord.HasValue && destCoord.HasValue)
+            {
+                // Calculate real distance using Haversine
+                var distanceMiles = HaversineDistanceMiles(
+                    pickupCoord.Value.Lat, pickupCoord.Value.Lon,
+                    destCoord.Value.Lat, destCoord.Value.Lon);
+
+                var fare = CalculateFareFromDistanceDecimal(distanceMiles);
+                var eta = EstimateEta(distanceMiles);
+
+                Console.WriteLine($"[FareCalculator] Geocoded distance: {distanceMiles:F2} miles");
+                Console.WriteLine($"[FareCalculator] Pickup: {pickup} → ({pickupCoord.Value.Lat:F4}, {pickupCoord.Value.Lon:F4})");
+                Console.WriteLine($"[FareCalculator] Dest: {destination} → ({destCoord.Value.Lat:F4}, {destCoord.Value.Lon:F4})");
+
+                return (FormatFare(fare), eta, distanceMiles);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Geocoding failed: {ex.Message}");
+        }
+
+        // Fallback to keyword-based estimation
+        var fallbackDistance = EstimateFromKeywords(pickup, destination);
+        var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
+        return (FormatFare(fallbackFare), EstimateEta(fallbackDistance), fallbackDistance);
+    }
+
+    /// <summary>
+    /// Geocode an address using OpenStreetMap Nominatim API.
+    /// Returns lat/lon coordinates or null if not found.
+    /// </summary>
+    private static async Task<(double Lat, double Lon)?> GeocodeAddressAsync(string address)
+    {
+        try
+        {
+            // Add UK bias for better results
+            var searchAddress = address;
+            if (!address.ToLowerInvariant().Contains("uk") && 
+                !address.ToLowerInvariant().Contains("united kingdom") &&
+                !address.ToLowerInvariant().Contains("netherlands") &&
+                !address.ToLowerInvariant().Contains("nederland"))
+            {
+                searchAddress = $"{address}, UK";
+            }
+
+            var url = $"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(searchAddress)}&format=json&limit=1";
+            
+            var response = await _httpClient.GetStringAsync(url);
+            var results = JsonSerializer.Deserialize<JsonElement[]>(response);
+
+            if (results != null && results.Length > 0)
+            {
+                var first = results[0];
+                var lat = double.Parse(first.GetProperty("lat").GetString()!);
+                var lon = double.Parse(first.GetProperty("lon").GetString()!);
+                return (lat, lon);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Geocode error for '{address}': {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Synchronous fare calculation (uses keyword-based fallback only).
+    /// Use CalculateFareAsync for accurate geocoded distances.
+    /// </summary>
     public static string CalculateFare(string? pickup, string? destination)
     {
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
             return FormatFare(MIN_FARE);
 
-        // Try to estimate distance
-        var distanceMiles = EstimateDistanceMiles(pickup, destination);
-        
-        // Calculate fare
-        var fare = BASE_FARE + (RATE_PER_MILE * (decimal)distanceMiles);
-        
-        // Apply minimum fare
-        fare = Math.Max(fare, MIN_FARE);
-        
-        // Round to nearest 50p
-        fare = Math.Ceiling(fare * 2) / 2;
-        
+        var distanceMiles = EstimateFromKeywords(pickup, destination);
+        var fare = CalculateFareFromDistanceDecimal(distanceMiles);
         return FormatFare(fare);
     }
 
     /// <summary>
     /// Calculate fare with explicit distance in miles.
     /// </summary>
-    /// <param name="distanceMiles">Distance in miles</param>
-    /// <returns>Calculated fare as formatted string</returns>
     public static string CalculateFareFromDistance(double distanceMiles)
+    {
+        return FormatFare(CalculateFareFromDistanceDecimal(distanceMiles));
+    }
+
+    /// <summary>
+    /// Calculate fare decimal value from distance.
+    /// </summary>
+    private static decimal CalculateFareFromDistanceDecimal(double distanceMiles)
     {
         var fare = BASE_FARE + (RATE_PER_MILE * (decimal)distanceMiles);
         fare = Math.Max(fare, MIN_FARE);
         fare = Math.Ceiling(fare * 2) / 2; // Round to nearest 50p
-        return FormatFare(fare);
+        return fare;
     }
 
     /// <summary>
     /// Get ETA based on distance (assumes average 20mph in urban areas).
     /// </summary>
-    /// <param name="distanceMiles">Distance in miles</param>
-    /// <returns>ETA as formatted string (e.g., "5 minutes")</returns>
     public static string EstimateEta(double distanceMiles)
     {
-        // Base pickup time: 5 minutes
+        // Base pickup time: 5 minutes minimum
         // Add travel time at average 20mph urban speed
-        int pickupMinutes = 5;
         int travelMinutes = (int)Math.Ceiling(distanceMiles / 20.0 * 60);
-        
-        // Minimum 5 minutes
-        int totalMinutes = Math.Max(pickupMinutes, travelMinutes + 2);
+        int totalMinutes = Math.Max(5, travelMinutes + 3); // +3 for pickup buffer
         
         return $"{totalMinutes} minutes";
     }
 
     /// <summary>
-    /// Estimate distance in miles between two addresses.
-    /// Uses Haversine formula for known coordinates, or keyword-based estimation.
-    /// </summary>
-    private static double EstimateDistanceMiles(string pickup, string destination)
-    {
-        // Try coordinate-based calculation
-        var pickupCoord = FindCoordinates(pickup);
-        var destCoord = FindCoordinates(destination);
-
-        if (pickupCoord.HasValue && destCoord.HasValue)
-        {
-            return HaversineDistanceMiles(
-                pickupCoord.Value.Lat, pickupCoord.Value.Lon,
-                destCoord.Value.Lat, destCoord.Value.Lon);
-        }
-
-        // Fallback: estimate based on keywords
-        return EstimateFromKeywords(pickup, destination);
-    }
-
-    /// <summary>
-    /// Find coordinates for an address by matching against known locations.
-    /// </summary>
-    private static (double Lat, double Lon)? FindCoordinates(string address)
-    {
-        var lower = address.ToLowerInvariant();
-        
-        foreach (var (name, coords) in CityCoordinates)
-        {
-            if (lower.Contains(name))
-                return coords;
-        }
-        
-        return null;
-    }
-
-    /// <summary>
-    /// Estimate distance using keyword heuristics when coordinates unavailable.
+    /// Estimate distance using keyword heuristics when geocoding unavailable.
     /// </summary>
     private static double EstimateFromKeywords(string pickup, string destination)
     {
@@ -153,37 +172,41 @@ public static class FareCalculator
         
         // Airport trips are typically longer
         if (combined.Contains("airport") || combined.Contains("heathrow") || 
-            combined.Contains("gatwick") || combined.Contains("stansted"))
+            combined.Contains("gatwick") || combined.Contains("stansted") ||
+            combined.Contains("schiphol"))
         {
-            return 15.0; // ~15 miles for airport trips
+            return 15.0;
         }
         
         // Train station trips
-        if (combined.Contains("station") || combined.Contains("railway"))
+        if (combined.Contains("station") || combined.Contains("railway") ||
+            combined.Contains("centraal"))
         {
-            return 5.0; // ~5 miles for station trips
+            return 5.0;
         }
         
         // Hospital trips
-        if (combined.Contains("hospital") || combined.Contains("clinic"))
+        if (combined.Contains("hospital") || combined.Contains("clinic") ||
+            combined.Contains("ziekenhuis"))
         {
             return 4.0;
         }
         
         // Shopping/retail
-        if (combined.Contains("shopping") || combined.Contains("mall") || combined.Contains("centre"))
+        if (combined.Contains("shopping") || combined.Contains("mall") || 
+            combined.Contains("centre") || combined.Contains("centrum"))
         {
             return 3.0;
         }
         
         // Default urban trip
-        return 4.0; // Average 4 miles
+        return 4.0;
     }
 
     /// <summary>
     /// Calculate great-circle distance between two coordinates using Haversine formula.
     /// </summary>
-    private static double HaversineDistanceMiles(double lat1, double lon1, double lat2, double lon2)
+    public static double HaversineDistanceMiles(double lat1, double lon1, double lat2, double lon2)
     {
         const double EarthRadiusMiles = 3959.0;
         
@@ -201,23 +224,16 @@ public static class FareCalculator
 
     private static double ToRadians(double degrees) => degrees * Math.PI / 180.0;
 
-    /// <summary>
-    /// Format fare as British pounds.
-    /// </summary>
-    private static string FormatFare(decimal fare)
-    {
-        return $"£{fare:F2}";
-    }
+    private static string FormatFare(decimal fare) => $"£{fare:F2}";
 
     /// <summary>
-    /// Parse fare string back to decimal (for calculations).
+    /// Parse fare string back to decimal.
     /// </summary>
     public static decimal ParseFare(string fare)
     {
         if (string.IsNullOrWhiteSpace(fare))
             return 0m;
             
-        // Remove currency symbol and parse
         var cleaned = fare.Replace("£", "").Replace("$", "").Replace("€", "").Trim();
         return decimal.TryParse(cleaned, out var value) ? value : 0m;
     }

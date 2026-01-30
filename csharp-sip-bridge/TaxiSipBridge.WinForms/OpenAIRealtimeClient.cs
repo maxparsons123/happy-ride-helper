@@ -1044,21 +1044,22 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     }
                     else
                     {
-                        // LOCAL FARE CALCULATOR - no webhook needed
-                        var calculatedFare = FareCalculator.CalculateFare(_booking.Pickup, _booking.Destination);
-                        var estimatedEta = FareCalculator.EstimateEta(4.0); // Default 4 miles for ETA
+                        // LOCAL FARE CALCULATOR with REAL GEOCODING (OpenStreetMap + Haversine)
+                        Log($"📍 Geocoding addresses for fare calculation...");
+                        var (calculatedFare, estimatedEta, distanceMiles) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination);
                         
                         _booking.Fare = calculatedFare;
                         _booking.Eta = estimatedEta;
                         OnBookingUpdated?.Invoke(_booking);
                         
-                        Log($"💰 Local fare calculated: {calculatedFare} (pickup: {_booking.Pickup}, dest: {_booking.Destination})");
+                        Log($"💰 Geocoded fare: {calculatedFare} ({distanceMiles:F1} miles) - pickup: {_booking.Pickup}, dest: {_booking.Destination}");
                         
                         await SendToolResultAsync(callId, new
                         {
                             success = true,
                             fare = calculatedFare,
                             eta = estimatedEta,
+                            distance_miles = Math.Round(distanceMiles, 1),
                             message = $"Your fare is {calculatedFare} and your driver will arrive in {estimatedEta}. Would you like me to book that?",
                             language = _detectedLanguage
                         });
