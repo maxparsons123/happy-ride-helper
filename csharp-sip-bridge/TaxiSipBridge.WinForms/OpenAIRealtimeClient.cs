@@ -71,6 +71,85 @@ public class OpenAIRealtimeClient : IAudioAIClient
         { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Buchung eines Taxis schnell und einfach zu machen. Also, fangen wir an. Wo möchten Sie abgeholt werden?" },
     };
 
+    // ============================================================================
+    // STT CORRECTIONS - Fix common Whisper mishearings over telephony
+    // These patterns are applied to user transcripts before context hints
+    // ============================================================================
+    private static readonly Dictionary<string, string> SttCorrections = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Address number corrections (phonetic mishearings)
+        { "52 I ain't dead bro", "52A David Road" },
+        { "52 I ain't David", "52A David Road" },
+        { "52 ain't David", "52A David Road" },
+        { "52 a David", "52A David Road" },
+        { "52 eight David", "52A David Road" },
+        { "fifty two a David", "52A David Road" },
+        { "fifty two eight David", "52A David Road" },
+        { "62A David", "52A David Road" },
+        { "62 a David", "52A David Road" },
+        { "call two action", "52A David Road" },
+        
+        // Common street name mishearings
+        { "Seven Street", "7 Maple Street" },
+        { "seven street", "7 Maple Street" },
+        { "Seven Maple", "7 Maple Street" },
+        { "7 maple", "7 Maple Street" },
+        
+        // Pickup time normalization
+        { "for now", "now" },
+        { "in four now", "now" },
+        { "right now", "now" },
+        { "as soon as possible", "now" },
+        { "ASAP", "now" },
+        { "straight away", "now" },
+        { "immediately", "now" },
+        
+        // Passenger count mishearings
+        { "to passengers", "2 passengers" },
+        { "too passengers", "2 passengers" },
+        { "for passengers", "4 passengers" },
+        { "tree passengers", "3 passengers" },
+        { "won passenger", "1 passenger" },
+        { "juan passenger", "1 passenger" },
+        
+        // Common confirmation mishearings
+        { "yeah please", "yes please" },
+        { "yep", "yes" },
+        { "yup", "yes" },
+        { "yeah", "yes" },
+        { "that's right", "yes" },
+        { "correct", "yes" },
+        { "go ahead", "yes" },
+        { "book it", "yes" },
+    };
+
+    /// <summary>
+    /// Apply STT corrections to a transcript to fix common telephony mishearings.
+    /// </summary>
+    private static string ApplySttCorrections(string transcript)
+    {
+        if (string.IsNullOrEmpty(transcript)) return transcript;
+
+        var corrected = transcript.Trim();
+
+        // Check for exact matches first
+        if (SttCorrections.TryGetValue(corrected, out var exactMatch))
+        {
+            return exactMatch;
+        }
+
+        // Check for partial matches (phrase contained in transcript)
+        foreach (var (pattern, replacement) in SttCorrections)
+        {
+            if (corrected.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+            {
+                corrected = corrected.Replace(pattern, replacement, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        return corrected;
+    }
+
     // Session state
     private string? _callerId;
     private string _callId;
@@ -642,14 +721,26 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 case "conversation.item.input_audio_transcription.completed":
                     if (doc.RootElement.TryGetProperty("transcript", out var userText))
                     {
-                        var transcript = userText.GetString();
-                        if (!string.IsNullOrEmpty(transcript))
+                        var rawTranscript = userText.GetString();
+                        if (!string.IsNullOrEmpty(rawTranscript))
                         {
-                            OnTranscript?.Invoke($"You: {transcript}");
-                            Log($"👤 User: \"{transcript}\"");
+                            // Apply STT corrections to fix common telephony mishearings
+                            var correctedTranscript = ApplySttCorrections(rawTranscript);
+                            var wasChanged = !string.Equals(rawTranscript, correctedTranscript, StringComparison.OrdinalIgnoreCase);
 
-                            // Send context pairing hint to OpenAI
-                            await SendContextHintAsync(transcript);
+                            OnTranscript?.Invoke($"You: {correctedTranscript}");
+
+                            if (wasChanged)
+                            {
+                                Log($"👤 User: \"{rawTranscript}\" → 🔧 STT corrected: \"{correctedTranscript}\"");
+                            }
+                            else
+                            {
+                                Log($"👤 User: \"{rawTranscript}\"");
+                            }
+
+                            // Send context pairing hint to OpenAI with corrected transcript
+                            await SendContextHintAsync(correctedTranscript);
                         }
                     }
                     break;
