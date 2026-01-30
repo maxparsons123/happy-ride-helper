@@ -175,7 +175,6 @@ public partial class MainForm : Form
                         // Create internal client for call handler
                         var simliClient = new SimliAvatarClient(simliKey, simliFaceId);
                         simliClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
-                        simliClient.OnVideoFrame += frame => _avatarPanel?.SendAudioAsync(new byte[0]); // Trigger frame display
 
                         // Wire up the call handler
                         localHandler.SetSimliClient(simliClient, isSpeaking => 
