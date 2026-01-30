@@ -36,15 +36,13 @@
     <Compile Include="LocalOpenAICallHandler.cs" />
 
     <!-- Audio utilities -->
-    <Compile Include="Audio\G711Codec.cs" />
-    <Compile Include="Audio\AudioResampler.cs" />
-    <Compile Include="Audio\AudioDsp.cs" />
-    <Compile Include="Audio\NAudioResampler.cs" />
+    <Compile Include="Audio\AudioCodecs.cs" />
+    <Compile Include="Audio\OptimizedAudioProcessor.cs" />
 
     <Compile Include="SipAutoAnswer.cs" />
     <Compile Include="AdaAudioClient.cs" />
     <Compile Include="AdaAudioSource.cs" />
-    <Compile Include="Audio\AudioCodecs.cs" />
+    <Compile Include="AudioMonitor.cs" />
     <Compile Include="AudioMonitor.cs" />
     <Compile Include="SipAdaBridge.cs" />
     <Compile Include="OpusAudioEncoder.cs" />
