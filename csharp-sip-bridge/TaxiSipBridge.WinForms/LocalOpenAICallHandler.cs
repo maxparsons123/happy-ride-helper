@@ -30,6 +30,10 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private CancellationTokenSource? _callCts;
     private Action<SIPDialogue>? _currentHungupHandler; // Track to prevent stale handlers
 
+    // Simli avatar integration
+    private SimliAvatarClient? _simliClient;
+    private Action<bool>? _onSimliSpeaking;
+
     private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
     private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
     private const int HANGUP_GRACE_MS = 5000;     // Wait for final audio to play before hangup (5 seconds for goodbye)
@@ -52,6 +56,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
     public bool IsOpusAvailable => _remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS);
     public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
+
+    /// <summary>
+    /// Configure Simli avatar client to receive AI audio for lip-sync.
+    /// </summary>
+    public void SetSimliClient(SimliAvatarClient client, Action<bool> onSpeakingChanged)
+    {
+        _simliClient = client;
+        _onSimliSpeaking = onSpeakingChanged;
+        Log("🎭 Simli avatar client configured");
+    }
 
     /// <summary>
     /// Create a local OpenAI call handler with optional dispatch webhook.
@@ -177,6 +191,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 {
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
+                    _onSimliSpeaking?.Invoke(false); // Notify Simli form: stopped speaking
                     Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
                 }
             };
@@ -185,15 +200,30 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _adaHasStartedSpeaking = false;
             Log($"🎵 [{callId}] DirectRtpPlayout started (raw RTP, A-law encoded)");
 
+            // Connect Simli avatar if configured
+            if (_simliClient != null)
+            {
+                try
+                {
+                    await _simliClient.ConnectAsync(cts.Token);
+                    Log($"🎭 [{callId}] Simli avatar connected");
+                }
+                catch (Exception ex)
+                {
+                    Log($"⚠️ [{callId}] Simli connection failed: {ex.Message}");
+                }
+            }
+
             // Create OpenAI client with dispatch webhook support
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
             _aiClient.OnLog += msg => Log(msg);
             _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
             _aiClient.OnAdaSpeaking += msg => { };
-            _aiClient.OnPcm24Audio += pcmBytes =>
+            _aiClient.OnPcm24Audio += async pcmBytes =>
             {
                 _isBotSpeaking = true;
                 _adaHasStartedSpeaking = true;
+                _onSimliSpeaking?.Invoke(true); // Notify Simli form: speaking
 
                 // Apply fade-in to first audio delta to prevent speaker pop
                 byte[] processedBytes = pcmBytes;
@@ -205,6 +235,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 }
 
                 _playout?.BufferAiAudio(processedBytes);
+
+                // Send audio to Simli for lip-sync (fire and forget)
+                if (_simliClient?.IsConnected == true)
+                {
+                    try
+                    {
+                        await _simliClient.SendPcm24AudioAsync(processedBytes);
+                    }
+                    catch { } // Ignore Simli errors - don't affect call
+                }
             };
             _aiClient.OnResponseStarted += () =>
             {

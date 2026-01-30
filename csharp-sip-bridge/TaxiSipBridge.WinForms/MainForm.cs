@@ -54,9 +54,40 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    // Stub handlers for Designer controls
+    // Stub handler for Designer controls
     private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
-    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) { }
+
+    // Simli Avatar state
+    private SimliAvatarClient? _simliClient;
+    private SimliAvatarForm? _simliForm;
+    private bool _useSimliAvatar = false;
+
+    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) 
+    { 
+        _useSimliAvatar = chkSimliAvatar.Checked;
+
+        // Show/hide Simli configuration fields
+        lblSimliApiKey.Visible = _useSimliAvatar;
+        txtSimliApiKey.Visible = _useSimliAvatar;
+        lblSimliFaceId.Visible = _useSimliAvatar;
+        txtSimliFaceId.Visible = _useSimliAvatar;
+
+        // Adjust button positions when Simli config is visible
+        if (_useSimliAvatar)
+        {
+            btnStartStop.Location = new Point(100, 178);
+            btnMicTest.Location = new Point(260, 178);
+        }
+        else
+        {
+            btnStartStop.Location = new Point(100, 148);
+            btnMicTest.Location = new Point(260, 148);
+        }
+
+        AddLog(_useSimliAvatar 
+            ? "🎭 Simli Avatar enabled - configure API key and Face ID"
+            : "🎭 Simli Avatar disabled");
+    }
 
     private void btnStartStop_Click(object sender, EventArgs e)
     {
@@ -111,6 +142,34 @@ public partial class MainForm : Form
                 // Create the NEW call handler with dispatch webhook for taxi bookings
                 const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
                 _callHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
+                
+                // Configure Simli avatar if enabled
+                if (_useSimliAvatar && _callHandler is LocalOpenAICallHandler localHandler)
+                {
+                    var simliKey = txtSimliApiKey.Text.Trim();
+                    var simliFaceId = txtSimliFaceId.Text.Trim();
+                    
+                    if (!string.IsNullOrEmpty(simliKey) && !string.IsNullOrEmpty(simliFaceId))
+                    {
+                        // Create Simli client and form
+                        _simliClient = new SimliAvatarClient(simliKey, simliFaceId);
+                        _simliClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                        _simliClient.OnVideoFrame += frame => SafeInvoke(() => _simliForm?.UpdateVideoFrame(frame));
+                        
+                        _simliForm = new SimliAvatarForm();
+                        _simliForm.Show();
+                        
+                        // Wire up the call handler to send AI audio to Simli
+                        localHandler.SetSimliClient(_simliClient, msg => SafeInvoke(() => _simliForm?.SetSpeaking(msg)));
+                        
+                        AddLog($"🎭 Simli avatar configured (Face: {simliFaceId[..Math.Min(8, simliFaceId.Length)]}...)");
+                    }
+                    else
+                    {
+                        AddLog("⚠️ Simli avatar enabled but API key or Face ID missing");
+                    }
+                }
+                
                 _sipLoginManager.SetCallHandler(_callHandler);
 
                 _sipLoginManager.Start();
@@ -359,7 +418,7 @@ public partial class MainForm : Form
         AddLog("🎤 Stopped");
     }
 
-    private void Stop()
+    private async void Stop()
     {
         // Stop Edge Function bridge
         if (_sipBridge != null)
@@ -388,6 +447,20 @@ public partial class MainForm : Form
         {
             _callHandler.Dispose();
             _callHandler = null;
+        }
+
+        // Stop Simli avatar
+        if (_simliClient != null)
+        {
+            try { await _simliClient.DisconnectAsync(); } catch { }
+            _simliClient.Dispose();
+            _simliClient = null;
+        }
+        if (_simliForm != null)
+        {
+            _simliForm.Close();
+            _simliForm.Dispose();
+            _simliForm = null;
         }
 
         _isRunning = false;
