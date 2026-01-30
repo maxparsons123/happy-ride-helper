@@ -129,13 +129,21 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Detect language from phone number country code prefix.
+    /// Handles both + prefix (international) and 00 prefix (European dialing).
     /// </summary>
     private static string DetectLanguageFromPhone(string? phoneNumber)
     {
         if (string.IsNullOrEmpty(phoneNumber)) return "en";
 
-        // Normalize: remove spaces, dashes
-        var normalized = phoneNumber.Replace(" ", "").Replace("-", "");
+        // Normalize: remove spaces, dashes, parentheses
+        var normalized = phoneNumber.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        // Convert 00 prefix to + (common in European SIP trunks)
+        // e.g., 0031612345678 → +31612345678
+        if (normalized.StartsWith("00") && normalized.Length > 4)
+        {
+            normalized = "+" + normalized.Substring(2);
+        }
 
         // Check each country code prefix
         foreach (var kvp in CountryCodeToLanguage)
