@@ -237,6 +237,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
             };
+            
             // AI-triggered hangup (with single-execution guard)
             Action? endCallHandler = null;
             endCallHandler = async () =>
@@ -478,36 +479,26 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
     private async Task CleanupAsync(string callId, SIPUserAgent ua)
     {
-        // Prevent duplicate cleanup - check before logging
-        if (!_isInCall)
-            return;
-        
-        Log($"📴 [{callId}] Cleanup starting...");
-        _isInCall = false;
-        _adaHasStartedSpeaking = false;
-        _isBotSpeaking = false;
+        Log($"📴 [{callId}] Cleanup...");
 
-        // Remove hangup handler FIRST to prevent duplicate/stale logs
-        if (_currentHungupHandler != null)
+        _isInCall = false;
+        
+        // Unsubscribe hangup handler to prevent stale callbacks
+        if (_currentHungupHandler != null && _currentUa != null)
         {
-            try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentUa.OnCallHungup -= _currentHungupHandler;
             _currentHungupHandler = null;
         }
 
-        // Hangup SIP session
         try { ua.Hangup(); } catch { }
 
-        // Disconnect and dispose AI client (WebSocket + audio buffers)
         if (_aiClient != null)
         {
-            Log($"📴 [{callId}] Closing OpenAI WebSocket...");
             try { await _aiClient.DisconnectAsync(); } catch { }
             try { _aiClient.Dispose(); } catch { }
             _aiClient = null;
-            Log($"📴 [{callId}] OpenAI client disposed");
         }
 
-        // Stop and dispose RTP playout
         if (_playout != null)
         {
             try { _playout.Stop(); } catch { }
@@ -515,26 +506,15 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _playout = null;
         }
 
-        // Close media session
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
         }
 
-        // Clear codec state for next call (static state cleanup)
-        _remotePtToCodec.Clear();
-        AudioCodecs.ResetAllCodecs();
-
-        // Dispose cancellation token
-        try { _callCts?.Cancel(); } catch { }
         try { _callCts?.Dispose(); } catch { }
         _callCts = null;
 
-        // Clear Simli sender reference
-        _simliSendAudio = null;
-
-        Log($"✅ [{callId}] Cleanup complete");
         OnCallEnded?.Invoke(callId);
     }
 
@@ -572,12 +552,18 @@ public class LocalOpenAICallHandler : ISipCallHandler
     {
         if (_disposed) return;
         _disposed = true;
+        
+        // Unsubscribe hangup handler
+        if (_currentHungupHandler != null && _currentUa != null)
+        {
+            try { _currentUa.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentHungupHandler = null;
+        }
 
         try { _callCts?.Cancel(); } catch { }
         try { _playout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
-
         GC.SuppressFinalize(this);
     }
 }
