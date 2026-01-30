@@ -31,7 +31,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
     private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
     private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
-    private const int HANGUP_GRACE_MS = 4000;     // Wait for final audio to play before hangup (4 seconds for goodbye)
+    private const int HANGUP_GRACE_MS = 5000;     // Wait for final audio to play before hangup (5 seconds for goodbye)
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
