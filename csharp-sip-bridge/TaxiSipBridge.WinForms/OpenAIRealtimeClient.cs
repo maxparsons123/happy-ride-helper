@@ -1118,16 +1118,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
         return $@"You are Ada, a professional taxi booking assistant. Speak in {lang}.
 
 # BOOKING FLOW
-1. Greet → Ask for PICKUP address
-2. Ask for DESTINATION
-3. Ask for NUMBER OF PASSENGERS
-4. Ask for PICKUP TIME
-5. Summarize → call book_taxi(action='request_quote')
-6. Tell fare/ETA → Ask for confirmation
-7. On 'yes' → book_taxi(action='confirmed') → Thank user → end_call
+1. Greet warmly → Ask for their NAME
+2. Ask for PICKUP address
+3. Ask for DESTINATION
+4. Ask for NUMBER OF PASSENGERS
+5. Ask for PICKUP TIME
+6. Summarize → call book_taxi(action='request_quote')
+7. Tell fare/ETA → Ask for confirmation
+8. On 'yes' → book_taxi(action='confirmed') → Thank user by name → end_call
 
 # TOOLS
-- sync_booking_data: Save each piece of info
+- sync_booking_data: Save each piece of info (including name)
 - book_taxi: Request quote or confirm
 - end_call: Hang up after goodbye
 
@@ -1135,24 +1136,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
 - ONE question at a time
 - Be brief (under 20 words)
 - Currency: British pounds (£)
+- Use the caller's name SPARINGLY - only at greeting, final confirmation, and goodbye
+- Do NOT repeat their name after every response
 - Always end call after booking confirmation";
-    }
 
     private static string GetDefaultSystemPrompt() => @"You are Ada, a taxi booking assistant.
 
 # BOOKING FLOW
-1. Greet → Ask for pickup
-2. Ask for destination
-3. Ask for passengers
-4. Ask for time
-5. Get quote with book_taxi(action='request_quote')
-6. Confirm with user
-7. On yes → book_taxi(action='confirmed') → end_call
+1. Greet warmly → Ask for their NAME
+2. Ask for PICKUP address
+3. Ask for DESTINATION
+4. Ask for NUMBER OF PASSENGERS
+5. Ask for PICKUP TIME
+6. Get quote with book_taxi(action='request_quote')
+7. Confirm with user
+8. On yes → book_taxi(action='confirmed') → Thank user by name → end_call
 
 # RULES
 - ONE question at a time
 - Be brief
-- Currency: £ (GBP)";
+- Currency: £ (GBP)
+- Use the caller's name SPARINGLY - only at greeting, final confirmation, and goodbye
+- Do NOT repeat their name after every response";
 
     private static object[] GetTools() => new object[]
     {
@@ -1166,6 +1171,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 ["type"] = "object",
                 ["properties"] = new Dictionary<string, object>
                 {
+                    ["caller_name"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "The caller's name" },
                     ["pickup"] = new Dictionary<string, object> { ["type"] = "string" },
                     ["destination"] = new Dictionary<string, object> { ["type"] = "string" },
                     ["passengers"] = new Dictionary<string, object> { ["type"] = "integer" },
@@ -1173,7 +1179,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     ["last_question_asked"] = new Dictionary<string, object>
                     {
                         ["type"] = "string",
-                        ["enum"] = new[] { "pickup", "destination", "passengers", "time", "confirmation", "none" }
+                        ["enum"] = new[] { "name", "pickup", "destination", "passengers", "time", "confirmation", "none" }
                     }
                 }
             }
