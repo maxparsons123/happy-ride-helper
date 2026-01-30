@@ -19,7 +19,7 @@ public static class FareCalculator
     /// <summary>Minimum fare in pounds</summary>
     public const decimal MIN_FARE = 4.00m;
 
-    // Lazy-initialized to avoid static constructor failures
+    // Lazy-initialized to avoid static constructor failures (TypeInitializationException)
     private static HttpClient? _httpClientBacking;
     private static HttpClient GetHttpClient()
     {
@@ -98,6 +98,7 @@ public static class FareCalculator
             }
 
             var url = $"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(searchAddress)}&format=json&limit=1";
+            
             var response = await GetHttpClient().GetStringAsync(url);
             var results = JsonSerializer.Deserialize<JsonElement[]>(response);
 
