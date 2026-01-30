@@ -160,14 +160,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             Log($"📗 [{callId}] Call answered and RTP started");
 
             // Create DirectRtpPlayout (bypasses SendAudio, sends raw RTP packets)
-            // VoIPMediaSession wraps an RTPSession - we access it via casting
-            var rtpSession = _currentMediaSession as RTPSession;
-            if (rtpSession == null)
-            {
-                Log($"❌ [{callId}] Failed to get RTPSession from VoIPMediaSession");
-                return;
-            }
-            _playout = new DirectRtpPlayout(rtpSession);
+            // VoIPMediaSession inherits from RTPSession, so this works directly
+            _playout = new DirectRtpPlayout(_currentMediaSession);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
