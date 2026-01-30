@@ -34,16 +34,12 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private readonly ConcurrentQueue<short[]> _pcmQueue = new();
     private readonly object _sendLock = new();
 
-    // High-quality resamplers (SpeexDSP preferred, FFmpeg fallback, polyphase FIR last resort)
-    private SpeexDspResampler? _speexResampler8k;
-    private SpeexDspResampler? _speexResampler16k;
-    private SpeexDspResampler? _speexResampler48k;  // 24kHz→48kHz for Opus
+    // High-quality resamplers (FFmpeg fallback, polyphase FIR primary)
     private FfmpegStreamingResampler? _ffmpegResampler8k;
     private PolyphaseFirResampler? _resampler8k;
     private PolyphaseFirResampler? _resampler16k;
     private PolyphaseFirResampler? _resampler48k;
-    private bool _speexAvailable = true;   // Try SpeexDSP first
-    private bool _ffmpegAvailable = true;  // Try FFmpeg second
+    private bool _ffmpegAvailable = true;  // Try FFmpeg as optional enhancement
     
     // Streaming preprocessor for 8kHz telephony (DC removal + lowpass + normalize + downsample)
     private readonly TtsPreConditioner _preConditioner8k = new();
@@ -212,11 +208,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
     {
         ClearQueue();
         
-        // Reset SpeexDSP resamplers
-        _speexResampler8k?.Reset();
-        _speexResampler16k?.Reset();
-        _speexResampler48k?.Reset();
-        
         // Reset FFmpeg resampler
         _ffmpegResampler8k?.Reset();
         
@@ -365,7 +356,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
         else
         {
-            // Jitter buffer priming - 20 frames (400ms) for maximum SpeexDSP stability
+            // Jitter buffer priming - ensures smooth audio delivery
             if (!_jitterBufferFilled)
             {
                 int minFrames = 10;  // 200ms - lower latency, accepts underrun risk
@@ -399,7 +390,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                 // TESTING: Softener disabled - pure passthrough to resampler
                 // ApplySoftener(pcm24);
                 
-                // SpeexDSP resampling (quality 8) with 20-frame buffer
+                // Polyphase FIR resampling for high-quality telephony audio
                 audioFrame = ResamplePolyphase(pcm24, 24000, targetRate, samplesNeeded);
                 
                 _lastAudioFrame = (short[])audioFrame.Clone();
@@ -464,9 +455,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
     }
 
     /// <summary>
-    /// High-quality resampling using SpeexDSP (preferred), FFmpeg (fallback), or polyphase FIR (last resort).
-    /// SpeexDSP is known for excellent audio quality in telephony applications.
-    /// FFmpeg uses libsoxr internally for high-quality resampling.
+    /// High-quality resampling using polyphase FIR (primary) or FFmpeg (optional enhancement).
+    /// Pure C# implementation with no external DLL dependencies.
     /// </summary>
     private short[] ResamplePolyphase(short[] input, int fromRate, int toRate, int outputLen)
     {
@@ -477,37 +467,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
             return copy;
         }
 
-        // Try SpeexDSP first (best quality, lowest latency)
-        if (_speexAvailable)
-        {
-            try
-            {
-                var resampled = ResampleSpeexDsp(input, fromRate, toRate);
-                
-                if (_sentFrames == 0)
-                {
-                    OnDebugLog?.Invoke($"[AdaAudioSource] 🔧 Resample (SpeexDSP Q8): {input.Length} samples @ {fromRate}Hz → {outputLen} samples @ {toRate}Hz");
-                }
-                
-                // Ensure correct output length
-                if (resampled.Length == outputLen) return resampled;
-                var result = new short[outputLen];
-                Array.Copy(resampled, result, Math.Min(resampled.Length, outputLen));
-                return result;
-            }
-            catch (DllNotFoundException)
-            {
-                _speexAvailable = false;
-                OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ libspeexdsp not found, trying FFmpeg");
-            }
-            catch (Exception ex)
-            {
-                _speexAvailable = false;
-                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ SpeexDSP error: {ex.Message}, trying FFmpeg");
-            }
-        }
-
-        // Try FFmpeg second (good quality, uses libsoxr)
+        // Try FFmpeg for 8kHz downsampling (optional enhancement)
         if (_ffmpegAvailable && toRate == 8000)
         {
             try
@@ -520,7 +480,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
                     if (!_ffmpegResampler8k.Start())
                     {
                         _ffmpegAvailable = false;
-                        OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ FFmpeg failed to start, falling back to polyphase FIR");
+                        OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ FFmpeg not available, using polyphase FIR");
                     }
                 }
                 
@@ -542,11 +502,11 @@ public class AdaAudioSource : IAudioSource, IDisposable
             catch (Exception ex)
             {
                 _ffmpegAvailable = false;
-                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ FFmpeg error: {ex.Message}, falling back to polyphase FIR");
+                OnDebugLog?.Invoke($"[AdaAudioSource] ⚠️ FFmpeg error: {ex.Message}, using polyphase FIR");
             }
         }
 
-        // Last resort: polyphase FIR resampler (pure C#, always works)
+        // Primary: polyphase FIR resampler (pure C#, always works)
         PolyphaseFirResampler resampler = GetOrCreateResampler(fromRate, toRate);
         
         if (_sentFrames == 0)
@@ -555,36 +515,6 @@ public class AdaAudioSource : IAudioSource, IDisposable
         }
 
         return resampler.Resample(input, outputLen);
-    }
-    
-    /// <summary>
-    /// Resample using SpeexDSP library (quality level 6 = good quality, smooth for telephony).
-    /// </summary>
-    private short[] ResampleSpeexDsp(short[] input, int fromRate, int toRate)
-    {
-        // Quality 6 is smoother than 8, less internal processing = less choppiness
-        if (fromRate == 24000 && toRate == 8000)
-        {
-            _speexResampler8k ??= new SpeexDspResampler(24000, 8000, 6);
-            return _speexResampler8k.Resample(input);
-        }
-        
-        if (fromRate == 24000 && toRate == 16000)
-        {
-            _speexResampler16k ??= new SpeexDspResampler(24000, 16000, 6);
-            return _speexResampler16k.Resample(input);
-        }
-        
-        // 24kHz → 48kHz for Opus (high quality upsampling)
-        if (fromRate == 24000 && toRate == 48000)
-        {
-            _speexResampler48k ??= new SpeexDspResampler(24000, 48000, 8);  // Quality 8 for Opus
-            return _speexResampler48k.Resample(input);
-        }
-        
-        // For other rates, create temporary resampler
-        using var resampler = new SpeexDspResampler((uint)fromRate, (uint)toRate, 6);
-        return resampler.Resample(input);
     }
     
     /// <summary>

@@ -10,7 +10,7 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Persistent FFmpeg process for real-time audio resampling.
 /// Keeps FFmpeg running and pipes audio through continuously.
-/// Alternative to SpeexDSP when native libraries aren't available.
+/// Optional enhancement for high-quality resampling via libsoxr.
 /// </summary>
 public class FfmpegStreamingResampler : IDisposable
 {
