@@ -1104,6 +1104,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         OnBookingUpdated?.Invoke(_booking);
                     }
                     
+                    // Send WhatsApp notification via BSQD
+                    await SendWhatsAppNotificationAsync();
+                    
                     // Send tool result with explicit instruction to end call
                     await SendToolResultAsync(callId, new
                     {
@@ -1222,6 +1225,77 @@ public class OpenAIRealtimeClient : IAudioAIClient
             WebSocketMessageType.Text,
             true,
             _cts?.Token ?? CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Send WhatsApp notification via BSQD API after booking confirmation.
+    /// </summary>
+    private async Task SendWhatsAppNotificationAsync()
+    {
+        if (string.IsNullOrEmpty(_callerId))
+        {
+            Log("⚠️ No caller ID - skipping WhatsApp notification");
+            return;
+        }
+
+        try
+        {
+            // Format phone number for WhatsApp
+            var phoneNumber = FormatPhoneForWhatsApp(_callerId);
+            
+            var url = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={Uri.EscapeDataString(phoneNumber)}";
+            
+            Log($"📱 Sending WhatsApp notification to {phoneNumber}...");
+            
+            var response = await _httpClient.GetAsync(url);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Log($"✅ WhatsApp notification sent successfully");
+            }
+            else
+            {
+                Log($"⚠️ WhatsApp notification failed: {response.StatusCode}");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Don't fail the booking if WhatsApp notification fails
+            Log($"⚠️ WhatsApp notification error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Format phone number for WhatsApp compatibility.
+    /// Converts 00 prefix to +, removes leading 0 after country code for Dutch numbers.
+    /// </summary>
+    private static string FormatPhoneForWhatsApp(string phoneNumber)
+    {
+        if (string.IsNullOrEmpty(phoneNumber))
+            return phoneNumber;
+
+        // Remove spaces and dashes
+        var formatted = phoneNumber.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        // Convert 00 prefix to +
+        if (formatted.StartsWith("00"))
+        {
+            formatted = "+" + formatted.Substring(2);
+        }
+        
+        // Add + if missing
+        if (!formatted.StartsWith("+") && formatted.Length > 9)
+        {
+            formatted = "+" + formatted;
+        }
+
+        // Dutch numbers: remove leading 0 after country code (+310 → +31)
+        if (formatted.StartsWith("+310") && formatted.Length > 4)
+        {
+            formatted = "+31" + formatted.Substring(4);
+        }
+
+        return formatted;
     }
 
     /// <summary>
