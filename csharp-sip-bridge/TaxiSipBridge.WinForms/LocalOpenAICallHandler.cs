@@ -21,7 +21,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
-    private volatile bool _cleanupStarted; // Guard against duplicate cleanup
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
     private const int ECHO_GUARD_MS = 200; // Suppress inbound audio for 200ms after Ada stops (reduced for faster response)
 
@@ -85,7 +84,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
         }
 
         _isInCall = true;
-        _cleanupStarted = false; // Reset cleanup guard
         var callId = Guid.NewGuid().ToString("N")[..8];
         _callCts = new CancellationTokenSource();
         var cts = _callCts;
@@ -205,27 +203,35 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
             };
-            _aiClient.OnCallEnded += async () =>
+            // Use local handlers that unsubscribe after first trigger
+            Action? endCallHandler = null;
+            SIPUserAgent.CallHungupDelegate? hungupHandler = null;
+            
+            endCallHandler = async () =>
             {
-                if (_cleanupStarted) return; // Prevent duplicate
-                _cleanupStarted = true;
+                _aiClient!.OnCallEnded -= endCallHandler;
+                if (hungupHandler != null) ua.OnCallHungup -= hungupHandler;
+                
                 Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
-                // Wait for final audio to finish playing before hangup
                 await Task.Delay(HANGUP_GRACE_MS);
                 Log($"📴 [{callId}] Grace period complete, ending call");
                 try { cts.Cancel(); } catch { }
             };
+            _aiClient.OnCallEnded += endCallHandler;
+            
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
-            // Wire hangup
-            ua.OnCallHungup += dialogue =>
+            // Wire hangup (unsubscribes after first trigger)
+            hungupHandler = dialogue =>
             {
-                if (_cleanupStarted) return; // Prevent duplicate
-                _cleanupStarted = true;
+                ua.OnCallHungup -= hungupHandler;
+                if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
+                
                 Log($"📕 [{callId}] Caller hung up");
                 try { cts.Cancel(); } catch { }
             };
+            ua.OnCallHungup += hungupHandler;
 
             // Connect to OpenAI
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
