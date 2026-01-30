@@ -42,9 +42,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
 
-    // Pre-emphasis for telephony clarity (matches edge function)
-    private const float PRE_EMPHASIS_COEFF = 0.97f;
-    private short _lastSample = 0;
+    // Optimized audio processor for telephony → OpenAI pipeline
+    private readonly OptimizedAudioProcessor _audioProcessor = new();
     private int _audioPacketsSent = 0;
 
     // Output codec mode - set by SipOpenAIBridge based on negotiated codec
@@ -290,6 +289,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _greetingSent = false;
         _booking = new BookingState();
         _lastQuestionAsked = "pickup";
+        _audioProcessor.Reset(); // Reset pre-emphasis filter state for new call
 
         Log($"🌐 Detected language: {_detectedLanguage} (from {caller ?? "unknown"})");
 
@@ -355,25 +355,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
         // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
 
-        // Apply pre-emphasis for consonant clarity (matches edge function)
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            short current = pcm8k[i];
-            pcm8k[i] = (short)Math.Clamp(current - (int)(PRE_EMPHASIS_COEFF * _lastSample), short.MinValue, short.MaxValue);
-            _lastSample = current;
-        }
-
-        // Volume boost for telephony - INCREASED to 2.5x for better VAD detection
-        // Telephony audio is often very quiet compared to desktop mics
-        for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
-
-        // Resample 8kHz → 24kHz
-        var pcm24k = AudioCodecs.Resample(pcm8k, 8000, 24000);
-        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        // Use optimized processor: pre-emphasis + linear interpolation + dynamic normalization
+        var pcmBytes = _audioProcessor.PrepareForOpenAI(pcm8k, 8000, 24000);
 
         // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
-        // durationMs = (bytes / 8000) * 1000
         var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
         _inputBufferedMs += durationMs;
 
@@ -414,19 +399,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Convert bytes to shorts
-        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
-
-        // PASSTHROUGH MODE: No DSP - just simple point upsampling 8kHz → 24kHz
-        // Pick each sample 3x (no filtering, no boost, no pre-emphasis)
-        var pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            pcm24k[i * 3] = pcm8k[i];
-            pcm24k[i * 3 + 1] = pcm8k[i];
-            pcm24k[i * 3 + 2] = pcm8k[i];
-        }
-        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        // Use optimized processor: pre-emphasis + linear interpolation + dynamic normalization
+        var pcmBytes = _audioProcessor.PrepareForOpenAI(pcm8kBytes, 8000, 24000);
 
         // Track buffered audio duration: PCM16 @ 8kHz = 2 bytes/sample
         var sampleCount = pcm8kBytes.Length / 2;
@@ -468,22 +442,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 return;
         }
 
-        // Convert bytes to shorts
-        var pcm8k = AudioCodecs.BytesToShorts(pcm8kBytes);
-
-        // Apply 2.5x volume boost only (no pre-emphasis, no noise gate)
-        for (int i = 0; i < pcm8k.Length; i++)
-            pcm8k[i] = (short)Math.Clamp(pcm8k[i] * 2.5, short.MinValue, short.MaxValue);
-
-        // Simple point upsampling 8kHz → 24kHz
-        var pcm24k = new short[pcm8k.Length * 3];
-        for (int i = 0; i < pcm8k.Length; i++)
-        {
-            pcm24k[i * 3] = pcm8k[i];
-            pcm24k[i * 3 + 1] = pcm8k[i];
-            pcm24k[i * 3 + 2] = pcm8k[i];
-        }
-        var pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+        // Use optimized processor: pre-emphasis + linear interpolation + dynamic normalization
+        var pcmBytes = _audioProcessor.PrepareForOpenAI(pcm8kBytes, 8000, 24000);
 
         // Track buffered audio duration
         var sampleCount = pcm8kBytes.Length / 2;
