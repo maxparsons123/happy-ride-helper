@@ -862,6 +862,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     
                     Log($"✅ Booking confirmed: {_booking.BookingRef}");
                     
+                    // Send WhatsApp notification (fire and forget)
+                    _ = SendWhatsAppNotificationAsync(_callerId);
+                    
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
@@ -973,6 +976,64 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
 
         return corrected;
+    }
+
+    /// <summary>
+    /// Send WhatsApp booking notification via BSQD webhook.
+    /// Fire-and-forget - errors are logged but don't affect booking.
+    /// </summary>
+    private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
+    {
+        if (string.IsNullOrEmpty(phoneNumber))
+        {
+            Log("⚠️ WhatsApp notification skipped - no phone number");
+            return;
+        }
+
+        try
+        {
+            var cli = FormatPhoneForWhatsApp(phoneNumber);
+            var webhookUrl = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={cli}";
+            
+            Log($"📱 Sending WhatsApp notification to {cli}...");
+            
+            var response = await HttpClient.GetAsync(webhookUrl);
+            
+            if (response.IsSuccessStatusCode)
+                Log($"✅ WhatsApp notification sent to {cli}");
+            else
+                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ WhatsApp notification error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Format phone number for WhatsApp:
+    /// - Convert 00 prefix to + then strip +
+    /// - For Dutch (+31), remove leading 0 after country code (e.g., +3106 → 316)
+    /// - Strip all non-numeric characters
+    /// </summary>
+    private static string FormatPhoneForWhatsApp(string phone)
+    {
+        var clean = phone.Replace(" ", "").Replace("-", "");
+        
+        // Convert 00 prefix to + for international format
+        if (clean.StartsWith("00"))
+            clean = "+" + clean.Substring(2);
+        
+        // Remove + prefix (WhatsApp uses numbers without +)
+        clean = clean.TrimStart('+');
+        
+        // For Dutch numbers (+31), remove leading 0 after country code
+        // e.g., 3106xxxxxxxx → 316xxxxxxxx
+        if (clean.StartsWith("310"))
+            clean = "31" + clean.Substring(3);
+        
+        // Remove any remaining non-numeric characters
+        return new string(clean.Where(char.IsDigit).ToArray());
     }
 
     private void Log(string msg)
