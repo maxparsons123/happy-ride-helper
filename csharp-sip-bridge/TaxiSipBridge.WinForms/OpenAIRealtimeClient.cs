@@ -93,7 +93,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     // Post-booking safety hangup: if the booking is confirmed and there's silence,
     // auto-disconnect to avoid calls lingering.
-    private const int POST_BOOKING_SILENCE_HANGUP_MS = 5000;
+    private const int POST_BOOKING_SILENCE_HANGUP_MS = 10000; // 10 seconds after final speech
     private const int POST_BOOKING_SILENCE_POLL_MS = 250;
     private CancellationTokenSource? _postBookingHangupCts;
     private long _lastUserSpeechAt = 0;
