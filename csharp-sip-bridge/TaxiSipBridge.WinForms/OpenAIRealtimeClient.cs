@@ -31,7 +31,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private readonly string _systemPrompt;
     private readonly string? _dispatchWebhookUrl;
     
-    // Lazy-init to avoid static constructor issues
+    // Lazy-init to avoid static constructor issues (TypeInitializationException)
     private HttpClient? _httpClientBacking;
     private HttpClient HttpClient => _httpClientBacking ??= new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -45,168 +45,133 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private bool _needsFadeIn = true;
     private const int FadeInSamples = 48;
 
-    // Optimized audio processor for telephony → OpenAI pipeline (lazy-init to avoid static init issues)
+    // Optimized audio processor for telephony → OpenAI pipeline (lazy-init)
     private OptimizedAudioProcessor? _audioProcessor;
     private OptimizedAudioProcessor AudioProcessor => _audioProcessor ??= new OptimizedAudioProcessor();
     private int _audioPacketsSent = 0;
 
     // Output codec mode - set by SipOpenAIBridge based on negotiated codec
-    private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
-    private short[] _opusResampleBuffer = Array.Empty<short>();  // Buffer for 24kHz→48kHz upsampling
+    private OutputCodecMode _outputCodec = OutputCodecMode.ALaw;
+    private short[] _opusResampleBuffer = Array.Empty<short>();
 
-    // Language detection from caller phone number (first 2 digits of country code)
-    private static readonly Dictionary<string, string> CountryCodeToLanguage = InitCountryCodeMap();
-    
-    private static Dictionary<string, string> InitCountryCodeMap()
+    // Language detection - LAZY INIT to avoid static constructor issues
+    private static Dictionary<string, string>? _countryCodeMap;
+    private static Dictionary<string, string> CountryCodeToLanguage
     {
-        return new Dictionary<string, string>
+        get
         {
-            { "31", "nl" }, // Netherlands
-            { "32", "nl" }, // Belgium (Dutch)
-            { "33", "fr" }, // France
-            { "41", "de" }, // Switzerland (German)
-            { "43", "de" }, // Austria
-            { "49", "de" }, // Germany
-        };
+            if (_countryCodeMap == null)
+            {
+                _countryCodeMap = new Dictionary<string, string>
+                {
+                    { "31", "nl" }, // Netherlands
+                    { "32", "nl" }, // Belgium (Dutch)
+                    { "33", "fr" }, // France
+                    { "41", "de" }, // Switzerland (German)
+                    { "43", "de" }, // Austria
+                    { "44", "en" }, // UK
+                    { "49", "de" }, // Germany
+                };
+            }
+            return _countryCodeMap;
+        }
     }
 
-    // Localized greetings
-    private static readonly Dictionary<string, string> LocalizedGreetings = InitGreetingsMap();
-    
-    private static Dictionary<string, string> InitGreetingsMap()
+    // Localized greetings - LAZY INIT
+    private static Dictionary<string, string>? _greetingsMap;
+    private static Dictionary<string, string> LocalizedGreetings
     {
-        return new Dictionary<string, string>
+        get
         {
-            { "en", "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?" },
-            { "nl", "Hallo, en welkom bij de Taxibot demo. Ik ben Ada, uw taxi boekingsassistent. Ik ben hier om het boeken van een taxi snel en gemakkelijk voor u te maken. Laten we beginnen. Waar wilt u worden opgehaald?" },
-            { "fr", "Bonjour et bienvenue à la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour rendre la réservation d'un taxi rapide et facile pour vous. Alors, commençons. Où souhaitez-vous être pris en charge?" },
-            { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Buchung eines Taxis schnell und einfach zu machen. Also, fangen wir an. Wo möchten Sie abgeholt werden?" },
-        };
+            if (_greetingsMap == null)
+            {
+                _greetingsMap = new Dictionary<string, string>
+                {
+                    { "en", "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. Where would you like to be picked up?" },
+                    { "nl", "Hallo, en welkom bij de Taxibot demo. Ik ben Ada, uw taxi boekingsassistent. Waar wilt u worden opgehaald?" },
+                    { "fr", "Bonjour et bienvenue à la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Où souhaitez-vous être pris en charge?" },
+                    { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Wo möchten Sie abgeholt werden?" },
+                };
+            }
+            return _greetingsMap;
+        }
     }
 
-    // ============================================================================
-    // STT CORRECTIONS - Fix common Whisper mishearings over telephony
-    // These patterns are applied to user transcripts before context hints
-    // ============================================================================
-    private static readonly Dictionary<string, string> SttCorrections = InitSttCorrectionsMap();
-    
-    private static Dictionary<string, string> InitSttCorrectionsMap()
+    // STT corrections - LAZY INIT
+    private static Dictionary<string, string>? _sttCorrectionsMap;
+    private static Dictionary<string, string> SttCorrections
     {
-        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        get
         {
-            // Address number corrections (phonetic mishearings)
-            { "52 I ain't dead bro", "52A David Road" },
-            { "52 I ain't David", "52A David Road" },
-            { "52 ain't David", "52A David Road" },
-            { "52 a David", "52A David Road" },
-            { "52 eight David", "52A David Road" },
-            { "fifty two a David", "52A David Road" },
-            { "fifty two eight David", "52A David Road" },
-            { "62A David", "52A David Road" },
-            { "62 a David", "52A David Road" },
-            { "call two action", "52A David Road" },
-            
-            // Common street name mishearings
-            { "Seven Street", "7 Maple Street" },
-            { "seven street", "7 Maple Street" },
-            { "Seven Maple", "7 Maple Street" },
-            { "7 maple", "7 Maple Street" },
-            
-            // Pickup time normalization
-            { "for now", "now" },
-            { "in four now", "now" },
-            { "right now", "now" },
-            { "as soon as possible", "now" },
-            { "ASAP", "now" },
-            { "straight away", "now" },
-            { "immediately", "now" },
-            
-            // Passenger count mishearings
-            { "to passengers", "2 passengers" },
-            { "too passengers", "2 passengers" },
-            { "for passengers", "4 passengers" },
-            { "tree passengers", "3 passengers" },
-            { "won passenger", "1 passenger" },
-            { "juan passenger", "1 passenger" },
-            
-            // Common confirmation mishearings
-            { "yeah please", "yes please" },
-            { "yep", "yes" },
-            { "yup", "yes" },
-            { "yeah", "yes" },
-            { "that's right", "yes" },
-            { "correct", "yes" },
-            { "go ahead", "yes" },
-            { "book it", "yes" },
-        };
+            if (_sttCorrectionsMap == null)
+            {
+                _sttCorrectionsMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "52 I ain't dead bro", "52A David Road" },
+                    { "52 I ain't David", "52A David Road" },
+                    { "52 ain't David", "52A David Road" },
+                    { "52 a David", "52A David Road" },
+                    { "52 eight David", "52A David Road" },
+                    { "for now", "now" },
+                    { "right now", "now" },
+                    { "as soon as possible", "now" },
+                    { "ASAP", "now" },
+                    { "yeah please", "yes please" },
+                    { "yep", "yes" },
+                    { "yup", "yes" },
+                    { "yeah", "yes" },
+                    { "that's right", "yes" },
+                    { "correct", "yes" },
+                    { "go ahead", "yes" },
+                    { "book it", "yes" },
+                };
+            }
+            return _sttCorrectionsMap;
+        }
     }
 
-    /// <summary>
-    /// Apply STT corrections to a transcript to fix common telephony mishearings.
-    /// </summary>
     private static string ApplySttCorrections(string transcript)
     {
         if (string.IsNullOrEmpty(transcript)) return transcript;
-
         var corrected = transcript.Trim();
-
-        // Check for exact matches first
         if (SttCorrections.TryGetValue(corrected, out var exactMatch))
-        {
             return exactMatch;
-        }
-
-        // Check for partial matches (phrase contained in transcript)
         foreach (var (pattern, replacement) in SttCorrections)
         {
             if (corrected.Contains(pattern, StringComparison.OrdinalIgnoreCase))
-            {
                 corrected = corrected.Replace(pattern, replacement, StringComparison.OrdinalIgnoreCase);
-            }
         }
-
         return corrected;
     }
 
     // Session state
     private string? _callerId;
     private string _callId;
-    private string _detectedLanguage = "en"; // Default to English
+    private string _detectedLanguage = "en";
     private string _lastQuestionAsked = "pickup";
     private BookingState _booking = new();
     private bool _greetingSent = false;
+    private bool _sessionConfigured = false;
     private bool _waitingForQuote = false;
     private bool _responseActive = false;
-
-    // Retry logic for transient OpenAI errors
     private int _greetingRetryCount = 0;
     private const int MAX_GREETING_RETRIES = 3;
-    private bool _pendingGreetingRetry = false;
 
-    // Echo guard timing - REDUCED for confirmation responsiveness
-    // 300ms is enough to filter Ada's echo but not block quick "Yes!" responses
+    // Echo guard timing
     private const int ECHO_GUARD_MS = 300;
     private long _lastAdaFinishedAt = 0;
 
-    // Post-booking safety hangup: if the booking is confirmed and there's silence,
-    // auto-disconnect to avoid calls lingering.
-    private const int POST_BOOKING_SILENCE_HANGUP_MS = 10000; // 10 seconds after final speech
+    // Post-booking hangup
+    private const int POST_BOOKING_SILENCE_HANGUP_MS = 10000;
     private const int POST_BOOKING_SILENCE_POLL_MS = 250;
     private CancellationTokenSource? _postBookingHangupCts;
     private long _lastUserSpeechAt = 0;
     private bool _postBookingHangupArmed = false;
     private bool _postBookingFinalSpeechDelivered = false;
-
-    // Ensure we only signal call end once
     private int _callEndSignaled = 0;
-
-    // Confirmation awareness - disable echo guard when waiting for yes/no
     private bool _awaitingConfirmation = false;
-
-    // Audio buffer tracking - prevent "buffer too small" errors on commit
-    // OpenAI requires at least 100ms of audio before commit
     private double _inputBufferedMs = 0;
-    private const double MIN_COMMIT_MS = 120; // Safety margin above 100ms requirement
+    private const double MIN_COMMIT_MS = 120;
 
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
@@ -216,8 +181,6 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
     public event Action<byte[]>? OnCallerAudioMonitor;
-
-    // Tool call events for external handling
     public event Action<string, Dictionary<string, object>>? OnToolCall;
     public event Action<BookingState>? OnBookingUpdated;
     public event Action? OnCallEnded;
@@ -227,85 +190,42 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public OutputCodecMode OutputCodec => _outputCodec;
     public string DetectedLanguage => _detectedLanguage;
 
-    /// <summary>
-    /// Set the output codec mode for AI audio.
-    /// Call this after codec negotiation to enable Opus output.
-    /// </summary>
     public void SetOutputCodec(OutputCodecMode codec)
     {
         _outputCodec = codec;
         Log($"🎵 Output codec set to: {codec}");
     }
 
-    /// <summary>
-    /// Detect language from phone number country code prefix.
-    /// Handles:
-    /// - + prefix (international): +31612345678
-    /// - 00 prefix (European dialing): 0031612345678
-    /// - National Dutch format: 0652328530 (starts with 06, 10 digits)
-    /// </summary>
     private static string DetectLanguageFromPhone(string? phoneNumber)
     {
         if (string.IsNullOrEmpty(phoneNumber)) return "en";
-
-        // Normalize: remove spaces, dashes, parentheses
         var normalized = phoneNumber.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
-
-        // Detect Dutch national format: starts with 06, exactly 10 digits
-        // Dutch mobile numbers: 06XXXXXXXX (10 digits total)
+        
+        // Dutch mobile: 06xxxxxxxx
         if (normalized.StartsWith("06") && normalized.Length == 10 && normalized.All(char.IsDigit))
-        {
-            return "nl"; // Dutch national mobile number
-        }
-
-        // Detect Dutch national landline: starts with 0 + area code (not 06), 10 digits
-        // e.g., 020XXXXXXX (Amsterdam), 010XXXXXXX (Rotterdam)
+            return "nl";
         if (normalized.StartsWith("0") && !normalized.StartsWith("00") && normalized.Length == 10 && normalized.All(char.IsDigit))
-        {
-            return "nl"; // Dutch national landline
-        }
+            return "nl";
 
-        // Strip prefix to get country code digits
-        // e.g., +31612345678 → 31612345678
-        // e.g., 0031612345678 → 31612345678
-        if (normalized.StartsWith("+"))
-        {
-            normalized = normalized.Substring(1);
-        }
-        else if (normalized.StartsWith("00") && normalized.Length > 4)
-        {
-            normalized = normalized.Substring(2);
-        }
+        // Strip + or 00 prefix
+        if (normalized.StartsWith("+")) normalized = normalized.Substring(1);
+        else if (normalized.StartsWith("00") && normalized.Length > 4) normalized = normalized.Substring(2);
 
-        // Check first 2 digits against country code map
+        // Check 2-digit country code
         if (normalized.Length >= 2)
         {
             var countryCode = normalized.Substring(0, 2);
             if (CountryCodeToLanguage.TryGetValue(countryCode, out var lang))
                 return lang;
         }
-
-        return "en"; // Default to English
+        return "en";
     }
 
-    /// <summary>
-    /// Get localized greeting for the detected language.
-    /// </summary>
     private string GetLocalizedGreeting()
     {
-        return LocalizedGreetings.TryGetValue(_detectedLanguage, out var greeting)
-            ? greeting
-            : LocalizedGreetings["en"];
+        return LocalizedGreetings.TryGetValue(_detectedLanguage, out var greeting) ? greeting : LocalizedGreetings["en"];
     }
 
-    /// <summary>
-    /// Create a direct OpenAI Realtime client (FULLY LOCALIZED - no edge function).
-    /// </summary>
-    /// <param name="apiKey">OpenAI API key</param>
-    /// <param name="model">Model name (default: gpt-4o-mini-realtime-preview-2024-12-17)</param>
-    /// <param name="voice">Voice name (default: shimmer)</param>
-    /// <param name="systemPrompt">Custom system prompt (null for default taxi booking prompt)</param>
-    /// <param name="dispatchWebhookUrl">Webhook URL for dispatch integration (required for real bookings)</param>
     public OpenAIRealtimeClient(
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
@@ -313,7 +233,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         string? systemPrompt = null,
         string? dispatchWebhookUrl = null)
     {
-        _apiKey = apiKey;
+        _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
         _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
@@ -329,54 +249,31 @@ public class OpenAIRealtimeClient : IAudioAIClient
         _detectedLanguage = DetectLanguageFromPhone(caller);
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _greetingSent = false;
+        _sessionConfigured = false;
         _booking = new BookingState();
         _lastQuestionAsked = "pickup";
-        AudioProcessor.Reset(); // Reset pre-emphasis filter state for new call
+        _audioPacketsSent = 0;
+        AudioProcessor.Reset();
 
-        Log($"🌐 Detected language: {_detectedLanguage} (from {caller ?? "unknown"})");
+        Log($"🌐 Language: {_detectedLanguage} (from {caller ?? "unknown"})");
 
         _ws = new ClientWebSocket();
-
-        // OpenAI Realtime API requires specific subprotocols
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
-        // Resolve api.openai.com to IP address for reliable connection
-        const string openAiHost = "api.openai.com";
-        string resolvedIp = openAiHost;
-
-        try
-        {
-            var addresses = await Dns.GetHostAddressesAsync(openAiHost);
-            if (addresses.Length > 0)
-            {
-                // Prefer IPv4 for compatibility
-                var ipv4 = addresses.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-                resolvedIp = (ipv4 ?? addresses[0]).ToString();
-                Log($"📡 Resolved {openAiHost} → {resolvedIp}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠️ DNS resolution failed, using hostname: {ex.Message}");
-        }
-
-        // For WebSocket with TLS, we must use the original hostname for SNI
-        // The DNS resolution is for logging/debugging - ClientWebSocket handles the rest
-        var uri = new Uri($"wss://{openAiHost}/v1/realtime?model={_model}");
-
-        Log($"🔌 Connecting to OpenAI Realtime: {_model} (IP: {resolvedIp})");
+        var uri = new Uri($"wss://api.openai.com/v1/realtime?model={_model}");
+        Log($"🔌 Connecting to OpenAI: {_model}");
 
         try
         {
             await _ws.ConnectAsync(uri, _cts.Token);
-            Log("✅ Connected to OpenAI Realtime API");
+            Log($"✅ Connected! WebSocket state: {_ws.State}");
             OnConnected?.Invoke();
-            _ = ReceiveLoopAsync();
+            _ = Task.Run(() => ReceiveLoopAsync(), _cts.Token);
         }
         catch (Exception ex)
         {
-            Log($"❌ Failed to connect: {ex.Message}");
+            Log($"❌ Connect failed: {ex.Message}");
             throw;
         }
     }
@@ -386,26 +283,18 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_disposed || _ws?.State != WebSocketState.Open) return;
         if (_cts?.Token.IsCancellationRequested == true) return;
 
-        // Echo guard - ignore audio right after Ada finishes speaking
-        // BUT: Skip guard if awaiting confirmation (user saying "yes" is critical!)
+        // Echo guard - skip if Ada just finished speaking (unless awaiting confirmation)
         if (!_awaitingConfirmation)
         {
             if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
                 return;
         }
 
-        // Decode µ-law → PCM16 @ 8kHz
         var pcm8k = AudioCodecs.MuLawDecode(ulawData);
-
-        // Use optimized processor: pre-emphasis + linear interpolation + dynamic normalization
         var pcmBytes = AudioProcessor.PrepareForOpenAI(pcm8k, 8000, 24000);
-
-        // Track buffered audio duration: G.711 µ-law @ 8kHz = 1 byte/sample
         var durationMs = (double)ulawData.Length * 1000.0 / 8000.0;
         _inputBufferedMs += durationMs;
 
-        // Send as JSON text (matches edge function expectation)
-        // Edge function expects: { type: "input_audio_buffer.append", audio: "base64..." }
         var base64 = Convert.ToBase64String(pcmBytes);
         var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = base64 });
 
@@ -413,7 +302,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             _audioPacketsSent++;
             if (_audioPacketsSent <= 3 || _audioPacketsSent % 100 == 0)
-                Log($"📤 Sent audio #{_audioPacketsSent}: {ulawData.Length}b ulaw → {pcmBytes.Length}b PCM24, {base64.Length} chars base64");
+                Log($"📤 Audio #{_audioPacketsSent}: {ulawData.Length}b → {pcmBytes.Length}b PCM24");
 
             await _ws.SendAsync(
                 new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
@@ -427,7 +316,6 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     /// <summary>
     /// Send PCM16 audio at 8kHz (already decoded from µ-law via NAudio).
-    /// This matches the SIPSorcery example pattern using NAudio.Codecs.MuLawDecoder.
     /// </summary>
     public async Task SendPcm8kAsync(byte[] pcm8kBytes)
     {
