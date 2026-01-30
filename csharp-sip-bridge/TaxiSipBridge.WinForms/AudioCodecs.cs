@@ -5,7 +5,7 @@ using SIPSorceryMedia.Abstractions;
 using Concentus.Enums;
 using Concentus.Structs;
 
-namespace TaxiSipBridge.Audio;
+namespace TaxiSipBridge;
 
 /// <summary>
 /// Audio codec utilities for encoding/decoding and resampling.
@@ -410,7 +410,6 @@ public static class AudioCodecs
         ResetOpus();
         ResetG722();
         ResetFirFilter();
-        TelephonyVoiceShaping.Reset();
     }
 
     /// <summary>
