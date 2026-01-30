@@ -170,21 +170,51 @@ partial class MainForm
             btnStartStop, btnMicTest
         });
 
+        // === Avatar Panel (shown when Simli is enabled) ===
+        grpAvatar = new GroupBox
+        {
+            Text = "🎭 Avatar",
+            Location = new Point(530, 210),
+            Size = new Size(192, 200),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Visible = false
+        };
+
+        picAvatar = new PictureBox
+        {
+            Location = new Point(10, 22),
+            Size = new Size(172, 140),
+            BackColor = Color.Black,
+            SizeMode = PictureBoxSizeMode.Zoom
+        };
+
+        lblAvatarStatus = new Label
+        {
+            Text = "Waiting...",
+            Location = new Point(10, 168),
+            Size = new Size(172, 20),
+            ForeColor = Color.Gray,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 9)
+        };
+
+        grpAvatar.Controls.AddRange(new Control[] { picAvatar, lblAvatarStatus });
+
         // === Status Panel ===
         var grpStatus = new GroupBox
         {
             Text = "📊 Status",
             Location = new Point(12, 210),
-            Size = new Size(710, 70),
+            Size = new Size(510, 70),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
         var lblStatusLabel = new Label { Text = "Status:", Location = new Point(15, 25), Size = new Size(50, 23) };
-        lblStatus = new Label { Text = "Ready", Location = new Point(70, 25), Size = new Size(300, 23), ForeColor = Color.Gray };
+        lblStatus = new Label { Text = "Ready", Location = new Point(70, 25), Size = new Size(200, 23), ForeColor = Color.Gray };
 
-        var lblCallLabel = new Label { Text = "Call:", Location = new Point(400, 25), Size = new Size(40, 23) };
-        lblActiveCall = new Label { Text = "No active call", Location = new Point(445, 25), Size = new Size(200, 23), ForeColor = Color.Gray };
-        lblCallId = new Label { Text = "", Location = new Point(445, 45), Size = new Size(200, 20), ForeColor = Color.DimGray, Font = new Font("Consolas", 8F) };
+        var lblCallLabel = new Label { Text = "Call:", Location = new Point(280, 25), Size = new Size(40, 23) };
+        lblActiveCall = new Label { Text = "No active call", Location = new Point(325, 25), Size = new Size(170, 23), ForeColor = Color.Gray };
+        lblCallId = new Label { Text = "", Location = new Point(325, 45), Size = new Size(170, 20), ForeColor = Color.DimGray, Font = new Font("Consolas", 8F) };
 
         grpStatus.Controls.AddRange(new Control[] { lblStatusLabel, lblStatus, lblCallLabel, lblActiveCall, lblCallId });
 
@@ -248,7 +278,7 @@ partial class MainForm
         grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs, btnCopyLogs });
 
         // Add all to form
-        this.Controls.AddRange(new Control[] { grpConfig, grpStatus, grpLogs });
+        this.Controls.AddRange(new Control[] { grpConfig, grpStatus, grpAvatar, grpLogs });
     }
 
     #endregion
@@ -284,4 +314,7 @@ partial class MainForm
     private ContextMenuStrip ctxLogs;
     private ToolStripMenuItem mnuCopySelected;
     private ToolStripMenuItem mnuCopyAll;
+    private GroupBox grpAvatar;
+    private PictureBox picAvatar;
+    private Label lblAvatarStatus;
 }

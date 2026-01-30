@@ -59,7 +59,6 @@ public partial class MainForm : Form
 
     // Simli Avatar state
     private SimliAvatarClient? _simliClient;
-    private SimliAvatarForm? _simliForm;
     private bool _useSimliAvatar = false;
 
     private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) 
@@ -71,6 +70,9 @@ public partial class MainForm : Form
         txtSimliApiKey.Visible = _useSimliAvatar;
         lblSimliFaceId.Visible = _useSimliAvatar;
         txtSimliFaceId.Visible = _useSimliAvatar;
+
+        // Show/hide avatar panel
+        grpAvatar.Visible = _useSimliAvatar;
 
         // Adjust button positions when Simli config is visible
         if (_useSimliAvatar)
@@ -87,6 +89,44 @@ public partial class MainForm : Form
         AddLog(_useSimliAvatar 
             ? "🎭 Simli Avatar enabled - configure API key and Face ID"
             : "🎭 Simli Avatar disabled");
+    }
+
+    /// <summary>
+    /// Update the embedded avatar video frame.
+    /// </summary>
+    private void UpdateAvatarFrame(byte[] frameData)
+    {
+        if (InvokeRequired)
+        {
+            try { Invoke(new Action(() => UpdateAvatarFrame(frameData))); }
+            catch { }
+            return;
+        }
+
+        try
+        {
+            using var ms = new System.IO.MemoryStream(frameData);
+            var image = Image.FromStream(ms);
+            var oldImage = picAvatar.Image;
+            picAvatar.Image = image;
+            oldImage?.Dispose();
+        }
+        catch
+        {
+            // Failed to decode frame
+        }
+    }
+
+    /// <summary>
+    /// Update the avatar speaking status.
+    /// </summary>
+    private void SetAvatarSpeaking(bool isSpeaking)
+    {
+        SafeInvoke(() =>
+        {
+            lblAvatarStatus.Text = isSpeaking ? "🔊 Speaking..." : "👂 Listening...";
+            lblAvatarStatus.ForeColor = isSpeaking ? Color.LightGreen : Color.Gray;
+        });
     }
 
     private void btnStartStop_Click(object sender, EventArgs e)
@@ -151,16 +191,16 @@ public partial class MainForm : Form
                     
                     if (!string.IsNullOrEmpty(simliKey) && !string.IsNullOrEmpty(simliFaceId))
                     {
-                        // Create Simli client and form
+                        // Create Simli client
                         _simliClient = new SimliAvatarClient(simliKey, simliFaceId);
                         _simliClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
-                        _simliClient.OnVideoFrame += frame => SafeInvoke(() => _simliForm?.UpdateVideoFrame(frame));
-                        
-                        _simliForm = new SimliAvatarForm();
-                        _simliForm.Show();
+                        _simliClient.OnVideoFrame += frame => UpdateAvatarFrame(frame);
                         
                         // Wire up the call handler to send AI audio to Simli
-                        localHandler.SetSimliClient(_simliClient, msg => SafeInvoke(() => _simliForm?.SetSpeaking(msg)));
+                        localHandler.SetSimliClient(_simliClient, isSpeaking => SetAvatarSpeaking(isSpeaking));
+                        
+                        // Reset avatar status
+                        SetAvatarSpeaking(false);
                         
                         AddLog($"🎭 Simli avatar configured (Face: {simliFaceId[..Math.Min(8, simliFaceId.Length)]}...)");
                     }
@@ -456,12 +496,15 @@ public partial class MainForm : Form
             _simliClient.Dispose();
             _simliClient = null;
         }
-        if (_simliForm != null)
+        
+        // Reset avatar display
+        SafeInvoke(() =>
         {
-            _simliForm.Close();
-            _simliForm.Dispose();
-            _simliForm = null;
-        }
+            picAvatar.Image?.Dispose();
+            picAvatar.Image = null;
+            lblAvatarStatus.Text = "Waiting...";
+            lblAvatarStatus.ForeColor = Color.Gray;
+        });
 
         _isRunning = false;
         btnStartStop.Text = "▶ Start SIP";
