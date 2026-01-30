@@ -41,9 +41,7 @@ public class AdaAudioSource : IAudioSource, IDisposable
     private PolyphaseFirResampler? _resampler48k;
     private bool _ffmpegAvailable = true;  // Try FFmpeg as optional enhancement
     
-    // Streaming preprocessor for 8kHz telephony (DC removal + lowpass + normalize + downsample)
-    private readonly TtsPreConditioner _preConditioner8k = new();
-    
+    // TtsPreConditioner is now static - no instance needed
     // Fallback state for rates without dedicated resampler
     private double _resamplePhase;
     private short _lastInputSample;
@@ -216,9 +214,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _resampler16k?.Reset();
         _resampler48k?.Reset();
         
-        // Reset streaming preprocessor for 8kHz
-        _preConditioner8k.Reset();
-        
+        // Reset streaming preprocessor for 8kHz (static class)
+        TtsPreConditioner.Reset();
         // Reset fallback resampler state
         _resamplePhase = 0;
         _lastInputSample = 0;
