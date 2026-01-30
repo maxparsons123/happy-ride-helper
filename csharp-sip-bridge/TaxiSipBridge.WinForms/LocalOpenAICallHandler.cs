@@ -515,8 +515,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _currentMediaSession = null;
         }
 
-        // Clear codec state for next call
+        // Clear codec state for next call (static state cleanup)
         _remotePtToCodec.Clear();
+        AudioCodecs.ResetAllCodecs();
 
         // Dispose cancellation token
         try { _callCts?.Cancel(); } catch { }
