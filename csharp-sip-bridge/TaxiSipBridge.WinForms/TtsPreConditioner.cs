@@ -6,7 +6,7 @@ namespace TaxiSipBridge;
 /// Streaming preprocessor for OpenAI Realtime 24kHz output → clean 8kHz PCM for PCMA encoding.
 /// Pipeline: DC removal → 3.4kHz low-pass → normalize → soft-clip → downsample
 /// </summary>
-public class TtsPreConditioner
+public static class TtsPreConditioner
 {
     // OpenAI Realtime outputs 24kHz, telephony needs 8kHz
     public const int InputSampleRate = 24000;
@@ -20,44 +20,49 @@ public class TtsPreConditioner
     public const int OutputBytesPerFrame = OutputSamplesPerFrame * 2; // 320 bytes
 
     // Low-pass filter state for continuity across frames
-    private double _lpPrev;
-    private bool _lpPrevInit;
+    private static double _lpPrev;
+    private static bool _lpPrevInit;
     
     // DC removal state (stateful high-pass)
-    private double _dcAccum;
+    private static double _dcAccum;
     private const double DcAlpha = 0.995; // High-pass pole for DC blocking
+    
+    private static readonly object _lock = new object();
 
     /// <summary>
     /// Process a single 20ms 24kHz PCM16 mono frame → 20ms 8kHz PCM16 frame.
     /// Output is ready for PCMA (G.711 A-Law) encoding.
     /// </summary>
-    public short[] ProcessFrame(short[] samples24k)
+    public static short[] ProcessFrame(short[] samples24k)
     {
         if (samples24k == null || samples24k.Length == 0)
             return Array.Empty<short>();
 
-        // Pad or truncate to exact frame size
-        short[] frame = EnsureFrameSize(samples24k, InputSamplesPerFrame);
+        lock (_lock)
+        {
+            // Pad or truncate to exact frame size
+            short[] frame = EnsureFrameSize(samples24k, InputSamplesPerFrame);
 
-        // 1) Remove DC offset (stateful high-pass)
-        RemoveDc(frame);
+            // 1) Remove DC offset (stateful high-pass)
+            RemoveDc(frame);
 
-        // 2) Low-pass @ 3.4kHz for telephony band limiting
-        LowpassInPlace(frame, 3400.0, InputSampleRate);
+            // 2) Low-pass @ 3.4kHz for telephony band limiting
+            LowpassInPlace(frame, 3400.0, InputSampleRate);
 
-        // 3) Normalize to 90% and soft-clip
-        NormalizeAndClip(frame);
+            // 3) Normalize to 90% and soft-clip
+            NormalizeAndClip(frame);
 
-        // 4) Downsample 24kHz → 8kHz (factor 3)
-        short[] samples8k = Downsample24kTo8k(frame);
+            // 4) Downsample 24kHz → 8kHz (factor 3)
+            short[] samples8k = Downsample24kTo8k(frame);
 
-        return samples8k;
+            return samples8k;
+        }
     }
 
     /// <summary>
     /// Process raw bytes from OpenAI Realtime → ready for PCMA encoding.
     /// </summary>
-    public byte[] ProcessFrameBytes(byte[] inputBytes)
+    public static byte[] ProcessFrameBytes(byte[] inputBytes)
     {
         short[] samples24k = BytesToPcm(inputBytes);
         short[] samples8k = ProcessFrame(samples24k);
@@ -67,11 +72,14 @@ public class TtsPreConditioner
     /// <summary>
     /// Reset filter state (call between calls/sessions).
     /// </summary>
-    public void Reset()
+    public static void Reset()
     {
-        _lpPrev = 0;
-        _lpPrevInit = false;
-        _dcAccum = 0;
+        lock (_lock)
+        {
+            _lpPrev = 0;
+            _lpPrevInit = false;
+            _dcAccum = 0;
+        }
     }
 
     /// <summary>
@@ -91,7 +99,7 @@ public class TtsPreConditioner
     /// <summary>
     /// Stateful DC blocking filter (high-pass).
     /// </summary>
-    private void RemoveDc(short[] samples)
+    private static void RemoveDc(short[] samples)
     {
         for (int i = 0; i < samples.Length; i++)
         {
@@ -106,7 +114,7 @@ public class TtsPreConditioner
     /// One-pole low-pass filter @ 3.4kHz with state across frames.
     /// Classic telephony band limiting.
     /// </summary>
-    private void LowpassInPlace(short[] samples, double cutoffHz, int sampleRate)
+    private static void LowpassInPlace(short[] samples, double cutoffHz, int sampleRate)
     {
         double rc = 1.0 / (2 * Math.PI * cutoffHz);
         double dt = 1.0 / sampleRate;
