@@ -29,8 +29,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private readonly string _model;
     private readonly string _voice;
     private readonly string _systemPrompt;
-    private readonly string? _dispatchWebhookUrl = "https://coherent-civil-imp.ngrok.app/ada";
-    private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly string? _dispatchWebhookUrl;
+    
+    // Lazy-init to avoid static constructor issues
+    private HttpClient? _httpClientBacking;
+    private HttpClient HttpClient => _httpClientBacking ??= new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
@@ -1183,7 +1186,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             content.Headers.Add("X-Call-ID", _callId);
 
-            var response = await _httpClient.PostAsync(_dispatchWebhookUrl, content);
+            var response = await HttpClient.PostAsync(_dispatchWebhookUrl, content);
             var responseBody = await response.Content.ReadAsStringAsync();
 
             Log($"📬 Dispatch response: {response.StatusCode}");
@@ -1263,7 +1266,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
             
             Log($"📱 Sending WhatsApp notification to {phoneNumber}...");
             
-            var response = await _httpClient.GetAsync(url);
+            var response = await HttpClient.GetAsync(url);
             
             if (response.IsSuccessStatusCode)
             {
@@ -1719,7 +1722,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         while (_outboundQueue.TryDequeue(out _)) { }
         _opusResampleBuffer = Array.Empty<short>();
 
-        try { _httpClient.Dispose(); } catch { }
+        try { _httpClientBacking?.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
