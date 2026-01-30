@@ -71,7 +71,7 @@ public class EdgeFunctionCallHandler : ISipCallHandler
 
         try
         {
-            // Setup media session with AdaAudioSource (SpeexDSP high-quality resampling)
+            // Setup media session with AdaAudioSource (polyphase FIR high-quality resampling)
             _adaAudioSource = new AdaAudioSource(_audioMode, _jitterBufferMs);
             _adaAudioSource.OnDebugLog += msg => Log(msg);
             _adaAudioSource.OnQueueEmpty += () => _isBotSpeaking = false;
