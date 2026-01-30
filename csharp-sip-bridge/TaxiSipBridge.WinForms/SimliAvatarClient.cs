@@ -126,9 +126,10 @@ public class SimliAvatarClient : IDisposable
     public async Task SendPcm24AudioAsync(byte[] pcm24Audio)
     {
         // Resample 24kHz to 16kHz (2:3 ratio)
-        var samples24 = AudioCodecs.BytesToShorts(pcm24Audio);
-        var samples16 = AudioCodecs.Resample(samples24, 24000, 16000);
-        var pcm16 = AudioCodecs.ShortsToBytes(samples16);
+        // Use fully qualified name to avoid conflict with TaxiSipBridge.Audio.AudioCodecs
+        var samples24 = TaxiSipBridge.AudioCodecs.BytesToShorts(pcm24Audio);
+        var samples16 = TaxiSipBridge.AudioCodecs.Resample(samples24, 24000, 16000);
+        var pcm16 = TaxiSipBridge.AudioCodecs.ShortsToBytes(samples16);
         
         await SendAudioAsync(pcm16);
     }
