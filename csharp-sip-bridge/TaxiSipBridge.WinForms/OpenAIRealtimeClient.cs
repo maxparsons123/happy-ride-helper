@@ -52,76 +52,91 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private short[] _opusResampleBuffer = Array.Empty<short>();  // Buffer for 24kHz→48kHz upsampling
 
     // Language detection from caller phone number (first 2 digits of country code)
-    private static readonly Dictionary<string, string> CountryCodeToLanguage = new()
+    private static readonly Dictionary<string, string> CountryCodeToLanguage = InitCountryCodeMap();
+    
+    private static Dictionary<string, string> InitCountryCodeMap()
     {
-        { "31", "nl" }, // Netherlands
-        { "32", "nl" }, // Belgium (Dutch)
-        { "33", "fr" }, // France
-        { "41", "de" }, // Switzerland (German)
-        { "43", "de" }, // Austria
-        { "49", "de" }, // Germany
-    };
+        return new Dictionary<string, string>
+        {
+            { "31", "nl" }, // Netherlands
+            { "32", "nl" }, // Belgium (Dutch)
+            { "33", "fr" }, // France
+            { "41", "de" }, // Switzerland (German)
+            { "43", "de" }, // Austria
+            { "49", "de" }, // Germany
+        };
+    }
 
     // Localized greetings
-    private static readonly Dictionary<string, string> LocalizedGreetings = new()
+    private static readonly Dictionary<string, string> LocalizedGreetings = InitGreetingsMap();
+    
+    private static Dictionary<string, string> InitGreetingsMap()
     {
-        { "en", "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?" },
-        { "nl", "Hallo, en welkom bij de Taxibot demo. Ik ben Ada, uw taxi boekingsassistent. Ik ben hier om het boeken van een taxi snel en gemakkelijk voor u te maken. Laten we beginnen. Waar wilt u worden opgehaald?" },
-        { "fr", "Bonjour et bienvenue à la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour rendre la réservation d'un taxi rapide et facile pour vous. Alors, commençons. Où souhaitez-vous être pris en charge?" },
-        { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Buchung eines Taxis schnell und einfach zu machen. Also, fangen wir an. Wo möchten Sie abgeholt werden?" },
-    };
+        return new Dictionary<string, string>
+        {
+            { "en", "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. I'm here to make booking a taxi quick and easy for you. So, let's get started. Where would you like to be picked up?" },
+            { "nl", "Hallo, en welkom bij de Taxibot demo. Ik ben Ada, uw taxi boekingsassistent. Ik ben hier om het boeken van een taxi snel en gemakkelijk voor u te maken. Laten we beginnen. Waar wilt u worden opgehaald?" },
+            { "fr", "Bonjour et bienvenue à la démo Taxibot. Je suis Ada, votre assistante de réservation de taxi. Je suis là pour rendre la réservation d'un taxi rapide et facile pour vous. Alors, commençons. Où souhaitez-vous être pris en charge?" },
+            { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada, Ihre Taxi-Buchungsassistentin. Ich bin hier, um Ihnen die Buchung eines Taxis schnell und einfach zu machen. Also, fangen wir an. Wo möchten Sie abgeholt werden?" },
+        };
+    }
 
     // ============================================================================
     // STT CORRECTIONS - Fix common Whisper mishearings over telephony
     // These patterns are applied to user transcripts before context hints
     // ============================================================================
-    private static readonly Dictionary<string, string> SttCorrections = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, string> SttCorrections = InitSttCorrectionsMap();
+    
+    private static Dictionary<string, string> InitSttCorrectionsMap()
     {
-        // Address number corrections (phonetic mishearings)
-        { "52 I ain't dead bro", "52A David Road" },
-        { "52 I ain't David", "52A David Road" },
-        { "52 ain't David", "52A David Road" },
-        { "52 a David", "52A David Road" },
-        { "52 eight David", "52A David Road" },
-        { "fifty two a David", "52A David Road" },
-        { "fifty two eight David", "52A David Road" },
-        { "62A David", "52A David Road" },
-        { "62 a David", "52A David Road" },
-        { "call two action", "52A David Road" },
-        
-        // Common street name mishearings
-        { "Seven Street", "7 Maple Street" },
-        { "seven street", "7 Maple Street" },
-        { "Seven Maple", "7 Maple Street" },
-        { "7 maple", "7 Maple Street" },
-        
-        // Pickup time normalization
-        { "for now", "now" },
-        { "in four now", "now" },
-        { "right now", "now" },
-        { "as soon as possible", "now" },
-        { "ASAP", "now" },
-        { "straight away", "now" },
-        { "immediately", "now" },
-        
-        // Passenger count mishearings
-        { "to passengers", "2 passengers" },
-        { "too passengers", "2 passengers" },
-        { "for passengers", "4 passengers" },
-        { "tree passengers", "3 passengers" },
-        { "won passenger", "1 passenger" },
-        { "juan passenger", "1 passenger" },
-        
-        // Common confirmation mishearings
-        { "yeah please", "yes please" },
-        { "yep", "yes" },
-        { "yup", "yes" },
-        { "yeah", "yes" },
-        { "that's right", "yes" },
-        { "correct", "yes" },
-        { "go ahead", "yes" },
-        { "book it", "yes" },
-    };
+        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            // Address number corrections (phonetic mishearings)
+            { "52 I ain't dead bro", "52A David Road" },
+            { "52 I ain't David", "52A David Road" },
+            { "52 ain't David", "52A David Road" },
+            { "52 a David", "52A David Road" },
+            { "52 eight David", "52A David Road" },
+            { "fifty two a David", "52A David Road" },
+            { "fifty two eight David", "52A David Road" },
+            { "62A David", "52A David Road" },
+            { "62 a David", "52A David Road" },
+            { "call two action", "52A David Road" },
+            
+            // Common street name mishearings
+            { "Seven Street", "7 Maple Street" },
+            { "seven street", "7 Maple Street" },
+            { "Seven Maple", "7 Maple Street" },
+            { "7 maple", "7 Maple Street" },
+            
+            // Pickup time normalization
+            { "for now", "now" },
+            { "in four now", "now" },
+            { "right now", "now" },
+            { "as soon as possible", "now" },
+            { "ASAP", "now" },
+            { "straight away", "now" },
+            { "immediately", "now" },
+            
+            // Passenger count mishearings
+            { "to passengers", "2 passengers" },
+            { "too passengers", "2 passengers" },
+            { "for passengers", "4 passengers" },
+            { "tree passengers", "3 passengers" },
+            { "won passenger", "1 passenger" },
+            { "juan passenger", "1 passenger" },
+            
+            // Common confirmation mishearings
+            { "yeah please", "yes please" },
+            { "yep", "yes" },
+            { "yup", "yes" },
+            { "yeah", "yes" },
+            { "that's right", "yes" },
+            { "correct", "yes" },
+            { "go ahead", "yes" },
+            { "book it", "yes" },
+        };
+    }
 
     /// <summary>
     /// Apply STT corrections to a transcript to fix common telephony mishearings.
