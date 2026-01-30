@@ -216,8 +216,8 @@ public class AdaAudioSource : IAudioSource, IDisposable
         _resampler16k?.Reset();
         _resampler48k?.Reset();
         
-        // Reset streaming preprocessor for 8kHz
-        _preConditioner8k.Reset();
+        // Reset streaming preprocessor for 8kHz (static state)
+        TtsPreConditioner.Reset();
         
         // Reset fallback resampler state
         _resamplePhase = 0;

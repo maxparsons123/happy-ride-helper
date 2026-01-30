@@ -20,11 +20,11 @@ public class TtsPreConditioner
     public const int OutputBytesPerFrame = OutputSamplesPerFrame * 2; // 320 bytes
 
     // Low-pass filter state for continuity across frames
-    private double _lpPrev;
-    private bool _lpPrevInit;
+    private static double _lpPrev;
+    private static bool _lpPrevInit;
     
     // DC removal state (stateful high-pass)
-    private double _dcAccum;
+    private static double _dcAccum;
     private const double DcAlpha = 0.995; // High-pass pole for DC blocking
 
     /// <summary>
@@ -67,7 +67,7 @@ public class TtsPreConditioner
     /// <summary>
     /// Reset filter state (call between calls/sessions).
     /// </summary>
-    public void Reset()
+    public static void Reset()
     {
         _lpPrev = 0;
         _lpPrevInit = false;
@@ -91,7 +91,7 @@ public class TtsPreConditioner
     /// <summary>
     /// Stateful DC blocking filter (high-pass).
     /// </summary>
-    private void RemoveDc(short[] samples)
+    private static void RemoveDc(short[] samples)
     {
         for (int i = 0; i < samples.Length; i++)
         {
@@ -106,7 +106,7 @@ public class TtsPreConditioner
     /// One-pole low-pass filter @ 3.4kHz with state across frames.
     /// Classic telephony band limiting.
     /// </summary>
-    private void LowpassInPlace(short[] samples, double cutoffHz, int sampleRate)
+    private static void LowpassInPlace(short[] samples, double cutoffHz, int sampleRate)
     {
         double rc = 1.0 / (2 * Math.PI * cutoffHz);
         double dt = 1.0 / sampleRate;
