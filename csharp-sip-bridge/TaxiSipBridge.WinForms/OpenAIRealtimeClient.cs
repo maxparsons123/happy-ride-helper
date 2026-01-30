@@ -963,6 +963,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     // Confirmation received - reset the awaiting flag
                     _awaitingConfirmation = false;
                     Log("✅ Confirmation received - echo guard re-enabled");
+                    
+                    string bookingRef;
+                    string confirmMessage;
+                    
                     if (!string.IsNullOrEmpty(_dispatchWebhookUrl))
                     {
                         var confirmResult = await CallDispatchWebhookAsync("confirmed");
@@ -970,33 +974,38 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         {
                             _booking.Confirmed = true;
                             _booking.BookingRef = confirmResult.bookingRef;
+                            bookingRef = confirmResult.bookingRef ?? "CONFIRMED";
+                            confirmMessage = confirmResult.message ?? "Your taxi is booked!";
                             OnBookingUpdated?.Invoke(_booking);
-                            await SendToolResultAsync(callId, new
-                            {
-                                success = true,
-                                booking_ref = confirmResult.bookingRef,
-                                message = confirmResult.message ?? "Your taxi is booked!",
-                                language = _detectedLanguage
-                            });
                         }
                         else
                         {
                             await SendToolResultAsync(callId, new { success = false, error = confirmResult.error });
+                            break;
                         }
                     }
                     else
                     {
                         _booking.Confirmed = true;
                         _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
+                        bookingRef = _booking.BookingRef;
+                        confirmMessage = "Your taxi is booked! Your driver will arrive shortly.";
                         OnBookingUpdated?.Invoke(_booking);
-                        await SendToolResultAsync(callId, new
-                        {
-                            success = true,
-                            booking_ref = _booking.BookingRef,
-                            message = "Your taxi is booked! Your driver will arrive shortly.",
-                            language = _detectedLanguage
-                        });
                     }
+                    
+                    // Send tool result with explicit instruction to end call
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        booking_ref = bookingRef,
+                        message = confirmMessage,
+                        language = _detectedLanguage,
+                        next_action = "IMPORTANT: Say a brief thank you and goodbye, then IMMEDIATELY call end_call to hang up."
+                    });
+                    
+                    // Also send an explicit system instruction to ensure end_call is triggered
+                    Log("📞 Injecting end_call instruction...");
+                    await SendEndCallInstructionAsync();
                 }
                 break;
 
@@ -1097,6 +1106,37 @@ public class OpenAIRealtimeClient : IAudioAIClient
             WebSocketMessageType.Text,
             true,
             _cts?.Token ?? CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Send explicit instruction to end the call after booking confirmation.
+    /// This ensures Ada calls end_call reliably.
+    /// </summary>
+    private async Task SendEndCallInstructionAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        // Wait for the thank you message to finish
+        await Task.Delay(3000);
+
+        // Send a system message forcing end_call
+        var instruction = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "system",
+                content = new[] { new {
+                    type = "input_text",
+                    text = "[BOOKING COMPLETE] The taxi is booked. You MUST now call end_call immediately to hang up. Do not wait for user response."
+                }}
+            }
+        };
+
+        await SendJsonAsync(instruction);
+        await SendJsonAsync(new { type = "response.create" });
+        Log("📞 End call instruction sent");
     }
 
     /// <summary>

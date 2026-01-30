@@ -251,12 +251,22 @@ public class LocalOpenAICallHandler : ISipCallHandler
         try
         {
             var sdpBody = req.Body;
-            if (string.IsNullOrEmpty(sdpBody)) return;
+            if (string.IsNullOrEmpty(sdpBody))
+            {
+                Log($"⚠️ [{callId}] No SDP body in INVITE");
+                return;
+            }
 
             var sdp = SDP.ParseSDPDescription(sdpBody);
             var audioMedia = sdp.Media.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
-            if (audioMedia == null) return;
+            if (audioMedia == null)
+            {
+                Log($"⚠️ [{callId}] No audio media in SDP");
+                return;
+            }
 
+            // Parse all codecs from remote offer
+            var codecList = new List<string>();
             foreach (var f in audioMedia.MediaFormats)
             {
                 var pt = f.Key;
@@ -271,12 +281,17 @@ public class LocalOpenAICallHandler : ISipCallHandler
                     _remotePtToCodec[pt] = AudioCodecsEnum.G722;
                 else if (name.Equals("opus", StringComparison.OrdinalIgnoreCase))
                     _remotePtToCodec[pt] = AudioCodecsEnum.OPUS;
+
+                codecList.Add($"{name}(PT{pt})");
             }
 
-            var codecSummary = audioMedia.MediaFormats
-                .Select(f => $"{f.Value.Name()}(PT{f.Key})")
-                .ToList();
-            Log($"📥 [{callId}] Remote codecs: {string.Join(", ", codecSummary)}");
+            // Log all available codecs prominently
+            Log($"════════════════════════════════════════════════════");
+            Log($"🎧 [{callId}] AVAILABLE CODECS: {string.Join(", ", codecList)}");
+            Log($"   Opus: {(IsOpusAvailable ? "✓ YES" : "✗ NO")}");
+            Log($"   G.722: {(IsG722Available ? "✓ YES" : "✗ NO")}");
+            Log($"   PCMA/PCMU: {(_remotePtToCodec.Values.Any(c => c == AudioCodecsEnum.PCMA || c == AudioCodecsEnum.PCMU) ? "✓ YES" : "✗ NO")}");
+            Log($"════════════════════════════════════════════════════");
         }
         catch (Exception ex)
         {
