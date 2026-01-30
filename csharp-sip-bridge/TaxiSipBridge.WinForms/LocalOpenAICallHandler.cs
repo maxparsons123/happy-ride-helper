@@ -29,6 +29,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
     private Action<SIPDialogue>? _currentHungupHandler; // Track to prevent stale handlers
+    private SIPUserAgent? _currentUa; // Track UA for cleanup
+    private int _hangupFired; // Ensure single execution (0 = not fired, 1 = fired)
 
     // Simli avatar integration (WebView2-based sender)
     private Func<byte[], Task>? _simliSendAudio;
@@ -104,13 +106,15 @@ public class LocalOpenAICallHandler : ISipCallHandler
         _inboundFlushComplete = false;
         _callStartedAt = DateTime.UtcNow;
         _remotePtToCodec.Clear();
+        _hangupFired = 0; // Reset for new call
         
-        // Clean up any stale hangup handler from previous call
-        if (_currentHungupHandler != null)
+        // Clean up any stale hangup handler from previous call on previous UA
+        if (_currentHungupHandler != null && _currentUa != null)
         {
-            ua.OnCallHungup -= _currentHungupHandler;
-            _currentHungupHandler = null;
+            _currentUa.OnCallHungup -= _currentHungupHandler;
         }
+        _currentHungupHandler = null;
+        _currentUa = ua; // Track current UA
 
         OnCallStarted?.Invoke(callId, caller);
 
@@ -233,17 +237,17 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
             };
-            // Store handler reference for cleanup
-            _currentHungupHandler = null;
-            
-            // AI-triggered hangup
+            // AI-triggered hangup (with single-execution guard)
             Action? endCallHandler = null;
             endCallHandler = async () =>
             {
+                // Ensure single execution across AI and caller hangup
+                if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
+                
                 _aiClient!.OnCallEnded -= endCallHandler;
-                if (_currentHungupHandler != null) 
+                if (_currentHungupHandler != null && _currentUa != null)
                 {
-                    ua.OnCallHungup -= _currentHungupHandler;
+                    _currentUa.OnCallHungup -= _currentHungupHandler;
                     _currentHungupHandler = null;
                 }
                 
@@ -257,12 +261,15 @@ public class LocalOpenAICallHandler : ISipCallHandler
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
-            // Caller-triggered hangup (store reference for cleanup between calls)
+            // Caller-triggered hangup (with single-execution guard)
             _currentHungupHandler = dialogue =>
             {
-                if (_currentHungupHandler != null)
+                // Ensure single execution across AI and caller hangup
+                if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
+                
+                if (_currentHungupHandler != null && _currentUa != null)
                 {
-                    ua.OnCallHungup -= _currentHungupHandler;
+                    _currentUa.OnCallHungup -= _currentHungupHandler;
                     _currentHungupHandler = null;
                 }
                 if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
