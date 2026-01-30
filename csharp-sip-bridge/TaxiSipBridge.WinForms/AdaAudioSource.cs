@@ -473,20 +473,22 @@ public class AdaAudioSource : IAudioSource, IDisposable
             try
             {
                 _ffmpegResampler8k ??= new FfmpegStreamingResampler(fromRate, toRate);
-                if (!_ffmpegResampler8k.IsRunning)
+                var ffmpeg = _ffmpegResampler8k;  // Local non-null reference
+                
+                if (!ffmpeg.IsRunning)
                 {
-                    _ffmpegResampler8k.OnDebugLog += msg => OnDebugLog?.Invoke(msg);
-                    _ffmpegResampler8k.OnError += err => OnDebugLog?.Invoke($"[FFmpeg] {err}");
-                    if (!_ffmpegResampler8k.Start())
+                    ffmpeg.OnDebugLog += msg => OnDebugLog?.Invoke(msg);
+                    ffmpeg.OnError += err => OnDebugLog?.Invoke($"[FFmpeg] {err}");
+                    if (!ffmpeg.Start())
                     {
                         _ffmpegAvailable = false;
                         OnDebugLog?.Invoke("[AdaAudioSource] ⚠️ FFmpeg not available, using polyphase FIR");
                     }
                 }
                 
-                if (_ffmpegResampler8k.IsRunning)
+                if (ffmpeg.IsRunning)
                 {
-                    var resampled = _ffmpegResampler8k.Resample(input);
+                    var resampled = ffmpeg.Resample(input);
                     
                     if (_sentFrames == 0)
                     {
