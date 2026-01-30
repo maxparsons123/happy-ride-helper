@@ -28,6 +28,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
+    private SIPUserAgent.CallHungupDelegate? _currentHungupHandler; // Track to prevent stale handlers
 
     private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
     private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
@@ -91,6 +92,13 @@ public class LocalOpenAICallHandler : ISipCallHandler
         _inboundFlushComplete = false;
         _callStartedAt = DateTime.UtcNow;
         _remotePtToCodec.Clear();
+        
+        // Clean up any stale hangup handler from previous call
+        if (_currentHungupHandler != null)
+        {
+            ua.OnCallHungup -= _currentHungupHandler;
+            _currentHungupHandler = null;
+        }
 
         OnCallStarted?.Invoke(callId, caller);
 
@@ -203,14 +211,19 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
             };
-            // Use local handlers that unsubscribe after first trigger
-            Action? endCallHandler = null;
-            SIPUserAgent.CallHungupDelegate? hungupHandler = null;
+            // Store handler reference for cleanup
+            _currentHungupHandler = null;
             
+            // AI-triggered hangup
+            Action? endCallHandler = null;
             endCallHandler = async () =>
             {
                 _aiClient!.OnCallEnded -= endCallHandler;
-                if (hungupHandler != null) ua.OnCallHungup -= hungupHandler;
+                if (_currentHungupHandler != null) 
+                {
+                    ua.OnCallHungup -= _currentHungupHandler;
+                    _currentHungupHandler = null;
+                }
                 
                 Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
                 await Task.Delay(HANGUP_GRACE_MS);
@@ -222,16 +235,20 @@ public class LocalOpenAICallHandler : ISipCallHandler
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
-            // Wire hangup (unsubscribes after first trigger)
-            hungupHandler = dialogue =>
+            // Caller-triggered hangup (store reference for cleanup between calls)
+            _currentHungupHandler = dialogue =>
             {
-                ua.OnCallHungup -= hungupHandler;
+                if (_currentHungupHandler != null)
+                {
+                    ua.OnCallHungup -= _currentHungupHandler;
+                    _currentHungupHandler = null;
+                }
                 if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
                 
                 Log($"📕 [{callId}] Caller hung up");
                 try { cts.Cancel(); } catch { }
             };
-            ua.OnCallHungup += hungupHandler;
+            ua.OnCallHungup += _currentHungupHandler;
 
             // Connect to OpenAI
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
