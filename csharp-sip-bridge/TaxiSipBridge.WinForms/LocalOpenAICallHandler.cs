@@ -202,6 +202,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 _playout?.Clear();
                 _needsFadeIn = true;
             };
+            _aiClient.OnCallEnded += () =>
+            {
+                Log($"📞 [{callId}] AI requested call end");
+                try { cts.Cancel(); } catch { }
+            };
             if (_aiClient is OpenAIRealtimeClient rtc)
                 rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
 
