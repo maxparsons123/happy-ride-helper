@@ -1027,28 +1027,38 @@ public class OpenAIRealtimeClient : IAudioAIClient
     }
 
     /// <summary>
-    /// Format phone number for WhatsApp:
-    /// - Convert 00 prefix to + then strip +
-    /// - For Dutch (+31), remove leading 0 after country code (e.g., +3106 → 316)
+    /// Format phone number for WhatsApp with 00 international prefix:
+    /// - Normalize to 00 prefix format (e.g., 0044, 0031)
+    /// - For Dutch, remove leading 0 after country code (e.g., 00310652 → 0031652)
     /// - Strip all non-numeric characters
     /// </summary>
     private static string FormatPhoneForWhatsApp(string phone)
     {
         var clean = phone.Replace(" ", "").Replace("-", "");
         
-        // Convert 00 prefix to + for international format
-        if (clean.StartsWith("00"))
-            clean = "+" + clean.Substring(2);
+        // Strip non-digits first
+        clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
         
-        // Remove + prefix (WhatsApp uses numbers without +)
-        clean = clean.TrimStart('+');
+        // Convert + prefix to 00 for international format
+        if (clean.StartsWith("+"))
+            clean = "00" + clean.Substring(1);
         
-        // For Dutch numbers (+31), remove leading 0 after country code
-        // e.g., 3106xxxxxxxx → 316xxxxxxxx
-        if (clean.StartsWith("310"))
-            clean = "31" + clean.Substring(3);
+        // If it doesn't start with 00, assume it needs country code
+        // Dutch local numbers starting with 06 → 00316
+        if (!clean.StartsWith("00"))
+        {
+            if (clean.StartsWith("06") || clean.StartsWith("0"))
+                clean = "0031" + clean.Substring(1); // Dutch local → international
+            else
+                clean = "00" + clean; // Assume already has country code without prefix
+        }
         
-        // Remove any remaining non-numeric characters
+        // For Dutch numbers (0031), remove leading 0 after country code
+        // e.g., 00310652... → 0031652...
+        if (clean.StartsWith("00310"))
+            clean = "0031" + clean.Substring(5);
+        
+        // Final cleanup - digits only
         return new string(clean.Where(char.IsDigit).ToArray());
     }
 
