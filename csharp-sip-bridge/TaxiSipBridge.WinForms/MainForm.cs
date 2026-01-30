@@ -15,15 +15,15 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
 
-    // Simli Avatar integration
-    private SimliAvatarPanel? _avatarPanel;
+    // Simli Avatar integration (WebView2-based)
+    private SimliWebView? _avatarView;
     private bool _useSimliAvatar = false;
 
     public MainForm()
     {
         InitializeComponent();
         LoadSettings();
-        InitializeAvatarPanel();
+        InitializeAvatarView();
     }
 
     private void LoadSettings()
@@ -42,17 +42,18 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Initialize the reusable Simli Avatar panel.
+    /// Initialize the WebView2-based Simli Avatar view.
     /// </summary>
-    private void InitializeAvatarPanel()
+    private void InitializeAvatarView()
     {
-        _avatarPanel = new SimliAvatarPanel
+        _avatarView = new SimliWebView
         {
-            Location = new Point(535, 215),
+            Location = new Point(535, 180),
+            Size = new Size(320, 280),
             Visible = false
         };
-        _avatarPanel.OnLog += msg => SafeInvoke(() => AddLog(msg));
-        Controls.Add(_avatarPanel);
+        _avatarView.OnLog += msg => SafeInvoke(() => AddLog(msg));
+        Controls.Add(_avatarView);
     }
 
     private void chkLocalOpenAI_CheckedChanged(object? sender, EventArgs e)
@@ -86,9 +87,9 @@ public partial class MainForm : Form
         lblSimliFaceId.Visible = _useSimliAvatar;
         txtSimliFaceId.Visible = _useSimliAvatar;
 
-        // Show/hide avatar panel
-        if (_avatarPanel != null)
-            _avatarPanel.Visible = _useSimliAvatar;
+        // Show/hide avatar view
+        if (_avatarView != null)
+            _avatarView.Visible = _useSimliAvatar;
 
         // Adjust button positions when Simli config is visible
         if (_useSimliAvatar)
@@ -162,28 +163,21 @@ public partial class MainForm : Form
                 _callHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
 
                 // Configure Simli avatar if enabled
-                if (_useSimliAvatar && _callHandler is LocalOpenAICallHandler localHandler && _avatarPanel != null)
+                if (_useSimliAvatar && _callHandler is LocalOpenAICallHandler localHandler && _avatarView != null)
                 {
                     var simliKey = txtSimliApiKey.Text.Trim();
                     var simliFaceId = txtSimliFaceId.Text.Trim();
 
                     if (!string.IsNullOrEmpty(simliKey) && !string.IsNullOrEmpty(simliFaceId))
                     {
-                        // Configure the avatar panel
-                        _avatarPanel.Configure(simliKey, simliFaceId);
+                        // Configure and connect the WebView-based avatar
+                        _avatarView.Configure(simliKey, simliFaceId);
+                        await _avatarView.ConnectAsync();
 
-                        // Create internal client for call handler
-                        var simliClient = new SimliAvatarClient(simliKey, simliFaceId);
-                        simliClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                        // Wire up audio from call handler to avatar
+                        localHandler.SetSimliSender(async audio => await _avatarView.SendPcm24AudioAsync(audio));
 
-                        // Wire up the call handler
-                        localHandler.SetSimliClient(simliClient, isSpeaking => 
-                            SafeInvoke(() => _avatarPanel?.SetSpeaking(isSpeaking)));
-
-                        // Connect avatar when SIP starts
-                        await _avatarPanel.ConnectAsync();
-
-                        AddLog($"🎭 Simli avatar configured (Face: {simliFaceId[..Math.Min(8, simliFaceId.Length)]}...)");
+                        AddLog($"🎭 Simli WebView avatar configured (Face: {simliFaceId[..Math.Min(8, simliFaceId.Length)]}...)");
                     }
                     else
                     {
