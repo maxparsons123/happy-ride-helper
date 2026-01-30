@@ -27,6 +27,9 @@ public class EdgeFunctionCallHandler : ISipCallHandler
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _callCts;
 
+    // Prevent accumulating OnCallHungup handlers across multiple calls.
+    private Action<SIPDialogue>? _currentHungupHandler;
+
     private const int FLUSH_PACKETS = 25;
     private const int RMS_NOISE_FLOOR = 650;
     private const int RMS_ECHO_CEILING = 20000;
@@ -63,6 +66,9 @@ public class EdgeFunctionCallHandler : ISipCallHandler
         var callId = Guid.NewGuid().ToString("N")[..8];
         _callCts = new CancellationTokenSource();
         var cts = _callCts;
+
+        // Ensure we only run hangup/cancel once per call.
+        int callEndedSignaled = 0;
 
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
@@ -115,11 +121,26 @@ public class EdgeFunctionCallHandler : ISipCallHandler
             Log($"🟢 [{callId}] WS Connected");
 
             // Wire hangup handler
-            ua.OnCallHungup += dialogue =>
+            if (_currentHungupHandler != null)
             {
+                try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+                _currentHungupHandler = null;
+            }
+
+            _currentHungupHandler = dialogue =>
+            {
+                if (System.Threading.Interlocked.Exchange(ref callEndedSignaled, 1) == 1) return;
                 Log($"📕 [{callId}] Caller hung up");
                 try { cts.Cancel(); } catch { }
+
+                // Unsubscribe immediately to avoid duplicate callbacks.
+                if (_currentHungupHandler != null)
+                {
+                    try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+                    _currentHungupHandler = null;
+                }
             };
+            ua.OnCallHungup += _currentHungupHandler;
 
             // Handle inbound RTP (caller → Edge Function)
             _currentMediaSession.OnRtpPacketReceived += (ep, mt, rtp) =>
@@ -275,6 +296,13 @@ public class EdgeFunctionCallHandler : ISipCallHandler
         Log($"📴 [{callId}] Cleanup...");
         _isInCall = false;
 
+        // Detach hangup handler to prevent duplicates across calls.
+        if (_currentHungupHandler != null)
+        {
+            try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentHungupHandler = null;
+        }
+
         try { ua.Hangup(); } catch { }
 
         if (_ws != null)
@@ -322,6 +350,9 @@ public class EdgeFunctionCallHandler : ISipCallHandler
         _disposed = true;
 
         try { _callCts?.Cancel(); } catch { }
+
+        // Best-effort detach (UA is call-scoped, but handler is instance-scoped)
+        _currentHungupHandler = null;
         try { _ws?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
         try { _adaAudioSource?.Dispose(); } catch { }

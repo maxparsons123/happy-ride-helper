@@ -27,6 +27,9 @@ public class SipAutoAnswer : IDisposable
     private volatile bool _disposed;
     private IPAddress? _localIp;
 
+    // Prevent accumulating OnCallHungup handlers across multiple calls.
+    private Action<SIPDialogue>? _currentHungupHandler;
+
     // 2-way audio safety: prevent echo by muting SIP→Ada while Ada is speaking
     private volatile bool _isBotSpeaking = false;
     private const int RMS_NOISE_FLOOR = 650;  // Below this = background noise, skip
@@ -88,6 +91,12 @@ public class SipAutoAnswer : IDisposable
         if (_userAgent != null)
         {
             _userAgent.OnIncomingCall -= OnIncomingCallAsync;
+
+            if (_currentHungupHandler != null)
+            {
+                try { _userAgent.OnCallHungup -= _currentHungupHandler; } catch { }
+                _currentHungupHandler = null;
+            }
         }
 
         if (_currentMediaSession != null)
@@ -452,11 +461,30 @@ public class SipAutoAnswer : IDisposable
 
     private void WireHangupHandler(string callId, CancellationTokenSource cts)
     {
-        _userAgent!.OnCallHungup += dialogue =>
+        // Ensure we only cancel once per call.
+        int callEndedSignaled = 0;
+
+        // Remove any previous handler (old call) from the UA.
+        if (_currentHungupHandler != null)
         {
+            try { _userAgent!.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentHungupHandler = null;
+        }
+
+        _currentHungupHandler = dialogue =>
+        {
+            if (System.Threading.Interlocked.Exchange(ref callEndedSignaled, 1) == 1) return;
             Log($"📴 [{callId}] Caller hung up");
             try { cts.Cancel(); } catch { }
+
+            // Unsubscribe immediately to avoid duplicates.
+            if (_currentHungupHandler != null)
+            {
+                try { _userAgent!.OnCallHungup -= _currentHungupHandler; } catch { }
+                _currentHungupHandler = null;
+            }
         };
+        _userAgent!.OnCallHungup += _currentHungupHandler;
     }
 
     private void WireRtpInput(string callId, VoIPMediaSession mediaSession, CancellationTokenSource cts)

@@ -23,6 +23,9 @@ public class SipAdaBridge : IDisposable
     private volatile bool _disposed = false;
     private IPAddress? _localIp;
 
+    // Prevent accumulating OnCallHungup handlers across multiple calls.
+    private Action<SIPDialogue>? _currentHungupHandler;
+
     public AudioMonitor? AudioMonitor { get; set; }
 
     public event Action? OnRegistered;
@@ -140,6 +143,14 @@ public class SipAdaBridge : IDisposable
         ClientWebSocket? ws = null;
         CancellationTokenSource? cts = null;
 
+        // Ensure we only signal call end once per call.
+        int callEndedSignaled = 0;
+        void SignalCallEndedOnce()
+        {
+            if (System.Threading.Interlocked.Exchange(ref callEndedSignaled, 1) == 1) return;
+            OnCallEnded?.Invoke(callId);
+        }
+
         try
         {
             // Create AdaAudioSource - implements IAudioSource for proper codec negotiation
@@ -188,12 +199,27 @@ public class SipAdaBridge : IDisposable
             ws = new ClientWebSocket();
             cts = new CancellationTokenSource();
 
-            ua.OnCallHungup += (SIPDialogue dialogue) =>
+            // Remove any previous handler (old calls) from the same UA.
+            if (_currentHungupHandler != null)
+            {
+                try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+                _currentHungupHandler = null;
+            }
+
+            _currentHungupHandler = (SIPDialogue dialogue) =>
             {
                 Log($"📕 [{callId}] Caller hung up");
-                OnCallEnded?.Invoke(callId);
+                SignalCallEndedOnce();
                 try { cts.Cancel(); } catch { }
+
+                // Unsubscribe immediately to avoid duplicate callbacks.
+                if (_currentHungupHandler != null)
+                {
+                    try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+                    _currentHungupHandler = null;
+                }
             };
+            ua.OnCallHungup += _currentHungupHandler;
 
             var wsUri = new Uri($"{_config.AdaWsUrl}?caller={Uri.EscapeDataString(caller)}");
             Log($"🔌 [{callId}] Connecting WS → {wsUri}");
@@ -339,6 +365,13 @@ public class SipAdaBridge : IDisposable
         finally
         {
             Log($"📴 [{callId}] Hangup & cleanup");
+
+            // Detach hangup handler to prevent duplicates across calls.
+            if (_currentHungupHandler != null)
+            {
+                try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+                _currentHungupHandler = null;
+            }
             
             try { ua.Hangup(); } catch { }
             
@@ -368,7 +401,7 @@ public class SipAdaBridge : IDisposable
             
             try { cts?.Dispose(); } catch { }
             
-            OnCallEnded?.Invoke(callId);
+            SignalCallEndedOnce();
         }
     }
 
