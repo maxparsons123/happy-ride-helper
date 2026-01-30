@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
@@ -89,6 +90,18 @@ public class OpenAIRealtimeClient : IAudioAIClient
     // 300ms is enough to filter Ada's echo but not block quick "Yes!" responses
     private const int ECHO_GUARD_MS = 300;
     private long _lastAdaFinishedAt = 0;
+
+    // Post-booking safety hangup: if the booking is confirmed and there's silence,
+    // auto-disconnect to avoid calls lingering.
+    private const int POST_BOOKING_SILENCE_HANGUP_MS = 5000;
+    private const int POST_BOOKING_SILENCE_POLL_MS = 250;
+    private CancellationTokenSource? _postBookingHangupCts;
+    private long _lastUserSpeechAt = 0;
+    private bool _postBookingHangupArmed = false;
+    private bool _postBookingFinalSpeechDelivered = false;
+
+    // Ensure we only signal call end once
+    private int _callEndSignaled = 0;
 
     // Confirmation awareness - disable echo guard when waiting for yes/no
     private bool _awaitingConfirmation = false;
@@ -577,17 +590,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     {
                         var transcript = fullText.GetString();
                         if (!string.IsNullOrEmpty(transcript))
+                        {
                             OnTranscript?.Invoke($"Ada: {transcript}");
+
+                            // If we've confirmed a booking, this marks the final spoken confirmation
+                            // as having been delivered; we can now arm the silence-based hangup.
+                            if (_booking.Confirmed && _postBookingHangupArmed)
+                            {
+                                _postBookingFinalSpeechDelivered = true;
+                            }
+                        }
                     }
                     break;
 
                 case "input_audio_buffer.speech_started":
                     Log("🎤 User speaking...");
+                    _lastUserSpeechAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     // VAD-driven commit - this is the proper way to commit for telephony
                     Log($"🎤 VAD stopped — attempting commit ({_inputBufferedMs:F1}ms)");
+                    _lastUserSpeechAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     await CommitInputAudioIfReadyAsync();
                     break;
 
@@ -603,6 +627,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     _responseActive = false;
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _inputBufferedMs = 0; // Reset buffer tracking after response
+
+                    // After booking confirmation speech is delivered, auto-hangup if silence persists.
+                    MaybeStartPostBookingSilenceHangup("response.done");
 
                     // DO NOT commit after greeting — SIP callers wait silently.
                     // Wait for VAD speech_stopped instead.
@@ -1006,13 +1033,18 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     // Also send an explicit system instruction to ensure end_call is triggered
                     Log("📞 Injecting end_call instruction...");
                     await SendEndCallInstructionAsync();
+
+                    // Arm post-booking silence hangup. We only start the timer after we know
+                    // the final booking message has been spoken (tracked via audio_transcript.done).
+                    _postBookingHangupArmed = true;
+                    _postBookingFinalSpeechDelivered = false;
                 }
                 break;
 
             case "end_call":
                 Log("📞 End call requested");
                 await SendToolResultAsync(callId, new { success = true });
-                OnCallEnded?.Invoke();
+                TriggerCallEnded("tool:end_call");
                 break;
 
             default:
@@ -1450,6 +1482,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         catch { }
         finally
         {
+            try { _postBookingHangupCts?.Cancel(); } catch { }
             _cts?.Cancel();
         }
     }
@@ -1459,11 +1492,65 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_disposed) return;
         _disposed = true;
 
+        try { _postBookingHangupCts?.Cancel(); } catch { }
         _cts?.Cancel();
         _ws?.Dispose();
         _httpClient.Dispose();
 
         GC.SuppressFinalize(this);
+    }
+
+    private void TriggerCallEnded(string reason)
+    {
+        if (_disposed) return;
+        if (Interlocked.Exchange(ref _callEndSignaled, 1) == 1) return;
+
+        Log($"📴 Auto-disconnecting call ({reason})");
+        try { _postBookingHangupCts?.Cancel(); } catch { }
+        OnCallEnded?.Invoke();
+    }
+
+    private void MaybeStartPostBookingSilenceHangup(string source)
+    {
+        if (_disposed) return;
+        if (!_booking.Confirmed) return;
+        if (!_postBookingHangupArmed) return;
+        if (!_postBookingFinalSpeechDelivered) return;
+        if (_postBookingHangupCts != null && !_postBookingHangupCts.IsCancellationRequested) return;
+
+        _postBookingHangupCts?.Cancel();
+        _postBookingHangupCts = new CancellationTokenSource();
+        var token = _postBookingHangupCts.Token;
+
+        Log($"⏱️ Starting post-booking silence hangup watchdog ({POST_BOOKING_SILENCE_HANGUP_MS}ms) [{source}]");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!token.IsCancellationRequested && !_disposed)
+                {
+                    if (_ws?.State != WebSocketState.Open)
+                        return;
+
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var lastActivity = Math.Max(_lastAdaFinishedAt, _lastUserSpeechAt);
+
+                    if (now - lastActivity >= POST_BOOKING_SILENCE_HANGUP_MS)
+                    {
+                        TriggerCallEnded("post_booking_silence");
+                        return;
+                    }
+
+                    await Task.Delay(POST_BOOKING_SILENCE_POLL_MS, token);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Post-booking hangup watchdog error: {ex.Message}");
+            }
+        }, token);
     }
 }
 
