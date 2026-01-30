@@ -21,6 +21,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
+    private volatile bool _cleanupStarted; // Guard against duplicate cleanup
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
     private const int ECHO_GUARD_MS = 200; // Suppress inbound audio for 200ms after Ada stops (reduced for faster response)
 
@@ -84,6 +85,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
         }
 
         _isInCall = true;
+        _cleanupStarted = false; // Reset cleanup guard
         var callId = Guid.NewGuid().ToString("N")[..8];
         _callCts = new CancellationTokenSource();
         var cts = _callCts;
@@ -205,6 +207,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             };
             _aiClient.OnCallEnded += async () =>
             {
+                if (_cleanupStarted) return; // Prevent duplicate
+                _cleanupStarted = true;
                 Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
                 // Wait for final audio to finish playing before hangup
                 await Task.Delay(HANGUP_GRACE_MS);
@@ -217,6 +221,8 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Wire hangup
             ua.OnCallHungup += dialogue =>
             {
+                if (_cleanupStarted) return; // Prevent duplicate
+                _cleanupStarted = true;
                 Log($"📕 [{callId}] Caller hung up");
                 try { cts.Cancel(); } catch { }
             };
