@@ -16,6 +16,7 @@
     <PackageReference Include="SIPSorcery" Version="10.0.1" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
     <PackageReference Include="Concentus" Version="2.2.0" />
   </ItemGroup>
 
@@ -51,9 +52,7 @@
     <Compile Include="AIClientFactory.cs" />
     <Compile Include="OpenAIRealtimeClient.cs" />
     <Compile Include="PassthroughWebhook.cs" />
-    <Compile Include="SimliAvatarClient.cs" />
-    <Compile Include="SimliAvatarPanel.cs" />
-    <Compile Include="SimliAvatarForm.cs" />
+    <Compile Include="SimliWebView.cs" />
     <Compile Include="DirectRtpPlayout.cs" />
     <Compile Include="DirectRtpPlayoutExtensions.cs" />
   </ItemGroup>
