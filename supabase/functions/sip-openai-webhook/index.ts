@@ -175,10 +175,30 @@ function detectLanguage(phoneNumber: string): string {
 }
 
 /**
- * Format phone number for WhatsApp (remove + prefix, clean)
+ * Format phone number for WhatsApp
+ * - Remove + prefix or convert 00 to +
+ * - For Dutch (+31) numbers, remove leading 0 after country code (e.g., +3106 -> +316)
+ * - Strip all spaces and dashes
  */
 function formatPhoneForWhatsApp(phone: string): string {
-  return phone.replace(/^\+/, '').replace(/[^0-9]/g, '');
+  let clean = phone.replace(/[\s\-]/g, ''); // Remove spaces and dashes
+  
+  // Convert 00 prefix to + for international format
+  if (clean.startsWith('00')) {
+    clean = '+' + clean.substring(2);
+  }
+  
+  // Remove + prefix for final format (WhatsApp typically uses numbers without +)
+  clean = clean.replace(/^\+/, '');
+  
+  // For Dutch numbers (+31), remove leading 0 after country code
+  // e.g., 3106xxxxxxxx -> 316xxxxxxxx
+  if (clean.startsWith('310')) {
+    clean = '31' + clean.substring(3);
+  }
+  
+  // Remove any remaining non-numeric characters
+  return clean.replace(/[^0-9]/g, '');
 }
 
 /**
