@@ -475,8 +475,10 @@ public class LocalOpenAICallHandler : ISipCallHandler
         if (!_isInCall)
             return;
         
-        Log($"📴 [{callId}] Cleanup...");
+        Log($"📴 [{callId}] Cleanup starting...");
         _isInCall = false;
+        _adaHasStartedSpeaking = false;
+        _isBotSpeaking = false;
 
         // Remove hangup handler FIRST to prevent duplicate/stale logs
         if (_currentHungupHandler != null)
@@ -485,15 +487,20 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _currentHungupHandler = null;
         }
 
+        // Hangup SIP session
         try { ua.Hangup(); } catch { }
 
+        // Disconnect and dispose AI client (WebSocket + audio buffers)
         if (_aiClient != null)
         {
+            Log($"📴 [{callId}] Closing OpenAI WebSocket...");
             try { await _aiClient.DisconnectAsync(); } catch { }
             try { _aiClient.Dispose(); } catch { }
             _aiClient = null;
+            Log($"📴 [{callId}] OpenAI client disposed");
         }
 
+        // Stop and dispose RTP playout
         if (_playout != null)
         {
             try { _playout.Stop(); } catch { }
@@ -501,15 +508,25 @@ public class LocalOpenAICallHandler : ISipCallHandler
             _playout = null;
         }
 
+        // Close media session
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
         }
 
+        // Clear codec state for next call
+        _remotePtToCodec.Clear();
+
+        // Dispose cancellation token
+        try { _callCts?.Cancel(); } catch { }
         try { _callCts?.Dispose(); } catch { }
         _callCts = null;
 
+        // Clear Simli sender reference
+        _simliSendAudio = null;
+
+        Log($"✅ [{callId}] Cleanup complete");
         OnCallEnded?.Invoke(callId);
     }
 

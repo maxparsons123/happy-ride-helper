@@ -1561,10 +1561,37 @@ public class OpenAIRealtimeClient : IAudioAIClient
         if (_disposed) return;
         _disposed = true;
 
+        // Cancel all background tasks
         try { _postBookingHangupCts?.Cancel(); } catch { }
-        _cts?.Cancel();
-        _ws?.Dispose();
-        _httpClient.Dispose();
+        try { _postBookingHangupCts?.Dispose(); } catch { }
+        _postBookingHangupCts = null;
+        
+        try { _cts?.Cancel(); } catch { }
+        try { _cts?.Dispose(); } catch { }
+        _cts = null;
+
+        // Close WebSocket gracefully if still open, then dispose
+        try
+        {
+            if (_ws?.State == WebSocketState.Open || _ws?.State == WebSocketState.CloseReceived)
+            {
+                _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposed", CancellationToken.None)
+                    .Wait(TimeSpan.FromMilliseconds(500));
+            }
+        }
+        catch { }
+        try { _ws?.Dispose(); } catch { }
+        _ws = null;
+
+        // Dispose audio processor
+        try { (_audioProcessor as IDisposable)?.Dispose(); } catch { }
+        _audioProcessor = null;
+
+        // Clear audio buffers
+        while (_outboundQueue.TryDequeue(out _)) { }
+        _opusResampleBuffer = Array.Empty<short>();
+
+        try { _httpClient.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
