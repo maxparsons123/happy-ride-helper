@@ -471,8 +471,19 @@ public class LocalOpenAICallHandler : ISipCallHandler
 
     private async Task CleanupAsync(string callId, SIPUserAgent ua)
     {
+        // Prevent duplicate cleanup - check before logging
+        if (!_isInCall)
+            return;
+        
         Log($"📴 [{callId}] Cleanup...");
         _isInCall = false;
+
+        // Remove hangup handler FIRST to prevent duplicate/stale logs
+        if (_currentHungupHandler != null)
+        {
+            try { ua.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentHungupHandler = null;
+        }
 
         try { ua.Hangup(); } catch { }
 
