@@ -15,15 +15,29 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
 
-    // Simli Avatar integration (WebView2-based)
-    private SimliWebView? _avatarView;
-    private bool _useSimliAvatar = false;
+    // Simli Avatar (WebView2-based, embedded in form)
+    private SimliWebView? _simliView;
 
     public MainForm()
     {
         InitializeComponent();
         LoadSettings();
-        InitializeAvatarView();
+        InitializeSimliView();
+
+        // Run SpeexDSP diagnostics at startup
+        SpeexDspResamplerHelper.LogStartupDiagnostics(msg => AddLog(msg));
+    }
+
+    private void InitializeSimliView()
+    {
+        _simliView = new SimliWebView
+        {
+            Location = new Point(535, 10),
+            Size = new Size(320, 280),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        _simliView.OnLog += msg => SafeInvoke(() => AddLog(msg));
+        Controls.Add(_simliView);
     }
 
     private void LoadSettings()
@@ -33,27 +47,10 @@ public partial class MainForm : Form
         txtSipUser.Text = "1234";
         txtSipPassword.Text = "293183719426";
         txtWebSocketUrl.Text = "wss://oerketnvlmptpfvttysy.functions.supabase.co/functions/v1/taxi-realtime-desktop";
-        txtApiKey.Text = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
-        txtSimliApiKey.Text = "vlw7tr7vxhhs52bi3rum7";
-        txtSimliFaceId.Text = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+        txtApiKey.Text = "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";
         cmbTransport.SelectedIndex = 0; // UDP
         cmbAudioMode.SelectedIndex = 0; // Standard
         cmbResampler.SelectedIndex = 0; // NAudio (default)
-    }
-
-    /// <summary>
-    /// Initialize the WebView2-based Simli Avatar view.
-    /// </summary>
-    private void InitializeAvatarView()
-    {
-        _avatarView = new SimliWebView
-        {
-            Location = new Point(535, 180),
-            Size = new Size(320, 280),
-            Visible = false
-        };
-        _avatarView.OnLog += msg => SafeInvoke(() => AddLog(msg));
-        Controls.Add(_avatarView);
     }
 
     private void chkLocalOpenAI_CheckedChanged(object? sender, EventArgs e)
@@ -74,39 +71,9 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    // Stub handler for Designer controls
+    // Stub handlers for Designer controls
     private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
-
-    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e)
-    {
-        _useSimliAvatar = chkSimliAvatar.Checked;
-
-        // Show/hide Simli configuration fields
-        lblSimliApiKey.Visible = _useSimliAvatar;
-        txtSimliApiKey.Visible = _useSimliAvatar;
-        lblSimliFaceId.Visible = _useSimliAvatar;
-        txtSimliFaceId.Visible = _useSimliAvatar;
-
-        // Show/hide avatar view
-        if (_avatarView != null)
-            _avatarView.Visible = _useSimliAvatar;
-
-        // Adjust button positions when Simli config is visible
-        if (_useSimliAvatar)
-        {
-            btnStartStop.Location = new Point(100, 178);
-            btnMicTest.Location = new Point(260, 178);
-        }
-        else
-        {
-            btnStartStop.Location = new Point(100, 148);
-            btnMicTest.Location = new Point(260, 148);
-        }
-
-        AddLog(_useSimliAvatar
-            ? "🎭 Simli Avatar enabled - configure API key and Face ID"
-            : "🎭 Simli Avatar disabled");
-    }
+    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) { }
 
     private void btnStartStop_Click(object sender, EventArgs e)
     {
@@ -124,7 +91,7 @@ public partial class MainForm : Form
             StartMicMode();
     }
 
-    private async void StartSipMode()
+    private void StartSipMode()
     {
         try
         {
@@ -158,32 +125,9 @@ public partial class MainForm : Form
                 _sipLoginManager.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
                 _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
 
-                // Create the call handler
+                // Create the NEW call handler with dispatch webhook for taxi bookings
                 const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
                 _callHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
-
-                // Configure Simli avatar if enabled
-                if (_useSimliAvatar && _callHandler is LocalOpenAICallHandler localHandler && _avatarView != null)
-                {
-                    var simliKey = txtSimliApiKey.Text.Trim();
-                    var simliFaceId = txtSimliFaceId.Text.Trim();
-
-                    if (!string.IsNullOrEmpty(simliKey) && !string.IsNullOrEmpty(simliFaceId))
-                    {
-                        // Configure and connect the WebView-based avatar
-                        _avatarView.Configure(simliKey, simliFaceId);
-                        await _avatarView.ConnectAsync();
-
-                        // Wire up audio from call handler to avatar
-                        localHandler.SetSimliSender(async audio => await _avatarView.SendPcm24AudioAsync(audio));
-
-                        AddLog($"🎭 Simli WebView avatar configured (Face: {simliFaceId[..Math.Min(8, simliFaceId.Length)]}...)");
-                    }
-                    else
-                    {
-                        AddLog("⚠️ Simli avatar enabled but API key or Face ID missing");
-                    }
-                }
 
                 _sipLoginManager.SetCallHandler(_callHandler);
                 _sipLoginManager.Start();
@@ -432,7 +376,7 @@ public partial class MainForm : Form
         AddLog("🎤 Stopped");
     }
 
-    private async void Stop()
+    private void Stop()
     {
         // Stop Edge Function bridge
         if (_sipBridge != null)
@@ -457,16 +401,11 @@ public partial class MainForm : Form
             _sipLoginManager.Dispose();
             _sipLoginManager = null;
         }
+
         if (_callHandler != null)
         {
             _callHandler.Dispose();
             _callHandler = null;
-        }
-
-        // Stop Simli avatar
-        if (_avatarPanel != null)
-        {
-            await _avatarPanel.DisconnectAsync();
         }
 
         _isRunning = false;
@@ -475,7 +414,6 @@ public partial class MainForm : Form
         btnMicTest.Enabled = true;
         SetStatus("Stopped", Color.Gray);
         SetConfigEnabled(true);
-
         AddLog("🛑 SIP stopped");
     }
 
@@ -512,7 +450,6 @@ public partial class MainForm : Form
         cmbAudioMode.Enabled = enabled;
         cmbResampler.Enabled = enabled;
         chkLocalOpenAI.Enabled = enabled;
-        chkSimliAvatar.Enabled = enabled;
     }
 
     private void AddLog(string message)
@@ -539,7 +476,6 @@ public partial class MainForm : Form
     private void SafeInvoke(Action action)
     {
         if (IsDisposed) return;
-
         if (InvokeRequired)
         {
             try { Invoke(action); }
@@ -624,6 +560,7 @@ public partial class MainForm : Form
     {
         if (_isRunning) Stop();
         if (_isMicMode) StopMicMode();
+        _simliView?.Dispose();
         base.OnFormClosing(e);
     }
 }
