@@ -51,15 +51,15 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
     private short[] _opusResampleBuffer = Array.Empty<short>();  // Buffer for 24kHz→48kHz upsampling
 
-    // Language detection from caller phone number
+    // Language detection from caller phone number (first 2 digits of country code)
     private static readonly Dictionary<string, string> CountryCodeToLanguage = new()
     {
-        { "+31", "nl" }, // Netherlands
-        { "+32", "nl" }, // Belgium (Dutch)
-        { "+33", "fr" }, // France
-        { "+41", "de" }, // Switzerland (German)
-        { "+43", "de" }, // Austria
-        { "+49", "de" }, // Germany
+        { "31", "nl" }, // Netherlands
+        { "32", "nl" }, // Belgium (Dutch)
+        { "33", "fr" }, // France
+        { "41", "de" }, // Switzerland (German)
+        { "43", "de" }, // Austria
+        { "49", "de" }, // Germany
     };
 
     // Localized greetings
@@ -247,18 +247,24 @@ public class OpenAIRealtimeClient : IAudioAIClient
             return "nl"; // Dutch national landline
         }
 
-        // Convert 00 prefix to + (common in European SIP trunks)
-        // e.g., 0031612345678 → +31612345678
-        if (normalized.StartsWith("00") && normalized.Length > 4)
+        // Strip prefix to get country code digits
+        // e.g., +31612345678 → 31612345678
+        // e.g., 0031612345678 → 31612345678
+        if (normalized.StartsWith("+"))
         {
-            normalized = "+" + normalized.Substring(2);
+            normalized = normalized.Substring(1);
+        }
+        else if (normalized.StartsWith("00") && normalized.Length > 4)
+        {
+            normalized = normalized.Substring(2);
         }
 
-        // Check each country code prefix
-        foreach (var kvp in CountryCodeToLanguage)
+        // Check first 2 digits against country code map
+        if (normalized.Length >= 2)
         {
-            if (normalized.StartsWith(kvp.Key))
-                return kvp.Value;
+            var countryCode = normalized.Substring(0, 2);
+            if (CountryCodeToLanguage.TryGetValue(countryCode, out var lang))
+                return lang;
         }
 
         return "en"; // Default to English
