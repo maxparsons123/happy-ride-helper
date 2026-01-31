@@ -141,6 +141,12 @@ public class SipLoginManager : IDisposable
                 _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(_localIp!, 0)));
                 Log("📡 Using TCP transport");
                 break;
+            case SipTransportType.TLS:
+                // TLS channel - accepts any server certificate for compatibility
+                var tlsChannel = new SIPTLSChannel(new IPEndPoint(_localIp!, 0));
+                _sipTransport.AddSIPChannel(tlsChannel);
+                Log("🔒 Using TLS transport");
+                break;
         }
     }
 
@@ -181,7 +187,12 @@ public class SipLoginManager : IDisposable
                 }
             }
 
-            var protocol = _config.Transport == SipTransportType.TCP ? SIPProtocolsEnum.tcp : SIPProtocolsEnum.udp;
+            var protocol = _config.Transport switch
+            {
+                SipTransportType.TCP => SIPProtocolsEnum.tcp,
+                SipTransportType.TLS => SIPProtocolsEnum.tls,
+                _ => SIPProtocolsEnum.udp
+            };
             var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _config.SipPort));
 
             var sipAccountAor = new SIPURI(_config.SipUser, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
