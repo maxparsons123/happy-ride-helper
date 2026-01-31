@@ -35,6 +35,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private int _responseQueued;   // Per-call
     private int _greetingSent;     // Per-call
     private int _ignoreUserAudio;  // Per-call (set after goodbye starts)
+    private int _deferredResponsePending; // Per-call (queued response after response.done)
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -143,6 +144,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             }
 
             await Task.Delay(delayMs).ConfigureAwait(false);
+
+            // If response is still active after waiting, defer to response.done handler
+            if (Volatile.Read(ref _responseActive) == 1)
+            {
+                Interlocked.Exchange(ref _deferredResponsePending, 1);
+                Log("⏳ Response still active - deferring response.create");
+                return;
+            }
 
             if (!CanCreateResponse())
                 return;
@@ -481,6 +490,21 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
+
+                    // Flush deferred response if pending
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+                    {
+                        Log("🔄 Flushing deferred response.create");
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(50).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
+                            {
+                                await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                                Log("🔄 response.create sent (deferred)");
+                            }
+                        });
+                    }
                     break;
                 }
 
@@ -904,6 +928,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Volatile.Write(ref _lastUserSpeechAt, 0);
         Volatile.Write(ref _lastToolCallAt, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
     }
 
     private static string DetectLanguage(string? phone)
