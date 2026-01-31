@@ -3,7 +3,8 @@ namespace TaxiSipBridge;
 public enum SipTransportType 
 { 
     UDP, 
-    TCP 
+    TCP,
+    TLS
 }
 
 /// <summary>
