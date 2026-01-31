@@ -105,9 +105,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                Volatile.Read(ref _disposed) == 0;
     }
 
-    private async Task QueueResponseCreateAsync(int delayMs = 40)
+    /// <summary>
+    /// Queue a response.create, waiting for any active response to complete first.
+    /// This is critical for tool calls - we must wait for response.done before triggering.
+    /// </summary>
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
     {
-        if (!CanCreateResponse()) return;
+        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+            return;
 
         if (Interlocked.CompareExchange(ref _responseQueued, 1, 0) == 1)
             return;
@@ -116,15 +121,21 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             try
             {
-                await Task.Delay(delayMs);
-                if (!CanCreateResponse())
+                // Wait for any active response to complete (up to 5s)
+                if (waitForCurrentResponse)
                 {
-                    Log("⏳ Skipping response.create — not ready");
-                    return;
+                    for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
+                        await Task.Delay(50);
                 }
+
+                await Task.Delay(delayMs);
+
+                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                    return;
 
                 Interlocked.Exchange(ref _responseActive, 1);
                 await SendJsonAsync(new { type = "response.create" });
+                Log("🔄 response.create sent (post-tool)");
             }
             finally
             {
