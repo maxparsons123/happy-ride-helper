@@ -164,77 +164,65 @@ public class SipLoginManager : IDisposable
     {
         var authUser = _config.EffectiveAuthUser;
 
-        // NOTE: SIPSorcery's simple ctor does NOT allow overriding the auth username.
-        // If Auth ID differs from extension (common in 3CX), we must use the advanced ctor.
-        var registrarHost = ResolveDns(_config.SipServer);
+        // IMPORTANT: Use HOSTNAME (not resolved IP) in SIP headers for correct digest auth.
+        // The resolved IP is only used for the outbound proxy (routing).
         var registrarHostWithPort = _config.SipPort == 5060
-            ? registrarHost
-            : $"{registrarHost}:{_config.SipPort}";
+            ? _config.SipServer
+            : $"{_config.SipServer}:{_config.SipPort}";
 
-        if (authUser != _config.SipUser)
+        // Resolve IP for routing only
+        var resolvedHost = ResolveDns(_config.SipServer);
+        if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
         {
-            if (!IPAddress.TryParse(registrarHost, out var registrarIp))
+            try
             {
-                try
-                {
-                    registrarIp = Dns.GetHostAddresses(registrarHost)
-                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
-                }
-                catch
-                {
-                    // If we can't resolve to an IP we can't build SIPEndPoint for the advanced ctor.
-                    // Fall back to the simple ctor (registration may fail, but we avoid crashing).
-                    Log($"⚠️ Could not resolve registrar to IPv4 for Auth ID login; falling back to simple registration.");
-                    _regUserAgent = new SIPRegistrationUserAgent(
-                        _sipTransport,
-                        _config.SipUser,
-                        _config.SipPassword,
-                        registrarHostWithPort,
-                        120);
-                    _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
-                    _regUserAgent.RegistrationFailed += OnRegistrationFailure;
-                    return;
-                }
+                registrarIp = Dns.GetHostAddresses(resolvedHost)
+                    .First(a => a.AddressFamily == AddressFamily.InterNetwork);
             }
-
-            var protocol = _config.Transport switch
+            catch
             {
-                SipTransportType.TCP => SIPProtocolsEnum.tcp,
-                SipTransportType.TLS => SIPProtocolsEnum.tls,
-                _ => SIPProtocolsEnum.udp
-            };
-            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _config.SipPort));
-
-            var sipAccountAor = new SIPURI(_config.SipUser, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
-            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _config.SipUser };
-
-            // Debug: show exactly what credentials are being used
-            Log($"🔐 Auth Debug: AOR={sipAccountAor}, AuthUser={authUser}, PassLen={_config.SipPassword?.Length ?? 0}");
-
-            _regUserAgent = new SIPRegistrationUserAgent(
-                sipTransport: _sipTransport,
-                outboundProxy: outboundProxy,
-                sipAccountAOR: sipAccountAor,
-                authUsername: authUser,
-                password: _config.SipPassword,
-                realm: null,  // Let SIPSorcery pick up realm from WWW-Authenticate (3CX uses custom realm)
-                registrarHost: registrarHostWithPort,
-                contactURI: contactUri,
-                expiry: 120,
-                customHeaders: null);
-
-            Log($"➡ Using separate Auth ID: {authUser} (realm from server)");
+                Log($"⚠️ Could not resolve registrar to IPv4; using hostname directly.");
+                // Fallback: let SIPSorcery resolve it
+                _regUserAgent = new SIPRegistrationUserAgent(
+                    _sipTransport,
+                    _config.SipUser,
+                    _config.SipPassword,
+                    registrarHostWithPort,
+                    120);
+                _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
+                _regUserAgent.RegistrationFailed += OnRegistrationFailure;
+                return;
+            }
         }
-        else
+
+        var protocol = _config.Transport switch
         {
-            // Standard registration: extension and auth username are the same.
-            _regUserAgent = new SIPRegistrationUserAgent(
-                _sipTransport,
-                _config.SipUser,
-                _config.SipPassword,
-                registrarHostWithPort,
-                120);
-        }
+            SipTransportType.TCP => SIPProtocolsEnum.tcp,
+            SipTransportType.TLS => SIPProtocolsEnum.tls,
+            _ => SIPProtocolsEnum.udp
+        };
+        var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _config.SipPort));
+
+        // Use HOSTNAME in AOR and registrar (not IP) - critical for digest auth realm matching
+        var sipAccountAor = new SIPURI(_config.SipUser, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
+        var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _config.SipUser };
+
+        // Debug: show exactly what credentials are being used
+        Log($"🔐 Auth Debug: AOR={sipAccountAor}, AuthUser={authUser}, PassLen={_config.SipPassword?.Length ?? 0}");
+
+        _regUserAgent = new SIPRegistrationUserAgent(
+            sipTransport: _sipTransport,
+            outboundProxy: outboundProxy,
+            sipAccountAOR: sipAccountAor,
+            authUsername: authUser,
+            password: _config.SipPassword,
+            realm: null,  // Let SIPSorcery pick up realm from WWW-Authenticate
+            registrarHost: registrarHostWithPort,  // HOSTNAME, not IP
+            contactURI: contactUri,
+            expiry: 120,
+            customHeaders: null);
+
+        Log($"➡ Using separate Auth ID: {authUser}, Registrar: {registrarHostWithPort} (routed via {registrarIp})");
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
         _regUserAgent.RegistrationFailed += OnRegistrationFailure;
