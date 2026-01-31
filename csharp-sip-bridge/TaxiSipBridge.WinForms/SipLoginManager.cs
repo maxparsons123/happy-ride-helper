@@ -193,13 +193,13 @@ public class SipLoginManager : IDisposable
                 sipAccountAOR: sipAccountAor,
                 authUsername: authUser,
                 password: _config.SipPassword,
-                realm: _config.SipServer,
+                realm: null,  // Let SIPSorcery pick up realm from WWW-Authenticate (3CX uses custom realm)
                 registrarHost: registrarHostWithPort,
                 contactURI: contactUri,
                 expiry: 120,
-                customHeaders: Array.Empty<string>());
+                customHeaders: null);
 
-            Log($"➡ Using separate Auth ID: {authUser}");
+            Log($"➡ Using separate Auth ID: {authUser} (realm from server)");
         }
         else
         {
