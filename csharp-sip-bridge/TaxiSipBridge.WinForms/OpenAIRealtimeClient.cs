@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.1";
+    public const string VERSION = "1.2";
     // =========================
     // CONFIG
     // =========================
@@ -480,17 +480,17 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     });
                     await QueueResponseCreateAsync();
 
-                    // Force hangup after 3s if AI doesn't call end_call
+                    // Extended grace period (15s) to allow "anything else?" flow
                     _ = Task.Run(async () =>
                     {
-                        await Task.Delay(3000);
+                        await Task.Delay(15000);
                         for (int i = 0; i < 20 && Volatile.Read(ref _responseActive) == 1; i++) await Task.Delay(100);
                         if (Volatile.Read(ref _callEnded) == 0 && CanCreateResponse())
                         {
                             await SendJsonAsync(new
                             {
                                 type = "conversation.item.create",
-                                item = new { type = "message", role = "system", content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } } }
+                                item = new { type = "message", role = "system", content = new[] { new { type = "input_text", text = "[TIMEOUT] Say 'Thank you for using the Voice Taxibot system. Goodbye!' and call end_call NOW." } } }
                             });
                             Interlocked.Exchange(ref _responseActive, 1);
                             await SendJsonAsync(new { type = "response.create" });
@@ -642,9 +642,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant. Speak in {GetLanguageName(_detectedLanguage)}.
 
-FLOW: Greet → Ask NAME → PICKUP → DESTINATION → PASSENGERS → TIME → book_taxi(request_quote) → Confirm → book_taxi(confirmed) → Thank → end_call
+FLOW: Greet → Ask NAME → PICKUP → DESTINATION → PASSENGERS → TIME → book_taxi(request_quote) → Confirm → book_taxi(confirmed) → Give booking ID → Ask 'Is there anything else I can help you with?' → If no: 'Thank you for using the Voice Taxibot system. Goodbye!' → end_call
 
-RULES: One question at a time. Under 20 words. Use £. Call end_call after booking.";
+RULES: One question at a time. Under 20 words. Use £. ALWAYS ask if there's anything else after giving booking ID. Only call end_call after user says no to 'anything else'.";
 
     private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
 
