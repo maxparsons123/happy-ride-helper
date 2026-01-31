@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.2";
+    public const string VERSION = "1.3";
     // =========================
     // CONFIG
     // =========================
@@ -42,6 +42,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private string _detectedLanguage = "en";
     private readonly BookingState _booking = new();
     private bool _awaitingConfirmation;
+    private string? _activeResponseId;
 
     // =========================
     // WS + LIFECYCLE
@@ -356,9 +357,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
 
                 case "response.created":
+                {
+                    var responseId = doc.RootElement.GetProperty("response").GetProperty("id").GetString();
+                    if (_activeResponseId == responseId) break; // Ignore duplicate
+                    _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
+                    Log("🤖 AI response started");
                     OnResponseStarted?.Invoke();
                     break;
+                }
 
                 case "response.audio.delta":
                     var delta = doc.RootElement.GetProperty("delta").GetString();
@@ -395,10 +402,16 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
 
                 case "response.done":
+                {
+                    var responseId = doc.RootElement.GetProperty("response").GetProperty("id").GetString();
+                    if (_activeResponseId != responseId) break; // Ignore stale/duplicate
+                    _activeResponseId = null;
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+                    Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
                     break;
+                }
 
                 case "response.function_call_arguments.done":
                     await HandleToolCallAsync(doc.RootElement);
