@@ -98,7 +98,7 @@ public partial class MainForm : Form
                     SipUser = txtSipUser.Text.Trim(),
                     AuthUser = txtAuthUser.Text.Trim(),  // Optional separate auth ID (e.g., 3CX)
                     SipPassword = txtSipPassword.Text.Trim(),
-                    Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
+                    Transport = (SipTransportType)cmbTransport.SelectedIndex
                 };
 
                 // Create SIP login manager
@@ -128,7 +128,7 @@ public partial class MainForm : Form
                     SipUser = txtSipUser.Text.Trim(),
                     SipPassword = txtSipPassword.Text.Trim(),
                     AdaWsUrl = txtWebSocketUrl.Text.Trim(),
-                    Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP,
+                    Transport = (SipTransportType)cmbTransport.SelectedIndex,
                     AudioMode = (AudioMode)cmbAudioMode.SelectedIndex
                 };
 
