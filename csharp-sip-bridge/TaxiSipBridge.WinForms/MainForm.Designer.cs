@@ -47,7 +47,7 @@ partial class MainForm
         // Transport
         var lblTransport = new Label { Text = "Transport:", Location = new Point(445, 28), Size = new Size(65, 23) };
         cmbTransport = new ComboBox { Location = new Point(515, 25), Size = new Size(80, 23), DropDownStyle = ComboBoxStyle.DropDownList };
-        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP" });
+        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TLS" });
 
         // SIP User (Extension)
         var lblUser = new Label { Text = "Extension:", Location = new Point(15, 58), Size = new Size(80, 23) };
