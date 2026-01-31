@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.17";
+    public const string VERSION = "1.18";
 
     // =========================
     // CONFIG
@@ -966,14 +966,20 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             _sttCorrectionsMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
+                // Name corrections
+                { "Aren't out", "Bernard" },
+                { "aren't out", "Bernard" },
+                // Address corrections
                 { "52 I ain't dead bro", "52A David Road" },
                 { "52 I ain't David", "52A David Road" },
                 { "52 ain't David", "52A David Road" },
                 { "52 a David", "52A David Road" },
+                // Time corrections
                 { "for now", "now" },
                 { "right now", "now" },
                 { "as soon as possible", "now" },
                 { "ASAP", "now" },
+                // Confirmation corrections
                 { "yeah please", "yes please" },
                 { "yep", "yes" },
                 { "yup", "yes" },
