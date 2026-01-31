@@ -34,6 +34,7 @@
     <Compile Include="ISipCallHandler.cs" />
     <Compile Include="EdgeFunctionCallHandler.cs" />
     <Compile Include="LocalOpenAICallHandler.cs" />
+    <Compile Include="IngressAudioProcessor.cs" />
 
     <!-- Audio utilities -->
     <Compile Include="AudioCodecs.cs" />
