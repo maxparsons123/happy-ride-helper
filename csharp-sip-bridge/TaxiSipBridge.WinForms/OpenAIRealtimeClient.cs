@@ -1,106 +1,153 @@
 using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Production-grade OpenAI Realtime API client for SIP-to-AI telephony.
-/// Thread-safe, .NET 6+ compatible, with response guards to prevent duplicate responses.
+/// Minimal OpenAI Realtime API client with proper response gating.
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public enum OutputCodecMode { Opus, ALaw, MuLaw }
-
-    // Configuration
+    // =========================
+    // CONFIG
+    // =========================
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
-    private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
-    private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
+    private readonly string _systemPrompt;
+    private readonly string? _dispatchWebhookUrl;
 
-    // Thread-safe flags (Interlocked)
-    private int _disposedFlag;
-    private int _responseActiveFlag;
-    private int _greetingSentFlag;
-    private int _postBookingHangupArmedFlag;
-    private int _callEndSignaledFlag;
-
-    // Thread-safe timestamps (Volatile)
+    // =========================
+    // THREAD-SAFE STATE
+    // =========================
+    private int _disposed;
+    private int _callEnded;
+    private int _responseActive;
+    private int _responseQueued;
+    private int _greetingSent;
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
 
-    // Mutable state
-    private readonly object _lock = new();
-    private ClientWebSocket? _ws;
-    private CancellationTokenSource? _cts;
+    // =========================
+    // CALL STATE
+    // =========================
     private string _callerId = "";
     private string _detectedLanguage = "en";
     private readonly BookingState _booking = new();
     private bool _awaitingConfirmation;
-    private short[] _opusBuffer = Array.Empty<short>();
 
-    // Audio pipeline
+    // =========================
+    // WS + LIFECYCLE
+    // =========================
+    private ClientWebSocket? _ws;
+    private CancellationTokenSource? _cts;
+
+    // =========================
+    // AUDIO OUTPUT
+    // =========================
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
     private const int MAX_QUEUE_FRAMES = 800;
-    private readonly ArrayPool<byte> _bytePool = ArrayPool<byte>.Create(160, 100);
-    private readonly ArrayPool<short> _shortPool = ArrayPool<short>.Create(960, 50);
 
-    // Events
+    // =========================
+    // EVENTS
+    // =========================
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
+    public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnConnected;
     public event Action? OnDisconnected;
-    public event Action<string>? OnAdaSpeaking;
-    public event Action<BookingState>? OnBookingUpdated;
-    public event Action? OnCallEnded;
-    public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
     public event Action? OnResponseCompleted;
+    public event Action? OnCallEnded;
+    public event Action<string>? OnAdaSpeaking;
+    public event Action<BookingState>? OnBookingUpdated;
 
-    // Properties
-    public bool IsConnected => Volatile.Read(ref _disposedFlag) == 0 && _ws?.State == WebSocketState.Open;
+    // =========================
+    // PROPERTIES
+    // =========================
+    public bool IsConnected =>
+        Volatile.Read(ref _disposed) == 0 &&
+        _ws?.State == WebSocketState.Open;
+
     public int PendingFrameCount => _outboundQueue.Count;
-    public OutputCodecMode OutputCodec { get => _outputCodec; set => _outputCodec = value; }
 
+    // =========================
+    // CONSTRUCTORS
+    // =========================
     public OpenAIRealtimeClient(
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
-        string voice = "shimmer")
+        string voice = "shimmer",
+        string? systemPrompt = null,
+        string? dispatchWebhookUrl = null)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
+        _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
+        _dispatchWebhookUrl = dispatchWebhookUrl;
     }
 
-    public OpenAIRealtimeClient(string apiKey, OutputCodecMode outputCodec,
-        string model = "gpt-4o-mini-realtime-preview-2024-12-17", string voice = "shimmer")
-        : this(apiKey, model, voice)
+    // =========================
+    // RESPONSE GATE (THE FIX)
+    // =========================
+    private bool CanCreateResponse()
     {
-        _outputCodec = outputCodec;
+        return Volatile.Read(ref _responseActive) == 0 &&
+               Volatile.Read(ref _responseQueued) == 0 &&
+               Volatile.Read(ref _callEnded) == 0 &&
+               Volatile.Read(ref _disposed) == 0;
     }
 
-    #region Audio Input
+    private async Task QueueResponseCreateAsync(int delayMs = 40)
+    {
+        if (!CanCreateResponse()) return;
 
+        if (Interlocked.CompareExchange(ref _responseQueued, 1, 0) == 1)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delayMs);
+                if (!CanCreateResponse())
+                {
+                    Log("⏳ Skipping response.create — not ready");
+                    return;
+                }
+
+                Interlocked.Exchange(ref _responseActive, 1);
+                await SendJsonAsync(new { type = "response.create" });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _responseQueued, 0);
+            }
+        });
+    }
+
+    // =========================
+    // AUDIO INPUT
+    // =========================
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (!IsConnected || ulawData.Length == 0) return;
 
-        // Echo guard: ignore audio shortly after AI finishes speaking
-        if (!_awaitingConfirmation && GetUnixTimeMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
+        // Echo guard: skip audio right after AI speaks
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
             return;
 
-        var pcm8k = AudioCodecs.MuLawDecode(ulawData);
+        var pcm8k = Audio.AudioCodecs.MuLawDecode(ulawData);
         var pcm24k = Resample8kTo24k(pcm8k);
-        await SendAudioToOpenAIAsync(pcm24k);
-        Volatile.Write(ref _lastUserSpeechAt, GetUnixTimeMs());
+        await SendAudioAsync(pcm24k);
+        Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
 
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
@@ -109,10 +156,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
         byte[] pcm24k = sampleRate == 24000
             ? pcmData
-            : AudioCodecs.ShortsToBytes(AudioCodecs.Resample(AudioCodecs.BytesToShorts(pcmData), sampleRate, 24000));
+            : Audio.AudioCodecs.ShortsToBytes(Audio.AudioCodecs.Resample(Audio.AudioCodecs.BytesToShorts(pcmData), sampleRate, 24000));
 
         await SendAudioToOpenAIAsync(pcm24k);
-        Volatile.Write(ref _lastUserSpeechAt, GetUnixTimeMs());
+        Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
 
     private async Task SendAudioToOpenAIAsync(byte[] pcm24k)
@@ -124,14 +171,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             var msg = JsonSerializer.Serialize(new { type = "input_audio_buffer.append", audio = Convert.ToBase64String(pcm24k) });
             await _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)), WebSocketMessageType.Text, true, _cts?.Token ?? default);
         }
-        catch (OperationCanceledException) { }
-        catch (WebSocketException) { }
+        catch { }
     }
 
-    #endregion
-
-    #region Audio Output
-
+    // =========================
+    // AUDIO OUTPUT
+    // =========================
     public byte[]? GetNextMuLawFrame() => _outboundQueue.TryDequeue(out var f) ? f : null;
     public void ClearPendingFrames() { while (_outboundQueue.TryDequeue(out _)) { } }
 
@@ -144,79 +189,36 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             var pcm24k = Convert.FromBase64String(base64);
             OnPcm24Audio?.Invoke(pcm24k);
 
-            var samples = AudioCodecs.BytesToShorts(pcm24k);
-            switch (_outputCodec)
-            {
-                case OutputCodecMode.Opus: ProcessOpusOutput(samples); break;
-                case OutputCodecMode.ALaw: ProcessNarrowbandOutput(samples, false); break;
-                case OutputCodecMode.MuLaw: ProcessNarrowbandOutput(samples, true); break;
-            }
-        }
-        catch (Exception ex) { Log($"⚠️ Audio error: {ex.Message}"); }
-    }
+            // Downsample 24kHz → 8kHz and encode to µ-law
+            var samples = Audio.AudioCodecs.BytesToShorts(pcm24k);
+            var len = samples.Length / 3;
+            var pcm8k = new short[len];
 
-    private void ProcessNarrowbandOutput(short[] pcm24k, bool muLaw)
-    {
-        var len = pcm24k.Length / 3;
-        var pcm8k = _shortPool.Rent(len);
-
-        try
-        {
             for (int i = 0; i < len; i++)
             {
                 int idx = i * 3;
-                pcm8k[i] = (short)((pcm24k[idx] * 2 + pcm24k[idx + 2]) / 3);
+                pcm8k[i] = (short)((samples[idx] * 2 + samples[idx + 2]) / 3);
             }
 
-            var encoded = muLaw ? AudioCodecs.MuLawEncode(pcm8k, 0, len) : AudioCodecs.ALawEncode(pcm8k, 0, len);
-            var silence = muLaw ? (byte)0xFF : (byte)0xD5;
+            var ulaw = Audio.AudioCodecs.MuLawEncode(pcm8k);
 
-            for (int i = 0; i < encoded.Length; i += 160)
+            // Frame into 160-byte (20ms) chunks
+            for (int i = 0; i < ulaw.Length; i += 160)
             {
-                var frame = _bytePool.Rent(160);
-                var count = Math.Min(160, encoded.Length - i);
-                Array.Copy(encoded, i, frame, 0, count);
-                if (count < 160) Array.Fill(frame, silence, count, 160 - count);
-                EnqueueFrame(frame);
+                var frame = new byte[160];
+                var count = Math.Min(160, ulaw.Length - i);
+                Array.Copy(ulaw, i, frame, 0, count);
+                if (count < 160) Array.Fill(frame, (byte)0xFF, count, 160 - count);
+
+                while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                    _outboundQueue.TryDequeue(out _);
+                _outboundQueue.Enqueue(frame);
             }
         }
-        finally { _shortPool.Return(pcm8k); }
-    }
-
-    private void ProcessOpusOutput(short[] pcm24k)
-    {
-        // Upsample 24kHz → 48kHz with linear interpolation
-        var pcm48k = new short[pcm24k.Length * 2];
-        for (int i = 0; i < pcm24k.Length; i++)
+        catch (Exception ex)
         {
-            pcm48k[i * 2] = pcm24k[i];
-            pcm48k[i * 2 + 1] = i < pcm24k.Length - 1 ? (short)((pcm24k[i] + pcm24k[i + 1]) / 2) : pcm24k[i];
+            Log($"⚠️ Audio error: {ex.Message}");
         }
-
-        lock (_lock)
-        {
-            var newBuf = new short[_opusBuffer.Length + pcm48k.Length];
-            Array.Copy(_opusBuffer, newBuf, _opusBuffer.Length);
-            Array.Copy(pcm48k, 0, newBuf, _opusBuffer.Length, pcm48k.Length);
-            _opusBuffer = newBuf;
-        }
-
-        while (_opusBuffer.Length >= 960)
-        {
-            var frame = new short[960];
-            Array.Copy(_opusBuffer, 0, frame, 0, 960);
-            EnqueueFrame(AudioCodecs.OpusEncode(frame));
-
-            var remaining = new short[_opusBuffer.Length - 960];
-            Array.Copy(_opusBuffer, 960, remaining, 0, remaining.Length);
-            _opusBuffer = remaining;
-        }
-    }
-
-    private void EnqueueFrame(byte[] frame)
-    {
-        while (_outboundQueue.Count >= MAX_QUEUE_FRAMES) _outboundQueue.TryDequeue(out _);
-        _outboundQueue.Enqueue(frame);
     }
 
     private byte[] Resample8kTo24k(short[] pcm8k)
@@ -228,37 +230,35 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             pcm24k[i * 3 + 1] = pcm8k[i];
             pcm24k[i * 3 + 2] = pcm8k[i];
         }
-        return AudioCodecs.ShortsToBytes(pcm24k);
+        return Audio.AudioCodecs.ShortsToBytes(pcm24k);
     }
 
-    #endregion
-
-    #region Connection Lifecycle
-
+    // =========================
+    // CONNECT / DISCONNECT
+    // =========================
     public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
     {
-        if (Volatile.Read(ref _disposedFlag) != 0) throw new ObjectDisposedException(nameof(OpenAIRealtimeClient));
-
         ResetCallState(caller);
-        Log($"📞 Connecting (caller: {caller ?? "unknown"}, lang: {_detectedLanguage})");
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
-        using var timeout = new CancellationTokenSource(_connectTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        Log($"📞 Connecting (caller: {caller ?? "unknown"}, lang: {_detectedLanguage})");
 
-        await _ws.ConnectAsync(new Uri($"wss://api.openai.com/v1/realtime?model={_model}"), linked.Token);
-        Log($"✅ Connected to OpenAI");
+        await _ws.ConnectAsync(new Uri($"wss://api.openai.com/v1/realtime?model={_model}"), ct);
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
+        Log("✅ Connected to OpenAI");
         OnConnected?.Invoke();
+
         _ = Task.Run(ReceiveLoopAsync);
     }
 
     public async Task DisconnectAsync()
     {
-        if (Volatile.Read(ref _disposedFlag) != 0) return;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+            return;
 
         Log("📴 Disconnecting...");
         SignalCallEnded("disconnect");
@@ -278,20 +278,25 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         }
     }
 
+    // =========================
+    // RECEIVE LOOP
+    // =========================
     private async Task ReceiveLoopAsync()
     {
         var buffer = new byte[64 * 1024];
         var sb = new StringBuilder();
-        _cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
 
-        while (IsConnected && !_cts.Token.IsCancellationRequested)
+        while (IsConnected && !(_cts?.IsCancellationRequested ?? true))
         {
             try
             {
-                var result = await _ws!.ReceiveAsync(new ArraySegment<byte>(buffer), _cts.Token);
+                var result = await _ws!.ReceiveAsync(new ArraySegment<byte>(buffer), _cts!.Token);
 
-                if (result.MessageType == WebSocketMessageType.Close) break;
-                if (result.MessageType != WebSocketMessageType.Text) continue;
+                if (result.MessageType == WebSocketMessageType.Close)
+                    break;
+
+                if (result.MessageType != WebSocketMessageType.Text)
+                    continue;
 
                 sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
 
@@ -302,7 +307,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { Log($"❌ Receive error: {ex.Message}"); break; }
+            catch (Exception ex)
+            {
+                Log($"❌ Receive error: {ex.Message}");
+                break;
+            }
         }
 
         Log("🔄 Receive loop ended");
@@ -311,13 +320,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         OnDisconnected?.Invoke();
     }
 
-    #endregion
-
-    #region Message Processing
-
+    // =========================
+    // MESSAGE HANDLER
+    // =========================
     private async Task ProcessMessageAsync(string json)
     {
-        if (Volatile.Read(ref _disposedFlag) != 0) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
 
         try
         {
@@ -331,17 +339,19 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
 
                 case "session.updated":
-                    if (Interlocked.CompareExchange(ref _greetingSentFlag, 1, 0) == 0)
+                    if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
                         await SendGreetingAsync();
                     break;
 
                 case "response.created":
-                    Interlocked.Exchange(ref _responseActiveFlag, 1);
+                    Interlocked.Exchange(ref _responseActive, 1);
                     OnResponseStarted?.Invoke();
                     break;
 
                 case "response.audio.delta":
-                    ProcessAudioDelta(doc.RootElement.GetProperty("delta").GetString() ?? "");
+                    var delta = doc.RootElement.GetProperty("delta").GetString();
+                    if (!string.IsNullOrEmpty(delta))
+                        ProcessAudioDelta(delta);
                     break;
 
                 case "response.audio_transcript.delta":
@@ -352,28 +362,29 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 case "response.audio_transcript.done":
                     if (doc.RootElement.TryGetProperty("transcript", out var t) && !string.IsNullOrWhiteSpace(t.GetString()))
                     {
-                        Log($"💬 Ada: {t.GetString()}");
-                        OnTranscript?.Invoke($"Ada: {t.GetString()}");
+                        var text = t.GetString()!;
+                        Log($"💬 Ada: {text}");
+                        OnTranscript?.Invoke($"Ada: {text}");
                     }
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
                     if (doc.RootElement.TryGetProperty("transcript", out var u) && !string.IsNullOrWhiteSpace(u.GetString()))
                     {
-                        var corrected = ApplySttCorrections(u.GetString()!);
-                        Log($"👤 User: {corrected}");
-                        OnTranscript?.Invoke($"You: {corrected}");
+                        var text = ApplySttCorrections(u.GetString()!);
+                        Log($"👤 User: {text}");
+                        OnTranscript?.Invoke($"You: {text}");
                     }
                     break;
 
                 case "input_audio_buffer.speech_started":
                 case "input_audio_buffer.speech_stopped":
-                    Volatile.Write(ref _lastUserSpeechAt, GetUnixTimeMs());
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     break;
 
                 case "response.done":
-                    Interlocked.Exchange(ref _responseActiveFlag, 0);
-                    Volatile.Write(ref _lastAdaFinishedAt, GetUnixTimeMs());
+                    Interlocked.Exchange(ref _responseActive, 0);
+                    Volatile.Write(ref _lastAdaFinishedAt, NowMs());
                     OnResponseCompleted?.Invoke();
                     break;
 
@@ -389,9 +400,122 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
             }
         }
-        catch (Exception ex) { Log($"⚠️ Parse error: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Parse error: {ex.Message}");
+        }
     }
 
+    // =========================
+    // TOOL HANDLING
+    // =========================
+    private async Task HandleToolCallAsync(JsonElement root)
+    {
+        if (NowMs() - Volatile.Read(ref _lastToolCallAt) < 200)
+            return;
+        Volatile.Write(ref _lastToolCallAt, NowMs());
+
+        if (!root.TryGetProperty("name", out var n) || !root.TryGetProperty("call_id", out var c))
+            return;
+
+        var name = n.GetString();
+        var callId = c.GetString()!;
+        var args = ParseArgs(root);
+
+        Log($"🔧 Tool: {name}");
+
+        switch (name)
+        {
+            case "sync_booking_data":
+                if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
+                if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
+                if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
+                if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
+                if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+                OnBookingUpdated?.Invoke(_booking);
+                await SendToolResultAsync(callId, new { success = true });
+                await QueueResponseCreateAsync();
+                break;
+
+            case "book_taxi":
+                var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
+                if (action == "request_quote")
+                {
+                    var (fare, eta, _) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination);
+                    _booking.Fare = fare;
+                    _booking.Eta = eta;
+                    _awaitingConfirmation = true;
+                    OnBookingUpdated?.Invoke(_booking);
+                    Log($"💰 Quote: {fare}");
+                    await SendToolResultAsync(callId, new { success = true, fare, eta, message = $"Fare is {fare}, driver arrives in {eta}. Book it?" });
+                    await QueueResponseCreateAsync();
+                }
+                else if (action == "confirmed")
+                {
+                    _booking.Confirmed = true;
+                    _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+                    _awaitingConfirmation = false;
+                    OnBookingUpdated?.Invoke(_booking);
+                    Log($"✅ Booked: {_booking.BookingRef}");
+                    _ = WhatsAppNotifier.SendAsync(_callerId);
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        booking_ref = _booking.BookingRef,
+                        message = string.IsNullOrWhiteSpace(_booking.Name)
+                            ? "Your taxi is booked!"
+                            : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
+                    });
+                    await QueueResponseCreateAsync();
+
+                    // Force hangup after 3s if AI doesn't call end_call
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(3000);
+                        for (int i = 0; i < 20 && Volatile.Read(ref _responseActive) == 1; i++) await Task.Delay(100);
+                        if (Volatile.Read(ref _callEnded) == 0 && CanCreateResponse())
+                        {
+                            await SendJsonAsync(new
+                            {
+                                type = "conversation.item.create",
+                                item = new { type = "message", role = "system", content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } } }
+                            });
+                            Interlocked.Exchange(ref _responseActive, 1);
+                            await SendJsonAsync(new { type = "response.create" });
+                        }
+                    });
+                }
+                break;
+
+            case "end_call":
+                Log("📞 End call requested");
+                await SendToolResultAsync(callId, new { success = true });
+                SignalCallEnded("end_call");
+                break;
+
+            default:
+                await SendToolResultAsync(callId, new { error = $"Unknown: {name}" });
+                break;
+        }
+    }
+
+    private async Task SendToolResultAsync(string callId, object result)
+    {
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "function_call_output",
+                call_id = callId,
+                output = JsonSerializer.Serialize(result)
+            }
+        });
+    }
+
+    // =========================
+    // SESSION SETUP
+    // =========================
     private async Task ConfigureSessionAsync()
     {
         var config = new
@@ -420,9 +544,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     {
         await Task.Delay(150);
 
-        if (Volatile.Read(ref _responseActiveFlag) == 1) return;
+        if (!CanCreateResponse())
+        {
+            Log("⏳ Skipping greeting — response already active");
+            return;
+        }
 
         var greeting = GetLocalizedGreeting(_detectedLanguage);
+        Interlocked.Exchange(ref _responseActive, 1);
+
         await SendJsonAsync(new
         {
             type = "response.create",
@@ -435,135 +565,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Log("📢 Greeting triggered");
     }
 
-    #endregion
-
-    #region Tool Handling
-
-    private async Task HandleToolCallAsync(JsonElement root)
-    {
-        if (GetUnixTimeMs() - Volatile.Read(ref _lastToolCallAt) < 200) return;
-        Volatile.Write(ref _lastToolCallAt, GetUnixTimeMs());
-
-        if (!root.TryGetProperty("name", out var n) || !root.TryGetProperty("call_id", out var c)) return;
-
-        var name = n.GetString();
-        var callId = c.GetString()!;
-        var args = ParseArgs(root);
-
-        Log($"🔧 Tool: {name}");
-
-        switch (name)
-        {
-            case "sync_booking_data":
-                await HandleSyncAsync(callId, args);
-                break;
-            case "book_taxi":
-                await HandleBookTaxiAsync(callId, args);
-                break;
-            case "end_call":
-                await HandleEndCallAsync(callId);
-                break;
-            default:
-                await SendToolResultAsync(callId, new { error = $"Unknown: {name}" });
-                break;
-        }
-    }
-
-    private async Task HandleSyncAsync(string callId, Dictionary<string, object> args)
-    {
-        lock (_lock)
-        {
-            if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
-            if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
-            if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
-            if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var n)) _booking.Passengers = n;
-            if (args.TryGetValue("pickup_time", out var t)) _booking.PickupTime = t?.ToString();
-        }
-
-        OnBookingUpdated?.Invoke(_booking);
-        await SendToolResultAsync(callId, new { success = true });
-    }
-
-    private async Task HandleBookTaxiAsync(string callId, Dictionary<string, object> args)
-    {
-        var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
-
-        if (action == "request_quote")
-        {
-            var (fare, eta, _) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination);
-            lock (_lock) { _booking.Fare = fare; _booking.Eta = eta; _awaitingConfirmation = true; }
-
-            OnBookingUpdated?.Invoke(_booking);
-            Log($"💰 Quote: {fare}");
-
-            await SendToolResultAsync(callId, new { success = true, fare, eta, message = $"Fare is {fare}, driver arrives in {eta}. Book it?" });
-        }
-        else if (action == "confirmed")
-        {
-            lock (_lock)
-            {
-                _booking.Confirmed = true;
-                _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
-                _awaitingConfirmation = false;
-                Interlocked.Exchange(ref _postBookingHangupArmedFlag, 1);
-            }
-
-            OnBookingUpdated?.Invoke(_booking);
-            Log($"✅ Booked: {_booking.BookingRef}");
-
-            _ = WhatsAppNotifier.SendAsync(_callerId);
-
-            await SendToolResultAsync(callId, new
-            {
-                success = true,
-                booking_ref = _booking.BookingRef,
-                message = string.IsNullOrWhiteSpace(_booking.Name)
-                    ? "Your taxi is booked!"
-                    : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
-            });
-
-            // Force hangup after 3s if AI doesn't call end_call
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(3000);
-                for (int i = 0; i < 20 && Volatile.Read(ref _responseActiveFlag) == 1; i++) await Task.Delay(100);
-                if (Volatile.Read(ref _callEndSignaledFlag) == 0)
-                {
-                    await SendJsonAsync(new
-                    {
-                        type = "conversation.item.create",
-                        item = new { type = "message", role = "system", content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } } }
-                    });
-                    await SendJsonAsync(new { type = "response.create" });
-                }
-            });
-        }
-    }
-
-    private async Task HandleEndCallAsync(string callId)
-    {
-        Log("📞 End call requested");
-        await SendToolResultAsync(callId, new { success = true });
-        SignalCallEnded("end_call");
-    }
-
-    private async Task SendToolResultAsync(string callId, object result)
-    {
-        await SendJsonAsync(new
-        {
-            type = "conversation.item.create",
-            item = new { type = "function_call_output", call_id = callId, output = JsonSerializer.Serialize(result) }
-        });
-
-        // Only trigger response if none active
-        if (Volatile.Read(ref _responseActiveFlag) == 0)
-            await SendJsonAsync(new { type = "response.create" });
-    }
-
-    #endregion
-
-    #region Utilities
-
+    // =========================
+    // UTILITIES
+    // =========================
     private async Task SendJsonAsync(object obj)
     {
         if (_ws?.State != WebSocketState.Open) return;
@@ -575,29 +579,30 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         catch { }
     }
 
+    private void SignalCallEnded(string reason)
+    {
+        if (Interlocked.Exchange(ref _callEnded, 1) == 1)
+            return;
+        Log($"📴 Call ended: {reason}");
+        OnCallEnded?.Invoke();
+    }
+
     private void ResetCallState(string? caller)
     {
         ClearPendingFrames();
-        _opusBuffer = Array.Empty<short>();
         _callerId = caller ?? "";
         _detectedLanguage = DetectLanguage(caller);
         _booking.Reset();
         _awaitingConfirmation = false;
 
-        Interlocked.Exchange(ref _greetingSentFlag, 0);
-        Interlocked.Exchange(ref _responseActiveFlag, 0);
-        Interlocked.Exchange(ref _postBookingHangupArmedFlag, 0);
-        Interlocked.Exchange(ref _callEndSignaledFlag, 0);
+        Interlocked.Exchange(ref _disposed, 0);
+        Interlocked.Exchange(ref _callEnded, 0);
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
+        Interlocked.Exchange(ref _greetingSent, 0);
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
         Volatile.Write(ref _lastToolCallAt, 0);
-    }
-
-    private void SignalCallEnded(string reason)
-    {
-        if (Interlocked.CompareExchange(ref _callEndSignaledFlag, 1, 0) == 1) return;
-        Log($"📴 Call ended: {reason}");
-        OnCallEnded?.Invoke();
     }
 
     private static string DetectLanguage(string? phone)
@@ -629,6 +634,8 @@ FLOW: Greet → Ask NAME → PICKUP → DESTINATION → PASSENGERS → TIME → 
 
 RULES: One question at a time. Under 20 words. Use £. Call end_call after booking.";
 
+    private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
+
     private static string GetLanguageName(string c) => c switch { "nl" => "Dutch", "fr" => "French", "de" => "German", _ => "English" };
 
     private static string GetLocalizedGreeting(string lang) => lang switch
@@ -639,7 +646,7 @@ RULES: One question at a time. Under 20 words. Use £. Call end_call after booki
         _ => "Hello, welcome to Taxibot. I'm Ada. What's your name?"
     };
 
-    private static long GetUnixTimeMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     private static Dictionary<string, object> ParseArgs(JsonElement root)
     {
@@ -709,27 +716,24 @@ RULES: One question at a time. Under 20 words. Use £. Call end_call after booki
 
     private void Log(string msg)
     {
-        if (Volatile.Read(ref _disposedFlag) != 0) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
         var line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
         Console.WriteLine($"[OpenAI] {line}");
         OnLog?.Invoke(line);
     }
 
-    #endregion
-
-    #region Disposal
-
+    // =========================
+    // DISPOSAL
+    // =========================
     public void Dispose()
     {
-        if (Interlocked.CompareExchange(ref _disposedFlag, 1, 0) == 1) return;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         SignalCallEnded("disposed");
         _cts?.Cancel();
         _ws?.Dispose();
         _cts?.Dispose();
         GC.SuppressFinalize(this);
     }
-
-    #endregion
 }
 
 public sealed class BookingState
