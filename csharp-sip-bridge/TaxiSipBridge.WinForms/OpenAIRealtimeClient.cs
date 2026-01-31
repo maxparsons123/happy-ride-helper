@@ -987,9 +987,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             _sttCorrectionsMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                // Name corrections
+                // Name corrections (case-insensitive, so only one entry needed)
                 { "Aren't out", "Bernard" },
-                { "aren't out", "Bernard" },
                 // Address corrections
                 { "52 I ain't dead bro", "52A David Road" },
                 { "52 I ain't David", "52A David Road" },
