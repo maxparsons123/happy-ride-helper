@@ -668,9 +668,20 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _awaitingConfirmation = false;
 
                     OnBookingUpdated?.Invoke(_booking);
-                    Log($"✅ Booked: {_booking.BookingRef}");
+                    Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
 
-                    _ = SendWhatsAppNotificationAsync(_callerId);
+                    // Fire-and-forget with explicit error logging
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await SendWhatsAppNotificationAsync(_callerId);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"❌ WhatsApp task error: {ex.Message}");
+                        }
+                    });
 
                     await SendToolResultAsync(callId, new
                     {
@@ -903,21 +914,31 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
     {
-        if (string.IsNullOrEmpty(phoneNumber))
+        Log($"📲 WhatsApp notification starting... (phone={phoneNumber ?? "null"})");
+        
+        if (string.IsNullOrWhiteSpace(phoneNumber) || phoneNumber == "unknown")
         {
-            Log("⚠️ WhatsApp notification skipped - no phone number");
+            Log("⚠️ WhatsApp notification skipped - no valid phone number");
             return;
         }
+        
         try
         {
-            var cli = FormatPhoneForWhatsApp(phoneNumber);
-            Log($"📲 Sending WhatsApp webhook: original={phoneNumber} → formatted={cli}");
-            var (success, msg) = await WhatsAppNotifier.SendAsync(cli).ConfigureAwait(false);
+            var formatted = FormatPhoneForWhatsApp(phoneNumber);
+            
+            if (string.IsNullOrWhiteSpace(formatted) || formatted.Length < 8)
+            {
+                Log($"⚠️ WhatsApp notification skipped - formatted number too short: {formatted}");
+                return;
+            }
+            
+            Log($"📲 Sending WhatsApp webhook: original={phoneNumber} → formatted={formatted}");
+            var (success, msg) = await WhatsAppNotifier.SendAsync(formatted).ConfigureAwait(false);
             Log($"📱 WhatsApp webhook result: {(success ? "✅ OK" : "❌ FAIL")} {msg}");
         }
         catch (Exception ex)
         {
-            Log($"⚠️ WhatsApp notification error: {ex.Message}");
+            Log($"❌ WhatsApp notification error: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
