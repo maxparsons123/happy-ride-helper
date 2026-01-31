@@ -112,6 +112,7 @@ public partial class MainForm : Form
                     SipServer = txtSipServer.Text.Trim(),
                     SipPort = int.Parse(txtSipPort.Text.Trim()),
                     SipUser = txtSipUser.Text.Trim(),
+                    AuthUser = txtAuthUser.Text.Trim(),  // Optional separate auth ID (e.g., 3CX)
                     SipPassword = txtSipPassword.Text.Trim(),
                     Transport = cmbTransport.SelectedIndex == 0 ? SipTransportType.UDP : SipTransportType.TCP
                 };
@@ -443,6 +444,7 @@ public partial class MainForm : Form
         txtSipServer.Enabled = enabled;
         txtSipPort.Enabled = enabled;
         txtSipUser.Enabled = enabled;
+        txtAuthUser.Enabled = enabled;
         txtSipPassword.Enabled = enabled;
         txtWebSocketUrl.Enabled = enabled;
         txtApiKey.Enabled = enabled;
