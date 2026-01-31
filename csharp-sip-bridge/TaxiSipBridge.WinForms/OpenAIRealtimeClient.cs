@@ -169,6 +169,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     public event Action<string>? OnAdaSpeaking;
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
+    public event Action? OnResponseCompleted;
     public event Action<byte[]>? OnCallerAudioMonitor;
     public event Action<string, Dictionary<string, object>>? OnToolCall;
     public event Action<BookingState>? OnBookingUpdated;
@@ -583,6 +584,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     _lastAdaFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _inputBufferedMs = 0;
                     Log("✅ Response complete");
+                    OnResponseCompleted?.Invoke();
                     MaybeStartPostBookingSilenceHangup();
                     break;
 
@@ -760,6 +762,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
         // Small delay for stability
         await Task.Delay(200);
+        
+        // Guard: ensure no active response
+        if (_responseActive)
+        {
+            Log("⏳ Skipping greeting — response already in progress");
+            return;
+        }
 
         var greeting = GetLocalizedGreeting();
         var langName = GetLanguageName(_detectedLanguage);
@@ -875,19 +884,37 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
                     _postBookingHangupArmed = true;
                     
-                    // Inject instruction to end call
-                    await Task.Delay(3000);
-                    await SendJsonAsync(new
+                    // Inject instruction to end call (with response guard)
+                    _ = Task.Run(async () =>
                     {
-                        type = "conversation.item.create",
-                        item = new
+                        await Task.Delay(3000);
+                        
+                        // Wait for any active response to complete
+                        var waitCount = 0;
+                        while (_responseActive && waitCount < 20) // Max 2 seconds wait
                         {
-                            type = "message",
-                            role = "system",
-                            content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } }
+                            await Task.Delay(100);
+                            waitCount++;
                         }
+                        
+                        if (_responseActive)
+                        {
+                            Log("⏳ Post-booking hangup prompt skipped — AI still responding");
+                            return;
+                        }
+                        
+                        await SendJsonAsync(new
+                        {
+                            type = "conversation.item.create",
+                            item = new
+                            {
+                                type = "message",
+                                role = "system",
+                                content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } }
+                            }
+                        });
+                        await SendJsonAsync(new { type = "response.create" });
                     });
-                    await SendJsonAsync(new { type = "response.create" });
                 }
                 break;
 
@@ -917,6 +944,14 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 output = JsonSerializer.Serialize(result)
             }
         });
+        
+        // Guard: only create response if no response is currently active
+        if (_responseActive)
+        {
+            Log("⏳ Skipping response.create — AI response already in progress");
+            return;
+        }
+        
         await SendJsonAsync(new { type = "response.create" });
     }
 
