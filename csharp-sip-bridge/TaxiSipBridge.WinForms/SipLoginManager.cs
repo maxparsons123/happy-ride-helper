@@ -234,7 +234,7 @@ public class SipLoginManager : IDisposable
 
     private async void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
     {
-        var caller = req.Header.From.FromURI.User ?? "unknown";
+        var caller = SipCallerId.Extract(req);
         Log($"📞 Incoming call from {caller}");
 
         if (_callHandler == null)

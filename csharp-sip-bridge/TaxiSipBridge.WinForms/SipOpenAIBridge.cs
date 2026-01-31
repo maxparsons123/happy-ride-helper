@@ -206,7 +206,7 @@ public class SipOpenAIBridge : IDisposable
         _inboundFlushComplete = false;
         _remotePtToCodec.Clear();
 
-        var caller = inviteRequest.Header.From.FromURI.User ?? "unknown";
+        var caller = SipCallerId.Extract(inviteRequest);
         Log($"📞 [{_currentCallId}] Incoming call from {caller}");
         OnCallStarted?.Invoke(_currentCallId, caller);
 

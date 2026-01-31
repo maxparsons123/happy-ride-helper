@@ -129,7 +129,7 @@ public class SipAdaBridge : IDisposable
         if (_disposed) return;
         
         var callId = Guid.NewGuid().ToString("N")[..8];
-        var caller = req.Header.From.FromURI.User ?? "unknown";
+        var caller = SipCallerId.Extract(req);
 
         Log($"📞 [{callId}] Call from {caller}");
         OnCallStarted?.Invoke(callId, caller);
