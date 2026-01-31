@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.6";
+    public const string VERSION = "1.7";
     // =========================
     // CONFIG
     // =========================
