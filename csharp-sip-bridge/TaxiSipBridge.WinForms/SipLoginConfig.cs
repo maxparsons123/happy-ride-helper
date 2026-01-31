@@ -1,6 +1,16 @@
 namespace TaxiSipBridge;
 
 /// <summary>
+/// SIP transport protocol options.
+/// </summary>
+public enum SipTransportType
+{
+    UDP,
+    TCP,
+    TLS
+}
+
+/// <summary>
 /// Configuration for SIP login.
 /// </summary>
 public class SipLoginConfig
