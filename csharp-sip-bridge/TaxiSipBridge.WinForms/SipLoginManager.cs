@@ -131,6 +131,16 @@ public class SipLoginManager : IDisposable
     {
         _sipTransport = new SIPTransport();
 
+        // Enable SIP trace logging for debugging registration issues
+        _sipTransport.SIPRequestOutTraceEvent += (ep, dst, req) =>
+            Log($"📤 SIP OUT → {dst}: {req.Method} {req.URI}");
+        _sipTransport.SIPResponseInTraceEvent += (ep, src, resp) =>
+            Log($"📥 SIP IN ← {src}: {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        _sipTransport.SIPResponseOutTraceEvent += (ep, dst, resp) =>
+            Log($"📤 SIP RESP → {dst}: {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        _sipTransport.SIPRequestInTraceEvent += (ep, src, req) =>
+            Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
+
         switch (_config.Transport)
         {
             case SipTransportType.UDP:
