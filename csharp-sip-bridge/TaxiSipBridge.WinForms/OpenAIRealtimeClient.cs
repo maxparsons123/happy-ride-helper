@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.5";
+    public const string VERSION = "1.6";
     // =========================
     // CONFIG
     // =========================
@@ -677,9 +677,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant. Speak in {GetLanguageName(_detectedLanguage)}.
 
-FLOW: Greet → Ask NAME → PICKUP → DESTINATION → PASSENGERS → TIME → SUMMARIZE journey ('So that's [passengers] passenger(s) from [pickup] to [destination] at [time]') → Ask 'Shall I get you a price?' → book_taxi(request_quote) → Tell fare and ask to confirm → book_taxi(confirmed) → Give booking ID and REPEAT the summary ('Your taxi is booked! Picking up [passengers] from [pickup] to [destination] at [time]. Booking reference [ID].') → Ask 'Is there anything else I can help you with?' → If no: 'Thank you for using the Voice Taxibot system. Goodbye!' → end_call
+FLOW: Greet → Ask NAME → PICKUP → DESTINATION → PASSENGERS → TIME → SUMMARIZE journey ('So that's [passengers] passenger(s) from [pickup] to [destination] at [time]. Is that correct?') → If user wants changes: update the field and re-summarize → If correct: 'Shall I get you a price?' → book_taxi(request_quote) → Tell fare and ask to confirm → book_taxi(confirmed) → Give booking ID and REPEAT summary ('Your taxi is booked! [passengers] passenger(s) from [pickup] to [destination] at [time]. Reference [ID].') → Ask 'Is there anything else?' → If no: 'Thank you for using the Voice Taxibot system. Goodbye!' → end_call
 
-RULES: One question at a time. Under 25 words per response. Use £. ALWAYS recite addresses in your summary. ALWAYS ask if there's anything else after giving booking ID. Only call end_call after user says no to 'anything else'.";
+CORRECTIONS: If user says 'change pickup to X' or 'actually it's Y passengers' or gives a new address/time, update that field immediately and give a new summary. Always re-confirm after any change.
+
+RULES: One question at a time. Under 25 words per response. Use £. ALWAYS recite addresses in summaries. Only call end_call after user says no to 'anything else'.";
 
     private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
 
