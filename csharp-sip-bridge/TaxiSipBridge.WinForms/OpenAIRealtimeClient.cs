@@ -482,11 +482,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _awaitingConfirmation = false;
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef}");
-                    _ = Task.Run(async () =>
-                    {
-                        var (success, msg) = await WhatsAppNotifier.SendAsync(_callerId);
-                        Log(success ? $"📱 WhatsApp sent: {msg}" : $"❌ WhatsApp failed: {msg}");
-                    });
+                    _ = SendWhatsAppNotificationAsync(_callerId);
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
@@ -636,6 +632,50 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             return;
         Log($"📴 Call ended: {reason}");
         OnCallEnded?.Invoke();
+    }
+
+    private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
+    {
+        if (string.IsNullOrEmpty(phoneNumber))
+        {
+            Log("⚠️ WhatsApp notification skipped - no phone number");
+            return;
+        }
+        try
+        {
+            var cli = FormatPhoneForWhatsApp(phoneNumber);
+            var (success, msg) = await WhatsAppNotifier.SendAsync(cli);
+            Log($"📱 WhatsApp notification to {cli}: {(success ? "OK" : "FAIL")} {msg}");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ WhatsApp notification error: {ex.Message}");
+        }
+    }
+
+    private static string FormatPhoneForWhatsApp(string phone)
+    {
+        var clean = phone.Replace(" ", "").Replace("-", "");
+        clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        
+        // Convert + prefix to 00
+        if (clean.StartsWith("+"))
+            clean = "00" + clean.Substring(1);
+        
+        // If no 00 prefix, add Dutch country code for local numbers
+        if (!clean.StartsWith("00"))
+        {
+            if (clean.StartsWith("06") || clean.StartsWith("0"))
+                clean = "0031" + clean.Substring(1);
+            else
+                clean = "00" + clean;
+        }
+        
+        // Dutch: remove leading 0 after country code (00310 → 0031)
+        if (clean.StartsWith("00310"))
+            clean = "0031" + clean.Substring(5);
+        
+        return new string(clean.Where(char.IsDigit).ToArray());
     }
 
     private void ResetCallState(string? caller)
