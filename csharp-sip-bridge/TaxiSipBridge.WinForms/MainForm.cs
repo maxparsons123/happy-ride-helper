@@ -15,29 +15,13 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
 
-    // Simli Avatar (WebView2-based, embedded in form)
-    private SimliWebView? _simliView;
-
     public MainForm()
     {
         InitializeComponent();
         LoadSettings();
-        InitializeSimliView();
 
         // Run SpeexDSP diagnostics at startup
         SpeexDspResamplerHelper.LogStartupDiagnostics(msg => AddLog(msg));
-    }
-
-    private void InitializeSimliView()
-    {
-        _simliView = new SimliWebView
-        {
-            Location = new Point(535, 10),
-            Size = new Size(320, 280),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-        _simliView.OnLog += msg => SafeInvoke(() => AddLog(msg));
-        Controls.Add(_simliView);
     }
 
     private void LoadSettings()
