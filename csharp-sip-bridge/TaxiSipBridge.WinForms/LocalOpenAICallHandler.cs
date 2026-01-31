@@ -236,6 +236,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
             {
                 // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
                 _needsFadeIn = true;
+                Log($"🤖 [{callId}] AI response started");
+            };
+            _aiClient.OnResponseCompleted += () =>
+            {
+                Log($"🤖 [{callId}] AI response completed");
             };
             
             // AI-triggered hangup (with single-execution guard)
