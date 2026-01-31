@@ -114,7 +114,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                Volatile.Read(ref _responseQueued) == 0 &&
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
-               IsConnected;
+               IsConnected &&
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300; // Don't respond while user is still talking
     }
 
     /// <summary>
@@ -220,7 +221,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             var pcm24k = Convert.FromBase64String(base64);
             OnPcm24Audio?.Invoke(pcm24k);
 
-            // Downsample 24kHz → 8kHz and encode to µ-law (3:1 decimation)
+            // Downsample 24kHz → 8kHz with 3-tap FIR filter (smoother, less aliasing)
             var samples = AudioCodecs.BytesToShorts(pcm24k);
             var len = samples.Length / 3;
             var pcm8k = new short[len];
@@ -228,7 +229,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             for (int i = 0; i < len; i++)
             {
                 int idx = i * 3;
-                pcm8k[i] = (short)((samples[idx] * 2 + samples[idx + 2]) / 3);
+                // Weighted average: 0.25, 0.5, 0.25 for smoother telephony audio
+                pcm8k[i] = (short)(samples[idx] * 0.25f + samples[idx + 1] * 0.5f + samples[idx + 2] * 0.25f);
             }
 
             var ulaw = AudioCodecs.MuLawEncode(pcm8k);
@@ -445,8 +447,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 }
 
                 case "input_audio_buffer.speech_started":
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    break;
+
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    // Commit audio buffer to finalize VAD and prevent duplicate responses
+                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     break;
 
                 case "response.done":
