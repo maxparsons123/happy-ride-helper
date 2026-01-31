@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.16";
+    public const string VERSION = "1.17";
 
     // =========================
     // CONFIG
@@ -1024,36 +1024,44 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             return "en";
         }
 
-        var clean = phone.Replace(" ", "").Replace("-", "");
-        clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        // Normalize: remove spaces, dashes, parentheses
+        var norm = phone.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+        Log($"🌍 Phone: {phone} → norm: {norm}");
 
-        // Convert + or 00 prefix to just digits
-        if (clean.StartsWith("+")) clean = clean.Substring(1);
-        if (clean.StartsWith("00")) clean = clean.Substring(2);
-
-        var prefix2 = clean.Length >= 2 ? clean.Substring(0, 2) : clean;
-        Log($"🌍 Phone: {phone} → clean: {clean} → prefix2: {prefix2}");
-
-        // Dutch local format
-        if (clean.StartsWith("06") && clean.Length == 10)
+        // Check Dutch local format BEFORE stripping international prefix
+        if (norm.StartsWith("06") && norm.Length == 10 && norm.All(char.IsDigit))
         {
             Log($"🌍 Language: nl (Dutch mobile 06)");
             return "nl";
         }
-        if (clean.StartsWith("0") && clean.Length == 10)
+        if (norm.StartsWith("0") && !norm.StartsWith("00") && norm.Length == 10)
         {
             Log($"🌍 Language: nl (Dutch landline)");
             return "nl";
         }
 
-        // Check country codes using first 2 digits
-        if (CountryCodeToLanguage.TryGetValue(prefix2, out var lang))
+        // Strip international prefix
+        if (norm.StartsWith("+")) 
+            norm = norm.Substring(1);
+        else if (norm.StartsWith("00") && norm.Length > 4) 
+            norm = norm.Substring(2);
+
+        // Check first 2 digits for country code
+        if (norm.Length >= 2)
         {
-            Log($"🌍 Language: {lang} (country code {prefix2})");
-            return lang;
+            var code = norm.Substring(0, 2);
+            if (CountryCodeToLanguage.TryGetValue(code, out var lang))
+            {
+                Log($"🌍 Language: {lang} (country code {code})");
+                return lang;
+            }
+            Log($"🌍 Language: en (default, no match for code {code})");
+        }
+        else
+        {
+            Log($"🌍 Language: en (default, number too short)");
         }
 
-        Log($"🌍 Language: en (default, no match for {prefix2})");
         return "en";
     }
 
