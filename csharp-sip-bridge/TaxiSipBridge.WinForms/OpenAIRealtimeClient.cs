@@ -34,6 +34,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private int _responseActive;   // OBSERVED only (set only by response.created / response.done)
     private int _responseQueued;   // Per-call
     private int _greetingSent;     // Per-call
+    private int _ignoreUserAudio;  // Per-call (set after goodbye starts)
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -162,6 +163,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
         // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
         if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
@@ -176,6 +178,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (!IsConnected || pcmData == null || pcmData.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
         byte[] pcm24k = sampleRate == 24000
             ? pcmData
@@ -641,7 +644,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             }
 
             case "end_call":
-                Log("📞 End call requested - waiting for audio buffer to drain...");
+                Log("📞 End call requested - ignoring further user audio...");
+                Interlocked.Exchange(ref _ignoreUserAudio, 1);  // Stop accepting mic input immediately
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
 
                 // Wait for audio buffer to drain (max 10s) then end
@@ -899,6 +903,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
         Volatile.Write(ref _lastToolCallAt, 0);
+        Interlocked.Exchange(ref _ignoreUserAudio, 0);
     }
 
     private static string DetectLanguage(string? phone)
