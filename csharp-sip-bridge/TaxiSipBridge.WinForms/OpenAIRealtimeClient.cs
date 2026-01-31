@@ -1103,11 +1103,15 @@ LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone 
 
 FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once ('So that's [passengers] from [pickup] to [destination] at [time]. Correct?') → If changes: update and confirm ONCE more → If correct: 'Shall I get a price?' → book_taxi(request_quote) → Tell fare → 'Confirm booking?' → book_taxi(confirmed) → Give reference ID ONLY (no repeat of journey) → 'Anything else?' → If no: 'You'll receive a WhatsApp with your booking details. Thank you for using Voice Taxibot. Goodbye!' → end_call
 
-NO REPETITION: After booking is confirmed, say 'Your taxi is booked, reference [ID].' Do NOT repeat pickup, destination, passengers, or time again. The user already confirmed these.
+NO REPETITION: After booking is confirmed, say the ACTUAL reference ID from the tool response (e.g. 'Your taxi is booked, reference TX12345.'). NEVER say '[ID]' literally. Do NOT repeat pickup, destination, passengers, or time again.
 
 CORRECTIONS: If user corrects any detail, update it and give ONE new summary. Do not repeat the same summary multiple times.
 
-PRONUNCIATION: Hyphenated house numbers like '12-14A' read as 'twelve fourteen A'. Suffixes like '52A' are 'fifty-two A'.
+PRONUNCIATION: 
+- 4-digit house numbers like '1214A' say 'twelve fourteen A' (NOT 'one two one four' and NOT hyphenated '12-14A')
+- Hyphenated ranges like '12-14' say 'twelve to fourteen' 
+- Suffixes like '52A' say 'fifty-two A'
+- NEVER insert hyphens into addresses that don't have them
 
 EVENTS: If caller asks about events or 'what's on', call find_local_events. List 2-3 events briefly.
 
