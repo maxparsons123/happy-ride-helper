@@ -482,7 +482,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _awaitingConfirmation = false;
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef}");
-                    _ = WhatsAppNotifier.SendAsync(_callerId);
+                    _ = Task.Run(async () =>
+                    {
+                        var (success, msg) = await WhatsAppNotifier.SendAsync(_callerId);
+                        Log(success ? $"📱 WhatsApp sent: {msg}" : $"❌ WhatsApp failed: {msg}");
+                    });
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
