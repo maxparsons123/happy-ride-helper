@@ -49,13 +49,19 @@ partial class MainForm
         cmbTransport = new ComboBox { Location = new Point(515, 25), Size = new Size(80, 23), DropDownStyle = ComboBoxStyle.DropDownList };
         cmbTransport.Items.AddRange(new object[] { "UDP", "TCP" });
 
-        // SIP User
-        var lblUser = new Label { Text = "Username:", Location = new Point(15, 58), Size = new Size(80, 23) };
-        txtSipUser = new TextBox { Location = new Point(100, 55), Size = new Size(200, 23) };
+        // SIP User (Extension)
+        var lblUser = new Label { Text = "Extension:", Location = new Point(15, 58), Size = new Size(80, 23) };
+        txtSipUser = new TextBox { Location = new Point(100, 55), Size = new Size(80, 23) };
+        txtSipUser.PlaceholderText = "e.g. 300";
+
+        // Auth ID (optional - for 3CX etc. where auth ID differs from extension)
+        var lblAuthUser = new Label { Text = "Auth ID:", Location = new Point(190, 58), Size = new Size(55, 23) };
+        txtAuthUser = new TextBox { Location = new Point(250, 55), Size = new Size(120, 23) };
+        txtAuthUser.PlaceholderText = "(optional)";
 
         // SIP Password
-        var lblPass = new Label { Text = "Password:", Location = new Point(320, 58), Size = new Size(65, 23) };
-        txtSipPassword = new TextBox { Location = new Point(390, 55), Size = new Size(205, 23), UseSystemPasswordChar = true };
+        var lblPass = new Label { Text = "Password:", Location = new Point(380, 58), Size = new Size(65, 23) };
+        txtSipPassword = new TextBox { Location = new Point(450, 55), Size = new Size(145, 23), UseSystemPasswordChar = true };
 
         // Audio Mode
         var lblAudioMode = new Label { Text = "Audio Mode:", Location = new Point(15, 88), Size = new Size(80, 23) };
@@ -159,7 +165,7 @@ partial class MainForm
 
         grpConfig.Controls.AddRange(new Control[] {
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
-            lblUser, txtSipUser, lblPass, txtSipPassword, 
+            lblUser, txtSipUser, lblAuthUser, txtAuthUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
             chkLocalOpenAI, chkSimliAvatar,
@@ -286,6 +292,7 @@ partial class MainForm
     private TextBox txtSipServer;
     private TextBox txtSipPort;
     private TextBox txtSipUser;
+    private TextBox txtAuthUser;
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
     private TextBox txtApiKey;
