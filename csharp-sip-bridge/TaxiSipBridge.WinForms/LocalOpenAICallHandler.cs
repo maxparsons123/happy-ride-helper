@@ -291,12 +291,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _aiClient.OnResponseStarted += () =>
         {
             _needsFadeIn = true;
-            Log($"🤖 [{callId}] AI response started");
+            // Log already comes through via OnLog event
         };
 
         _aiClient.OnResponseCompleted += () =>
         {
-            Log($"🤖 [{callId}] AI response completed");
+            // Log already comes through via OnLog event
         };
 
         // AI-triggered hangup (with single-execution guard)
