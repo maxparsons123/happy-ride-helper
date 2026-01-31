@@ -187,6 +187,9 @@ public class SipLoginManager : IDisposable
             var sipAccountAor = new SIPURI(_config.SipUser, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _config.SipUser };
 
+            // Debug: show exactly what credentials are being used
+            Log($"🔐 Auth Debug: AOR={sipAccountAor}, AuthUser={authUser}, PassLen={_config.SipPassword?.Length ?? 0}");
+
             _regUserAgent = new SIPRegistrationUserAgent(
                 sipTransport: _sipTransport,
                 outboundProxy: outboundProxy,
