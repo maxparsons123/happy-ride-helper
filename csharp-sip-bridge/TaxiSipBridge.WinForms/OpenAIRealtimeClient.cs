@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.3";
+    public const string VERSION = "1.4";
     // =========================
     // CONFIG
     // =========================
@@ -157,7 +157,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
             return;
 
-        var pcm8k = Audio.AudioCodecs.MuLawDecode(ulawData);
+        var pcm8k = AudioCodecs.MuLawDecode(ulawData);
         var pcm24k = Resample8kTo24k(pcm8k);
         await SendAudioAsync(pcm24k);
         Volatile.Write(ref _lastUserSpeechAt, NowMs());
@@ -169,7 +169,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
         byte[] pcm24k = sampleRate == 24000
             ? pcmData
-            : Audio.AudioCodecs.ShortsToBytes(Audio.AudioCodecs.Resample(Audio.AudioCodecs.BytesToShorts(pcmData), sampleRate, 24000));
+            : AudioCodecs.ShortsToBytes(AudioCodecs.Resample(AudioCodecs.BytesToShorts(pcmData), sampleRate, 24000));
 
         await SendAudioToOpenAIAsync(pcm24k);
         Volatile.Write(ref _lastUserSpeechAt, NowMs());
@@ -203,7 +203,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             OnPcm24Audio?.Invoke(pcm24k);
 
             // Downsample 24kHz → 8kHz and encode to µ-law
-            var samples = Audio.AudioCodecs.BytesToShorts(pcm24k);
+            var samples = AudioCodecs.BytesToShorts(pcm24k);
             var len = samples.Length / 3;
             var pcm8k = new short[len];
 
@@ -213,7 +213,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 pcm8k[i] = (short)((samples[idx] * 2 + samples[idx + 2]) / 3);
             }
 
-            var ulaw = Audio.AudioCodecs.MuLawEncode(pcm8k);
+            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
 
             // Frame into 160-byte (20ms) chunks
             for (int i = 0; i < ulaw.Length; i += 160)
@@ -243,7 +243,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             pcm24k[i * 3 + 1] = pcm8k[i];
             pcm24k[i * 3 + 2] = pcm8k[i];
         }
-        return Audio.AudioCodecs.ShortsToBytes(pcm24k);
+        return AudioCodecs.ShortsToBytes(pcm24k);
     }
 
     // =========================
@@ -513,9 +513,31 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 break;
 
             case "end_call":
-                Log("📞 End call requested");
+                Log("📞 End call requested - waiting for audio buffer to drain...");
                 await SendToolResultAsync(callId, new { success = true });
-                SignalCallEnded("end_call");
+                
+                // Wait for audio buffer to drain (max 10 seconds) before signaling end
+                _ = Task.Run(async () =>
+                {
+                    var waitStart = NowMs();
+                    const int MAX_WAIT_MS = 10000;
+                    const int CHECK_INTERVAL_MS = 100;
+                    
+                    while (NowMs() - waitStart < MAX_WAIT_MS)
+                    {
+                        if (_outboundQueue.IsEmpty)
+                        {
+                            Log("✅ Audio buffer drained, ending call");
+                            break;
+                        }
+                        await Task.Delay(CHECK_INTERVAL_MS);
+                    }
+                    
+                    if (!_outboundQueue.IsEmpty)
+                        Log($"⚠️ Buffer still has {_outboundQueue.Count} frames, ending anyway");
+                    
+                    SignalCallEnded("end_call");
+                });
                 break;
 
             default:
