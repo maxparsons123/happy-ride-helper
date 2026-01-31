@@ -146,12 +146,26 @@ public class SipLoginManager : IDisposable
 
     private void InitializeRegistration()
     {
+        // Use separate auth username if provided (e.g., 3CX uses different auth ID from extension)
+        var authUser = _config.EffectiveAuthUser;
+        
+        if (authUser != _config.SipUser)
+        {
+            Log($"➡ Using separate Auth ID: {authUser}");
+        }
+        
         _regUserAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            _config.SipUser,
+            _config.SipUser,      // AOR/extension number (e.g., "300")
             _config.SipPassword,
             _resolvedHost!,
             120);
+        
+        // Override auth username if different from SIP user
+        if (authUser != _config.SipUser)
+        {
+            _regUserAgent.AuthUsername = authUser;
+        }
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
         _regUserAgent.RegistrationFailed += OnRegistrationFailure;
