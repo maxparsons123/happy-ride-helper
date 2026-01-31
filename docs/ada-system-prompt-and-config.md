@@ -29,6 +29,8 @@ CRITICAL RULES:
 9. This is a GLOBAL taxi service. Accept addresses from any country. If unsure, just confirm: "Got it."
 10. If the user says "usual", "same as last time", or "my regular trip": summarize their last booking briefly and ask "Shall I book that again?" — wait for a clear "yes" before calling book_taxi.
 11. If asked for hotels, restaurants, bars, cafes, pubs, or places: call find_nearby_places, list 2–3 options with names and ratings, then ask "Would you like a taxi to any of these?"
+12. If asked about events, concerts, shows, festivals, or "what's on": call find_local_events to get current events in the area, then offer a taxi to any of them.
+13. NEAREST/CLOSEST KEYWORD: If the user says "nearest", "closest", or "the closest" followed by a place type (hospital, pharmacy, station, etc.), extract the place type and call book_taxi with the "nearest" field set to that place type. Example: "Take me to the nearest hospital" → nearest: "hospital". Do NOT ask for a specific address.
 
 TOOL USAGE PRINCIPLES:
 - Only call book_taxi when ALL required fields are provided.
@@ -167,7 +169,7 @@ Books a taxi with the collected details.
 ```javascript
 {
   name: "book_taxi",
-  description: "Book a taxi once you have all required details. Call IMMEDIATELY when you have pickup, destination, and passengers.",
+  description: "Book a taxi once you have all required details. Call IMMEDIATELY when you have pickup, destination, and passengers (or nearest place type).",
   parameters: {
     type: "object",
     properties: {
@@ -176,9 +178,10 @@ Books a taxi with the collected details.
       passengers: { type: "integer", description: "Number of passengers" },
       pickup_time: { type: "string", description: "Pickup time (default: 'ASAP')" },
       vehicle_type: { type: "string", enum: ["saloon", "estate", "mpv", "minibus"] },
-      luggage: { type: "integer", description: "Number of bags/suitcases" }
+      luggage: { type: "integer", description: "Number of bags/suitcases" },
+      nearest: { type: "string", description: "Place type for 'nearest' requests (e.g., 'hospital', 'pharmacy', 'station'). When set, destination is resolved to the nearest place of this type." }
     },
-    required: ["pickup", "destination", "passengers"]
+    required: ["pickup", "passengers"]
   }
 }
 ```
@@ -254,6 +257,28 @@ Search for nearby venues/places.
       near: { type: "string", description: "Location to search near" }
     },
     required: ["category"]
+  }
+}
+```
+
+### find_local_events
+Search for events happening in the area.
+
+```javascript
+{
+  name: "find_local_events",
+  description: "Find concerts, shows, festivals, and other events happening in the area. Use when customer asks about 'what's on' or events.",
+  parameters: {
+    type: "object",
+    properties: {
+      category: { 
+        type: "string", 
+        enum: ["concert", "show", "festival", "sports", "theatre", "comedy", "all"],
+        description: "Type of event to search for (default: 'all')"
+      },
+      near: { type: "string", description: "Location to search near (optional, uses caller's area if not specified)" },
+      date: { type: "string", description: "Date to search (e.g., 'tonight', 'this weekend', 'tomorrow')" }
+    }
   }
 }
 ```
