@@ -799,8 +799,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         try
         {
             var cli = FormatPhoneForWhatsApp(phoneNumber);
+            Log($"📲 Sending WhatsApp webhook: original={phoneNumber} → formatted={cli}");
             var (success, msg) = await WhatsAppNotifier.SendAsync(cli).ConfigureAwait(false);
-            Log($"📱 WhatsApp notification to {cli}: {(success ? "OK" : "FAIL")} {msg}");
+            Log($"📱 WhatsApp webhook result: {(success ? "✅ OK" : "❌ FAIL")} {msg}");
         }
         catch (Exception ex)
         {
