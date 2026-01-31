@@ -40,6 +40,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     // Tracks current OpenAI response id to ignore duplicate events
     private string? _activeResponseId;
+    private string? _lastCompletedResponseId; // Prevents duplicate response.done logs
 
     // =========================
     // CALL STATE
@@ -460,10 +461,18 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 {
                     // OBSERVED end (OpenAI controlled) — this is the ONLY place we set _responseActive = 0
                     var responseId = TryGetResponseId(doc.RootElement);
-                    if (_activeResponseId != null && responseId != null && _activeResponseId != responseId)
-                        break; // Ignore stale/duplicate
 
+                    // Ignore duplicate response.done for same ID
+                    if (responseId == null || responseId == _lastCompletedResponseId)
+                        break;
+
+                    // Ignore stale response.done for different ID
+                    if (_activeResponseId != null && responseId != _activeResponseId)
+                        break;
+
+                    _lastCompletedResponseId = responseId;
                     _activeResponseId = null;
+
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastAdaFinishedAt, NowMs());
 
@@ -884,6 +893,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Interlocked.Exchange(ref _greetingSent, 0);
 
         _activeResponseId = null;
+        _lastCompletedResponseId = null;
 
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
