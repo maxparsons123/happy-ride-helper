@@ -848,15 +848,27 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     {
         await Task.Delay(150).ConfigureAwait(false);
 
-        if (!CanCreateResponse())
+        // DEBUG: Log what's blocking the greeting
+        var respActive = Volatile.Read(ref _responseActive);
+        var respQueued = Volatile.Read(ref _responseQueued);
+        var callEnded = Volatile.Read(ref _callEnded);
+        var disposed = Volatile.Read(ref _disposed);
+        var lastSpeech = Volatile.Read(ref _lastUserSpeechAt);
+        var speechGap = NowMs() - lastSpeech;
+
+        Log($"🔍 Greeting check: respActive={respActive}, respQueued={respQueued}, callEnded={callEnded}, disposed={disposed}, speechGap={speechGap}ms");
+
+        // FORCE greeting to fire — it's the first response, so override any spurious state
+        if (respActive == 1 || respQueued == 1)
         {
-            Log("⏳ Skipping greeting — response already active/queued");
-            return;
+            Log("⚠️ Greeting: Clearing spurious response state for initial greeting");
+            Interlocked.Exchange(ref _responseActive, 0);
+            Interlocked.Exchange(ref _responseQueued, 0);
+            _activeResponseId = null;
         }
 
         var greeting = GetLocalizedGreeting(_detectedLanguage);
 
-        // DO NOT set _responseActive = 1 here — let OpenAI's response.created do it
         await SendJsonAsync(new
         {
             type = "response.create",
