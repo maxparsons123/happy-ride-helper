@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.11";
+    public const string VERSION = "1.12";
 
     // =========================
     // CONFIG
@@ -443,6 +443,26 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         var text = t.GetString()!;
                         Log($"💬 Ada: {text}");
                         OnTranscript?.Invoke($"Ada: {text}");
+
+                        // Goodbye detection watchdog: if Ada says goodbye, force end_call after 5s
+                        if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+                            (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
+                             text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
+                            _ = Task.Run(async () =>
+                            {
+                                await Task.Delay(5000).ConfigureAwait(false);
+
+                                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                    return;
+
+                                Log("⏰ Goodbye watchdog triggered - forcing end_call");
+                                Interlocked.Exchange(ref _ignoreUserAudio, 1);
+                                SignalCallEnded("goodbye_watchdog");
+                            });
+                        }
                     }
                     break;
                 }
