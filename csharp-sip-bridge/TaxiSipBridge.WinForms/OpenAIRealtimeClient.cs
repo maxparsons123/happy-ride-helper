@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.12";
+    public const string VERSION = "1.13";
 
     // =========================
     // CONFIG
@@ -36,6 +36,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private int _greetingSent;     // Per-call
     private int _ignoreUserAudio;  // Per-call (set after goodbye starts)
     private int _deferredResponsePending; // Per-call (queued response after response.done)
+    private int _noReplyWatchdogId;      // Incremented to cancel stale watchdogs
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -481,6 +482,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
                     break;
 
                 case "input_audio_buffer.speech_stopped":
@@ -525,6 +527,41 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             }
                         });
                     }
+
+                    // Start no-reply watchdog (8 seconds of silence triggers re-prompt)
+                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(8000).ConfigureAwait(false);
+
+                        // Abort if cancelled, call ended, or user spoke
+                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                        if (Volatile.Read(ref _responseActive) == 1) return;
+
+                        Log("⏰ No-reply watchdog triggered - prompting user");
+
+                        await SendJsonAsync(new
+                        {
+                            type = "conversation.item.create",
+                            item = new
+                            {
+                                type = "message",
+                                role = "system",
+                                content = new[]
+                                {
+                                    new
+                                    {
+                                        type = "input_text",
+                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                                    }
+                                }
+                            }
+                        }).ConfigureAwait(false);
+
+                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                    });
+
                     break;
                 }
 
@@ -949,6 +986,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Volatile.Write(ref _lastToolCallAt, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
         Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any stale watchdogs
     }
 
     private static string DetectLanguage(string? phone)
