@@ -653,31 +653,75 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         }
     }
 
-    private static string FormatPhoneForWhatsApp(string phone)
+    // ===========================================
+    // LAZY-INITIALIZED DICTIONARIES
+    // ===========================================
+    private static Dictionary<string, string>? _countryCodeMap;
+    private static Dictionary<string, string> CountryCodeToLanguage
     {
-        var clean = phone.Replace(" ", "").Replace("-", "");
-        clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
-        
-        // Convert + prefix to 00
-        if (clean.StartsWith("+"))
-            clean = "00" + clean.Substring(1);
-        
-        // If no 00 prefix, add Dutch country code for local numbers
-        if (!clean.StartsWith("00"))
+        get
         {
-            if (clean.StartsWith("06") || clean.StartsWith("0"))
-                clean = "0031" + clean.Substring(1);
-            else
-                clean = "00" + clean;
+            _countryCodeMap ??= new Dictionary<string, string>
+            {
+                { "31", "nl" }, // Netherlands
+                { "32", "nl" }, // Belgium (Dutch)
+                { "33", "fr" }, // France
+                { "41", "de" }, // Switzerland
+                { "43", "de" }, // Austria
+                { "44", "en" }, // UK
+                { "49", "de" }, // Germany
+            };
+            return _countryCodeMap;
         }
-        
-        // Dutch: remove leading 0 after country code (00310 → 0031)
-        if (clean.StartsWith("00310"))
-            clean = "0031" + clean.Substring(5);
-        
-        return new string(clean.Where(char.IsDigit).ToArray());
     }
 
+    private static Dictionary<string, string>? _greetingsMap;
+    private static Dictionary<string, string> LocalizedGreetings
+    {
+        get
+        {
+            _greetingsMap ??= new Dictionary<string, string>
+            {
+                { "en", "Hello, and welcome to the Taxibot demo. I'm Ada, your taxi booking assistant. What's your name?" },
+                { "nl", "Hallo, en welkom bij de Taxibot demo. Ik ben Ada, uw taxi boekingsassistent. Wat is uw naam?" },
+                { "fr", "Bonjour et bienvenue à la démo Taxibot. Je suis Ada. Quel est votre prénom?" },
+                { "de", "Hallo und willkommen zur Taxibot-Demo. Ich bin Ada. Wie ist Ihr Name?" },
+            };
+            return _greetingsMap;
+        }
+    }
+
+    private static Dictionary<string, string>? _sttCorrectionsMap;
+    private static Dictionary<string, string> SttCorrections
+    {
+        get
+        {
+            _sttCorrectionsMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "52 I ain't dead bro", "52A David Road" },
+                { "52 I ain't David", "52A David Road" },
+                { "52 ain't David", "52A David Road" },
+                { "52 a David", "52A David Road" },
+                { "for now", "now" },
+                { "right now", "now" },
+                { "as soon as possible", "now" },
+                { "ASAP", "now" },
+                { "yeah please", "yes please" },
+                { "yep", "yes" },
+                { "yup", "yes" },
+                { "yeah", "yes" },
+                { "that's right", "yes" },
+                { "correct", "yes" },
+                { "go ahead", "yes" },
+                { "book it", "yes" },
+            };
+            return _sttCorrectionsMap;
+        }
+    }
+
+    // ===========================================
+    // UTILITIES
+    // ===========================================
     private void ResetCallState(string? caller)
     {
         ClearPendingFrames();
@@ -700,23 +744,28 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     {
         if (string.IsNullOrEmpty(phone)) return "en";
         var clean = phone.Replace(" ", "").Replace("-", "");
+        clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        
+        // Convert + or 00 prefix to just digits
+        if (clean.StartsWith("+")) clean = clean.Substring(1);
+        if (clean.StartsWith("00")) clean = clean.Substring(2);
+        
+        // Dutch local format
         if (clean.StartsWith("06") && clean.Length == 10) return "nl";
-        if (clean.StartsWith("+31") || clean.StartsWith("0031")) return "nl";
-        if (clean.StartsWith("+33") || clean.StartsWith("0033")) return "fr";
-        if (clean.StartsWith("+49") || clean.StartsWith("0049")) return "de";
+        if (clean.StartsWith("0") && clean.Length == 10) return "nl";
+        
+        // Check country codes
+        foreach (var kv in CountryCodeToLanguage)
+        {
+            if (clean.StartsWith(kv.Key)) return kv.Value;
+        }
         return "en";
     }
 
     private static string ApplySttCorrections(string text)
     {
         var t = text.Trim();
-        return t switch
-        {
-            "ASAP" or "as soon as possible" or "right now" => "now",
-            "yep" or "yup" or "yeah" or "yeah please" => "yes",
-            "that's right" or "correct" or "go ahead" or "book it" => "yes",
-            _ => t
-        };
+        return SttCorrections.TryGetValue(t, out var corrected) ? corrected : t;
     }
 
     private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant. Speak in {GetLanguageName(_detectedLanguage)}.
@@ -731,13 +780,10 @@ RULES: One question at a time. Under 25 words per response. Use £. ALWAYS recit
 
     private static string GetLanguageName(string c) => c switch { "nl" => "Dutch", "fr" => "French", "de" => "German", _ => "English" };
 
-    private static string GetLocalizedGreeting(string lang) => lang switch
-    {
-        "nl" => "Hallo, welkom bij Taxibot. Ik ben Ada. Wat is uw naam?",
-        "fr" => "Bonjour, bienvenue chez Taxibot. Je suis Ada. Comment vous appelez-vous?",
-        "de" => "Hallo, willkommen bei Taxibot. Ich bin Ada. Wie heißen Sie?",
-        _ => "Hello, welcome to Taxibot. I'm Ada. What's your name?"
-    };
+    private static string GetLocalizedGreeting(string lang) => 
+        LocalizedGreetings.TryGetValue(lang, out var greeting) ? greeting : LocalizedGreetings["en"];
+
+    private static string FormatPhoneForWhatsApp(string phone) => WhatsAppNotifier.FormatPhone(phone);
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
