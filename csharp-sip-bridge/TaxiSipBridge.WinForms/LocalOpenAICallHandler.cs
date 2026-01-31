@@ -9,54 +9,90 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
-/// Uses G711AiSipPlayout for timer-driven RTP delivery with proper G.711 encoding.
+/// Uses DirectRtpPlayout for timer-driven RTP delivery with proper G.711 encoding.
+/// Thread-safe with single-execution guards for hangup handling.
 /// </summary>
-public class LocalOpenAICallHandler : ISipCallHandler
+public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 {
+    // ===========================================
+    // CONFIGURATION
+    // ===========================================
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
     private readonly string? _dispatchWebhookUrl;
 
+    // ===========================================
+    // CALL STATE
+    // ===========================================
     private volatile bool _isInCall;
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
-    private const int ECHO_GUARD_MS = 200; // Suppress inbound audio for 200ms after Ada stops (reduced for faster response)
-
+    
     private VoIPMediaSession? _currentMediaSession;
     private DirectRtpPlayout? _playout;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
-    private Action<SIPDialogue>? _currentHungupHandler; // Track to prevent stale handlers
-    private SIPUserAgent? _currentUa; // Track UA for cleanup
-    private int _hangupFired; // Ensure single execution (0 = not fired, 1 = fired)
+    private Action<SIPDialogue>? _currentHungupHandler;
+    private SIPUserAgent? _currentUa;
+    private int _hangupFired;
 
-    // Simli avatar integration (WebView2-based sender)
-    private Func<byte[], Task>? _simliSendAudio;
-
-    private const int FLUSH_PACKETS = 20;       // Flush first ~400ms of audio (carrier junk)
-    private const int EARLY_PROTECTION_MS = 500;  // Ignore inbound for 500ms after call starts
-    private const int HANGUP_GRACE_MS = 5000;     // Wait for final audio to play before hangup (5 seconds for goodbye)
+    // ===========================================
+    // AUDIO PROCESSING STATE
+    // ===========================================
     private int _inboundPacketCount;
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
-    private bool _adaHasStartedSpeaking; // Track if we've received any AI audio
-    private bool _needsFadeIn; // Apply fade-in to first audio delta of each response
+    private bool _adaHasStartedSpeaking;
+    private bool _needsFadeIn;
 
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
 
+    // Simli avatar integration
+    private Func<byte[], Task>? _simliSendAudio;
+
+    // ===========================================
+    // CONSTANTS
+    // ===========================================
+    private const int ECHO_GUARD_MS = 200;
+    private const int FLUSH_PACKETS = 20;
+    private const int EARLY_PROTECTION_MS = 500;
+    private const int HANGUP_GRACE_MS = 5000;
+
+    // ===========================================
+    // EVENTS
+    // ===========================================
     public event Action<string>? OnLog;
     public event Action<string, string>? OnCallStarted;
     public event Action<string>? OnCallEnded;
     public event Action<string>? OnTranscript;
     public event Action<byte[]>? OnCallerAudioMonitor;
+    public event Action<BookingState>? OnBookingUpdated;
 
+    // ===========================================
+    // PROPERTIES
+    // ===========================================
     public bool IsInCall => _isInCall;
     public bool IsOpusAvailable => _remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS);
     public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
+
+    // ===========================================
+    // CONSTRUCTOR
+    // ===========================================
+    public LocalOpenAICallHandler(
+        string apiKey,
+        string model = "gpt-4o-mini-realtime-preview-2024-12-17",
+        string voice = "shimmer",
+        string? dispatchWebhookUrl = null)
+    {
+        _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
+        _model = model;
+        _voice = voice;
+        _dispatchWebhookUrl = dispatchWebhookUrl;
+    }
 
     /// <summary>
     /// Configure a sender function for Simli avatar audio (PCM24 24kHz).
@@ -67,25 +103,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
         Log("🎭 Simli audio sender configured");
     }
 
-    /// <summary>
-    /// Create a local OpenAI call handler with optional dispatch webhook.
-    /// </summary>
-    /// <param name="apiKey">OpenAI API key</param>
-    /// <param name="model">Model name</param>
-    /// <param name="voice">Voice name</param>
-    /// <param name="dispatchWebhookUrl">Optional webhook URL for taxi dispatch (e.g., Supabase edge function)</param>
-    public LocalOpenAICallHandler(
-        string apiKey,
-        string model = "gpt-4o-mini-realtime-preview-2024-12-17",
-        string voice = "shimmer",
-        string? dispatchWebhookUrl = null)
-    {
-        _apiKey = apiKey;
-        _model = model;
-        _voice = voice;
-        _dispatchWebhookUrl = dispatchWebhookUrl;
-    }
-
+    // ===========================================
+    // MAIN CALL HANDLER
+    // ===========================================
     public async Task HandleIncomingCallAsync(SIPTransport transport, SIPUserAgent ua, SIPRequest req, string caller)
     {
         if (_disposed) return;
@@ -102,19 +122,25 @@ public class LocalOpenAICallHandler : ISipCallHandler
         var callId = Guid.NewGuid().ToString("N")[..8];
         _callCts = new CancellationTokenSource();
         var cts = _callCts;
+
+        // Reset state for new call
         _inboundPacketCount = 0;
         _inboundFlushComplete = false;
         _callStartedAt = DateTime.UtcNow;
         _remotePtToCodec.Clear();
-        _hangupFired = 0; // Reset for new call
-        
-        // Clean up any stale hangup handler from previous call on previous UA
+        _hangupFired = 0;
+        _adaHasStartedSpeaking = false;
+        _needsFadeIn = false;
+        _isBotSpeaking = false;
+        _botStoppedSpeakingAt = DateTime.MinValue;
+
+        // Clean up stale handlers from previous call
         if (_currentHungupHandler != null && _currentUa != null)
         {
             _currentUa.OnCallHungup -= _currentHungupHandler;
         }
         _currentHungupHandler = null;
-        _currentUa = ua; // Track current UA
+        _currentUa = ua;
 
         OnCallStarted?.Invoke(callId, caller);
 
@@ -123,11 +149,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
             // Parse remote SDP for codec info
             ParseRemoteSdp(callId, req);
 
-            // Setup media session with UnifiedAudioEncoder (Opus + G.722 + G.711)
+            // Setup media session
             var audioEncoder = new UnifiedAudioEncoder();
-            AudioCodecs.ResetAllCodecs(); // Reset codec state for new call
+            AudioCodecs.ResetAllCodecs();
 
-            // Build codec list with Opus prioritized if remote offers it
+            // Build codec list with Opus prioritized if available
             List<AudioFormat> preferredFormats;
             if (IsOpusAvailable)
             {
@@ -142,13 +168,10 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 preferredFormats = audioEncoder.SupportedFormats.ToList();
             }
 
-            // Create audio source with prioritized codecs
             var audioSource = new AudioExtrasSource(
                 audioEncoder,
                 new AudioSourceOptions { AudioSource = AudioSourcesEnum.None }
             );
-
-            // Restrict to our preferred format order
             audioSource.RestrictFormats(fmt => preferredFormats.Any(p => p.Codec == fmt.Codec));
 
             var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
@@ -183,8 +206,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create DirectRtpPlayout (bypasses SendAudio, sends raw RTP packets)
-            // VoIPMediaSession inherits from RTPSession, so this works directly
+            // Create DirectRtpPlayout
             _playout = new DirectRtpPlayout(_currentMediaSession);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
@@ -197,98 +219,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 }
             };
             _playout.Start();
+            Log($"🎵 [{callId}] DirectRtpPlayout started");
 
-            _adaHasStartedSpeaking = false;
-            Log($"🎵 [{callId}] DirectRtpPlayout started (raw RTP, A-law encoded)");
-
-            // Create OpenAI client with dispatch webhook support
+            // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
-            _aiClient.OnLog += msg => Log(msg);
-            _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
-            _aiClient.OnAdaSpeaking += msg => { };
-            _aiClient.OnPcm24Audio += async pcmBytes =>
-            {
-                _isBotSpeaking = true;
-                _adaHasStartedSpeaking = true;
-
-                // Apply fade-in to first audio delta to prevent speaker pop
-                byte[] processedBytes = pcmBytes;
-                if (_needsFadeIn)
-                {
-                    processedBytes = ApplyFadeIn(pcmBytes);
-                    _needsFadeIn = false;
-                    Log($"🔊 [{callId}] Applied anti-glitch fade-in");
-                }
-
-                _playout?.BufferAiAudio(processedBytes);
-
-                // Send audio to Simli for lip-sync (fire and forget)
-                if (_simliSendAudio != null)
-                {
-                    try
-                    {
-                        await _simliSendAudio(processedBytes);
-                    }
-                    catch { } // Ignore Simli errors - don't affect call
-                }
-            };
-            _aiClient.OnResponseStarted += () =>
-            {
-                // Mark for fade-in on new response (don't clear buffer to avoid cutting previous audio)
-                _needsFadeIn = true;
-                Log($"🤖 [{callId}] AI response started");
-            };
-            _aiClient.OnResponseCompleted += () =>
-            {
-                Log($"🤖 [{callId}] AI response completed");
-            };
-            
-            // AI-triggered hangup (with single-execution guard)
-            Action? endCallHandler = null;
-            endCallHandler = async () =>
-            {
-                // Ensure single execution across AI and caller hangup
-                if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
-                
-                _aiClient!.OnCallEnded -= endCallHandler;
-                if (_currentHungupHandler != null && _currentUa != null)
-                {
-                    _currentUa.OnCallHungup -= _currentHungupHandler;
-                    _currentHungupHandler = null;
-                }
-                
-                Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
-                await Task.Delay(HANGUP_GRACE_MS);
-                Log($"📴 [{callId}] Grace period complete, ending call");
-                try { cts.Cancel(); } catch { }
-            };
-            _aiClient.OnCallEnded += endCallHandler;
-            
-            if (_aiClient is OpenAIRealtimeClient rtc)
-                rtc.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
-
-            // Caller-triggered hangup (with single-execution guard)
-            _currentHungupHandler = dialogue =>
-            {
-                // Ensure single execution across AI and caller hangup
-                if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
-                
-                if (_currentHungupHandler != null && _currentUa != null)
-                {
-                    _currentUa.OnCallHungup -= _currentHungupHandler;
-                    _currentHungupHandler = null;
-                }
-                if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
-                
-                Log($"📕 [{callId}] Caller hung up");
-                try { cts.Cancel(); } catch { }
-            };
-            ua.OnCallHungup += _currentHungupHandler;
+            WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
             await _aiClient.ConnectAsync(caller, cts.Token);
-            Log($"🟢 [{callId}] OpenAI connected");
+            Log($"🟢 [{callId}] OpenAI connected (language: {_aiClient.DetectedLanguage})");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
@@ -310,6 +250,96 @@ public class LocalOpenAICallHandler : ISipCallHandler
         }
     }
 
+    // ===========================================
+    // AI CLIENT EVENT WIRING
+    // ===========================================
+    private void WireAiClientEvents(string callId, CancellationTokenSource cts)
+    {
+        if (_aiClient == null) return;
+
+        _aiClient.OnLog += msg => Log(msg);
+        _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
+        _aiClient.OnBookingUpdated += state => OnBookingUpdated?.Invoke(state);
+        _aiClient.OnCallerAudioMonitor += data => OnCallerAudioMonitor?.Invoke(data);
+
+        _aiClient.OnAdaSpeaking += _ => { };
+
+        _aiClient.OnPcm24Audio += async pcmBytes =>
+        {
+            _isBotSpeaking = true;
+            _adaHasStartedSpeaking = true;
+
+            // Apply fade-in to first audio delta to prevent speaker pop
+            byte[] processedBytes = pcmBytes;
+            if (_needsFadeIn)
+            {
+                processedBytes = ApplyFadeIn(pcmBytes);
+                _needsFadeIn = false;
+                Log($"🔊 [{callId}] Applied anti-glitch fade-in");
+            }
+
+            _playout?.BufferAiAudio(processedBytes);
+
+            // Send to Simli avatar (fire and forget)
+            if (_simliSendAudio != null)
+            {
+                try { await _simliSendAudio(processedBytes); }
+                catch { }
+            }
+        };
+
+        _aiClient.OnResponseStarted += () =>
+        {
+            _needsFadeIn = true;
+            Log($"🤖 [{callId}] AI response started");
+        };
+
+        _aiClient.OnResponseCompleted += () =>
+        {
+            Log($"🤖 [{callId}] AI response completed");
+        };
+
+        // AI-triggered hangup (with single-execution guard)
+        Action? endCallHandler = null;
+        endCallHandler = async () =>
+        {
+            if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
+
+            _aiClient!.OnCallEnded -= endCallHandler;
+            if (_currentHungupHandler != null && _currentUa != null)
+            {
+                _currentUa.OnCallHungup -= _currentHungupHandler;
+                _currentHungupHandler = null;
+            }
+
+            Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
+            await Task.Delay(HANGUP_GRACE_MS);
+            Log($"📴 [{callId}] Grace period complete, ending call");
+            try { cts.Cancel(); } catch { }
+        };
+        _aiClient.OnCallEnded += endCallHandler;
+
+        // Caller-triggered hangup (with single-execution guard)
+        _currentHungupHandler = _ =>
+        {
+            if (Interlocked.Exchange(ref _hangupFired, 1) != 0) return;
+
+            if (_currentHungupHandler != null && _currentUa != null)
+            {
+                _currentUa.OnCallHungup -= _currentHungupHandler;
+                _currentHungupHandler = null;
+            }
+            if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
+
+            Log($"📕 [{callId}] Caller hung up");
+            try { cts.Cancel(); } catch { }
+        };
+        _currentUa!.OnCallHungup += _currentHungupHandler;
+    }
+
+    // ===========================================
+    // SDP PARSING
+    // ===========================================
     private void ParseRemoteSdp(string callId, SIPRequest req)
     {
         try
@@ -329,7 +359,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 return;
             }
 
-            // Parse all codecs from remote offer
             var codecList = new List<string>();
             foreach (var f in audioMedia.MediaFormats)
             {
@@ -349,7 +378,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 codecList.Add($"{name}(PT{pt})");
             }
 
-            // Log all available codecs prominently
             Log($"════════════════════════════════════════════════════");
             Log($"🎧 [{callId}] AVAILABLE CODECS: {string.Join(", ", codecList)}");
             Log($"   Opus: {(IsOpusAvailable ? "✓ YES" : "✗ NO")}");
@@ -363,6 +391,9 @@ public class LocalOpenAICallHandler : ISipCallHandler
         }
     }
 
+    // ===========================================
+    // RTP INPUT HANDLING
+    // ===========================================
     private void WireRtpInput(string callId, CancellationTokenSource cts)
     {
         if (_currentMediaSession == null || _aiClient == null) return;
@@ -387,12 +418,12 @@ public class LocalOpenAICallHandler : ISipCallHandler
                 Log($"✅ [{callId}] Inbound flush complete");
             }
 
-            // Early protection: ignore audio for first N seconds (carrier/PBX junk)
+            // Early protection: ignore audio for first N ms
             var msSinceCallStart = (DateTime.UtcNow - _callStartedAt).TotalMilliseconds;
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // Skip while bot is speaking OR during echo guard period
+            // Skip while bot is speaking OR during echo guard
             if (_isBotSpeaking) return;
 
             var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
@@ -405,13 +436,11 @@ public class LocalOpenAICallHandler : ISipCallHandler
             var pt = rtp.Header.PayloadType;
             if (!_remotePtToCodec.TryGetValue(pt, out var codec))
             {
-                // Default to PCMU for unknown PT
                 codec = pt == 8 ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
             }
 
-            // Decode to PCM16
             short[] pcm16;
-            int sampleRate = 8000; // Default for G.711
+            int sampleRate = 8000;
 
             switch (codec)
             {
@@ -439,12 +468,12 @@ public class LocalOpenAICallHandler : ISipCallHandler
                             mono = pcm48;
                         }
 
-                        // Decimate 48kHz → 24kHz (2:1) for OpenAI
+                        // Decimate 48kHz → 24kHz for OpenAI
                         pcm16 = new short[mono.Length / 2];
                         for (int j = 0; j < pcm16.Length; j++)
                             pcm16[j] = mono[j * 2];
 
-                        sampleRate = 24000; // Already at 24kHz after decimation
+                        sampleRate = 24000;
                     }
                     catch (Exception ex)
                     {
@@ -456,7 +485,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
                     try
                     {
                         pcm16 = AudioCodecs.G722Decode(payload);
-                        sampleRate = 16000; // G.722 is 16kHz
+                        sampleRate = 16000;
                     }
                     catch (Exception ex)
                     {
@@ -465,15 +494,13 @@ public class LocalOpenAICallHandler : ISipCallHandler
                     }
                     break;
                 default:
-                    // Unsupported codec
                     return;
             }
 
-            // Convert to bytes
+            // Convert to bytes and send to OpenAI
             var pcmBytes = new byte[pcm16.Length * 2];
             Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-            // Send to OpenAI with correct sample rate
             try
             {
                 await _aiClient.SendAudioAsync(pcmBytes, sampleRate);
@@ -482,13 +509,16 @@ public class LocalOpenAICallHandler : ISipCallHandler
         };
     }
 
+    // ===========================================
+    // CLEANUP
+    // ===========================================
     private async Task CleanupAsync(string callId, SIPUserAgent ua)
     {
         Log($"📴 [{callId}] Cleanup...");
 
         _isInCall = false;
-        
-        // Unsubscribe hangup handler to prevent stale callbacks
+
+        // Unsubscribe hangup handler
         if (_currentHungupHandler != null && _currentUa != null)
         {
             _currentUa.OnCallHungup -= _currentHungupHandler;
@@ -523,17 +553,19 @@ public class LocalOpenAICallHandler : ISipCallHandler
         OnCallEnded?.Invoke(callId);
     }
 
+    // ===========================================
+    // AUDIO UTILITIES
+    // ===========================================
+    
     /// <summary>
     /// Apply a fade-in ramp to the first PCM24 audio delta to prevent speaker pop.
     /// Ramps from 0% to 100% over ~2ms (48 samples at 24kHz).
     /// </summary>
-    private byte[] ApplyFadeIn(byte[] pcmBytes)
+    private static byte[] ApplyFadeIn(byte[] pcmBytes)
     {
-        // Convert bytes to shorts (PCM16 24kHz)
         short[] samples = new short[pcmBytes.Length / 2];
         Buffer.BlockCopy(pcmBytes, 0, samples, 0, pcmBytes.Length);
 
-        // Fade over 48 samples (~2ms at 24kHz)
         int fadeLength = Math.Min(samples.Length, 48);
         for (int i = 0; i < fadeLength; i++)
         {
@@ -541,7 +573,6 @@ public class LocalOpenAICallHandler : ISipCallHandler
             samples[i] = (short)(samples[i] * multiplier);
         }
 
-        // Convert back to bytes
         byte[] fadedBytes = new byte[pcmBytes.Length];
         Buffer.BlockCopy(samples, 0, fadedBytes, 0, pcmBytes.Length);
         return fadedBytes;
@@ -553,12 +584,14 @@ public class LocalOpenAICallHandler : ISipCallHandler
         OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
     }
 
+    // ===========================================
+    // DISPOSAL
+    // ===========================================
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        
-        // Unsubscribe hangup handler
+
         if (_currentHungupHandler != null && _currentUa != null)
         {
             try { _currentUa.OnCallHungup -= _currentHungupHandler; } catch { }
@@ -569,6 +602,7 @@ public class LocalOpenAICallHandler : ISipCallHandler
         try { _playout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
+
         GC.SuppressFinalize(this);
     }
 }
