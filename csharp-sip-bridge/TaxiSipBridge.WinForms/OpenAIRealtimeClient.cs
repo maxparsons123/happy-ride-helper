@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.14";
+    public const string VERSION = "1.15";
 
     // =========================
     // CONFIG
@@ -724,6 +724,33 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 break;
             }
 
+            case "find_local_events":
+            {
+                var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
+                var near = args.TryGetValue("near", out var n) ? n?.ToString() : null;
+                var date = args.TryGetValue("date", out var dt) ? dt?.ToString() ?? "this weekend" : "this weekend";
+
+                Log($"🎭 Events lookup: {category} near {near ?? "unknown"} on {date}");
+
+                // Mock response - in production this would call an events API
+                var mockEvents = new[]
+                {
+                    new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
+                    new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
+                    new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
+                };
+
+                await SendToolResultAsync(callId, new
+                {
+                    success = true,
+                    events = mockEvents,
+                    message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+                }).ConfigureAwait(false);
+
+                await QueueResponseCreateAsync().ConfigureAwait(false);
+                break;
+            }
+
             case "end_call":
                 Log("📞 End call requested - ignoring further user audio...");
                 Interlocked.Exchange(ref _ignoreUserAudio, 1);  // Stop accepting mic input immediately
@@ -1025,6 +1052,10 @@ CORRECTIONS: If user says 'change pickup to X' or 'actually it's Y passengers' o
 
 PRONUNCIATION: Hyphenated house numbers like '12-14A' are read as separate numbers without 'to' or 'dash' — say 'twelve fourteen A'. Alphanumeric suffixes like '52A' are pronounced naturally: 'fifty-two A'. Treat hyphens in addresses as spacing, not ranges.
 
+EVENTS: If caller asks about events, concerts, shows, festivals, or 'what's on' in an area, call find_local_events to search. List 2-3 events with names and dates, then offer a taxi.
+
+NEAREST: If caller says 'nearest', 'closest', or 'the closest' + place type (hospital, pharmacy, station, etc.), extract the place type. Set destination to 'Nearest [place type]' and proceed with booking — the system will resolve the actual address.
+
 RULES: One question at a time. Under 25 words per response. Use £. ALWAYS recite addresses in summaries. Only call end_call after user says no to 'anything else'.";
 
     private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
@@ -1098,6 +1129,22 @@ RULES: One question at a time. Under 25 words per response. Use £. ALWAYS recit
                     ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } }
                 },
                 required = new[] { "action" }
+            }
+        },
+        new
+        {
+            type = "function",
+            name = "find_local_events",
+            description = "Find concerts, shows, festivals, and events happening in an area",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["category"] = new { type = "string", description = "Event type: concert, show, festival, sports, theatre, comedy, or all" },
+                    ["near"] = new { type = "string", description = "Location to search near" },
+                    ["date"] = new { type = "string", description = "Date: tonight, tomorrow, this weekend, etc." }
+                }
             }
         },
         new
