@@ -146,6 +146,8 @@ public class SipLoginManager : IDisposable
 
     private void InitializeRegistration()
     {
+        string resolvedHost = ResolveDns(_config.SipServer);
+        
         // Use separate auth username if provided (e.g., 3CX uses different auth ID from extension)
         var authUser = _config.EffectiveAuthUser;
         
@@ -158,7 +160,7 @@ public class SipLoginManager : IDisposable
             _sipTransport,
             _config.SipUser,      // AOR/extension number (e.g., "300")
             _config.SipPassword,
-            _resolvedHost!,
+            resolvedHost,
             120);
         
         // Override auth username if different from SIP user
