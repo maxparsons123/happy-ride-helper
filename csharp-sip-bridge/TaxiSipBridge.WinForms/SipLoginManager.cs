@@ -146,21 +146,70 @@ public class SipLoginManager : IDisposable
 
     private void InitializeRegistration()
     {
-        string resolvedHost = ResolveDns(_config.SipServer);
         var authUser = _config.EffectiveAuthUser;
-        
-        _regUserAgent = new SIPRegistrationUserAgent(
-            _sipTransport,
-            _config.SipUser,
-            _config.SipPassword,
-            resolvedHost,
-            120);
-        
-        // Set separate auth username if provided (for 3CX, etc.)
+
+        // NOTE: SIPSorcery's simple ctor does NOT allow overriding the auth username.
+        // If Auth ID differs from extension (common in 3CX), we must use the advanced ctor.
+        var registrarHost = ResolveDns(_config.SipServer);
+        var registrarHostWithPort = _config.SipPort == 5060
+            ? registrarHost
+            : $"{registrarHost}:{_config.SipPort}";
+
         if (authUser != _config.SipUser)
         {
-            _regUserAgent.AuthUsername = authUser;
+            if (!IPAddress.TryParse(registrarHost, out var registrarIp))
+            {
+                try
+                {
+                    registrarIp = Dns.GetHostAddresses(registrarHost)
+                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+                }
+                catch
+                {
+                    // If we can't resolve to an IP we can't build SIPEndPoint for the advanced ctor.
+                    // Fall back to the simple ctor (registration may fail, but we avoid crashing).
+                    Log($"⚠️ Could not resolve registrar to IPv4 for Auth ID login; falling back to simple registration.");
+                    _regUserAgent = new SIPRegistrationUserAgent(
+                        _sipTransport,
+                        _config.SipUser,
+                        _config.SipPassword,
+                        registrarHostWithPort,
+                        120);
+                    _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
+                    _regUserAgent.RegistrationFailed += OnRegistrationFailure;
+                    return;
+                }
+            }
+
+            var protocol = _config.Transport == SipTransportType.TCP ? SIPProtocolsEnum.tcp : SIPProtocolsEnum.udp;
+            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _config.SipPort));
+
+            var sipAccountAor = new SIPURI(_config.SipUser, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
+            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _config.SipUser };
+
+            _regUserAgent = new SIPRegistrationUserAgent(
+                sipTransport: _sipTransport,
+                outboundProxy: outboundProxy,
+                sipAccountAOR: sipAccountAor,
+                authUsername: authUser,
+                password: _config.SipPassword,
+                realm: _config.SipServer,
+                registrarHost: registrarHostWithPort,
+                contactURI: contactUri,
+                expiry: 120,
+                customHeaders: Array.Empty<string>());
+
             Log($"➡ Using separate Auth ID: {authUser}");
+        }
+        else
+        {
+            // Standard registration: extension and auth username are the same.
+            _regUserAgent = new SIPRegistrationUserAgent(
+                _sipTransport,
+                _config.SipUser,
+                _config.SipPassword,
+                registrarHostWithPort,
+                120);
         }
 
         _regUserAgent.RegistrationSuccessful += OnRegistrationSuccess;
