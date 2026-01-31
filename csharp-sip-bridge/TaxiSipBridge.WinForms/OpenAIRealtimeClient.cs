@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.15";
+    public const string VERSION = "1.16";
 
     // =========================
     // CONFIG
@@ -1016,9 +1016,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any stale watchdogs
     }
 
-    private static string DetectLanguage(string? phone)
+    private string DetectLanguage(string? phone)
     {
-        if (string.IsNullOrEmpty(phone)) return "en";
+        if (string.IsNullOrEmpty(phone))
+        {
+            Log($"🌍 Language: en (no phone)");
+            return "en";
+        }
+
         var clean = phone.Replace(" ", "").Replace("-", "");
         clean = new string(clean.Where(c => char.IsDigit(c) || c == '+').ToArray());
 
@@ -1026,15 +1031,29 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         if (clean.StartsWith("+")) clean = clean.Substring(1);
         if (clean.StartsWith("00")) clean = clean.Substring(2);
 
-        // Dutch local format
-        if (clean.StartsWith("06") && clean.Length == 10) return "nl";
-        if (clean.StartsWith("0") && clean.Length == 10) return "nl";
+        var prefix2 = clean.Length >= 2 ? clean.Substring(0, 2) : clean;
+        Log($"🌍 Phone: {phone} → clean: {clean} → prefix2: {prefix2}");
 
-        // Check country codes
-        foreach (var kv in CountryCodeToLanguage)
+        // Dutch local format
+        if (clean.StartsWith("06") && clean.Length == 10)
         {
-            if (clean.StartsWith(kv.Key)) return kv.Value;
+            Log($"🌍 Language: nl (Dutch mobile 06)");
+            return "nl";
         }
+        if (clean.StartsWith("0") && clean.Length == 10)
+        {
+            Log($"🌍 Language: nl (Dutch landline)");
+            return "nl";
+        }
+
+        // Check country codes using first 2 digits
+        if (CountryCodeToLanguage.TryGetValue(prefix2, out var lang))
+        {
+            Log($"🌍 Language: {lang} (country code {prefix2})");
+            return lang;
+        }
+
+        Log($"🌍 Language: en (default, no match for {prefix2})");
         return "en";
     }
 
