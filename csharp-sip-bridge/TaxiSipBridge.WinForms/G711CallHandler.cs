@@ -247,15 +247,28 @@ Be concise, warm, and professional.
     {
         Log($"▶️ [{callId}] Playout loop started (G711 direct, codec={_negotiatedCodec})");
 
+        bool aiDisconnected = false;
+        int drainAttempts = 0;
+        const int MAX_DRAIN_ATTEMPTS = 500; // 10 seconds max drain time (500 * 20ms)
+
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 var ai = _aiClient;
-                if (ai == null || !ai.IsConnected) break;
 
-                // Get G.711 frame from AI client (OpenAI outputs matching codec format)
-                var g711Frame = ai.GetNextMuLawFrame();
+                // Check if AI is still connected
+                if (ai == null || !ai.IsConnected)
+                {
+                    if (!aiDisconnected)
+                    {
+                        aiDisconnected = true;
+                        Log($"🔌 [{callId}] AI disconnected, draining remaining audio buffer...");
+                    }
+                }
+
+                // Get G.711 frame from AI client
+                var g711Frame = ai?.GetNextMuLawFrame();
                 if (g711Frame != null && g711Frame.Length == FRAME_SIZE_ULAW)
                 {
                     _isBotSpeaking = true;
@@ -265,13 +278,32 @@ Be concise, warm, and professional.
                     _playout?.BufferG711Frame(g711Frame);
 
                     _framesSent++;
+                    drainAttempts = 0; // Reset drain counter when we get audio
 
                     if (_framesSent % 50 == 0)
                         Log($"📤 [{callId}] Playout: {_framesSent} frames buffered ({_negotiatedCodec})");
                 }
                 else
                 {
-                    // No audio available, short sleep
+                    // No audio available
+                    if (aiDisconnected)
+                    {
+                        // AI is gone - check if playout buffer is also empty
+                        var pending = _playout?.PendingFrameCount ?? 0;
+                        if (pending == 0)
+                        {
+                            Log($"✅ [{callId}] Buffer fully drained after AI disconnect");
+                            break;
+                        }
+
+                        drainAttempts++;
+                        if (drainAttempts >= MAX_DRAIN_ATTEMPTS)
+                        {
+                            Log($"⚠️ [{callId}] Drain timeout, {pending} frames still in playout buffer");
+                            break;
+                        }
+                    }
+
                     await Task.Delay(5, ct);
                 }
             }
