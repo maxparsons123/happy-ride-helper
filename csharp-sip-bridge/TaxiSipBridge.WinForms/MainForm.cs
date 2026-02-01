@@ -55,9 +55,88 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    // Stub handlers for Designer controls
+    // Stub handler for cheaper pipeline
     private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
-    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e) { }
+
+    // Simli avatar integration
+    private SimliWebView? _simliView;
+
+    private void chkSimliAvatar_CheckedChanged(object? sender, EventArgs e)
+    {
+        bool enabled = chkSimliAvatar.Checked;
+
+        // Show/hide Simli config fields
+        lblSimliApiKey.Visible = enabled;
+        txtSimliApiKey.Visible = enabled;
+        lblSimliFaceId.Visible = enabled;
+        txtSimliFaceId.Visible = enabled;
+        grpAvatar.Visible = enabled;
+
+        // Move buttons down when Simli config is visible
+        btnStartStop.Location = enabled ? new Point(100, 178) : new Point(100, 148);
+        btnMicTest.Location = enabled ? new Point(260, 178) : new Point(260, 148);
+
+        if (enabled)
+        {
+            // Create SimliWebView if not exists
+            if (_simliView == null)
+            {
+                _simliView = new SimliWebView
+                {
+                    Location = new Point(6, 20),
+                    Size = new Size(180, 175)
+                };
+                _simliView.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                grpAvatar.Controls.Clear();
+                grpAvatar.Controls.Add(_simliView);
+            }
+
+            // Load default values if empty
+            if (string.IsNullOrEmpty(txtSimliApiKey.Text))
+                txtSimliApiKey.Text = "vlw7tr7vxhhs52bi3rum7";
+            if (string.IsNullOrEmpty(txtSimliFaceId.Text))
+                txtSimliFaceId.Text = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+
+            AddLog("🎭 Simli avatar enabled");
+        }
+        else
+        {
+            // Clean up SimliWebView
+            if (_simliView != null)
+            {
+                _simliView.DisconnectAsync().ConfigureAwait(false);
+                grpAvatar.Controls.Remove(_simliView);
+                _simliView.Dispose();
+                _simliView = null;
+            }
+            AddLog("🎭 Simli avatar disabled");
+        }
+    }
+
+    private async Task ConfigureSimliForCallAsync()
+    {
+        if (!chkSimliAvatar.Checked || _simliView == null) return;
+
+        var apiKey = txtSimliApiKey.Text.Trim();
+        var faceId = txtSimliFaceId.Text.Trim();
+
+        if (string.IsNullOrEmpty(apiKey) || string.IsNullOrEmpty(faceId))
+        {
+            AddLog("⚠️ Simli API key or Face ID missing");
+            return;
+        }
+
+        _simliView.Configure(apiKey, faceId);
+        await _simliView.ConnectAsync();
+    }
+
+    private async Task DisconnectSimliAsync()
+    {
+        if (_simliView != null)
+        {
+            await _simliView.DisconnectAsync();
+        }
+    }
 
     private void btnStartStop_Click(object sender, EventArgs e)
     {
@@ -112,7 +191,15 @@ public partial class MainForm : Form
 
                 // Create the NEW call handler with dispatch webhook for taxi bookings
                 const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
-                _callHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
+                var localHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
+                _callHandler = localHandler;
+
+                // Configure Simli avatar if enabled
+                if (chkSimliAvatar.Checked && _simliView != null)
+                {
+                    localHandler.SetSimliSender(async pcm24 => await _simliView.SendPcm24AudioAsync(pcm24));
+                    AddLog("🎭 Simli audio sender connected to call handler");
+                }
 
                 _sipLoginManager.SetCallHandler(_callHandler);
                 _sipLoginManager.Start();
@@ -402,19 +489,25 @@ public partial class MainForm : Form
         AddLog("🛑 SIP stopped");
     }
 
-    private void OnCallStarted(string callId, string caller)
+    private async void OnCallStarted(string callId, string caller)
     {
         lblActiveCall.Text = $"📞 {caller}";
         lblActiveCall.ForeColor = Color.Green;
         lblCallId.Text = $"ID: {callId}";
         AddLog($"📞 AUTO-ANSWERED: {caller}");
+
+        // Connect Simli avatar for this call
+        await ConfigureSimliForCallAsync();
     }
 
-    private void OnCallEnded(string callId)
+    private async void OnCallEnded(string callId)
     {
         lblActiveCall.Text = "Waiting for calls...";
         lblActiveCall.ForeColor = Color.Gray;
         lblCallId.Text = "";
+
+        // Disconnect Simli avatar
+        await DisconnectSimliAsync();
     }
 
     private void SetStatus(string status, Color color)
