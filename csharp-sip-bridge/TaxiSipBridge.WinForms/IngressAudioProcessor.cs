@@ -70,6 +70,12 @@ public sealed class IngressAudioProcessor : IDisposable
     private const int LOG_EVERY_N_FRAMES = 50; // Log RMS every ~1 second
 
     // ===========================================
+    // DIAGNOSTICS
+    // ===========================================
+    private int _framesEmitted;
+    private int _framesEmittedWithSubscriber;
+
+    // ===========================================
     // CODEC STATE
     // ===========================================
     private readonly Dictionary<int, AudioCodecsEnum> _ptToCodec = new();
@@ -340,6 +346,27 @@ public sealed class IngressAudioProcessor : IDisposable
         MemoryMarshal.AsBytes(_resampledFrame.AsSpan()).CopyTo(_outputBytes);
 
         // Emit
+        _framesEmitted++;
+
+        // Detect whether anyone is subscribed to output
+        bool hasSubscriber = OnPcmFrameReady != null;
+        if (hasSubscriber)
+        {
+            _framesEmittedWithSubscriber++;
+            if (_framesEmittedWithSubscriber == 1)
+            {
+                Log($"[Ingress v{VERSION}] Output subscriber detected ✅ (audio frames will be forwarded)");
+            }
+        }
+        else
+        {
+            // If nobody is subscribed, the AI will NEVER hear anything.
+            if (_framesEmitted == 1 || _framesEmitted % 50 == 0)
+            {
+                Log($"[Ingress v{VERSION}] WARNING: no OnPcmFrameReady subscribers ❌ (AI will not receive audio)");
+            }
+        }
+
         OnPcmFrameReady?.Invoke(_outputBytes.ToArray());
     }
 

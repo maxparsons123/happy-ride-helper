@@ -250,20 +250,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _ingressProcessor.OnLog += msg => Log(msg);
             Log($"🎧 [{callId}] IngressAudioProcessor ready (24kHz, jitter=6)");
 
-            // Create OpenAI client
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
-            WireAiClientEvents(callId, cts);
-
-            // Connect to OpenAI
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
-            await _aiClient.ConnectAsync(caller, cts.Token);
-            Log($"🟢 [{callId}] OpenAI connected");
-
-            // Wire ingress processor output to OpenAI
+            // Wire ingress output immediately so we can verify frames are emitted.
+            // (RTP wiring happens later via WireRtpInput, so this won't receive frames until then.)
             _ingressProcessor.OnPcmFrameReady += async pcmBytes =>
             {
                 if (cts.Token.IsCancellationRequested) return;
-                
+
                 // Echo guard: skip audio briefly after bot stops speaking
                 if (_adaHasStartedSpeaking && !_isBotSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
                 {
@@ -274,7 +266,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 // Audio monitoring (already at 24kHz from processor)
                 OnCallerAudioMonitor?.Invoke(pcmBytes);
 
-                // Send to OpenAI (already at 24kHz)
+                var ai = _aiClient;
+                if (ai == null || !ai.IsConnected) return;
+
                 try
                 {
                     _ingressFramesForwarded++;
@@ -283,10 +277,20 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     {
                         Log($"🎙️ [{callId}] Ingress→OpenAI: frames={_ingressFramesForwarded}, bytes={_ingressBytesForwarded}");
                     }
-                    await _aiClient.SendAudioAsync(pcmBytes, 24000);
+
+                    await ai.SendAudioAsync(pcmBytes, 24000);
                 }
                 catch { }
             };
+
+            // Create OpenAI client
+            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
+            WireAiClientEvents(callId, cts);
+
+            // Connect to OpenAI
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
+            await _aiClient.ConnectAsync(caller, cts.Token);
+            Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP to processor
             WireRtpInput(callId, cts);
