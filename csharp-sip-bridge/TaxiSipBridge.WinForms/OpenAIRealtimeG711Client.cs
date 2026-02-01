@@ -116,6 +116,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action? OnConnected;
     public event Action? OnDisconnected;
     public event Action? OnResponseStarted;
+    public event Action? OnResponseCompleted;
     public event Action<string>? OnAdaSpeaking;
     public event Action? OnCallEnded;
     public event Action<BookingState>? OnBookingUpdated;
@@ -429,6 +430,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastResponseDoneAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                     Log("🤖 AI response completed");
+                    OnResponseCompleted?.Invoke();
                     
                     // Start no-reply watchdog if awaiting confirmation
                     if (_awaitingConfirmation)
