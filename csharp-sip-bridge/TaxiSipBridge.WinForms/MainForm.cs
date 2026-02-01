@@ -15,6 +15,11 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
 
+    // === Audio Monitor (local speaker playback) ===
+    private NAudio.Wave.WaveOutEvent? _monitorWaveOut;
+    private NAudio.Wave.BufferedWaveProvider? _monitorWaveProvider;
+    private volatile bool _audioMonitorEnabled = false;
+
     public MainForm()
     {
         InitializeComponent();
@@ -57,6 +62,74 @@ public partial class MainForm : Form
 
     // Stub handler for cheaper pipeline
     private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
+
+    // Audio monitor checkbox handler
+    private void chkMonitorAudio_CheckedChanged(object? sender, EventArgs e)
+    {
+        _audioMonitorEnabled = chkMonitorAudio.Checked;
+        AddLog(_audioMonitorEnabled ? "🔊 Audio monitor enabled (caller → speaker)" : "🔇 Audio monitor disabled");
+    }
+
+    /// <summary>
+    /// Start local speaker playback for monitoring caller audio.
+    /// </summary>
+    private void StartAudioMonitor()
+    {
+        if (!_audioMonitorEnabled) return;
+
+        try
+        {
+            _monitorWaveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(48000, 16, 1))
+            {
+                BufferDuration = TimeSpan.FromSeconds(2),
+                DiscardOnBufferOverflow = true
+            };
+
+            _monitorWaveOut = new NAudio.Wave.WaveOutEvent();
+            _monitorWaveOut.Init(_monitorWaveProvider);
+            _monitorWaveOut.Play();
+
+            AddLog("🔊 Audio monitor started (48kHz speaker output)");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"⚠️ Audio monitor failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Stop local speaker playback.
+    /// </summary>
+    private void StopAudioMonitor()
+    {
+        if (_monitorWaveOut != null)
+        {
+            _monitorWaveOut.Stop();
+            _monitorWaveOut.Dispose();
+            _monitorWaveOut = null;
+        }
+        _monitorWaveProvider = null;
+    }
+
+    /// <summary>
+    /// Feed caller audio to local speaker (called from call handler).
+    /// Expects PCM16 at 24kHz, resamples to 48kHz for speaker.
+    /// </summary>
+    private void PlayCallerAudioLocally(byte[] pcm24kHz)
+    {
+        if (!_audioMonitorEnabled || _monitorWaveProvider == null) return;
+
+        try
+        {
+            // Resample 24kHz → 48kHz (2x interpolation)
+            var samples24 = AudioCodecs.BytesToShorts(pcm24kHz);
+            var samples48 = AudioCodecs.Resample(samples24, 24000, 48000);
+            var pcm48 = AudioCodecs.ShortsToBytes(samples48);
+
+            _monitorWaveProvider.AddSamples(pcm48, 0, pcm48.Length);
+        }
+        catch { }
+    }
 
     // Simli avatar integration
     private SimliWebView? _simliView;
@@ -199,6 +272,13 @@ public partial class MainForm : Form
                 {
                     localHandler.SetSimliSender(async pcm24 => await _simliView.SendPcm24AudioAsync(pcm24));
                     AddLog("🎭 Simli audio sender connected to call handler");
+                }
+
+                // Configure audio monitor if enabled (listen to caller through speakers)
+                if (_audioMonitorEnabled)
+                {
+                    localHandler.OnCallerAudioMonitor += pcm24 => SafeInvoke(() => PlayCallerAudioLocally(pcm24));
+                    AddLog("🔊 Audio monitor connected to call handler");
                 }
 
                 _sipLoginManager.SetCallHandler(_callHandler);
@@ -496,6 +576,9 @@ public partial class MainForm : Form
         lblCallId.Text = $"ID: {callId}";
         AddLog($"📞 AUTO-ANSWERED: {caller}");
 
+        // Start audio monitor for this call
+        StartAudioMonitor();
+
         // Connect Simli avatar for this call
         await ConfigureSimliForCallAsync();
     }
@@ -505,6 +588,9 @@ public partial class MainForm : Form
         lblActiveCall.Text = "Waiting for calls...";
         lblActiveCall.ForeColor = Color.Gray;
         lblCallId.Text = "";
+
+        // Stop audio monitor
+        StopAudioMonitor();
 
         // Disconnect Simli avatar
         await DisconnectSimliAsync();

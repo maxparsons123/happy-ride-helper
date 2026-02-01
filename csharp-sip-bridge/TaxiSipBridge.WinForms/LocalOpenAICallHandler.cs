@@ -399,12 +399,15 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _ingress.SetCodecMap(_remotePtToCodec);
         _ingress.OnLog += msg => Log(msg);
 
-        // Wire output to OpenAI (16kHz PCM16)
+        // Wire output to OpenAI (16kHz PCM16) and audio monitor
         _ingress.OnPcmFrameReady += async pcmBytes =>
         {
             if (cts.Token.IsCancellationRequested) return;
 
-            // Skip while bot is speaking OR during echo guard
+            // Always emit for audio monitoring (so user can hear caller through speakers)
+            OnCallerAudioMonitor?.Invoke(pcmBytes);
+
+            // Skip sending to OpenAI while bot is speaking OR during echo guard
             if (_isBotSpeaking) return;
 
             var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
