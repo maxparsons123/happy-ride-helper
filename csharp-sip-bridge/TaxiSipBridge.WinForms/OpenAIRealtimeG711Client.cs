@@ -56,10 +56,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private int _disposed;
     private int _callEnded;
     private int _responseActive;
+    private int _responseQueued;
     private int _sessionCreated;
     private int _sessionUpdated;
     private int _greetingSent;
     private int _ignoreUserAudio;
+    private int _deferredResponsePending;
+    private int _noReplyWatchdogId; // Incremented to cancel stale watchdogs
+    private long _lastAdaFinishedAt;
+    private long _lastUserSpeechAt;
 
     // =========================
     // BOOKING STATE
@@ -97,15 +102,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private long _lastToolCallAt;
 
     // =========================
-    // NO-REPLY WATCHDOG
+    // HELPERS
     // =========================
-    private Timer? _noReplyWatchdog;
-    private long _lastResponseDoneAt;
-    private long _lastAudioSentAt; // Track when we last sent audio to OpenAI
-    private int _userSpeaking;
-    private int _noReplyRepromptCount;
-    private const int NO_REPLY_TIMEOUT_MS = 8000; // 8 seconds before re-prompting
-    private const int MAX_NO_REPLY_REPROMPTS = 2; // Maximum re-prompt attempts
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     // =========================
     // EVENTS
@@ -240,9 +239,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             });
 
             await SendTextAsync(msg).ConfigureAwait(false);
-
-            // Track when we last sent audio (for no-reply watchdog)
-            Volatile.Write(ref _lastAudioSentAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            Volatile.Write(ref _lastUserSpeechAt, NowMs());
 
             var count = Interlocked.Increment(ref _audioFramesSent);
             if (count % 50 == 0) // Log every 1 second
@@ -449,7 +446,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 case "response.done":
                     Interlocked.Exchange(ref _responseActive, 0);
-                    Volatile.Write(ref _lastResponseDoneAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    Volatile.Write(ref _lastAdaFinishedAt, NowMs());
                     Log("🤖 AI response completed");
                     
                     // CRITICAL: Fire event to unblock user audio in call handler
@@ -466,11 +463,55 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         Log($"❌ OnResponseCompleted error: {ex.Message}");
                     }
                     
-                    // Start no-reply watchdog if awaiting confirmation
-                    if (_awaitingConfirmation)
+                    // Flush deferred response if pending
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
-                        StartNoReplyWatchdog();
+                        Log("🔄 Flushing deferred response.create");
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(50).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
+                            {
+                                await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                                Log("🔄 response.create sent (deferred)");
+                            }
+                        });
                     }
+                    
+                    // Start no-reply watchdog (8 seconds of silence triggers ONE re-prompt)
+                    // Uses ID-based cancellation - when user speaks, ID increments and stale watchdog aborts
+                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(8000).ConfigureAwait(false);
+                        
+                        // Abort if cancelled, call ended, or user spoke
+                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                        if (Volatile.Read(ref _responseActive) == 1) return;
+                        
+                        Log("⏰ No-reply watchdog triggered - prompting user");
+                        
+                        await SendJsonAsync(new
+                        {
+                            type = "conversation.item.create",
+                            item = new
+                            {
+                                type = "message",
+                                role = "system",
+                                content = new[]
+                                {
+                                    new
+                                    {
+                                        type = "input_text",
+                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                                    }
+                                }
+                            }
+                        }).ConfigureAwait(false);
+                        
+                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                    });
                     break;
 
                 case "response.audio.delta":
@@ -523,14 +564,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     break;
 
                 case "input_audio_buffer.speech_started":
-                    Log("🎤 User speaking...");
-                    Interlocked.Exchange(ref _userSpeaking, 1);
-                    StopNoReplyWatchdog(); // Cancel watchdog when user speaks
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
                     break;
 
                 case "input_audio_buffer.speech_stopped":
-                    Log("🔇 User stopped speaking");
-                    Interlocked.Exchange(ref _userSpeaking, 0);
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    // Commit audio buffer to finalize VAD
+                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     break;
 
                 case "response.function_call_arguments.done":
@@ -587,7 +628,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                await SendResponseCreateAsync().ConfigureAwait(false);
+                await QueueResponseCreateAsync().ConfigureAwait(false);
                 break;
 
             case "book_taxi":
@@ -614,14 +655,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         message = $"Fare is {fare}, driver arrives in {eta}. Book it?"
                     }).ConfigureAwait(false);
 
-                    await SendResponseCreateAsync().ConfigureAwait(false);
+                    await QueueResponseCreateAsync().ConfigureAwait(false);
                 }
                 else if (action == "confirmed")
                 {
                     _booking.Confirmed = true;
                     _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     _awaitingConfirmation = false;
-                    StopNoReplyWatchdog(); // Stop watchdog when booking confirmed
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
@@ -630,10 +670,49 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     {
                         success = true,
                         booking_ref = _booking.BookingRef,
-                        message = $"Taxi booked. Reference: {_booking.BookingRef}"
+                        message = string.IsNullOrWhiteSpace(_booking.Name)
+                            ? "Your taxi is booked!"
+                            : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
                     }).ConfigureAwait(false);
 
-                    await SendResponseCreateAsync().ConfigureAwait(false);
+                    await QueueResponseCreateAsync().ConfigureAwait(false);
+                    
+                    // Extended grace period (15s) for "anything else?" flow, then force end
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(15000).ConfigureAwait(false);
+
+                        // Wait for any current response to finish
+                        for (int i = 0; i < 50 && Volatile.Read(ref _responseActive) == 1; i++)
+                            await Task.Delay(100).ConfigureAwait(false);
+
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                            return;
+
+                        // Only proceed if no response is active/queued
+                        if (!CanCreateResponse())
+                            return;
+
+                        await SendJsonAsync(new
+                        {
+                            type = "conversation.item.create",
+                            item = new
+                            {
+                                type = "message",
+                                role = "system",
+                                content = new[]
+                                {
+                                    new
+                                    {
+                                        type = "input_text",
+                                        text = "[TIMEOUT] Say 'Thank you for using the Voice Taxibot system. Goodbye!' and call end_call NOW."
+                                    }
+                                }
+                            }
+                        }).ConfigureAwait(false);
+
+                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                    });
                 }
                 break;
             }
@@ -647,10 +726,19 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 // Wait for audio to drain before signaling call end
                 _ = Task.Run(async () =>
                 {
-                    await Task.Delay(500).ConfigureAwait(false);
-                    
-                    for (int i = 0; i < 100 && !_outboundQueue.IsEmpty; i++)
-                        await Task.Delay(100).ConfigureAwait(false);
+                    var waitStart = NowMs();
+                    const int MAX_WAIT_MS = 10000;
+                    const int CHECK_INTERVAL_MS = 100;
+
+                    while (NowMs() - waitStart < MAX_WAIT_MS)
+                    {
+                        if (_outboundQueue.IsEmpty)
+                        {
+                            Log("✅ Audio buffer drained, ending call");
+                            break;
+                        }
+                        await Task.Delay(CHECK_INTERVAL_MS).ConfigureAwait(false);
+                    }
 
                     if (!_outboundQueue.IsEmpty)
                         Log($"⚠️ Buffer still has {_outboundQueue.Count} frames, ending anyway");
@@ -679,12 +767,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
         };
         await SendJsonAsync(msg).ConfigureAwait(false);
-    }
-
-    private async Task SendResponseCreateAsync()
-    {
-        await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-    }
 
     private void SignalCallEnded(string reason)
     {
@@ -696,109 +778,58 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // NO-REPLY WATCHDOG
+    // RESPONSE GATE (copied from original)
     // =========================
-
-    private void StartNoReplyWatchdog()
+    
+    private bool CanCreateResponse()
     {
-        StopNoReplyWatchdog();
+        return Volatile.Read(ref _responseActive) == 0 &&
+               Volatile.Read(ref _responseQueued) == 0 &&
+               Volatile.Read(ref _callEnded) == 0 &&
+               Volatile.Read(ref _disposed) == 0 &&
+               IsConnected &&
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300; // Don't respond while user is talking
+    }
 
-        // Don't start if we've already re-prompted too many times
-        var reprompts = Volatile.Read(ref _noReplyRepromptCount);
-        if (reprompts >= MAX_NO_REPLY_REPROMPTS)
-        {
-            Log($"⚠️ Max re-prompts ({MAX_NO_REPLY_REPROMPTS}) reached, not starting watchdog");
+    /// <summary>
+    /// Queue a response.create. Waits for any active response to complete first.
+    /// </summary>
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    {
+        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
-        }
 
-        Log($"⏰ No-reply watchdog started ({NO_REPLY_TIMEOUT_MS}ms timeout, awaiting confirmation, attempt {reprompts + 1}/{MAX_NO_REPLY_REPROMPTS})");
-
-        _noReplyWatchdog = new Timer(async _ =>
-        {
-            // Check if still awaiting confirmation and user hasn't spoken
-            if (!_awaitingConfirmation || Volatile.Read(ref _userSpeaking) != 0)
-            {
-                StopNoReplyWatchdog();
-                return;
-            }
-
-            // Check if AI is currently generating a response
-            if (Volatile.Read(ref _responseActive) != 0)
-            {
-                return; // AI is speaking, don't interrupt
-            }
-
-            // Check elapsed time since last response.done
-            var lastDone = Volatile.Read(ref _lastResponseDoneAt);
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var elapsed = now - lastDone;
-
-            if (elapsed >= NO_REPLY_TIMEOUT_MS)
-            {
-                StopNoReplyWatchdog(); // Stop before re-prompting (will restart after response.done)
-                await SendNoReplyRepromptAsync().ConfigureAwait(false);
-            }
-        }, null, NO_REPLY_TIMEOUT_MS, Timeout.Infinite); // Fire once, not repeating
-    }
-
-    private void StopNoReplyWatchdog()
-    {
-        var watchdog = Interlocked.Exchange(ref _noReplyWatchdog, null);
-        if (watchdog != null)
-        {
-            try { watchdog.Dispose(); } catch { }
-        }
-    }
-
-    private async Task SendNoReplyRepromptAsync()
-    {
-        if (!IsConnected || !_awaitingConfirmation) return;
-
-        Interlocked.Increment(ref _noReplyRepromptCount);
+        if (Interlocked.CompareExchange(ref _responseQueued, 1, 0) == 1)
+            return;
 
         try
         {
-            // Check if we have recent audio - if so, try to commit it first
-            var lastAudioSent = Volatile.Read(ref _lastAudioSentAt);
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var audioAge = now - lastAudioSent;
-
-            if (audioAge < 3000) // Audio was sent within last 3 seconds
+            // Wait for any active response to complete (up to 5s)
+            if (waitForCurrentResponse)
             {
-                Log("⏰ No-reply timeout - committing recent audio buffer...");
-                await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
-                await Task.Delay(300).ConfigureAwait(false);
-            }
-            else
-            {
-                Log($"⏰ No-reply timeout - no recent audio (last sent {audioAge}ms ago), sending re-prompt...");
+                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
+                    await Task.Delay(50).ConfigureAwait(false);
             }
 
-            // Inject a system message asking for clarification, then trigger response
-            var repromptMsg = new
+            await Task.Delay(delayMs).ConfigureAwait(false);
+
+            // If response is still active after waiting, defer to response.done handler
+            if (Volatile.Read(ref _responseActive) == 1)
             {
-                type = "conversation.item.create",
-                item = new
-                {
-                    type = "message",
-                    role = "system",
-                    content = new[]
-                    {
-                        new { type = "input_text", text = "[SILENCE DETECTED - User may not have heard or responded. Politely ask if they'd like to confirm the booking. Do NOT assume they said yes.]" }
-                    }
-                }
-            };
+                Interlocked.Exchange(ref _deferredResponsePending, 1);
+                Log("⏳ Response still active - deferring response.create");
+                return;
+            }
 
-            await SendJsonAsync(repromptMsg).ConfigureAwait(false);
-            Log("📤 Injected silence-detected system message");
+            if (!CanCreateResponse())
+                return;
 
-            await Task.Delay(100).ConfigureAwait(false);
-            await SendResponseCreateAsync().ConfigureAwait(false);
-            Log("📤 Response.create sent after silence detection");
+            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+            Log("🔄 response.create sent");
         }
-        catch (Exception ex)
+        finally
         {
-            Log($"⚠️ Re-prompt error: {ex.Message}");
+            Interlocked.Exchange(ref _responseQueued, 0);
         }
     }
 
@@ -1004,23 +1035,25 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     private void ResetCallState(string? caller)
     {
         ClearPendingFrames();
-        StopNoReplyWatchdog();
 
         _callerId = caller ?? "";
         _detectedLanguage = DetectLanguage(caller);
         _booking.Reset();
         _awaitingConfirmation = false;
-        Interlocked.Exchange(ref _userSpeaking, 0);
-        Interlocked.Exchange(ref _noReplyRepromptCount, 0);
-        Volatile.Write(ref _lastResponseDoneAt, 0);
-        Volatile.Write(ref _lastAudioSentAt, 0);
-
+        
+        // Reset all per-call state
         Interlocked.Exchange(ref _callEnded, 0);
         Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
         Interlocked.Exchange(ref _greetingSent, 0);
         Interlocked.Exchange(ref _sessionCreated, 0);
         Interlocked.Exchange(ref _sessionUpdated, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any stale watchdogs
+        
+        Volatile.Write(ref _lastAdaFinishedAt, 0);
+        Volatile.Write(ref _lastUserSpeechAt, 0);
     }
 
     private string DetectLanguage(string? phone)
@@ -1129,7 +1162,7 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         SignalCallEnded("disposed");
-        StopNoReplyWatchdog();
+        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending watchdogs
 
         try { _cts?.Cancel(); } catch { }
         try { _ws?.Dispose(); } catch { }
