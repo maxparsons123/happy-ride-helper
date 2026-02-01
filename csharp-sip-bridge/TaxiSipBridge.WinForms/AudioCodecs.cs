@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using Concentus.Enums;
@@ -9,10 +10,157 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Audio codec utilities for encoding/decoding and resampling.
-/// Uses native FIR-based resampling for reliability (no external DLL dependencies).
+/// Uses SpeexDSP (Quality 8) for high-quality resampling when available.
+/// Falls back to native FIR/linear interpolation if DLL unavailable.
 /// </summary>
 public static class AudioCodecs
 {
+    // ===========================================
+    // SPEEX DSP RESAMPLING (High Quality)
+    // ===========================================
+    private static bool _speexChecked;
+    private static bool _speexAvailable;
+    private static IntPtr _speexResampler8to24 = IntPtr.Zero;
+    private static IntPtr _speexResampler16to24 = IntPtr.Zero;
+    private static readonly object _speexLock = new();
+
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr speex_resampler_init(uint channels, uint in_rate, uint out_rate, int quality, out int err);
+
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int speex_resampler_process_int(IntPtr st, uint channel_index, short[] input, ref uint in_len, short[] output, ref uint out_len);
+
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void speex_resampler_destroy(IntPtr st);
+
+    /// <summary>
+    /// Check if SpeexDSP is available and initialize resamplers.
+    /// </summary>
+    private static bool IsSpeexAvailable()
+    {
+        if (_speexChecked) return _speexAvailable;
+
+        lock (_speexLock)
+        {
+            if (_speexChecked) return _speexAvailable;
+            
+            try
+            {
+                int err;
+                var testResampler = speex_resampler_init(1, 8000, 24000, 8, out err);
+                if (err == 0 && testResampler != IntPtr.Zero)
+                {
+                    speex_resampler_destroy(testResampler);
+                    _speexAvailable = true;
+                    Console.WriteLine("🎵 AudioCodecs: SpeexDSP available ✓");
+                }
+            }
+            catch
+            {
+                _speexAvailable = false;
+                Console.WriteLine("⚠️ AudioCodecs: SpeexDSP unavailable, using linear interpolation");
+            }
+
+            _speexChecked = true;
+            return _speexAvailable;
+        }
+    }
+
+    /// <summary>
+    /// High-quality resample using SpeexDSP (Quality 8).
+    /// Falls back to linear interpolation if unavailable.
+    /// </summary>
+    public static short[] ResampleWithSpeex(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate || input.Length == 0) return input;
+
+        // For downsampling, use FIR anti-aliasing filter
+        if (fromRate == 24000 && toRate == 8000)
+            return Resample24kTo8k(input);
+
+        if (!IsSpeexAvailable())
+            return ResampleLinear(input, fromRate, toRate);
+
+        lock (_speexLock)
+        {
+            try
+            {
+                // Get or create resampler for this rate pair
+                IntPtr resampler;
+                if (fromRate == 8000 && toRate == 24000)
+                {
+                    if (_speexResampler8to24 == IntPtr.Zero)
+                    {
+                        int err;
+                        _speexResampler8to24 = speex_resampler_init(1, 8000, 24000, 8, out err);
+                        if (err != 0) throw new Exception($"Speex init 8→24 failed: {err}");
+                    }
+                    resampler = _speexResampler8to24;
+                }
+                else if (fromRate == 16000 && toRate == 24000)
+                {
+                    if (_speexResampler16to24 == IntPtr.Zero)
+                    {
+                        int err;
+                        _speexResampler16to24 = speex_resampler_init(1, 16000, 24000, 8, out err);
+                        if (err != 0) throw new Exception($"Speex init 16→24 failed: {err}");
+                    }
+                    resampler = _speexResampler16to24;
+                }
+                else
+                {
+                    // For other rate pairs, use linear (rare case)
+                    return ResampleLinear(input, fromRate, toRate);
+                }
+
+                // Calculate output size with headroom
+                double ratio = (double)toRate / fromRate;
+                int outputLen = (int)Math.Ceiling(input.Length * ratio) + 16;
+                var output = new short[outputLen];
+
+                uint inLen = (uint)input.Length;
+                uint outLen = (uint)output.Length;
+
+                int result = speex_resampler_process_int(resampler, 0, input, ref inLen, output, ref outLen);
+                if (result != 0) throw new Exception($"Speex resample failed: {result}");
+
+                // Trim to actual output
+                if (outLen < output.Length)
+                {
+                    var trimmed = new short[outLen];
+                    Array.Copy(output, trimmed, outLen);
+                    return trimmed;
+                }
+                return output;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Speex resample error: {ex.Message}, falling back to linear");
+                _speexAvailable = false;
+                return ResampleLinear(input, fromRate, toRate);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reset SpeexDSP resamplers (call between sessions to clear filter state).
+    /// </summary>
+    public static void ResetSpeexResamplers()
+    {
+        lock (_speexLock)
+        {
+            if (_speexResampler8to24 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler8to24); } catch { }
+                _speexResampler8to24 = IntPtr.Zero;
+            }
+            if (_speexResampler16to24 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler16to24); } catch { }
+                _speexResampler16to24 = IntPtr.Zero;
+            }
+        }
+    }
 
     /// <summary>
     /// Decode µ-law (G.711) to PCM16 samples.
@@ -178,11 +326,11 @@ public static class AudioCodecs
 
     /// <summary>
     /// High-quality 8kHz to 24kHz conversion for inbound audio.
-    /// Uses linear interpolation (good quality for upsampling).
+    /// Uses SpeexDSP (Quality 8) when available, falls back to linear interpolation.
     /// </summary>
     public static short[] Resample8kTo24k(short[] input)
     {
-        return Resample(input, 8000, 24000);
+        return ResampleWithSpeex(input, 8000, 24000);
     }
 
     /// <summary>
@@ -196,17 +344,31 @@ public static class AudioCodecs
     #endregion
 
     /// <summary>
-    /// Simple linear interpolation resampling for upsampling (8k→24k).
-    /// Anti-aliasing not needed for upsampling.
+    /// High-quality resampling using SpeexDSP for upsampling.
+    /// Uses FIR anti-aliasing for downsampling 24k→8k.
+    /// Falls back to linear interpolation if SpeexDSP unavailable.
     /// </summary>
     public static short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
         if (input.Length == 0) return input;
 
-        // For downsampling, use specialized FIR-based method
+        // For downsampling 24k→8k, use specialized FIR-based method
         if (fromRate == 24000 && toRate == 8000)
             return Resample24kTo8k(input);
+
+        // For upsampling (8k→24k, 16k→24k), use SpeexDSP (high quality)
+        return ResampleWithSpeex(input, fromRate, toRate);
+    }
+
+    /// <summary>
+    /// Linear interpolation resampling (fallback when SpeexDSP unavailable).
+    /// Quality is lower - introduces spectral artifacts.
+    /// </summary>
+    public static short[] ResampleLinear(short[] input, int fromRate, int toRate)
+    {
+        if (fromRate == toRate) return input;
+        if (input.Length == 0) return input;
 
         double ratio = (double)fromRate / toRate;
         int outputLength = (int)(input.Length / ratio);
@@ -410,6 +572,7 @@ public static class AudioCodecs
         ResetOpus();
         ResetG722();
         ResetFirFilter();
+        ResetSpeexResamplers();
     }
 
     /// <summary>
