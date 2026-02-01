@@ -50,6 +50,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 samples = 160 bytes
     private const int PCM_FRAME_SIZE_BYTES = FRAME_SIZE_BYTES * 2; // 320 bytes (PCM16)
 
+    // Confirmation patience
+    private const int CONFIRM_NO_REPLY_TIMEOUT_MS = 20000; // 20s before a single gentle nudge
+    private const int MAX_CONFIRM_REPROMPTS = 1;          // Never ask more than 1 extra time
+
     // =========================
     // THREAD-SAFE STATE
     // =========================
@@ -100,6 +104,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private long _audioFramesSent;
     private long _audioChunksReceived;
     private long _lastToolCallAt;
+
+    // Response id guards (copied from OpenAIRealtimeClient)
+    private long _responseCreatedAt;
+    private string? _activeResponseId;
+    private string? _lastCompletedResponseId;
+
+    // Confirmation watchdog state
+    private int _confirmRepromptCount;
 
     // =========================
     // HELPERS
@@ -198,8 +210,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (Volatile.Read(ref _sessionCreated) == 0)
             throw new TimeoutException("Timeout waiting for session.created");
 
-        Log("✅ Session created, configuring...");
-        await ConfigureSessionAsync().ConfigureAwait(false);
+        // Config is sent from the session.created handler (matches OpenAIRealtimeClient flow)
+        Log("✅ Session created");
 
         // Wait for session.updated
         Log("⏳ Waiting for session.updated...");
@@ -211,12 +223,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         Log("✅ Session configured");
 
-        // Send greeting after session.updated
-        if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
-        {
-            await SendGreetingAsync().ConfigureAwait(false);
-            Log("📢 Greeting sent");
-        }
+        // Greeting is sent from the session.updated handler; wait briefly so the call always starts cleanly.
+        for (int i = 0; i < 40 && Volatile.Read(ref _greetingSent) == 0; i++)
+            await Task.Delay(50, linked.Token).ConfigureAwait(false);
 
         OnConnected?.Invoke();
         Log($"✅ Connected to OpenAI Realtime (G.711 {_codec}, voice={_voice})");
@@ -429,27 +438,73 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "session.created":
                     Interlocked.Exchange(ref _sessionCreated, 1);
                     Log("📋 session.created received");
+                    // Match OpenAIRealtimeClient: configure immediately after session.created
+                    _ = Task.Run(async () =>
+                    {
+                        try { await ConfigureSessionAsync().ConfigureAwait(false); }
+                        catch (Exception ex) { Log($"⚠️ ConfigureSession error: {ex.Message}"); }
+                    });
                     break;
 
                 case "session.updated":
                     Interlocked.Exchange(ref _sessionUpdated, 1);
                     Log("📋 session.updated received");
+                    // Match OpenAIRealtimeClient: send greeting after session.updated
+                    if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await SendGreetingAsync().ConfigureAwait(false);
+                                Log("📢 Greeting sent");
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"⚠️ Greeting error: {ex.Message}");
+                            }
+                        });
+                    }
                     break;
 
                 case "response.created":
+                {
+                    // OBSERVED start (OpenAI controlled) — guard duplicates
+                    var responseId = TryGetResponseId(doc.RootElement);
+                    if (responseId != null && _activeResponseId == responseId)
+                        break;
+
+                    _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
+                    Volatile.Write(ref _responseCreatedAt, NowMs());
+
+                    // Clear OpenAI's input buffer so stale audio doesn't create phantom turns
+                    _ = ClearInputAudioBufferAsync();
+
                     Log("🤖 AI response started");
                     Action? startHandler;
                     lock (_eventLock) startHandler = _onResponseStarted;
                     startHandler?.Invoke();
                     break;
+                }
 
                 case "response.done":
+                {
+                    // OBSERVED end (OpenAI controlled) — guard duplicates
+                    var responseId = TryGetResponseId(doc.RootElement);
+                    if (responseId == null || responseId == _lastCompletedResponseId)
+                        break;
+                    if (_activeResponseId != null && responseId != _activeResponseId)
+                        break;
+
+                    _lastCompletedResponseId = responseId;
+                    _activeResponseId = null;
+
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastAdaFinishedAt, NowMs());
                     Log("🤖 AI response completed");
-                    
-                    // CRITICAL: Fire event to unblock user audio in call handler
+
+                    // Fire event to unblock user audio in call handler
                     try
                     {
                         Action? completedHandler;
@@ -462,7 +517,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     {
                         Log($"❌ OnResponseCompleted error: {ex.Message}");
                     }
-                    
+
                     // Flush deferred response if pending
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
@@ -477,42 +532,49 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             }
                         });
                     }
-                    
-                    // Start no-reply watchdog (8 seconds of silence triggers ONE re-prompt)
-                    // Uses ID-based cancellation - when user speaks, ID increments and stale watchdog aborts
-                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                    _ = Task.Run(async () =>
+
+                    // Patience: only nudge during the "awaiting confirmation" window.
+                    if (_awaitingConfirmation && Volatile.Read(ref _confirmRepromptCount) < MAX_CONFIRM_REPROMPTS)
                     {
-                        await Task.Delay(8000).ConfigureAwait(false);
-                        
-                        // Abort if cancelled, call ended, or user spoke
-                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                        if (Volatile.Read(ref _responseActive) == 1) return;
-                        
-                        Log("⏰ No-reply watchdog triggered - prompting user");
-                        
-                        await SendJsonAsync(new
+                        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+                        _ = Task.Run(async () =>
                         {
-                            type = "conversation.item.create",
-                            item = new
+                            await Task.Delay(CONFIRM_NO_REPLY_TIMEOUT_MS).ConfigureAwait(false);
+
+                            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+                            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                            if (Volatile.Read(ref _responseActive) == 1) return;
+                            if (!_awaitingConfirmation) return;
+
+                            var reprompt = Interlocked.Increment(ref _confirmRepromptCount);
+                            if (reprompt > MAX_CONFIRM_REPROMPTS) return;
+
+                            Log("⏰ Confirmation silence - gentle nudge (once)");
+
+                            await SendJsonAsync(new
                             {
-                                type = "message",
-                                role = "system",
-                                content = new[]
+                                type = "conversation.item.create",
+                                item = new
                                 {
-                                    new
+                                    type = "message",
+                                    role = "system",
+                                    content = new[]
                                     {
-                                        type = "input_text",
-                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                                        new
+                                        {
+                                            type = "input_text",
+                                            text = "[CONFIRMATION SILENCE] Be patient. Ask ONE short question: ‘Would you like me to confirm the booking? (yes/no)’. Do not repeat details." 
+                                        }
                                     }
                                 }
-                            }
-                        }).ConfigureAwait(false);
-                        
-                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
-                    });
+                            }).ConfigureAwait(false);
+
+                            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false).ConfigureAwait(false);
+                        });
+                    }
+
                     break;
+                }
 
                 case "response.audio.delta":
                     if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
@@ -584,6 +646,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var message = errorEl.TryGetProperty("message", out var msgEl) 
                             ? msgEl.GetString() 
                             : "Unknown error";
+                        if (!string.IsNullOrEmpty(message) &&
+                            message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
+                            break;
                         Log($"❌ OpenAI error: {message}");
                     }
                     break;
@@ -643,6 +708,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _booking.Fare = fare;
                     _booking.Eta = eta;
                     _awaitingConfirmation = true;
+                    Interlocked.Exchange(ref _confirmRepromptCount, 0);
+                    Interlocked.Increment(ref _noReplyWatchdogId); // cancel any stale watchdog
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"💰 Quote: {fare}");
@@ -662,6 +729,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _booking.Confirmed = true;
                     _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     _awaitingConfirmation = false;
+                    Interlocked.Exchange(ref _confirmRepromptCount, 0);
+                    Interlocked.Increment(ref _noReplyWatchdogId); // cancel any pending confirmation nudge
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
@@ -767,6 +836,35 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
         };
         await SendJsonAsync(msg).ConfigureAwait(false);
+    }
+
+    private static string? TryGetResponseId(JsonElement root)
+    {
+        try
+        {
+            if (root.TryGetProperty("response", out var resp) &&
+                resp.TryGetProperty("id", out var idEl))
+                return idEl.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
+    /// Clear OpenAI's input audio buffer. Call this when Ada starts speaking
+    /// to avoid stale audio causing phantom transcripts/turns.
+    /// </summary>
+    private async Task ClearInputAudioBufferAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        try
+        {
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
+            Log("🧹 Cleared OpenAI input audio buffer");
+        }
+        catch { }
+    }
 
     private void SignalCallEnded(string reason)
     {
@@ -949,9 +1047,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
 LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone number. If they speak a different language, switch to that language.
 
-FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once → book_taxi(request_quote) → Tell fare → Confirm → book_taxi(confirmed) → Give reference ID → 'Anything else?' → If no: 'Thank you for using Voice Taxibot. Goodbye!' → end_call
+FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once → book_taxi(request_quote) → Tell fare → Ask to confirm → book_taxi(confirmed) → Give reference ID → 'Anything else?' → If no: 'Thank you for using Voice Taxibot. Goodbye!' → end_call
 
 DATA SYNC (CRITICAL): After EVERY user message that provides booking info, call sync_booking_data immediately.
+
+CONFIRMATION PATIENCE: When asking to confirm the booking, ask ONCE and wait. If silence, you may nudge ONE time after ~20 seconds.
 
 RULES: One question at a time. Under 20 words per response. Use £. Only call end_call after user says no to 'anything else'.";
 

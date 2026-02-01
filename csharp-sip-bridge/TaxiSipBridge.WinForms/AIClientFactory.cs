@@ -86,6 +86,7 @@ internal class AdaAudioClientWrapper : IAudioAIClient
     public event Action<string>? OnAdaSpeaking;
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
+    public event Action? OnResponseCompleted;
 
     public bool IsConnected => _client.IsConnected;
     public int PendingFrameCount => _client.PendingFrameCount;
