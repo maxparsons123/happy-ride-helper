@@ -311,8 +311,47 @@ public class SimliWebView : UserControl
 
     private async Task ExecuteScriptAsync(string script)
     {
+        if (IsDisposed) return;
+
+        // CoreWebView2 is thread-affine (UI thread). Our audio callbacks often come from background threads.
+        // If we call CoreWebView2 from a non-UI thread, WebView2 throws:
+        // "CoreWebView2 can only be accessed from the UI thread." (exactly what your logs show).
+        if (InvokeRequired)
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                BeginInvoke(new Action(async () =>
+                {
+                    try
+                    {
+                        if (IsDisposed || _webView.CoreWebView2 == null)
+                        {
+                            tcs.TrySetResult(true);
+                            return;
+                        }
+
+                        await _webView.CoreWebView2.ExecuteScriptAsync(script);
+                        tcs.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        OnLog?.Invoke($"🎭 Script error: {ex.Message}");
+                        tcs.TrySetResult(true); // Don't crash audio pipeline on scripting errors
+                    }
+                }));
+            }
+            catch
+            {
+                tcs.TrySetResult(true);
+            }
+
+            await tcs.Task;
+            return;
+        }
+
         if (_webView.CoreWebView2 == null) return;
-        
+
         try
         {
             await _webView.CoreWebView2.ExecuteScriptAsync(script);
