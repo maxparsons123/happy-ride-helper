@@ -451,11 +451,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // Skip while bot is speaking
-            if (_isBotSpeaking) return;
-
-            // Echo guard: only applies if Ada has actually spoken
-            if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+            // IMPORTANT: Do NOT block audio while bot is speaking!
+            // OpenAI's VAD handles barge-in detection. We still forward audio.
+            // Only apply echo guard AFTER bot stops speaking.
+            if (_adaHasStartedSpeaking && !_isBotSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
             {
                 var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
                 if (msSinceBotStopped < ECHO_GUARD_MS) return;
