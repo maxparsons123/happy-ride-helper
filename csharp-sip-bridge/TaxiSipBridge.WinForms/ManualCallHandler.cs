@@ -10,6 +10,7 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Manual call handler - allows operator to answer calls and speak directly via microphone.
 /// No AI involved - just routes local mic to RTP and caller audio to speakers.
+/// Supports all codecs: Opus (48kHz), G.722 (16kHz), PCMA/PCMU (8kHz).
 /// </summary>
 public class ManualCallHandler : ISipCallHandler, IDisposable
 {
@@ -22,7 +23,7 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
     private volatile bool _isAnswered;
 
     private VoIPMediaSession? _currentMediaSession;
-    private DirectRtpPlayout? _playout;
+    private MultiCodecRtpPlayout? _playout;
     private CancellationTokenSource? _callCts;
     private Action<SIPDialogue>? _currentHungupHandler;
     private SIPUserAgent? _currentUa;
@@ -36,8 +37,13 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
     private WaveInEvent? _waveIn;
     private readonly object _micLock = new();
 
-    // Remote SDP payload type → codec mapping
+    // ===========================================
+    // CODEC NEGOTIATION
+    // ===========================================
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
+    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
+    private int _negotiatedPayloadType = 8;
+    private int _inputSampleRate = 8000;
 
     // ===========================================
     // EVENTS
@@ -155,18 +161,63 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
             _isRinging = false;
             _isAnswered = true;
 
-            // Setup media session
+            // Setup media session with all codecs
             var audioEncoder = new UnifiedAudioEncoder();
             AudioCodecs.ResetAllCodecs();
+
+            // Build codec list with Opus prioritized if available
+            List<AudioFormat> preferredFormats;
+            if (_remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS))
+            {
+                var opusPt = _remotePtToCodec.FirstOrDefault(kv => kv.Value == AudioCodecsEnum.OPUS).Key;
+                var opusFormat = new AudioFormat(AudioCodecsEnum.OPUS, opusPt, 48000, 1, "opus");
+                preferredFormats = new List<AudioFormat> { opusFormat };
+                preferredFormats.AddRange(audioEncoder.SupportedFormats.Where(f => f.Codec != AudioCodecsEnum.OPUS));
+                Log($"🎧 [{callId}] Opus prioritized (PT{opusPt})");
+            }
+            else if (_remotePtToCodec.Values.Contains(AudioCodecsEnum.G722))
+            {
+                var g722Pt = _remotePtToCodec.FirstOrDefault(kv => kv.Value == AudioCodecsEnum.G722).Key;
+                preferredFormats = audioEncoder.SupportedFormats.ToList();
+                Log($"🎧 [{callId}] G.722 available (PT{g722Pt})");
+            }
+            else
+            {
+                preferredFormats = audioEncoder.SupportedFormats.ToList();
+            }
 
             var audioSource = new AudioExtrasSource(
                 audioEncoder,
                 new AudioSourceOptions { AudioSource = AudioSourcesEnum.None }
             );
+            audioSource.RestrictFormats(fmt => preferredFormats.Any(p => p.Codec == fmt.Codec));
 
             var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
             _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
+
+            // Track negotiated codec
+            _currentMediaSession.OnAudioFormatsNegotiated += formats =>
+            {
+                var fmt = formats.FirstOrDefault();
+                _negotiatedCodec = fmt.Codec;
+                _negotiatedPayloadType = fmt.FormatID;
+                
+                switch (fmt.Codec)
+                {
+                    case AudioCodecsEnum.OPUS:
+                        _inputSampleRate = 48000;
+                        break;
+                    case AudioCodecsEnum.G722:
+                        _inputSampleRate = 16000;
+                        break;
+                    default:
+                        _inputSampleRate = 8000;
+                        break;
+                }
+                
+                Log($"🎵 [{callId}] Negotiated: {fmt.Codec} (PT{fmt.FormatID}, {_inputSampleRate}Hz)");
+            };
 
             // Answer call
             Log($"📞 [{callId}] Answering call...");
@@ -181,11 +232,12 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create DirectRtpPlayout for outbound audio
-            _playout = new DirectRtpPlayout(_currentMediaSession);
+            // Create MultiCodecRtpPlayout for outbound audio
+            _playout = new MultiCodecRtpPlayout(_currentMediaSession);
+            _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
             _playout.OnLog += msg => Log(msg);
             _playout.Start();
-            Log($"🎵 [{callId}] DirectRtpPlayout started");
+            Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
             // Wire inbound RTP to speakers
             WireRtpInput(callId, cts);
@@ -295,6 +347,7 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
         {
             StopMicrophoneCapture();
 
+            // Capture at 24kHz - MultiCodecRtpPlayout will resample to codec rate
             _waveIn = new WaveInEvent
             {
                 WaveFormat = new WaveFormat(24000, 16, 1), // 24kHz PCM16 mono
@@ -309,12 +362,12 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
                 var buffer = new byte[e.BytesRecorded];
                 Buffer.BlockCopy(e.Buffer, 0, buffer, 0, e.BytesRecorded);
 
-                // Send to RTP via DirectRtpPlayout
-                _playout.BufferAiAudio(buffer);
+                // Send to RTP via MultiCodecRtpPlayout (handles resampling + encoding)
+                _playout.BufferAudio(buffer);
             };
 
             _waveIn.StartRecording();
-            Log($"🎤 [{callId}] Microphone capture started (24kHz PCM16)");
+            Log($"🎤 [{callId}] Microphone capture started (24kHz PCM16 → {_negotiatedCodec})");
         }
     }
 
