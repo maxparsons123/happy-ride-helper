@@ -24,8 +24,15 @@ public class SimliWebView : UserControl
     /// <summary>Fired for log messages.</summary>
     public event Action<string>? OnLog;
 
-    /// <summary>Whether the avatar is currently connected.</summary>
+    /// <summary>Whether the avatar is currently connected and ready for audio.</summary>
     public bool IsConnected { get; private set; }
+    
+    /// <summary>Whether we're in the process of connecting (will buffer audio).</summary>
+    public bool IsConnecting { get; private set; }
+    
+    // Buffer audio while connecting
+    private readonly List<byte[]> _pendingAudioBuffer = new();
+    private const int MAX_PENDING_AUDIO_CHUNKS = 100; // ~2 seconds of audio
 
     public SimliWebView()
     {
@@ -110,12 +117,17 @@ public class SimliWebView : UserControl
                 {
                     case "connected":
                         IsConnected = true;
+                        IsConnecting = false;
                         SafeInvoke(() => SetStatus("🟢 Connected", System.Drawing.Color.LightGreen));
                         OnLog?.Invoke("🎭 Simli avatar connected");
+                        // Flush any buffered audio
+                        _ = FlushPendingAudioAsync();
                         break;
                         
                     case "disconnected":
                         IsConnected = false;
+                        IsConnecting = false;
+                        _pendingAudioBuffer.Clear();
                         SafeInvoke(() => SetStatus("Disconnected", System.Drawing.Color.Gray));
                         OnLog?.Invoke("🎭 Simli avatar disconnected");
                         break;
@@ -169,6 +181,8 @@ public class SimliWebView : UserControl
             return;
         }
 
+        IsConnecting = true;
+        _pendingAudioBuffer.Clear();
         SetStatus("Connecting...", System.Drawing.Color.Yellow);
 
         var cmd = JsonSerializer.Serialize(new
@@ -187,9 +201,27 @@ public class SimliWebView : UserControl
     /// </summary>
     public async Task SendAudioAsync(byte[] pcm16Audio)
     {
+        // If still connecting, buffer the audio
+        if (IsConnecting && !IsConnected)
+        {
+            if (_pendingAudioBuffer.Count < MAX_PENDING_AUDIO_CHUNKS)
+            {
+                _pendingAudioBuffer.Add(pcm16Audio);
+                if (_pendingAudioBuffer.Count == 1)
+                {
+                    OnLog?.Invoke($"🎭 Buffering audio while Simli connects...");
+                }
+            }
+            return;
+        }
+        
         if (!IsConnected) 
         {
-            OnLog?.Invoke($"🎭 Audio skipped - not connected (IsConnected={IsConnected})");
+            // Only log first skip
+            if (_audioBytesSent == 0)
+            {
+                OnLog?.Invoke($"🎭 Audio skipped - not connected and not connecting");
+            }
             return;
         }
 
@@ -210,6 +242,27 @@ public class SimliWebView : UserControl
         await ExecuteScriptAsync($"handleCommand({cmd})");
     }
     private long _audioBytesSent = 0;
+    
+    /// <summary>
+    /// Flush buffered audio after connection is established.
+    /// </summary>
+    private async Task FlushPendingAudioAsync()
+    {
+        if (_pendingAudioBuffer.Count == 0) return;
+        
+        OnLog?.Invoke($"🎭 Flushing {_pendingAudioBuffer.Count} buffered audio chunks");
+        
+        var bufferedAudio = _pendingAudioBuffer.ToList();
+        _pendingAudioBuffer.Clear();
+        
+        foreach (var chunk in bufferedAudio)
+        {
+            await SendAudioAsync(chunk);
+            await Task.Delay(10); // Small delay to prevent flooding
+        }
+        
+        OnLog?.Invoke($"🎭 Buffer flush complete");
+    }
 
     private int _pcm24CallCount = 0;
     
@@ -242,6 +295,8 @@ public class SimliWebView : UserControl
         var cmd = JsonSerializer.Serialize(new { command = "disconnect" });
         await ExecuteScriptAsync($"handleCommand({cmd})");
         IsConnected = false;
+        IsConnecting = false;
+        _pendingAudioBuffer.Clear();
         SetStatus("Disconnected", System.Drawing.Color.Gray);
     }
 

@@ -519,10 +519,14 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     return;
             }
 
-            // Convert to bytes and send to OpenAI
+            // Convert to bytes
             var pcmBytes = new byte[pcm16.Length * 2];
             Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
+            // Always emit for audio monitoring (so you can hear caller through speakers)
+            OnCallerAudioMonitor?.Invoke(pcmBytes);
+
+            // Send to OpenAI
             try
             {
                 await _aiClient.SendAudioAsync(pcmBytes, sampleRate);
