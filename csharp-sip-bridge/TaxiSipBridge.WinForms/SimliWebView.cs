@@ -211,11 +211,21 @@ public class SimliWebView : UserControl
     }
     private long _audioBytesSent = 0;
 
+    private int _pcm24CallCount = 0;
+    
     /// <summary>
     /// Send audio as PCM24 (24kHz) - will be resampled to 16kHz.
     /// </summary>
     public async Task SendPcm24AudioAsync(byte[] pcm24Audio)
     {
+        _pcm24CallCount++;
+        
+        // Log first few calls and then periodically
+        if (_pcm24CallCount <= 3 || _pcm24CallCount % 50 == 0)
+        {
+            OnLog?.Invoke($"🎭 SendPcm24AudioAsync called #{_pcm24CallCount} ({pcm24Audio.Length} bytes, IsConnected={IsConnected})");
+        }
+        
         // Resample 24kHz to 16kHz (3:2 ratio)
         var samples24 = AudioCodecs.BytesToShorts(pcm24Audio);
         var samples16 = AudioCodecs.Resample(samples24, 24000, 16000);
