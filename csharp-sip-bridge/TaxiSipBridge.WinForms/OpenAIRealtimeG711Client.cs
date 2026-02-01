@@ -83,6 +83,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
     private const int MAX_QUEUE_FRAMES = 500;
 
+    // Audio delta accumulator (OpenAI deltas are not guaranteed to be 160-byte aligned).
+    // We must accumulate across deltas and only emit full 20ms frames to avoid injecting padding/silence.
+    private byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 20];
+    private int _audioAccumOffset;
+    private int _audioAccumLength;
+
     // =========================
     // STATS
     // =========================
@@ -421,6 +427,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     }
                     break;
 
+                case "response.audio.done":
+                    // Flush any leftover partial frame at end-of-audio.
+                    FlushAudioAccumulator(padWithSilence: true);
+                    break;
+
                 case "response.audio_transcript.delta":
                     if (doc.RootElement.TryGetProperty("delta", out var transcriptDeltaEl))
                     {
@@ -635,24 +646,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         {
             // Decode base64 to get G.711 bytes (μ-law or A-law depending on config)
             var g711Bytes = Convert.FromBase64String(base64);
-
-            // Frame into 160-byte (20ms) chunks for RTP
-            for (int i = 0; i < g711Bytes.Length; i += FRAME_SIZE_BYTES)
-            {
-                var frame = new byte[FRAME_SIZE_BYTES];
-                var count = Math.Min(FRAME_SIZE_BYTES, g711Bytes.Length - i);
-                Array.Copy(g711Bytes, i, frame, 0, count);
-
-                // Pad with correct silence byte: μ-law = 0xFF, A-law = 0xD5
-                if (count < FRAME_SIZE_BYTES)
-                    Array.Fill(frame, _silenceByte, count, FRAME_SIZE_BYTES - count);
-
-                // Queue management
-                while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
-                    _outboundQueue.TryDequeue(out _);
-
-                _outboundQueue.Enqueue(frame);
-            }
+            AppendAndEnqueueG711(g711Bytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
@@ -664,6 +658,75 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         {
             Log($"⚠️ Audio processing error: {ex.Message}");
         }
+    }
+
+    private void AppendAndEnqueueG711(byte[] bytes)
+    {
+        if (bytes.Length == 0) return;
+
+        // Ensure capacity and contiguity
+        if (_audioAccumOffset + _audioAccumLength + bytes.Length > _audioAccum.Length)
+        {
+            // Compact if we have a head offset
+            if (_audioAccumLength > 0 && _audioAccumOffset > 0)
+            {
+                Buffer.BlockCopy(_audioAccum, _audioAccumOffset, _audioAccum, 0, _audioAccumLength);
+                _audioAccumOffset = 0;
+            }
+
+            if (_audioAccumLength + bytes.Length > _audioAccum.Length)
+            {
+                var newCap = _audioAccum.Length;
+                while (newCap < _audioAccumLength + bytes.Length)
+                    newCap *= 2;
+                var next = new byte[newCap];
+                if (_audioAccumLength > 0)
+                    Buffer.BlockCopy(_audioAccum, _audioAccumOffset, next, 0, _audioAccumLength);
+                _audioAccum = next;
+                _audioAccumOffset = 0;
+            }
+        }
+
+        Buffer.BlockCopy(bytes, 0, _audioAccum, _audioAccumOffset + _audioAccumLength, bytes.Length);
+        _audioAccumLength += bytes.Length;
+
+        // Emit full 20ms frames
+        while (_audioAccumLength >= FRAME_SIZE_BYTES)
+        {
+            var frame = new byte[FRAME_SIZE_BYTES];
+            Buffer.BlockCopy(_audioAccum, _audioAccumOffset, frame, 0, FRAME_SIZE_BYTES);
+            _audioAccumOffset += FRAME_SIZE_BYTES;
+            _audioAccumLength -= FRAME_SIZE_BYTES;
+
+            if (_audioAccumLength == 0)
+                _audioAccumOffset = 0;
+
+            // Queue management
+            while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                _outboundQueue.TryDequeue(out _);
+            _outboundQueue.Enqueue(frame);
+        }
+    }
+
+    private void FlushAudioAccumulator(bool padWithSilence)
+    {
+        if (_audioAccumLength <= 0) return;
+
+        if (padWithSilence)
+        {
+            var frame = new byte[FRAME_SIZE_BYTES];
+            var count = Math.Min(_audioAccumLength, FRAME_SIZE_BYTES);
+            Buffer.BlockCopy(_audioAccum, _audioAccumOffset, frame, 0, count);
+            if (count < FRAME_SIZE_BYTES)
+                Array.Fill(frame, _silenceByte, count, FRAME_SIZE_BYTES - count);
+
+            while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
+                _outboundQueue.TryDequeue(out _);
+            _outboundQueue.Enqueue(frame);
+        }
+
+        _audioAccumOffset = 0;
+        _audioAccumLength = 0;
     }
 
     // =========================
