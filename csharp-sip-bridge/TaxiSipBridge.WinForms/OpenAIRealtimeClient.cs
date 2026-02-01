@@ -313,38 +313,31 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Keepalive loop sends a lightweight ping every 15 seconds to prevent silent disconnects.
-    /// OpenAI WebSocket connections can timeout during long AI responses or user silence.
+    /// Keepalive loop monitors connection health every 15 seconds.
+    /// Uses WebSocket ping frames (handled internally by ClientWebSocket) for connection keepalive.
+    /// Logs connection status periodically to detect silent disconnects.
     /// </summary>
     private async Task KeepaliveLoopAsync()
     {
-        const int KEEPALIVE_INTERVAL_MS = 15000;
+        const int KEEPALIVE_INTERVAL_MS = 20000;
 
         try
         {
-            while (IsConnected && !(_cts?.IsCancellationRequested ?? true))
+            while (!(_cts?.IsCancellationRequested ?? true))
             {
                 await Task.Delay(KEEPALIVE_INTERVAL_MS, _cts!.Token).ConfigureAwait(false);
 
-                if (!IsConnected || _cts.IsCancellationRequested)
+                // Check if WebSocket is still connected
+                if (_ws?.State != WebSocketState.Open)
+                {
+                    Log($"⚠️ Keepalive: WebSocket disconnected (state: {_ws?.State})");
                     break;
+                }
 
-                // Send a harmless input_audio_buffer.clear if no audio is buffered
-                // This keeps the connection alive without affecting state
-                try
-                {
-                    // Only send keepalive if we're not actively in a response
-                    if (Volatile.Read(ref _responseActive) == 0)
-                    {
-                        await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
-                        Log("💓 Keepalive ping");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log($"⚠️ Keepalive failed: {ex.Message}");
-                    break; // Connection likely dead
-                }
+                // Log connection status (no actual message sent to avoid interference)
+                var responseActive = Volatile.Read(ref _responseActive) == 1;
+                var callEnded = Volatile.Read(ref _callEnded) == 1;
+                Log($"💓 Keepalive: connected (response_active={responseActive}, call_ended={callEnded})");
             }
         }
         catch (OperationCanceledException) { }
