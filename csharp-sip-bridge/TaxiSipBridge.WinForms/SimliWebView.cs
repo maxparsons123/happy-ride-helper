@@ -382,19 +382,18 @@ public class SimliWebView : UserControl
 
                 pc.addEventListener('iceconnectionstatechange', () => {
                     log('ICE state: ' + pc.iceConnectionState);
-                    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-                        chrome.webview.postMessage({ type: 'connected' });
-                    } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                    // Don't mark connected on ICE state - wait for START message from Simli
+                    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
                         chrome.webview.postMessage({ type: 'disconnected' });
                     }
                 });
 
-                // Step 2: Create data channel
+                // Step 2: Create data channel (for receiving Simli messages, not audio)
                 const dc = pc.createDataChannel('datachannel', { ordered: true });
                 log('DataChannel created');
                 
                 dc.addEventListener('open', async () => {
-                    log('DataChannel open - sending session token...');
+                    log('DataChannel open - getting session token...');
                     
                     // Get session token from Simli API
                     const metadata = {
@@ -415,17 +414,18 @@ public class SimliWebView : UserControl
                         });
                         
                         if (!response.ok) {
-                            throw new Error('Session API failed: ' + response.status);
+                            const errText = await response.text();
+                            throw new Error('Session API failed: ' + response.status + ' - ' + errText);
                         }
                         
                         const resJSON = await response.json();
-                        log('Session token received');
+                        log('Session token received: ' + (resJSON.session_token ? 'yes' : 'no'));
                         
                         // Send session token over WebSocket
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             ws.send(resJSON.session_token);
-                            log('Session token sent to WebSocket');
-                            chrome.webview.postMessage({ type: 'connected' });
+                            log('Session token sent to WebSocket - waiting for START...');
+                            // DON'T mark connected yet - wait for START message
                         }
                     } catch (err) {
                         log('Session token error: ' + err.message);
@@ -471,9 +471,13 @@ public class SimliWebView : UserControl
                     log('WS message: ' + (typeof data === 'string' ? data.substring(0, 50) : 'binary'));
                     
                     if (data === 'START') {
-                        log('Received START - sending initial silence');
+                        log('Received START - Simli ready for audio!');
+                        // NOW we're connected and ready for audio
+                        chrome.webview.postMessage({ type: 'connected' });
+                        // Send initial silence to start the session
                         const silence = new Uint8Array(16000);
                         ws.send(silence);
+                        log('Initial silence sent');
                         return;
                     }
                     
