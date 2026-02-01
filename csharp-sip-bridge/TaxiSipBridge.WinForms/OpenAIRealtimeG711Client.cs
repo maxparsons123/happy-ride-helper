@@ -342,9 +342,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.35,
-                    prefix_padding_ms = 600,
-                    silence_duration_ms = 1200
+                    threshold = 0.4,            // Slightly higher for telephony noise rejection
+                    prefix_padding_ms = 300,     // Reduced from 600 - faster response start
+                    silence_duration_ms = 700    // Reduced from 1200 - snappier turn-taking
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -886,13 +886,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300; // Don't respond while user is talking
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 150; // Reduced from 300ms for faster response
     }
 
     /// <summary>
     /// Queue a response.create. Waits for any active response to complete first.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 20, bool waitForCurrentResponse = true)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -902,14 +902,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Wait for any active response to complete (up to 5s)
+            // Wait for any active response to complete (up to 3s - reduced from 5s)
             if (waitForCurrentResponse)
             {
-                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
+                for (int i = 0; i < 60 && Volatile.Read(ref _responseActive) == 1; i++)
                     await Task.Delay(50).ConfigureAwait(false);
             }
 
-            await Task.Delay(delayMs).ConfigureAwait(false);
+            if (delayMs > 0)
+                await Task.Delay(delayMs).ConfigureAwait(false);
 
             // If response is still active after waiting, defer to response.done handler
             if (Volatile.Read(ref _responseActive) == 1)
