@@ -120,6 +120,18 @@ partial class MainForm
         };
         chkMonitorAudio.CheckedChanged += this.chkMonitorAudio_CheckedChanged;
 
+        // === G711 Mode (8kHz passthrough - experimental) ===
+        chkG711Mode = new CheckBox 
+        { 
+            Text = "G711", 
+            Location = new Point(530, 118), 
+            Size = new Size(60, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(102, 51, 153),
+            Visible = false // Only shown in Local OpenAI mode
+        };
+        chkG711Mode.CheckedChanged += this.chkG711Mode_CheckedChanged;
+
         // Answer/Reject buttons (hidden by default, shown when call rings in manual mode)
         btnAnswerCall = new Button
         {
@@ -238,7 +250,7 @@ partial class MainForm
             lblResampler, cmbResampler,
             chkLocalOpenAI, chkManualAnswer, chkSimliAvatar, chkMonitorAudio,
             lblApiKey, txtApiKey,
-            chkCheaperPipeline, lblDeepgramKey, txtDeepgramKey,
+            chkCheaperPipeline, chkG711Mode, lblDeepgramKey, txtDeepgramKey,
             lblWs, txtWebSocketUrl,
             lblSimliApiKey, txtSimliApiKey, lblSimliFaceId, txtSimliFaceId,
             btnStartStop, btnMicTest,
@@ -376,6 +388,7 @@ partial class MainForm
     private CheckBox chkSimliAvatar;
     private CheckBox chkCheaperPipeline;
     private CheckBox chkMonitorAudio;
+    private CheckBox chkG711Mode;
     private Label lblApiKey;
     private Label lblDeepgramKey;
     private Label lblWs;
