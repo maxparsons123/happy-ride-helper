@@ -9,12 +9,25 @@ using Concentus.Structs;
 namespace TaxiSipBridge;
 
 /// <summary>
+/// Resampler mode for audio processing.
+/// </summary>
+public enum ResamplerMode
+{
+    NAudio = 0,
+    Custom = 1
+}
+
+/// <summary>
 /// Audio codec utilities for encoding/decoding and resampling.
 /// Uses SpeexDSP (Quality 8) for high-quality resampling when available.
 /// Falls back to native FIR/linear interpolation if DLL unavailable.
 /// </summary>
 public static class AudioCodecs
 {
+    /// <summary>
+    /// Current resampler mode (for UI selection).
+    /// </summary>
+    public static ResamplerMode CurrentResamplerMode { get; set; } = ResamplerMode.NAudio;
     // ===========================================
     // SPEEX DSP RESAMPLING (High Quality)
     // ===========================================
