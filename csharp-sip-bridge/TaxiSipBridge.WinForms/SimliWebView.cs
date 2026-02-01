@@ -306,6 +306,7 @@ public class SimliWebView : UserControl
             color: #888;
             font-family: 'Segoe UI', sans-serif;
             font-size: 14px;
+            text-align: center;
         }
     </style>
 </head>
@@ -317,7 +318,6 @@ public class SimliWebView : UserControl
     </div>
     <script>
         let pc = null;
-        let ws = null;
         let dc = null;
         let audioQueue = [];
         let isSending = false;
@@ -345,105 +345,148 @@ public class SimliWebView : UserControl
         }
 
         async function connect(apiKey, faceId) {
-            document.getElementById('loading').textContent = 'Connecting...';
+            document.getElementById('loading').textContent = 'Getting session token...';
             
             try {
-                // Create peer connection
+                // Step 1: Get session token from Simli API
+                log('Requesting session token...');
+                const sessionResponse = await fetch('https://api.simli.ai/startAudioToVideoSession', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        apiKey: apiKey,
+                        faceId: faceId,
+                        handleSilence: true,
+                        maxSessionLength: 3600,
+                        maxIdleTime: 600
+                    })
+                });
+                
+                if (!sessionResponse.ok) {
+                    const errText = await sessionResponse.text();
+                    throw new Error('Session API failed: ' + sessionResponse.status + ' - ' + errText);
+                }
+                
+                const sessionData = await sessionResponse.json();
+                log('Session token received: ' + (sessionData.session_token ? 'yes' : 'no'));
+                
+                if (!sessionData.session_token) {
+                    throw new Error('No session token in response: ' + JSON.stringify(sessionData));
+                }
+                
+                // Step 2: Get ICE servers
+                document.getElementById('loading').textContent = 'Getting ICE servers...';
+                log('Requesting ICE servers...');
+                const iceResponse = await fetch('https://api.simli.ai/getIceServer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiKey: apiKey })
+                });
+                
+                if (!iceResponse.ok) {
+                    throw new Error('ICE API failed: ' + iceResponse.status);
+                }
+                
+                const iceData = await iceResponse.json();
+                log('ICE servers received: ' + JSON.stringify(iceData).substring(0, 100));
+                
+                // Step 3: Create WebRTC connection
+                document.getElementById('loading').textContent = 'Establishing WebRTC...';
+                
                 const config = {
-                    sdpSemantics: 'unified-plan',
-                    iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+                    iceServers: iceData.iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]
                 };
+                log('Using ICE config: ' + JSON.stringify(config));
+                
                 pc = new RTCPeerConnection(config);
                 
                 pc.addEventListener('track', (evt) => {
+                    log('Track received: ' + evt.track.kind);
                     if (evt.track.kind === 'video') {
                         document.getElementById('video').srcObject = evt.streams[0];
-                    } else {
+                        document.getElementById('loading').style.display = 'none';
+                    } else if (evt.track.kind === 'audio') {
                         document.getElementById('audio').srcObject = evt.streams[0];
                     }
                 });
 
                 pc.addEventListener('iceconnectionstatechange', () => {
                     log('ICE state: ' + pc.iceConnectionState);
-                    if (pc.iceConnectionState === 'connected') {
-                        document.getElementById('loading').style.display = 'none';
+                    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                         chrome.webview.postMessage({ type: 'connected' });
                     } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
                         chrome.webview.postMessage({ type: 'disconnected' });
                     }
                 });
+                
+                pc.addEventListener('connectionstatechange', () => {
+                    log('Connection state: ' + pc.connectionState);
+                });
 
                 // Create data channel for sending audio
-                dc = pc.createDataChannel('datachannel', { ordered: true });
+                dc = pc.createDataChannel('audio', { ordered: true });
                 dc.binaryType = 'arraybuffer';
                 
                 dc.addEventListener('open', () => {
                     log('Data channel open');
-                    // Send metadata
-                    const metadata = {
-                        faceId: faceId,
-                        isJPG: false,
-                        apiKey: apiKey,
-                        syncAudio: true
-                    };
-                    dc.send(JSON.stringify(metadata));
                     chrome.webview.postMessage({ type: 'connected' });
                     processAudioQueue();
                 });
                 
                 dc.addEventListener('close', () => {
                     log('Data channel closed');
-                    chrome.webview.postMessage({ type: 'disconnected' });
                 });
                 
                 dc.addEventListener('error', (err) => {
-                    log('Data channel error: ' + err);
-                    chrome.webview.postMessage({ type: 'error', message: err.toString() });
+                    log('Data channel error: ' + err.message);
                 });
 
-                // Create and send offer
-                const offer = await pc.createOffer();
+                // Create offer
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: true
+                });
                 await pc.setLocalDescription(offer);
-                
+                log('Local description set');
+
                 // Wait for ICE gathering
                 await waitForIceGathering();
-                
-                // Connect to Simli WebSocket
-                ws = new WebSocket('wss://api.simli.ai/startWebRTCSession');
-                
-                ws.addEventListener('open', () => {
-                    log('WebSocket connected, sending offer');
-                    ws.send(JSON.stringify({
+                log('ICE gathering complete');
+
+                // Step 4: Send offer to Simli with session token
+                document.getElementById('loading').textContent = 'Connecting to avatar...';
+                const connectResponse = await fetch('https://api.simli.ai/StartWebRTCSession', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_token: sessionData.session_token,
                         sdp: pc.localDescription.sdp,
                         type: pc.localDescription.type
-                    }));
+                    })
                 });
                 
-                ws.addEventListener('message', async (evt) => {
-                    if (typeof evt.data === 'string') {
-                        try {
-                            const message = JSON.parse(evt.data);
-                            if (message.type === 'answer') {
-                                log('Received SDP answer');
-                                await pc.setRemoteDescription(message);
-                            }
-                        } catch (e) {
-                            log('WS message: ' + evt.data);
-                        }
-                    }
-                });
+                if (!connectResponse.ok) {
+                    const errText = await connectResponse.text();
+                    throw new Error('WebRTC session failed: ' + connectResponse.status + ' - ' + errText);
+                }
                 
-                ws.addEventListener('error', (err) => {
-                    log('WebSocket error');
-                    chrome.webview.postMessage({ type: 'error', message: 'WebSocket connection failed' });
-                });
+                const answerData = await connectResponse.json();
+                log('Answer received: ' + (answerData.sdp ? 'yes' : 'no'));
                 
-                ws.addEventListener('close', () => {
-                    log('WebSocket closed');
-                });
+                if (answerData.sdp) {
+                    await pc.setRemoteDescription({
+                        type: 'answer',
+                        sdp: answerData.sdp
+                    });
+                    log('Remote description set');
+                } else {
+                    throw new Error('No SDP in answer: ' + JSON.stringify(answerData));
+                }
                 
             } catch (err) {
+                log('Connection error: ' + err.message);
                 document.getElementById('loading').textContent = 'Error: ' + err.message;
+                document.getElementById('loading').style.display = 'block';
                 chrome.webview.postMessage({ type: 'error', message: err.message });
             }
         }
@@ -460,13 +503,18 @@ public class SimliWebView : UserControl
                             setTimeout(checkState, 100);
                         }
                     };
+                    // Also resolve after timeout to prevent hanging
+                    setTimeout(() => resolve(), 5000);
                     setTimeout(checkState, 100);
                 }
             });
         }
 
         function queueAudio(base64Data) {
-            if (!dc || dc.readyState !== 'open') return;
+            if (!dc || dc.readyState !== 'open') {
+                log('Data channel not ready, state: ' + (dc ? dc.readyState : 'null'));
+                return;
+            }
             
             try {
                 const binary = atob(base64Data);
@@ -514,10 +562,6 @@ public class SimliWebView : UserControl
             if (pc) {
                 pc.close();
                 pc = null;
-            }
-            if (ws) {
-                ws.close();
-                ws = null;
             }
             audioQueue = [];
             document.getElementById('loading').style.display = 'block';
