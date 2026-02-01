@@ -451,11 +451,15 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // Skip while bot is speaking OR during echo guard
+            // Skip while bot is speaking
             if (_isBotSpeaking) return;
 
-            var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
-            if (msSinceBotStopped < ECHO_GUARD_MS) return;
+            // Echo guard: only applies if Ada has actually spoken
+            if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+            {
+                var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
+                if (msSinceBotStopped < ECHO_GUARD_MS) return;
+            }
 
             var payload = rtp.Payload;
             if (payload == null || payload.Length == 0) return;
