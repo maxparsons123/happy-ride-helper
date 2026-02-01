@@ -1035,7 +1035,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             {
                 // Name corrections (case-insensitive, so only one entry needed)
                 { "Aren't out", "Bernard" },
-                // Address corrections
+                // Address corrections (exact matches)
                 { "52 I ain't dead bro", "52A David Road" },
                 { "52 I ain't David", "52A David Road" },
                 { "52 ain't David", "52A David Road" },
@@ -1056,6 +1056,19 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 { "book it", "yes" },
             };
             return _sttCorrectionsMap;
+        }
+    }
+
+    // Partial/substring corrections for common mishearings
+    private static readonly (string Bad, string Good)[] PartialSttCorrections = new[]
+    {
+        // Street name mishearings
+        ("Waters Street", "Russell Street"),
+        ("Water Street", "Russell Street"),
+        ("Walters Street", "Russell Street"),
+        ("Daisy Grove", "Daisy Grove"), // Keep correct
+        // Add more patterns as discovered
+    };
         }
     }
 
@@ -1140,7 +1153,24 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private static string ApplySttCorrections(string text)
     {
         var t = text.Trim();
-        return SttCorrections.TryGetValue(t, out var corrected) ? corrected : t;
+        
+        // First try exact match
+        if (SttCorrections.TryGetValue(t, out var corrected))
+            return corrected;
+        
+        // Then apply partial/substring corrections
+        foreach (var (bad, good) in PartialSttCorrections)
+        {
+            if (t.Contains(bad, StringComparison.OrdinalIgnoreCase))
+            {
+                var result = t.Replace(bad, good, StringComparison.OrdinalIgnoreCase);
+                // Log when correction is applied (visible in console)
+                Console.WriteLine($"🔧 STT partial fix: \"{t}\" → \"{result}\"");
+                t = result;
+            }
+        }
+        
+        return t;
     }
 
     private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant.
