@@ -115,8 +115,21 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action<byte[]>? OnPcm24Audio; // Not used in G.711 mode, but required by interface
     public event Action? OnConnected;
     public event Action? OnDisconnected;
-    public event Action? OnResponseStarted;
-    public event Action? OnResponseCompleted;
+    private Action? _onResponseStarted;
+    private Action? _onResponseCompleted;
+    private readonly object _eventLock = new object();
+    
+    public event Action? OnResponseStarted
+    {
+        add { lock (_eventLock) _onResponseStarted += value; }
+        remove { lock (_eventLock) _onResponseStarted -= value; }
+    }
+    
+    public event Action? OnResponseCompleted
+    {
+        add { lock (_eventLock) _onResponseCompleted += value; }
+        remove { lock (_eventLock) _onResponseCompleted -= value; }
+    }
     public event Action<string>? OnAdaSpeaking;
     public event Action? OnCallEnded;
     public event Action<BookingState>? OnBookingUpdated;
@@ -429,7 +442,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "response.created":
                     Interlocked.Exchange(ref _responseActive, 1);
                     Log("🤖 AI response started");
-                    OnResponseStarted?.Invoke();
+                    Action? startHandler;
+                    lock (_eventLock) startHandler = _onResponseStarted;
+                    startHandler?.Invoke();
                     break;
 
                 case "response.done":
@@ -440,9 +455,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     // CRITICAL: Fire event to unblock user audio in call handler
                     try
                     {
-                        var hasSubscribers = OnResponseCompleted != null;
+                        Action? completedHandler;
+                        lock (_eventLock) completedHandler = _onResponseCompleted;
+                        var hasSubscribers = completedHandler != null;
                         Log($"📢 Firing OnResponseCompleted (subscribers: {hasSubscribers})");
-                        OnResponseCompleted?.Invoke();
+                        completedHandler?.Invoke();
                     }
                     catch (Exception ex)
                     {
