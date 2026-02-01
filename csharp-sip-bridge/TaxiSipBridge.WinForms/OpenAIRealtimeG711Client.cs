@@ -97,6 +97,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private long _lastToolCallAt;
 
     // =========================
+    // NO-REPLY WATCHDOG
+    // =========================
+    private Timer? _noReplyWatchdog;
+    private long _lastResponseDoneAt;
+    private int _userSpeaking;
+    private const int NO_REPLY_TIMEOUT_MS = 8000; // 8 seconds before forcing commit
+    private const int FORCE_COMMIT_INTERVAL_MS = 3000; // Repeat commit every 3s if still no response
+
+    // =========================
     // EVENTS
     // =========================
     public event Action<string>? OnLog;
@@ -413,7 +422,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 case "response.done":
                     Interlocked.Exchange(ref _responseActive, 0);
+                    Volatile.Write(ref _lastResponseDoneAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                     Log("🤖 AI response completed");
+                    
+                    // Start no-reply watchdog if awaiting confirmation
+                    if (_awaitingConfirmation)
+                    {
+                        StartNoReplyWatchdog();
+                    }
                     break;
 
                 case "response.audio.delta":
@@ -467,10 +483,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 case "input_audio_buffer.speech_started":
                     Log("🎤 User speaking...");
+                    Interlocked.Exchange(ref _userSpeaking, 1);
+                    StopNoReplyWatchdog(); // Cancel watchdog when user speaks
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     Log("🔇 User stopped speaking");
+                    Interlocked.Exchange(ref _userSpeaking, 0);
                     break;
 
                 case "response.function_call_arguments.done":
@@ -561,6 +580,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _booking.Confirmed = true;
                     _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     _awaitingConfirmation = false;
+                    StopNoReplyWatchdog(); // Stop watchdog when booking confirmed
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
@@ -631,6 +651,74 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         {
             Log($"📴 Call ended: {reason}");
             OnCallEnded?.Invoke();
+        }
+    }
+
+    // =========================
+    // NO-REPLY WATCHDOG
+    // =========================
+
+    private void StartNoReplyWatchdog()
+    {
+        StopNoReplyWatchdog();
+
+        Log($"⏰ No-reply watchdog started ({NO_REPLY_TIMEOUT_MS}ms timeout, awaiting confirmation)");
+
+        _noReplyWatchdog = new Timer(async _ =>
+        {
+            // Check if still awaiting confirmation and user hasn't spoken
+            if (!_awaitingConfirmation || Volatile.Read(ref _userSpeaking) != 0)
+            {
+                StopNoReplyWatchdog();
+                return;
+            }
+
+            // Check if AI is currently generating a response
+            if (Volatile.Read(ref _responseActive) != 0)
+            {
+                return; // AI is speaking, don't interrupt
+            }
+
+            // Check elapsed time since last response.done
+            var lastDone = Volatile.Read(ref _lastResponseDoneAt);
+            var elapsed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - lastDone;
+
+            if (elapsed >= NO_REPLY_TIMEOUT_MS)
+            {
+                Log("⏰ No-reply timeout - forcing audio commit to trigger VAD...");
+                await ForceAudioCommitAsync().ConfigureAwait(false);
+            }
+        }, null, NO_REPLY_TIMEOUT_MS, FORCE_COMMIT_INTERVAL_MS);
+    }
+
+    private void StopNoReplyWatchdog()
+    {
+        var watchdog = Interlocked.Exchange(ref _noReplyWatchdog, null);
+        if (watchdog != null)
+        {
+            try { watchdog.Dispose(); } catch { }
+        }
+    }
+
+    private async Task ForceAudioCommitAsync()
+    {
+        if (!IsConnected) return;
+
+        try
+        {
+            // Force commit the audio buffer - this makes OpenAI process whatever is in the buffer
+            // even if VAD hasn't triggered
+            await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
+            Log("📤 Forced audio buffer commit sent");
+
+            // Also send a response.create to prompt the AI to respond
+            await Task.Delay(200).ConfigureAwait(false);
+            await SendResponseCreateAsync().ConfigureAwait(false);
+            Log("📤 Response.create sent after forced commit");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Force commit error: {ex.Message}");
         }
     }
 
@@ -823,11 +911,14 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     private void ResetCallState(string? caller)
     {
         ClearPendingFrames();
+        StopNoReplyWatchdog();
 
         _callerId = caller ?? "";
         _detectedLanguage = DetectLanguage(caller);
         _booking.Reset();
         _awaitingConfirmation = false;
+        Interlocked.Exchange(ref _userSpeaking, 0);
+        Volatile.Write(ref _lastResponseDoneAt, 0);
 
         Interlocked.Exchange(ref _callEnded, 0);
         Interlocked.Exchange(ref _responseActive, 0);
@@ -943,6 +1034,7 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         SignalCallEnded("disposed");
+        StopNoReplyWatchdog();
 
         try { _cts?.Cancel(); } catch { }
         try { _ws?.Dispose(); } catch { }
