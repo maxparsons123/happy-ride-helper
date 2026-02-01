@@ -205,7 +205,7 @@ Be concise, warm, and professional.
             Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
             // Create OpenAI G711 client
-            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, _instructions, _greeting);
+            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
