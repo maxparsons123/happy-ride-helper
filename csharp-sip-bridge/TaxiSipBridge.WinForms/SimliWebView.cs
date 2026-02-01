@@ -183,10 +183,22 @@ public class SimliWebView : UserControl
 
     /// <summary>
     /// Send PCM16 audio (16kHz) to drive lip-sync.
+    /// Simli expects chunks around 6000 bytes for optimal performance.
     /// </summary>
     public async Task SendAudioAsync(byte[] pcm16Audio)
     {
-        if (!IsConnected) return;
+        if (!IsConnected) 
+        {
+            OnLog?.Invoke($"🎭 Audio skipped - not connected (IsConnected={IsConnected})");
+            return;
+        }
+
+        // Log occasionally to show audio is flowing
+        _audioBytesSent += pcm16Audio.Length;
+        if (_audioBytesSent % 48000 < pcm16Audio.Length) // Log roughly every 1.5 seconds of audio
+        {
+            OnLog?.Invoke($"🎭 Audio flowing: {_audioBytesSent / 1000}KB sent");
+        }
 
         var base64 = Convert.ToBase64String(pcm16Audio);
         var cmd = JsonSerializer.Serialize(new
@@ -197,6 +209,7 @@ public class SimliWebView : UserControl
 
         await ExecuteScriptAsync($"handleCommand({cmd})");
     }
+    private long _audioBytesSent = 0;
 
     /// <summary>
     /// Send audio as PCM24 (24kHz) - will be resampled to 16kHz.
@@ -527,9 +540,14 @@ public class SimliWebView : UserControl
             });
         }
 
+        let audioBytesSent = 0;
+        
         function queueAudio(base64Data) {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
-                log('WebSocket not ready, state: ' + (ws ? ws.readyState : 'null'));
+                // Only log occasionally to avoid spam
+                if (audioBytesSent === 0) {
+                    log('WebSocket not ready for audio, state: ' + (ws ? ws.readyState : 'null'));
+                }
                 return;
             }
             
@@ -539,6 +557,13 @@ public class SimliWebView : UserControl
                 for (let i = 0; i < binary.length; i++) {
                     bytes[i] = binary.charCodeAt(i);
                 }
+                audioBytesSent += bytes.length;
+                
+                // Log periodically
+                if (audioBytesSent % 32000 < bytes.length) {
+                    log('Audio queued: ' + Math.round(audioBytesSent / 1000) + 'KB total, queue: ' + audioQueue.length);
+                }
+                
                 audioQueue.push(bytes);
                 processAudioQueue();
             } catch (err) {
