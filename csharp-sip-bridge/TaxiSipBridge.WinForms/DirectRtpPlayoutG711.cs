@@ -9,11 +9,11 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Direct RTP Playout for G.711 mode (8kHz passthrough).
-/// Receives μ-law from OpenAI and outputs directly to SIP.
+/// Receives G.711 from OpenAI and outputs directly to SIP.
 /// 
 /// Key Features:
-/// - Direct μ-law passthrough (no resampling when SIP uses PCMU)
-/// - Direct μ-law→A-law transcode (no PCM intermediate when SIP uses PCMA)
+/// - Direct passthrough (no resampling, no transcoding)
+/// - OpenAI outputs matching codec format (μ-law or A-law)
 /// - NAT punch-through via symmetric RTP
 /// - Timer-driven 20ms cadence for stable delivery
 /// - Grace period before OnQueueEmpty to prevent premature cutoff
@@ -93,24 +93,29 @@ public class DirectRtpPlayoutG711 : IDisposable
     }
 
     /// <summary>
-    /// Buffer a μ-law frame from OpenAI (160 bytes = 20ms @ 8kHz).
-    /// Frame is transcoded to A-law on output if carrier uses PCMA.
+    /// Buffer a G.711 frame from OpenAI (160 bytes = 20ms @ 8kHz).
+    /// Frame is passed through directly - OpenAI outputs matching codec format.
     /// </summary>
-    public void BufferMuLawFrame(byte[] mulawFrame)
+    public void BufferG711Frame(byte[] g711Frame)
     {
-        if (mulawFrame == null || mulawFrame.Length != FRAME_SIZE_BYTES) return;
+        if (g711Frame == null || g711Frame.Length != FRAME_SIZE_BYTES) return;
 
-        _frameBuffer.Enqueue(mulawFrame);
+        _frameBuffer.Enqueue(g711Frame);
         _totalFramesQueued++;
     }
 
     /// <summary>
-    /// Buffer multiple μ-law frames at once.
+    /// Alias for BufferG711Frame for backwards compatibility.
     /// </summary>
-    public void BufferMuLawFrames(IEnumerable<byte[]> frames)
+    public void BufferMuLawFrame(byte[] frame) => BufferG711Frame(frame);
+
+    /// <summary>
+    /// Buffer multiple G.711 frames at once.
+    /// </summary>
+    public void BufferG711Frames(IEnumerable<byte[]> frames)
     {
         foreach (var frame in frames)
-            BufferMuLawFrame(frame);
+            BufferG711Frame(frame);
     }
 
     /// <summary>
@@ -152,22 +157,13 @@ public class DirectRtpPlayoutG711 : IDisposable
             OnLog?.Invoke($"[RTP] ▶️ Playing ({_frameBuffer.Count * FRAME_SIZE_BYTES} samples buffered)");
         }
 
-        if (_frameBuffer.TryDequeue(out var mulawFrame))
+        if (_frameBuffer.TryDequeue(out var g711Frame))
         {
             _emptyFramesCount = 0;
             
-            // Transcode if needed and send
-            if (_useALaw)
-            {
-                // μ-law → A-law direct transcode (no PCM intermediate)
-                var alawFrame = AudioCodecs.TranscodeMuLawToALaw(mulawFrame);
-                SendRtpFrame(alawFrame);
-            }
-            else
-            {
-                // Direct μ-law passthrough
-                SendRtpFrame(mulawFrame);
-            }
+            // Direct passthrough - OpenAI outputs matching codec format
+            // (μ-law when configured for μ-law, A-law when configured for A-law)
+            SendRtpFrame(g711Frame);
 
             _framesSent++;
             if (_framesSent % 50 == 0)
