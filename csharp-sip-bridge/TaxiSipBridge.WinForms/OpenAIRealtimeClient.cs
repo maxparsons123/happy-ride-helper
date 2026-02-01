@@ -40,6 +40,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
+    private long _responseCreatedAt;     // For transcript guard (ignore stale transcripts)
 
     // Tracks current OpenAI response id to ignore duplicate events
     private string? _activeResponseId;
@@ -465,6 +466,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
+                    
+                    // CRITICAL: Record timestamp for transcript guard.
+                    // Any user transcripts arriving within 500ms of this are stale and should be ignored.
+                    Volatile.Write(ref _responseCreatedAt, NowMs());
 
                     // CRITICAL: Clear OpenAI's input audio buffer when Ada starts speaking.
                     // This prevents stale audio from being transcribed as the user's response.
@@ -531,6 +536,17 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         !string.IsNullOrWhiteSpace(u.GetString()))
                     {
                         var text = ApplySttCorrections(u.GetString()!);
+                        
+                        // TRANSCRIPT GUARD: Ignore stale transcripts that arrive within 500ms
+                        // of Ada starting to speak. These are from audio processed before we
+                        // cleared the buffer and blocked inbound audio.
+                        var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
+                        if (msSinceResponseCreated < 500 && Volatile.Read(ref _responseActive) == 1)
+                        {
+                            Log($"🚫 Ignoring stale transcript (arrived {msSinceResponseCreated}ms after response.created): {text}");
+                            break;
+                        }
+                        
                         Log($"👤 User: {text}");
                         OnTranscript?.Invoke($"You: {text}");
                     }
