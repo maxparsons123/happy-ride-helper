@@ -20,8 +20,17 @@ public static class AudioCodecs
     // ===========================================
     private static bool _speexChecked;
     private static bool _speexAvailable;
+    
+    // Upsampling resamplers
     private static IntPtr _speexResampler8to24 = IntPtr.Zero;
     private static IntPtr _speexResampler16to24 = IntPtr.Zero;
+    private static IntPtr _speexResampler24to48 = IntPtr.Zero;
+    
+    // Downsampling resamplers (for G711 mode - all codecs → 8kHz μ-law)
+    private static IntPtr _speexResampler48to8 = IntPtr.Zero;
+    private static IntPtr _speexResampler16to8 = IntPtr.Zero;
+    private static IntPtr _speexResampler24to8 = IntPtr.Zero;
+    
     private static readonly object _speexLock = new();
 
     [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
@@ -67,16 +76,86 @@ public static class AudioCodecs
     }
 
     /// <summary>
-    /// High-quality resample using SpeexDSP (Quality 8).
+    /// Get or create a SpeexDSP resampler for the given rate pair.
+    /// Returns IntPtr.Zero if the rate pair is not supported.
+    /// </summary>
+    private static IntPtr GetOrCreateResampler(int fromRate, int toRate)
+    {
+        // Quality 8 for high-fidelity, Quality 6 for narrowband
+        int quality = (fromRate >= 24000 || toRate >= 24000) ? 8 : 6;
+
+        if (fromRate == 8000 && toRate == 24000)
+        {
+            if (_speexResampler8to24 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler8to24 = speex_resampler_init(1, 8000, 24000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 8→24 failed: {err}");
+            }
+            return _speexResampler8to24;
+        }
+        else if (fromRate == 16000 && toRate == 24000)
+        {
+            if (_speexResampler16to24 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler16to24 = speex_resampler_init(1, 16000, 24000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 16→24 failed: {err}");
+            }
+            return _speexResampler16to24;
+        }
+        else if (fromRate == 24000 && toRate == 48000)
+        {
+            if (_speexResampler24to48 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler24to48 = speex_resampler_init(1, 24000, 48000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 24→48 failed: {err}");
+            }
+            return _speexResampler24to48;
+        }
+        else if (fromRate == 48000 && toRate == 8000)
+        {
+            if (_speexResampler48to8 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler48to8 = speex_resampler_init(1, 48000, 8000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 48→8 failed: {err}");
+            }
+            return _speexResampler48to8;
+        }
+        else if (fromRate == 16000 && toRate == 8000)
+        {
+            if (_speexResampler16to8 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler16to8 = speex_resampler_init(1, 16000, 8000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 16→8 failed: {err}");
+            }
+            return _speexResampler16to8;
+        }
+        else if (fromRate == 24000 && toRate == 8000)
+        {
+            if (_speexResampler24to8 == IntPtr.Zero)
+            {
+                int err;
+                _speexResampler24to8 = speex_resampler_init(1, 24000, 8000, quality, out err);
+                if (err != 0) throw new Exception($"Speex init 24→8 failed: {err}");
+            }
+            return _speexResampler24to8;
+        }
+
+        return IntPtr.Zero; // Unsupported rate pair
+    }
+
+    /// <summary>
+    /// High-quality resample using SpeexDSP.
+    /// Supports all common telephony rate pairs for G711 mode.
     /// Falls back to linear interpolation if unavailable.
     /// </summary>
     public static short[] ResampleWithSpeex(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate || input.Length == 0) return input;
-
-        // For downsampling, use FIR anti-aliasing filter
-        if (fromRate == 24000 && toRate == 8000)
-            return Resample24kTo8k(input);
 
         if (!IsSpeexAvailable())
             return ResampleLinear(input, fromRate, toRate);
@@ -85,31 +164,13 @@ public static class AudioCodecs
         {
             try
             {
-                // Get or create resampler for this rate pair
-                IntPtr resampler;
-                if (fromRate == 8000 && toRate == 24000)
+                IntPtr resampler = GetOrCreateResampler(fromRate, toRate);
+                
+                if (resampler == IntPtr.Zero)
                 {
-                    if (_speexResampler8to24 == IntPtr.Zero)
-                    {
-                        int err;
-                        _speexResampler8to24 = speex_resampler_init(1, 8000, 24000, 8, out err);
-                        if (err != 0) throw new Exception($"Speex init 8→24 failed: {err}");
-                    }
-                    resampler = _speexResampler8to24;
-                }
-                else if (fromRate == 16000 && toRate == 24000)
-                {
-                    if (_speexResampler16to24 == IntPtr.Zero)
-                    {
-                        int err;
-                        _speexResampler16to24 = speex_resampler_init(1, 16000, 24000, 8, out err);
-                        if (err != 0) throw new Exception($"Speex init 16→24 failed: {err}");
-                    }
-                    resampler = _speexResampler16to24;
-                }
-                else
-                {
-                    // For other rate pairs, use linear (rare case)
+                    // Unsupported rate pair - fall back to linear or FIR
+                    if (fromRate == 24000 && toRate == 8000)
+                        return Resample24kTo8k(input); // Use FIR for this specific case
                     return ResampleLinear(input, fromRate, toRate);
                 }
 
@@ -149,6 +210,7 @@ public static class AudioCodecs
     {
         lock (_speexLock)
         {
+            // Upsampling resamplers
             if (_speexResampler8to24 != IntPtr.Zero)
             {
                 try { speex_resampler_destroy(_speexResampler8to24); } catch { }
@@ -158,6 +220,28 @@ public static class AudioCodecs
             {
                 try { speex_resampler_destroy(_speexResampler16to24); } catch { }
                 _speexResampler16to24 = IntPtr.Zero;
+            }
+            if (_speexResampler24to48 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler24to48); } catch { }
+                _speexResampler24to48 = IntPtr.Zero;
+            }
+            
+            // Downsampling resamplers (G711 mode)
+            if (_speexResampler48to8 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler48to8); } catch { }
+                _speexResampler48to8 = IntPtr.Zero;
+            }
+            if (_speexResampler16to8 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler16to8); } catch { }
+                _speexResampler16to8 = IntPtr.Zero;
+            }
+            if (_speexResampler24to8 != IntPtr.Zero)
+            {
+                try { speex_resampler_destroy(_speexResampler24to8); } catch { }
+                _speexResampler24to8 = IntPtr.Zero;
             }
         }
     }
