@@ -15,6 +15,7 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
     private bool _useManualAnswer = false;
+    private bool _useG711Mode = false;  // G711 8kHz passthrough mode
     private ManualCallHandler? _manualCallHandler;
 
     // === Audio Monitor (local speaker playback) ===
@@ -51,6 +52,7 @@ public partial class MainForm : Form
         // Show/hide relevant fields
         lblApiKey.Visible = _useLocalOpenAI;
         txtApiKey.Visible = _useLocalOpenAI;
+        chkG711Mode.Visible = _useLocalOpenAI; // Show G711 option only in Local mode
         lblWs.Visible = !_useLocalOpenAI;
         txtWebSocketUrl.Visible = !_useLocalOpenAI;
 
@@ -60,6 +62,15 @@ public partial class MainForm : Form
         AddLog(_useLocalOpenAI
             ? "🔒 Switched to LOCAL OpenAI mode (direct connection)"
             : "☁️ Switched to EDGE FUNCTION mode");
+    }
+
+    // G711 mode checkbox handler
+    private void chkG711Mode_CheckedChanged(object? sender, EventArgs e)
+    {
+        _useG711Mode = chkG711Mode.Checked;
+        AddLog(_useG711Mode 
+            ? "🎵 G711 mode ENABLED (8kHz μ-law passthrough - experimental)" 
+            : "🎵 G711 mode DISABLED (24kHz mode)");
     }
 
     // Manual Answer mode checkbox handler
@@ -365,28 +376,49 @@ public partial class MainForm : Form
                 });
                 _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
 
-                // Create the NEW call handler with dispatch webhook for taxi bookings
-                const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
-                var localHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
-                _callHandler = localHandler;
-
-                // Configure Simli avatar if enabled
-                if (chkSimliAvatar.Checked && _simliView != null)
+                // Create call handler based on mode
+                if (_useG711Mode)
                 {
-                    localHandler.SetSimliSender(async pcm24 => await _simliView.SendPcm24AudioAsync(pcm24));
-                    AddLog("🎭 Simli audio sender connected to call handler");
-                }
+                    // G711 mode: 8kHz μ-law passthrough (experimental)
+                    var g711Handler = new G711CallHandler(apiKey);
+                    _callHandler = g711Handler;
 
-                // Configure audio monitor if enabled (listen to caller through speakers)
-                if (_audioMonitorEnabled)
+                    // Configure audio monitor if enabled
+                    if (_audioMonitorEnabled)
+                    {
+                        g711Handler.OnCallerAudioMonitor += pcm24 => SafeInvoke(() => PlayCallerAudioLocally(pcm24));
+                        AddLog("🔊 Audio monitor connected to G711 handler");
+                    }
+
+                    _sipLoginManager.SetCallHandler(_callHandler);
+                    _sipLoginManager.Start();
+                    AddLog("🎵 SIP G711 mode started - 8kHz μ-law passthrough (experimental)");
+                }
+                else
                 {
-                    localHandler.OnCallerAudioMonitor += pcm24 => SafeInvoke(() => PlayCallerAudioLocally(pcm24));
-                    AddLog("🔊 Audio monitor connected to call handler");
-                }
+                    // Standard 24kHz mode with dispatch webhook
+                    const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
+                    var localHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
+                    _callHandler = localHandler;
 
-                _sipLoginManager.SetCallHandler(_callHandler);
-                _sipLoginManager.Start();
-                AddLog("🔒 SIP LOCAL AI mode started - NEW AiSipAudioPlayout (20ms timer-driven RTP)");
+                    // Configure Simli avatar if enabled
+                    if (chkSimliAvatar.Checked && _simliView != null)
+                    {
+                        localHandler.SetSimliSender(async pcm24 => await _simliView.SendPcm24AudioAsync(pcm24));
+                        AddLog("🎭 Simli audio sender connected to call handler");
+                    }
+
+                    // Configure audio monitor if enabled
+                    if (_audioMonitorEnabled)
+                    {
+                        localHandler.OnCallerAudioMonitor += pcm24 => SafeInvoke(() => PlayCallerAudioLocally(pcm24));
+                        AddLog("🔊 Audio monitor connected to call handler");
+                    }
+
+                    _sipLoginManager.SetCallHandler(_callHandler);
+                    _sipLoginManager.Start();
+                    AddLog("🔒 SIP LOCAL AI mode started - 24kHz with resampling");
+                }
             }
             else
             {
