@@ -242,13 +242,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Send PCM16 @ 8kHz audio. Converts to µ-law before sending.
+    /// Send PCM16 @ 8kHz audio. Converts to G.711 (µ-law or A-law based on codec) before sending.
     /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 8000)
     {
         if (!IsConnected || pcmData == null || pcmData.Length == 0) return;
 
-        // Convert PCM16 → µ-law
+        // Convert PCM16 bytes → samples
         var samples = AudioCodecs.BytesToShorts(pcmData);
         
         // Resample if needed
@@ -257,8 +257,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             samples = AudioCodecs.Resample(samples, sampleRate, SAMPLE_RATE);
         }
 
-        var ulaw = AudioCodecs.MuLawEncode(samples);
-        await SendMuLawAsync(ulaw).ConfigureAwait(false);
+        // Dynamic encoding based on the negotiated codec
+        byte[] encoded;
+        if (_codec == G711Codec.ALaw)
+            encoded = AudioCodecs.ALawEncode(samples);
+        else
+            encoded = AudioCodecs.MuLawEncode(samples);
+
+        await SendMuLawAsync(encoded).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -805,54 +811,67 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Accumulates G.711 audio deltas and enqueues full 20ms (160-byte) frames.
+    /// Uses Span<byte> for zero-allocation compaction (net8.0 optimization).
+    /// </summary>
     private void AppendAndEnqueueG711(byte[] bytes)
     {
         if (bytes.Length == 0) return;
 
+        var incoming = bytes.AsSpan();
+
         // Ensure capacity and contiguity
-        if (_audioAccumOffset + _audioAccumLength + bytes.Length > _audioAccum.Length)
+        if (_audioAccumOffset + _audioAccumLength + incoming.Length > _audioAccum.Length)
         {
-            // Compact if we have a head offset
+            // Compact if we have a head offset - use Span for zero-copy
             if (_audioAccumLength > 0 && _audioAccumOffset > 0)
             {
-                Buffer.BlockCopy(_audioAccum, _audioAccumOffset, _audioAccum, 0, _audioAccumLength);
+                _audioAccum.AsSpan(_audioAccumOffset, _audioAccumLength)
+                           .CopyTo(_audioAccum.AsSpan(0, _audioAccumLength));
                 _audioAccumOffset = 0;
             }
 
-            if (_audioAccumLength + bytes.Length > _audioAccum.Length)
+            // Grow buffer if still insufficient
+            if (_audioAccumLength + incoming.Length > _audioAccum.Length)
             {
                 var newCap = _audioAccum.Length;
-                while (newCap < _audioAccumLength + bytes.Length)
+                while (newCap < _audioAccumLength + incoming.Length)
                     newCap *= 2;
                 var next = new byte[newCap];
                 if (_audioAccumLength > 0)
-                    Buffer.BlockCopy(_audioAccum, _audioAccumOffset, next, 0, _audioAccumLength);
+                    _audioAccum.AsSpan(_audioAccumOffset, _audioAccumLength).CopyTo(next);
                 _audioAccum = next;
                 _audioAccumOffset = 0;
             }
         }
 
-        Buffer.BlockCopy(bytes, 0, _audioAccum, _audioAccumOffset + _audioAccumLength, bytes.Length);
-        _audioAccumLength += bytes.Length;
+        // Append incoming data using Span
+        incoming.CopyTo(_audioAccum.AsSpan(_audioAccumOffset + _audioAccumLength));
+        _audioAccumLength += incoming.Length;
 
         // Emit full 20ms frames
         while (_audioAccumLength >= FRAME_SIZE_BYTES)
         {
             var frame = new byte[FRAME_SIZE_BYTES];
-            Buffer.BlockCopy(_audioAccum, _audioAccumOffset, frame, 0, FRAME_SIZE_BYTES);
+            _audioAccum.AsSpan(_audioAccumOffset, FRAME_SIZE_BYTES).CopyTo(frame);
             _audioAccumOffset += FRAME_SIZE_BYTES;
             _audioAccumLength -= FRAME_SIZE_BYTES;
 
             if (_audioAccumLength == 0)
                 _audioAccumOffset = 0;
 
-            // Queue management
+            // Queue management - cap buffer to prevent runaway memory
             while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);
             _outboundQueue.Enqueue(frame);
         }
     }
 
+    /// <summary>
+    /// Flushes any remaining audio in the accumulator.
+    /// Uses Span<byte> for zero-allocation operations.
+    /// </summary>
     private void FlushAudioAccumulator(bool padWithSilence)
     {
         if (_audioAccumLength <= 0) return;
@@ -861,9 +880,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         {
             var frame = new byte[FRAME_SIZE_BYTES];
             var count = Math.Min(_audioAccumLength, FRAME_SIZE_BYTES);
-            Buffer.BlockCopy(_audioAccum, _audioAccumOffset, frame, 0, count);
+            _audioAccum.AsSpan(_audioAccumOffset, count).CopyTo(frame);
             if (count < FRAME_SIZE_BYTES)
-                Array.Fill(frame, _silenceByte, count, FRAME_SIZE_BYTES - count);
+                frame.AsSpan(count).Fill(_silenceByte);
 
             while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                 _outboundQueue.TryDequeue(out _);
