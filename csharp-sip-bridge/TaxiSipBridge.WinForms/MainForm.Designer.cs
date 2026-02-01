@@ -90,13 +90,24 @@ partial class MainForm
         // === Simli Avatar ===
         chkSimliAvatar = new CheckBox 
         { 
-            Text = "🎭 Simli Avatar", 
-            Location = new Point(565, 88), 
-            Size = new Size(130, 23),
+            Text = "🎭 Simli", 
+            Location = new Point(560, 88), 
+            Size = new Size(70, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(156, 39, 176)
         };
         chkSimliAvatar.CheckedChanged += this.chkSimliAvatar_CheckedChanged;
+
+        // === Audio Monitor (hear caller through speakers) ===
+        chkMonitorAudio = new CheckBox 
+        { 
+            Text = "🔊 Monitor", 
+            Location = new Point(630, 88), 
+            Size = new Size(80, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(255, 152, 0)
+        };
+        chkMonitorAudio.CheckedChanged += this.chkMonitorAudio_CheckedChanged;
 
         // OpenAI API Key (shown when Local mode is checked)
         lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
@@ -168,7 +179,7 @@ partial class MainForm
             lblUser, txtSipUser, lblAuthUser, txtAuthUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
-            chkLocalOpenAI, chkSimliAvatar,
+            chkLocalOpenAI, chkSimliAvatar, chkMonitorAudio,
             lblApiKey, txtApiKey,
             chkCheaperPipeline, lblDeepgramKey, txtDeepgramKey,
             lblWs, txtWebSocketUrl,
@@ -305,6 +316,7 @@ partial class MainForm
     private CheckBox chkLocalOpenAI;
     private CheckBox chkSimliAvatar;
     private CheckBox chkCheaperPipeline;
+    private CheckBox chkMonitorAudio;
     private Label lblApiKey;
     private Label lblDeepgramKey;
     private Label lblWs;
