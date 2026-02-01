@@ -1059,18 +1059,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         }
     }
 
-    // Partial/substring corrections for common mishearings
+    // Partial/substring corrections for common mishearings (backup if audio quality degrades)
     private static readonly (string Bad, string Good)[] PartialSttCorrections = new[]
     {
-        // Street name mishearings
+        // Street name mishearings - only add patterns that persist after SpeexDSP fix
         ("Waters Street", "Russell Street"),
         ("Water Street", "Russell Street"),
         ("Walters Street", "Russell Street"),
-        ("Daisy Grove", "Daisy Grove"), // Keep correct
-        // Add more patterns as discovered
     };
-        }
-    }
 
     // ===========================================
     // UTILITIES
