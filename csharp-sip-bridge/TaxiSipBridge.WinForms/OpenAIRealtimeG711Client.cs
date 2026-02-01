@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -23,7 +24,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.0";
+    public const string VERSION = "1.1"; // Added booking tools
 
     // =========================
     // CONFIG
@@ -31,8 +32,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
-    private readonly string _instructions;
-    private readonly string? _greeting;
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
     // Audio format: G.711 μ-law @ 8kHz
@@ -51,6 +50,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private int _sessionCreated;
     private int _sessionUpdated;
     private int _greetingSent;
+    private int _ignoreUserAudio;
+
+    // =========================
+    // BOOKING STATE
+    // =========================
+    private readonly BookingState _booking = new();
+    private string _callerId = "";
+    private string _detectedLanguage = "en";
+    private bool _awaitingConfirmation;
 
     // =========================
     // WS + LIFECYCLE
@@ -71,6 +79,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private long _audioFramesSent;
     private long _audioChunksReceived;
+    private long _lastToolCallAt;
 
     // =========================
     // EVENTS
@@ -83,6 +92,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action? OnResponseStarted;
     public event Action<string>? OnAdaSpeaking;
     public event Action? OnCallEnded;
+    public event Action<BookingState>? OnBookingUpdated;
 
     // =========================
     // PROPERTIES
@@ -99,15 +109,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public OpenAIRealtimeG711Client(
         string apiKey,
         string model = "gpt-4o-realtime-preview-2025-06-03",
-        string voice = "shimmer",
-        string? instructions = null,
-        string? greeting = null)
+        string voice = "shimmer")
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
-        _instructions = instructions ?? "You are a helpful assistant.";
-        _greeting = greeting;
     }
 
     // =========================
@@ -118,9 +124,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     {
         ThrowIfDisposed();
 
+        // Reset state for new call
+        ResetCallState(caller);
+
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
-        // Note: Don't use "OpenAI-Beta: realtime=v1" - that connects to old API
 
         using var timeout = new CancellationTokenSource(_connectTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
@@ -156,7 +164,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Log("✅ Session configured");
 
         // Send greeting after session.updated
-        if (!string.IsNullOrEmpty(_greeting) && Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
+        if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
         {
             await SendGreetingAsync().ConfigureAwait(false);
             Log("📢 Greeting sent");
@@ -172,6 +180,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public async Task SendMuLawAsync(byte[] ulawData)
     {
         if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) != 0) return;
 
         try
         {
@@ -249,41 +258,30 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // SESSION CONFIGURATION (New Schema)
+    // SESSION CONFIGURATION
     // =========================
 
     private async Task ConfigureSessionAsync()
     {
-        // New OpenAI Realtime API schema
         var config = new
         {
             type = "session.update",
             session = new
             {
-                type = "realtime",
                 model = _model,
-                output_modalities = new[] { "audio" },
-                audio = new
+                modalities = new[] { "text", "audio" },
+                instructions = GetSystemPrompt(),
+                voice = _voice,
+                input_audio_format = "pcmu",
+                output_audio_format = "pcmu",
+                input_audio_transcription = new { model = "whisper-1" },
+                turn_detection = new
                 {
-                    input = new
-                    {
-                        format = new { type = AUDIO_FORMAT },
-                        transcription = new { model = "whisper-1" },
-                        noise_reduction = new { type = "near_field" },
-                        turn_detection = new
-                        {
-                            type = "semantic_vad",
-                            create_response = true,
-                            eagerness = "medium"
-                        }
-                    },
-                    output = new
-                    {
-                        format = new { type = AUDIO_FORMAT },
-                        voice = _voice
-                    }
+                    type = "semantic_vad",
+                    eagerness = "medium",
+                    create_response = true
                 },
-                instructions = _instructions
+                tools = GetTools()
             }
         };
 
@@ -293,19 +291,19 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task SendGreetingAsync()
     {
-        var greeting = new
+        var greeting = GetLocalizedGreeting(_detectedLanguage);
+        
+        var msg = new
         {
             type = "response.create",
             response = new
             {
-                instructions = _greeting,
-                conversation = "none",
-                output_modalities = new[] { "audio" },
-                metadata = new { response_purpose = "greeting" }
+                modalities = new[] { "text", "audio" },
+                instructions = $"Say exactly: \"{greeting}\""
             }
         };
 
-        await SendJsonAsync(greeting).ConfigureAwait(false);
+        await SendJsonAsync(msg).ConfigureAwait(false);
     }
 
     // =========================
@@ -391,23 +389,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Log("🤖 AI response completed");
                     break;
 
-                case "response.output_audio.delta":
-                    // Audio chunk from AI (base64 encoded G.711 μ-law @ 8kHz)
+                case "response.audio.delta":
                     if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
                     {
                         var audioBase64 = deltaEl.GetString();
-                        if (!string.IsNullOrEmpty(audioBase64))
-                        {
-                            ProcessAudioDelta(audioBase64);
-                        }
-                    }
-                    break;
-
-                case "response.audio.delta":
-                    // Alternative audio delta format (older API)
-                    if (doc.RootElement.TryGetProperty("delta", out var audioDeltaEl))
-                    {
-                        var audioBase64 = audioDeltaEl.GetString();
                         if (!string.IsNullOrEmpty(audioBase64))
                         {
                             ProcessAudioDelta(audioBase64);
@@ -456,6 +441,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Log("🔇 User stopped speaking");
                     break;
 
+                case "response.function_call_arguments.done":
+                    await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
+
                 case "error":
                     if (doc.RootElement.TryGetProperty("error", out var errorEl))
                     {
@@ -465,15 +454,151 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         Log($"❌ OpenAI error: {message}");
                     }
                     break;
-
-                default:
-                    // Log unhandled events for debugging (debug level)
-                    break;
             }
         }
         catch (Exception ex)
         {
             Log($"⚠️ ProcessMessageAsync error: {ex.Message}");
+        }
+    }
+
+    // =========================
+    // TOOL HANDLING
+    // =========================
+
+    private async Task HandleToolCallAsync(JsonElement root)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (now - Volatile.Read(ref _lastToolCallAt) < 200)
+            return;
+        Volatile.Write(ref _lastToolCallAt, now);
+
+        if (!root.TryGetProperty("name", out var n) || !root.TryGetProperty("call_id", out var c))
+            return;
+
+        var name = n.GetString();
+        var callId = c.GetString();
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(callId))
+            return;
+
+        var args = ParseArgs(root);
+        Log($"🔧 Tool: {name}");
+
+        switch (name)
+        {
+            case "sync_booking_data":
+                if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
+                if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
+                if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
+                if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
+                if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+
+                OnBookingUpdated?.Invoke(_booking);
+                await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+                await SendResponseCreateAsync().ConfigureAwait(false);
+                break;
+
+            case "book_taxi":
+            {
+                var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
+
+                if (action == "request_quote")
+                {
+                    var (fare, eta, _) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination)
+                                                             .ConfigureAwait(false);
+
+                    _booking.Fare = fare;
+                    _booking.Eta = eta;
+                    _awaitingConfirmation = true;
+
+                    OnBookingUpdated?.Invoke(_booking);
+                    Log($"💰 Quote: {fare}");
+
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        fare,
+                        eta,
+                        message = $"Fare is {fare}, driver arrives in {eta}. Book it?"
+                    }).ConfigureAwait(false);
+
+                    await SendResponseCreateAsync().ConfigureAwait(false);
+                }
+                else if (action == "confirmed")
+                {
+                    _booking.Confirmed = true;
+                    _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+                    _awaitingConfirmation = false;
+
+                    OnBookingUpdated?.Invoke(_booking);
+                    Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
+
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        booking_ref = _booking.BookingRef,
+                        message = $"Taxi booked. Reference: {_booking.BookingRef}"
+                    }).ConfigureAwait(false);
+
+                    await SendResponseCreateAsync().ConfigureAwait(false);
+                }
+                break;
+            }
+
+            case "end_call":
+                Log("📞 End call requested - ignoring further user audio...");
+                Interlocked.Exchange(ref _ignoreUserAudio, 1);
+
+                await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+
+                // Wait for audio to drain before signaling call end
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(500).ConfigureAwait(false);
+                    
+                    for (int i = 0; i < 100 && !_outboundQueue.IsEmpty; i++)
+                        await Task.Delay(100).ConfigureAwait(false);
+
+                    if (!_outboundQueue.IsEmpty)
+                        Log($"⚠️ Buffer still has {_outboundQueue.Count} frames, ending anyway");
+
+                    SignalCallEnded("end_call");
+                });
+                break;
+
+            default:
+                Log($"⚠️ Unknown tool: {name}");
+                await SendToolResultAsync(callId, new { error = "Unknown tool" }).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private async Task SendToolResultAsync(string callId, object output)
+    {
+        var msg = new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "function_call_output",
+                call_id = callId,
+                output = JsonSerializer.Serialize(output)
+            }
+        };
+        await SendJsonAsync(msg).ConfigureAwait(false);
+    }
+
+    private async Task SendResponseCreateAsync()
+    {
+        await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+    }
+
+    private void SignalCallEnded(string reason)
+    {
+        if (Interlocked.Exchange(ref _callEnded, 1) == 0)
+        {
+            Log($"📴 Call ended: {reason}");
+            OnCallEnded?.Invoke();
         }
     }
 
@@ -521,8 +646,173 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
+    // SYSTEM PROMPT & TOOLS
+    // =========================
+
+    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant.
+
+LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone number. If they speak a different language, switch to that language.
+
+FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once → book_taxi(request_quote) → Tell fare → Confirm → book_taxi(confirmed) → Give reference ID → 'Anything else?' → If no: 'Thank you for using Voice Taxibot. Goodbye!' → end_call
+
+DATA SYNC (CRITICAL): After EVERY user message that provides booking info, call sync_booking_data immediately.
+
+RULES: One question at a time. Under 20 words per response. Use £. Only call end_call after user says no to 'anything else'.";
+
+    private static string GetLanguageName(string c) => c switch 
+    { 
+        "nl" => "Dutch", 
+        "fr" => "French", 
+        "de" => "German", 
+        "es" => "Spanish", 
+        "it" => "Italian", 
+        "pl" => "Polish", 
+        "pt" => "Portuguese", 
+        _ => "English" 
+    };
+
+    private static string GetLocalizedGreeting(string lang) => lang switch
+    {
+        "nl" => "Hallo, welkom bij Voice Taxibot. Mag ik uw naam?",
+        "fr" => "Bonjour, bienvenue chez Voice Taxibot. Puis-je avoir votre nom?",
+        "de" => "Hallo, willkommen bei Voice Taxibot. Darf ich Ihren Namen erfahren?",
+        "es" => "Hola, bienvenido a Voice Taxibot. ¿Puedo saber su nombre?",
+        _ => "Hello, welcome to Voice Taxibot. May I have your name?"
+    };
+
+    private static object[] GetTools() => new object[]
+    {
+        new
+        {
+            type = "function",
+            name = "sync_booking_data",
+            description = "Save booking data as collected",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["caller_name"] = new { type = "string" },
+                    ["pickup"] = new { type = "string" },
+                    ["destination"] = new { type = "string" },
+                    ["passengers"] = new { type = "integer" },
+                    ["pickup_time"] = new { type = "string" }
+                }
+            }
+        },
+        new
+        {
+            type = "function",
+            name = "book_taxi",
+            description = "Request quote or confirm booking",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } }
+                },
+                required = new[] { "action" }
+            }
+        },
+        new
+        {
+            type = "function",
+            name = "end_call",
+            description = "End call after goodbye",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["reason"] = new { type = "string" }
+                },
+                required = new[] { "reason" }
+            }
+        }
+    };
+
+    // =========================
     // HELPERS
     // =========================
+
+    private void ResetCallState(string? caller)
+    {
+        ClearPendingFrames();
+
+        _callerId = caller ?? "";
+        _detectedLanguage = DetectLanguage(caller);
+        _booking.Reset();
+        _awaitingConfirmation = false;
+
+        Interlocked.Exchange(ref _callEnded, 0);
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _greetingSent, 0);
+        Interlocked.Exchange(ref _sessionCreated, 0);
+        Interlocked.Exchange(ref _sessionUpdated, 0);
+        Interlocked.Exchange(ref _ignoreUserAudio, 0);
+    }
+
+    private string DetectLanguage(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "en";
+
+        var norm = phone.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        // Dutch mobile
+        if (norm.StartsWith("06") && norm.Length == 10) return "nl";
+        if (norm.StartsWith("0") && !norm.StartsWith("00") && norm.Length == 10) return "nl";
+
+        // International prefix
+        if (norm.StartsWith("+")) norm = norm.Substring(1);
+        else if (norm.StartsWith("00") && norm.Length > 4) norm = norm.Substring(2);
+
+        if (norm.Length >= 2)
+        {
+            var code = norm.Substring(0, 2);
+            return code switch
+            {
+                "31" => "nl",
+                "32" => "nl", // Belgium
+                "33" => "fr",
+                "34" => "es",
+                "39" => "it",
+                "48" => "pl",
+                "49" => "de",
+                "351" => "pt",
+                _ => "en"
+            };
+        }
+
+        return "en";
+    }
+
+    private static Dictionary<string, object> ParseArgs(JsonElement root)
+    {
+        var args = new Dictionary<string, object>();
+
+        if (!root.TryGetProperty("arguments", out var a) || string.IsNullOrEmpty(a.GetString()))
+            return args;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(a.GetString()!);
+            foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                args[p.Name] = p.Value.ValueKind switch
+                {
+                    JsonValueKind.Number => p.Value.TryGetInt32(out var i) ? i : p.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String => p.Value.GetString() ?? "",
+                    _ => p.Value.ToString() ?? ""
+                };
+            }
+        }
+        catch { }
+
+        return args;
+    }
 
     private async Task SendJsonAsync(object obj)
     {
@@ -554,7 +844,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private void Log(string message)
     {
         var ts = DateTime.Now.ToString("HH:mm:ss.fff");
-        Console.WriteLine($"{ts} {message}");
+        Console.WriteLine($"{ts} [G711] {message}");
         OnLog?.Invoke(message);
     }
 
@@ -567,6 +857,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+
+        SignalCallEnded("disposed");
 
         try { _cts?.Cancel(); } catch { }
         try { _ws?.Dispose(); } catch { }
