@@ -430,7 +430,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastResponseDoneAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                     Log("🤖 AI response completed");
-                    OnResponseCompleted?.Invoke();
+                    
+                    // CRITICAL: Fire event to unblock user audio in call handler
+                    try
+                    {
+                        var hasSubscribers = OnResponseCompleted != null;
+                        Log($"📢 Firing OnResponseCompleted (subscribers: {hasSubscribers})");
+                        OnResponseCompleted?.Invoke();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"❌ OnResponseCompleted error: {ex.Message}");
+                    }
                     
                     // Start no-reply watchdog if awaiting confirmation
                     if (_awaitingConfirmation)

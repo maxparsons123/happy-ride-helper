@@ -331,7 +331,7 @@ Be concise, warm, and professional.
         _aiClient.OnResponseStarted += () =>
         {
             _isBotSpeaking = true;
-            Log($"🤖 [{callId}] AI response started");
+            Log($"🤖 [{callId}] AI response started (blocking user audio)");
         };
 
         _aiClient.OnResponseCompleted += () =>
@@ -340,8 +340,10 @@ Be concise, warm, and professional.
             // NOT when playout buffer empties (which can take 10+ seconds for long responses)
             _isBotSpeaking = false;
             _botStoppedSpeakingAt = DateTime.UtcNow;
-            Log($"🎤 [{callId}] AI response done - enabling user audio (echo guard {ECHO_GUARD_MS}ms)");
+            Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
+
+        Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
 
         _aiClient.OnAdaSpeaking += _ => { };
 
@@ -417,13 +419,23 @@ Be concise, warm, and professional.
 
             // Don't send audio while bot is speaking
             if (_isBotSpeaking)
+            {
+                // Log periodically to diagnose blocking
+                if (_inboundPacketCount % 100 == 0)
+                    Log($"🚫 [{callId}] Ingress blocked: bot speaking (packet #{_inboundPacketCount})");
                 return;
+            }
 
             // Echo guard
             if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
             {
                 var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
-                if (msSinceBotStopped < ECHO_GUARD_MS) return;
+                if (msSinceBotStopped < ECHO_GUARD_MS)
+                {
+                    if (_inboundPacketCount % 50 == 0)
+                        Log($"🛡️ [{callId}] Ingress blocked: echo guard ({msSinceBotStopped:F0}ms < {ECHO_GUARD_MS}ms)");
+                    return;
+                }
             }
 
             var ai = _aiClient;
