@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
-    public const string VERSION = "1.1";
+    public const string VERSION = "1.2";
     // ===========================================
     // CONFIGURATION
     // ===========================================
@@ -24,18 +24,18 @@ public sealed class IngressAudioProcessor : IDisposable
     private readonly int _jitterFrames;
 
     // ===========================================
-    // DSP CONSTANTS (ASR-tuned, lowered thresholds for telephony)
+    // DSP CONSTANTS (ASR-tuned for low-level telephony audio)
     // ===========================================
     private const float DC_ALPHA = 0.995f;
     private const float PRE_EMPH = 0.97f;
-    private const float GATE_OPEN_RMS = 200f;   // Lowered: telephony speech can be very quiet
-    private const float GATE_CLOSE_RMS = 120f;  // Lowered: avoid gating quiet words like "correct"
-    private const int GATE_HOLD_FRAMES = 10;    // Increased: hold gate open longer for natural speech
+    private const float GATE_OPEN_RMS = 40f;    // Very low: telephony audio is quiet (saw RMS 8-10 silence, 200+ speech)
+    private const float GATE_CLOSE_RMS = 20f;   // Very low: close only on true silence
+    private const int GATE_HOLD_FRAMES = 15;    // Hold gate open 300ms after speech
     private const float RMS_ALPHA = 0.995f;
-    private const float TARGET_RMS = 10000f;    // Lowered: less aggressive normalization
-    private const float AGC_MIN = 0.70f;        // Allow more dynamic range
-    private const float AGC_MAX = 4.0f;         // Higher max gain for quiet callers
-    private const float AGC_SMOOTH = 0.03f;     // Slightly faster AGC adaptation
+    private const float TARGET_RMS = 8000f;     // Lower target for natural sound
+    private const float AGC_MIN = 0.50f;        // Allow more dynamic range
+    private const float AGC_MAX = 6.0f;         // Higher max gain for very quiet callers
+    private const float AGC_SMOOTH = 0.05f;     // Faster AGC adaptation
     private const float LIMIT = 29000f;
 
     // ===========================================
