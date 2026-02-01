@@ -14,6 +14,8 @@ public partial class MainForm : Form
     private volatile bool _isRunning = false;
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
+    private bool _useManualAnswer = false;
+    private ManualCallHandler? _manualCallHandler;
 
     // === Audio Monitor (local speaker playback) ===
     private NAudio.Wave.WaveOutEvent? _monitorWaveOut;
@@ -58,6 +60,60 @@ public partial class MainForm : Form
         AddLog(_useLocalOpenAI
             ? "🔒 Switched to LOCAL OpenAI mode (direct connection)"
             : "☁️ Switched to EDGE FUNCTION mode");
+    }
+
+    // Manual Answer mode checkbox handler
+    private void chkManualAnswer_CheckedChanged(object? sender, EventArgs e)
+    {
+        _useManualAnswer = chkManualAnswer.Checked;
+        
+        // Manual mode disables Local OpenAI and vice versa
+        if (_useManualAnswer)
+        {
+            chkLocalOpenAI.Checked = false;
+            chkLocalOpenAI.Enabled = false;
+            chkSimliAvatar.Checked = false;
+            chkSimliAvatar.Enabled = false;
+            AddLog("🎤 Switched to MANUAL ANSWER mode - you will answer calls yourself");
+        }
+        else
+        {
+            chkLocalOpenAI.Enabled = true;
+            chkSimliAvatar.Enabled = true;
+            AddLog("🤖 Switched back to AI mode");
+        }
+    }
+
+    // Button handlers for manual call control
+    private async void btnAnswerCall_Click(object? sender, EventArgs e)
+    {
+        if (_manualCallHandler != null)
+        {
+            btnAnswerCall.Visible = false;
+            btnRejectCall.Visible = false;
+            btnHangUp.Visible = true;
+            await _manualCallHandler.AnswerCallAsync();
+        }
+    }
+
+    private void btnRejectCall_Click(object? sender, EventArgs e)
+    {
+        if (_manualCallHandler != null)
+        {
+            _manualCallHandler.RejectCall();
+            btnAnswerCall.Visible = false;
+            btnRejectCall.Visible = false;
+        }
+    }
+
+    private void btnHangUp_Click(object? sender, EventArgs e)
+    {
+        if (_manualCallHandler != null)
+        {
+            _manualCallHandler.HangUp();
+            btnHangUp.Visible = false;
+        }
+    }
     }
 
     // Stub handler for cheaper pipeline
@@ -231,9 +287,61 @@ public partial class MainForm : Form
     {
         try
         {
-            if (_useLocalOpenAI)
+            // Create SIP login config (shared by all modes)
+            var loginConfig = new SipLoginConfig
             {
-                // === NEW: LOCAL OPENAI SIP MODE with AiSipAudioPlayout ===
+                SipServer = txtSipServer.Text.Trim(),
+                SipPort = int.Parse(txtSipPort.Text.Trim()),
+                SipUser = txtSipUser.Text.Trim(),
+                AuthUser = txtAuthUser.Text.Trim(),
+                SipPassword = txtSipPassword.Text.Trim(),
+                Transport = (SipTransportType)cmbTransport.SelectedIndex
+            };
+
+            if (_useManualAnswer)
+            {
+                // === MANUAL ANSWER MODE ===
+                _sipLoginManager = new SipLoginManager(loginConfig);
+                _sipLoginManager.OnLog += msg => SafeInvoke(() => AddLog(msg));
+                _sipLoginManager.OnRegistered += () => SafeInvoke(() => SetStatus("🎤 MANUAL - Waiting for calls", Color.Green));
+                _sipLoginManager.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
+                _sipLoginManager.OnCallStarted += (id, caller) => SafeInvoke(() => OnManualCallRinging(id, caller));
+                _sipLoginManager.OnCallEnded += id => SafeInvoke(() => OnManualCallEnded(id));
+                _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
+
+                // Create manual call handler
+                _manualCallHandler = new ManualCallHandler();
+                _manualCallHandler.OnRinging += caller => SafeInvoke(() => 
+                {
+                    lblActiveCall.Text = $"📞 RINGING: {caller}";
+                    lblActiveCall.ForeColor = Color.Orange;
+                    btnAnswerCall.Visible = true;
+                    btnRejectCall.Visible = true;
+                    // Flash the form or beep
+                    System.Media.SystemSounds.Asterisk.Play();
+                });
+                _manualCallHandler.OnAnswered += () => SafeInvoke(() => 
+                {
+                    lblActiveCall.Text = $"📞 CONNECTED: {_manualCallHandler.CurrentCaller}";
+                    lblActiveCall.ForeColor = Color.Green;
+                    StartAudioMonitor();
+                });
+
+                // Configure audio monitor if enabled (listen to caller through speakers)
+                if (_audioMonitorEnabled)
+                {
+                    _manualCallHandler.OnCallerAudioMonitor += pcm24 => SafeInvoke(() => PlayCallerAudioLocally(pcm24));
+                    AddLog("🔊 Audio monitor connected to call handler");
+                }
+
+                _callHandler = _manualCallHandler;
+                _sipLoginManager.SetCallHandler(_callHandler);
+                _sipLoginManager.Start();
+                AddLog("🎤 SIP MANUAL ANSWER mode started - YOU will answer incoming calls");
+            }
+            else if (_useLocalOpenAI)
+            {
+                // === LOCAL OPENAI SIP MODE with AiSipAudioPlayout ===
                 var apiKey = txtApiKey.Text.Trim();
                 if (string.IsNullOrEmpty(apiKey) || (!apiKey.StartsWith("sk-") && !apiKey.StartsWith("sk-proj-")))
                 {
@@ -242,18 +350,6 @@ public partial class MainForm : Form
                     return;
                 }
 
-                // Create SIP login config
-                var loginConfig = new SipLoginConfig
-                {
-                    SipServer = txtSipServer.Text.Trim(),
-                    SipPort = int.Parse(txtSipPort.Text.Trim()),
-                    SipUser = txtSipUser.Text.Trim(),
-                    AuthUser = txtAuthUser.Text.Trim(),  // Optional separate auth ID (e.g., 3CX)
-                    SipPassword = txtSipPassword.Text.Trim(),
-                    Transport = (SipTransportType)cmbTransport.SelectedIndex
-                };
-
-                // Create SIP login manager
                 _sipLoginManager = new SipLoginManager(loginConfig);
                 _sipLoginManager.OnLog += msg => SafeInvoke(() => AddLog(msg));
                 _sipLoginManager.OnRegistered += () => SafeInvoke(() => SetStatus("🔒 LOCAL AI - Waiting for calls", Color.Green));
@@ -560,6 +656,14 @@ public partial class MainForm : Form
             _callHandler = null;
         }
 
+        // Clear manual handler reference
+        _manualCallHandler = null;
+
+        // Hide manual call buttons
+        btnAnswerCall.Visible = false;
+        btnRejectCall.Visible = false;
+        btnHangUp.Visible = false;
+
         _isRunning = false;
         btnStartStop.Text = "▶ Start SIP";
         btnStartStop.BackColor = Color.FromArgb(40, 167, 69);
@@ -567,6 +671,27 @@ public partial class MainForm : Form
         SetStatus("Stopped", Color.Gray);
         SetConfigEnabled(true);
         AddLog("🛑 SIP stopped");
+    }
+
+    // Manual call event handlers
+    private void OnManualCallRinging(string callId, string caller)
+    {
+        lblActiveCall.Text = $"📞 RINGING: {caller}";
+        lblActiveCall.ForeColor = Color.Orange;
+        lblCallId.Text = $"ID: {callId}";
+        AddLog($"📞 RINGING: {caller} - click Answer or Reject");
+    }
+
+    private void OnManualCallEnded(string callId)
+    {
+        lblActiveCall.Text = "Waiting for calls...";
+        lblActiveCall.ForeColor = Color.Gray;
+        lblCallId.Text = "";
+        btnAnswerCall.Visible = false;
+        btnRejectCall.Visible = false;
+        btnHangUp.Visible = false;
+        StopAudioMonitor();
+        AddLog($"📴 Call ended: {callId}");
     }
 
     private async void OnCallStarted(string callId, string caller)
