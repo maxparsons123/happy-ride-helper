@@ -241,7 +241,7 @@ Be concise, warm, and professional.
     // ===========================================
     private async Task PlayoutLoopAsync(string callId, CancellationToken ct)
     {
-        Log($"▶️ [{callId}] Playout loop started");
+        Log($"▶️ [{callId}] Playout loop started (codec={_negotiatedCodec})");
 
         while (!ct.IsCancellationRequested)
         {
@@ -250,24 +250,41 @@ Be concise, warm, and professional.
                 var ai = _aiClient;
                 if (ai == null || !ai.IsConnected) break;
 
-                // Get μ-law frame from AI client
+                // Get μ-law frame from AI client (OpenAI always outputs μ-law)
                 var ulawFrame = ai.GetNextMuLawFrame();
                 if (ulawFrame != null && ulawFrame.Length == FRAME_SIZE_ULAW)
                 {
                     _isBotSpeaking = true;
                     _adaHasStartedSpeaking = true;
 
-                    // Convert μ-law → PCM16 @ 8kHz → PCM16 @ 24kHz for playout buffer
-                    // (MultiCodecRtpPlayout expects 24kHz input)
-                    var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
-                    var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
-                    var pcm24kBytes = AudioCodecs.ShortsToBytes(pcm24k);
+                    // For G.711 codecs, we can stay at 8kHz (faster path)
+                    if (_negotiatedCodec == AudioCodecsEnum.PCMU)
+                    {
+                        // μ-law → μ-law: direct passthrough to 8kHz playout
+                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
+                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
+                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
+                    }
+                    else if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                    {
+                        // μ-law → PCM → A-law: transcode for European carriers
+                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
+                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
+                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
+                        // Note: MultiCodecRtpPlayout handles A-law encoding
+                    }
+                    else
+                    {
+                        // For other codecs (Opus, G.722), upsample to 24kHz
+                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
+                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
+                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
+                    }
 
-                    _playout?.BufferAudio(pcm24kBytes);
                     _framesSent++;
 
                     if (_framesSent % 50 == 0)
-                        Log($"📤 [{callId}] Playout: {_framesSent} frames sent");
+                        Log($"📤 [{callId}] Playout: {_framesSent} frames sent ({_negotiatedCodec})");
                 }
                 else
                 {
