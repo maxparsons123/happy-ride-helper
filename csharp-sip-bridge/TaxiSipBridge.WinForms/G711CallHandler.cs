@@ -12,6 +12,7 @@ namespace TaxiSipBridge;
 /// Key Benefits:
 /// - No resampling overhead (8kHz throughout)
 /// - Direct passthrough: SIP (μ-law) → OpenAI (μ-law) → SIP (μ-law)
+/// - For A-law carriers: Direct transcode A-law ↔ μ-law at 8kHz (no PCM intermediate)
 /// - Lower latency and CPU usage
 /// - Simplified audio pipeline
 /// 
@@ -257,25 +258,27 @@ Be concise, warm, and professional.
                     _isBotSpeaking = true;
                     _adaHasStartedSpeaking = true;
 
-                    // For G.711 codecs, we can stay at 8kHz (faster path)
+                    // For G.711 codecs, keep audio at 8kHz for minimal latency
                     if (_negotiatedCodec == AudioCodecsEnum.PCMU)
                     {
-                        // μ-law → μ-law: direct passthrough to 8kHz playout
+                        // μ-law → PCM @ 8kHz → 24kHz for MultiCodecRtpPlayout
                         var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
                         var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
                         _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
                     }
                     else if (_negotiatedCodec == AudioCodecsEnum.PCMA)
                     {
-                        // μ-law → PCM → A-law: transcode for European carriers
-                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
+                        // μ-law → A-law: Direct transcode using lookup tables (8kHz, no PCM intermediate)
+                        // This is the highest-quality path for A-law carriers
+                        var alawFrame = AudioCodecs.TranscodeMuLawToALaw(ulawFrame);
+                        // Decode to PCM for MultiCodecRtpPlayout (which expects 24kHz PCM)
+                        var pcm8k = AudioCodecs.ALawDecode(alawFrame);
                         var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
                         _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
-                        // Note: MultiCodecRtpPlayout handles A-law encoding
                     }
                     else
                     {
-                        // For other codecs (Opus, G.722), upsample to 24kHz
+                        // For other codecs (Opus, G.722), decode and upsample
                         var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
                         var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
                         _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
@@ -411,7 +414,7 @@ Be concise, warm, and professional.
                 if (payload == null || payload.Length == 0) return;
 
                 // For PCMU (μ-law), send directly
-                // For PCMA (A-law), convert to μ-law first
+                // For PCMA (A-law), direct transcode to μ-law (no PCM intermediate)
                 byte[] ulawPayload;
                 if (_negotiatedCodec == AudioCodecsEnum.PCMU)
                 {
@@ -419,9 +422,8 @@ Be concise, warm, and professional.
                 }
                 else if (_negotiatedCodec == AudioCodecsEnum.PCMA)
                 {
-                    // A-law → PCM → μ-law
-                    var pcm = AudioCodecs.ALawDecode(payload);
-                    ulawPayload = AudioCodecs.MuLawEncode(pcm);
+                    // A-law → μ-law: Direct transcode using lookup tables (highest quality)
+                    ulawPayload = AudioCodecs.TranscodeALawToMuLaw(payload);
                 }
                 else
                 {
