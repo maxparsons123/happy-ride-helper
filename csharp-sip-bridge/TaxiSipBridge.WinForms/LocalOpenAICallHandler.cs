@@ -286,19 +286,17 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 try 
                 { 
                     await _simliSendAudio(processedBytes);
-                    // Log first few audio sends to confirm flow
-                    if (_simliAudioSendCount++ < 3)
+                    _simliAudioSendCount++;
+                    
+                    // Log first 5 sends, then every 50th to track ongoing flow
+                    if (_simliAudioSendCount <= 5 || _simliAudioSendCount % 50 == 0)
                     {
-                        Log($"🎭 [{callId}] Simli audio sent #{_simliAudioSendCount} ({processedBytes.Length} bytes)");
+                        Log($"🎭 [{callId}] Simli audio #{_simliAudioSendCount} ({processedBytes.Length} bytes)");
                     }
                 }
                 catch (Exception ex)
                 {
-                    // Only log first error to avoid spam
-                    if (_simliAudioSendCount < 10)
-                    {
-                        Log($"🎭 [{callId}] Simli audio send error: {ex.Message}");
-                    }
+                    Log($"🎭 [{callId}] Simli send error #{_simliAudioSendCount}: {ex.Message}");
                 }
             }
             else if (_simliAudioSendCount == 0)
