@@ -23,18 +23,18 @@ public sealed class IngressAudioProcessor : IDisposable
     private readonly int _jitterFrames;
 
     // ===========================================
-    // DSP CONSTANTS (ASR-tuned)
+    // DSP CONSTANTS (ASR-tuned, lowered thresholds for telephony)
     // ===========================================
     private const float DC_ALPHA = 0.995f;
     private const float PRE_EMPH = 0.97f;
-    private const float GATE_OPEN_RMS = 600f;
-    private const float GATE_CLOSE_RMS = 450f;
-    private const int GATE_HOLD_FRAMES = 6;
+    private const float GATE_OPEN_RMS = 200f;   // Lowered: telephony speech can be very quiet
+    private const float GATE_CLOSE_RMS = 120f;  // Lowered: avoid gating quiet words like "correct"
+    private const int GATE_HOLD_FRAMES = 10;    // Increased: hold gate open longer for natural speech
     private const float RMS_ALPHA = 0.995f;
-    private const float TARGET_RMS = 12000f;
-    private const float AGC_MIN = 0.80f;
-    private const float AGC_MAX = 2.20f;
-    private const float AGC_SMOOTH = 0.02f;
+    private const float TARGET_RMS = 10000f;    // Lowered: less aggressive normalization
+    private const float AGC_MIN = 0.70f;        // Allow more dynamic range
+    private const float AGC_MAX = 4.0f;         // Higher max gain for quiet callers
+    private const float AGC_SMOOTH = 0.03f;     // Slightly faster AGC adaptation
     private const float LIMIT = 29000f;
 
     // ===========================================
@@ -65,6 +65,8 @@ public sealed class IngressAudioProcessor : IDisposable
     private float _agcGain = 1.0f;
     private bool _gateOpen = true;
     private int _gateHold;
+    private int _framesSinceLastLog;
+    private const int LOG_EVERY_N_FRAMES = 50; // Log RMS every ~1 second
 
     // ===========================================
     // CODEC STATE
@@ -372,6 +374,14 @@ public sealed class IngressAudioProcessor : IDisposable
         }
 
         float rms = (float)Math.Sqrt(sumSq / frame.Length);
+
+        // Log RMS periodically for diagnostics
+        _framesSinceLastLog++;
+        if (_framesSinceLastLog >= LOG_EVERY_N_FRAMES)
+        {
+            _framesSinceLastLog = 0;
+            Log($"[Ingress] RMS={rms:F0} gate={(_gateOpen ? "OPEN" : "CLOSED")} agc={_agcGain:F2}");
+        }
 
         // Noise gate
         if (_gateOpen)
