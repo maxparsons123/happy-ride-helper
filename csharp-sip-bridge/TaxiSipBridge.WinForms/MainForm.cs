@@ -114,7 +114,6 @@ public partial class MainForm : Form
             btnHangUp.Visible = false;
         }
     }
-    }
 
     // Stub handler for cheaper pipeline
     private void chkCheaperPipeline_CheckedChanged(object? sender, EventArgs e) { }
