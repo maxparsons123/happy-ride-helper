@@ -25,7 +25,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.2"; // Added A-law support
+    public const string VERSION = "1.4"; // Memory + thread safety improvements
 
     // =========================
     // G.711 CODEC SELECTION
@@ -94,9 +94,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     // Audio delta accumulator (OpenAI deltas are not guaranteed to be 160-byte aligned).
     // We must accumulate across deltas and only emit full 20ms frames to avoid injecting padding/silence.
-    private byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 20];
+    // Thread-safe with lock for concurrent access from receive loop.
+    private readonly byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 10];
     private int _audioAccumOffset;
-    private int _audioAccumLength;
+    private readonly object _audioAccumLock = new();
 
     // =========================
     // STATS
@@ -233,6 +234,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     /// <summary>
     /// Send µ-law audio frame to OpenAI. Input: 160 bytes µ-law @ 8kHz (20ms frame).
+    /// Uses SerializeToUtf8Bytes for reduced GC pressure.
     /// </summary>
     public async Task SendMuLawAsync(byte[] ulawData)
     {
@@ -241,13 +243,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            var msg = JsonSerializer.Serialize(new
+            // Use SerializeToUtf8Bytes for lower heap allocation
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "input_audio_buffer.append",
                 audio = Convert.ToBase64String(ulawData)
             });
 
-            await SendTextAsync(msg).ConfigureAwait(false);
+            await SendBytesAsync(bytes).ConfigureAwait(false);
             Volatile.Write(ref _lastUserSpeechAt, NowMs());
 
             var count = Interlocked.Increment(ref _audioFramesSent);
@@ -414,7 +417,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Log("🔄 Receive loop ended");
         try { _ws?.Dispose(); } catch { }
         _ws = null;
-        OnDisconnected?.Invoke();
+        
+        // Event safety: capture delegate before invoking
+        var handler = OnDisconnected;
+        handler?.Invoke();
     }
 
     // =========================
@@ -960,84 +966,68 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     /// <summary>
     /// Accumulates G.711 audio deltas and enqueues full 20ms (160-byte) frames.
-    /// Uses Span<byte> for zero-allocation compaction (net8.0 optimization).
+    /// Thread-safe with lock for concurrent access. Uses Buffer.BlockCopy for efficiency.
     /// </summary>
     private void AppendAndEnqueueG711(byte[] bytes)
     {
         if (bytes.Length == 0) return;
 
-        var incoming = bytes.AsSpan();
-
-        // Ensure capacity and contiguity
-        if (_audioAccumOffset + _audioAccumLength + incoming.Length > _audioAccum.Length)
+        lock (_audioAccumLock)
         {
-            // Compact if we have a head offset - use Span for zero-copy
-            if (_audioAccumLength > 0 && _audioAccumOffset > 0)
+            int sourceOffset = 0;
+
+            while (sourceOffset < bytes.Length)
             {
-                _audioAccum.AsSpan(_audioAccumOffset, _audioAccumLength)
-                           .CopyTo(_audioAccum.AsSpan(0, _audioAccumLength));
-                _audioAccumOffset = 0;
+                int needed = FRAME_SIZE_BYTES - _audioAccumOffset;
+                int remainingInRaw = bytes.Length - sourceOffset;
+                int toCopy = Math.Min(needed, remainingInRaw);
+
+                Buffer.BlockCopy(bytes, sourceOffset, _audioAccum, _audioAccumOffset, toCopy);
+
+                _audioAccumOffset += toCopy;
+                sourceOffset += toCopy;
+
+                // Emit full frame when we have exactly 160 bytes
+                if (_audioAccumOffset == FRAME_SIZE_BYTES)
+                {
+                    // Cap buffer to prevent runaway memory
+                    if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
+                    {
+                        var frame = new byte[FRAME_SIZE_BYTES];
+                        Buffer.BlockCopy(_audioAccum, 0, frame, 0, FRAME_SIZE_BYTES);
+                        _outboundQueue.Enqueue(frame);
+                    }
+                    _audioAccumOffset = 0;
+                }
             }
-
-            // Grow buffer if still insufficient
-            if (_audioAccumLength + incoming.Length > _audioAccum.Length)
-            {
-                var newCap = _audioAccum.Length;
-                while (newCap < _audioAccumLength + incoming.Length)
-                    newCap *= 2;
-                var next = new byte[newCap];
-                if (_audioAccumLength > 0)
-                    _audioAccum.AsSpan(_audioAccumOffset, _audioAccumLength).CopyTo(next);
-                _audioAccum = next;
-                _audioAccumOffset = 0;
-            }
-        }
-
-        // Append incoming data using Span
-        incoming.CopyTo(_audioAccum.AsSpan(_audioAccumOffset + _audioAccumLength));
-        _audioAccumLength += incoming.Length;
-
-        // Emit full 20ms frames
-        while (_audioAccumLength >= FRAME_SIZE_BYTES)
-        {
-            var frame = new byte[FRAME_SIZE_BYTES];
-            _audioAccum.AsSpan(_audioAccumOffset, FRAME_SIZE_BYTES).CopyTo(frame);
-            _audioAccumOffset += FRAME_SIZE_BYTES;
-            _audioAccumLength -= FRAME_SIZE_BYTES;
-
-            if (_audioAccumLength == 0)
-                _audioAccumOffset = 0;
-
-            // Queue management - cap buffer to prevent runaway memory
-            while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
-                _outboundQueue.TryDequeue(out _);
-            _outboundQueue.Enqueue(frame);
         }
     }
 
     /// <summary>
     /// Flushes any remaining audio in the accumulator.
-    /// Uses Span<byte> for zero-allocation operations.
+    /// Thread-safe with lock for concurrent access.
     /// </summary>
     private void FlushAudioAccumulator(bool padWithSilence)
     {
-        if (_audioAccumLength <= 0) return;
-
-        if (padWithSilence)
+        lock (_audioAccumLock)
         {
-            var frame = new byte[FRAME_SIZE_BYTES];
-            var count = Math.Min(_audioAccumLength, FRAME_SIZE_BYTES);
-            _audioAccum.AsSpan(_audioAccumOffset, count).CopyTo(frame);
-            if (count < FRAME_SIZE_BYTES)
-                frame.AsSpan(count).Fill(_silenceByte);
+            if (_audioAccumOffset <= 0) return;
 
-            while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
-                _outboundQueue.TryDequeue(out _);
-            _outboundQueue.Enqueue(frame);
+            if (padWithSilence)
+            {
+                var frame = new byte[FRAME_SIZE_BYTES];
+                Buffer.BlockCopy(_audioAccum, 0, frame, 0, _audioAccumOffset);
+                
+                // Pad remaining with silence byte
+                for (int i = _audioAccumOffset; i < FRAME_SIZE_BYTES; i++)
+                    frame[i] = _silenceByte;
+
+                if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
+                    _outboundQueue.Enqueue(frame);
+            }
+
+            _audioAccumOffset = 0;
         }
-
-        _audioAccumOffset = 0;
-        _audioAccumLength = 0;
     }
 
     // =========================
@@ -1218,20 +1208,28 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         return args;
     }
 
+    /// <summary>
+    /// Serialize object to UTF8 bytes and send via WebSocket.
+    /// Uses SerializeToUtf8Bytes for reduced GC pressure (avoids intermediate string).
+    /// </summary>
     private async Task SendJsonAsync(object obj)
     {
-        var json = JsonSerializer.Serialize(obj);
-        await SendTextAsync(json).ConfigureAwait(false);
+        if (_ws?.State != WebSocketState.Open) return;
+
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(obj);
+        await SendBytesAsync(bytes).ConfigureAwait(false);
     }
 
-    private async Task SendTextAsync(string text)
+    /// <summary>
+    /// Send raw UTF8 bytes via WebSocket. Thread-safe with mutex.
+    /// </summary>
+    private async Task SendBytesAsync(byte[] bytes)
     {
         if (_ws?.State != WebSocketState.Open) return;
 
         await _sendMutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            var bytes = Encoding.UTF8.GetBytes(text);
             await _ws.SendAsync(
                 new ArraySegment<byte>(bytes),
                 WebSocketMessageType.Text,
@@ -1249,13 +1247,15 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     {
         var ts = DateTime.Now.ToString("HH:mm:ss.fff");
         Console.WriteLine($"{ts} [G711] {message}");
-        OnLog?.Invoke(message);
+        
+        // Event safety: capture delegate before invoking
+        var handler = OnLog;
+        handler?.Invoke(message);
     }
 
     private void ThrowIfDisposed()
     {
-        if (Volatile.Read(ref _disposed) != 0)
-            throw new ObjectDisposedException(nameof(OpenAIRealtimeG711Client));
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
     public void Dispose()
@@ -1266,6 +1266,7 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending watchdogs
 
         try { _cts?.Cancel(); } catch { }
+        try { _cts?.Dispose(); } catch { }
         try { _ws?.Dispose(); } catch { }
         _sendMutex.Dispose();
     }
