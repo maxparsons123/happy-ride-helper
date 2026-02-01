@@ -226,7 +226,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             // Connect to OpenAI
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime API...");
             await _aiClient.ConnectAsync(caller, cts.Token);
-            Log($"🟢 [{callId}] OpenAI connected (language: {_aiClient.DetectedLanguage})");
+            Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
@@ -437,12 +437,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
             try
             {
-                await _aiClient.SendAudioAsync(pcmBytes, 16000);
+                await _aiClient.SendAudioAsync(pcmBytes, 24000);
             }
             catch { }
         };
 
-        Log($"🎧 [{callId}] IngressAudioProcessor ready (16kHz, jitter={JITTER_FRAMES * 20}ms)");
+        Log($"🎧 [{callId}] IngressAudioProcessor ready (24kHz, jitter={JITTER_FRAMES * 20}ms)");
 
         // Wire RTP to ingress processor
         _currentMediaSession.OnRtpPacketReceived += (ep, mt, rtp) =>
