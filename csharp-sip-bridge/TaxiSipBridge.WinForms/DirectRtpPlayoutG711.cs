@@ -25,6 +25,7 @@ public class DirectRtpPlayoutG711 : IDisposable
     private const int FRAME_MS = 20;
     private const int MIN_FRAMES_TO_START = 5; // 100ms cushion
     private const int GRACE_PERIOD_FRAMES = 5; // 100ms grace before declaring done
+    private const int MAX_QUEUE_FRAMES = 50;   // 1 second max buffer (prevents latency buildup)
 
     private readonly ConcurrentQueue<byte[]> _frameBuffer = new();
     private readonly VoIPMediaSession _mediaSession;
@@ -95,10 +96,15 @@ public class DirectRtpPlayoutG711 : IDisposable
     /// <summary>
     /// Buffer a G.711 frame from OpenAI (160 bytes = 20ms @ 8kHz).
     /// Frame is passed through directly - OpenAI outputs matching codec format.
+    /// Drops oldest frames when buffer exceeds MAX_QUEUE_FRAMES to prevent latency buildup.
     /// </summary>
     public void BufferG711Frame(byte[] g711Frame)
     {
         if (g711Frame == null || g711Frame.Length != FRAME_SIZE_BYTES) return;
+
+        // Drop oldest frame on overflow to prevent latency buildup
+        while (_frameBuffer.Count >= MAX_QUEUE_FRAMES)
+            _frameBuffer.TryDequeue(out _);
 
         _frameBuffer.Enqueue(g711Frame);
         _totalFramesQueued++;
