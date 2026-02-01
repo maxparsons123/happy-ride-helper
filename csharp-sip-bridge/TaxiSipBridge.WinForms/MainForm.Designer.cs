@@ -79,20 +79,31 @@ partial class MainForm
         // === Local OpenAI Mode ===
         chkLocalOpenAI = new CheckBox 
         { 
-            Text = "🔒 Local OpenAI (Direct)", 
+            Text = "🔒 Local OpenAI", 
             Location = new Point(400, 88), 
-            Size = new Size(160, 23),
+            Size = new Size(105, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(0, 123, 255)
         };
         chkLocalOpenAI.CheckedChanged += this.chkLocalOpenAI_CheckedChanged;
 
+        // === Manual Answer Mode ===
+        chkManualAnswer = new CheckBox 
+        { 
+            Text = "🎤 Manual", 
+            Location = new Point(505, 88), 
+            Size = new Size(75, 23),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(220, 53, 69)
+        };
+        chkManualAnswer.CheckedChanged += this.chkManualAnswer_CheckedChanged;
+
         // === Simli Avatar ===
         chkSimliAvatar = new CheckBox 
         { 
             Text = "🎭 Simli", 
-            Location = new Point(560, 88), 
-            Size = new Size(70, 23),
+            Location = new Point(580, 88), 
+            Size = new Size(60, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(156, 39, 176)
         };
@@ -101,13 +112,59 @@ partial class MainForm
         // === Audio Monitor (hear caller through speakers) ===
         chkMonitorAudio = new CheckBox 
         { 
-            Text = "🔊 Monitor", 
-            Location = new Point(630, 88), 
-            Size = new Size(80, 23),
+            Text = "🔊 Mon", 
+            Location = new Point(640, 88), 
+            Size = new Size(60, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(255, 152, 0)
         };
         chkMonitorAudio.CheckedChanged += this.chkMonitorAudio_CheckedChanged;
+
+        // Answer/Reject buttons (hidden by default, shown when call rings in manual mode)
+        btnAnswerCall = new Button
+        {
+            Text = "✅ Answer",
+            Location = new Point(430, 148),
+            Size = new Size(90, 32),
+            BackColor = Color.FromArgb(40, 167, 69),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Cursor = Cursors.Hand,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            Visible = false
+        };
+        btnAnswerCall.FlatAppearance.BorderSize = 0;
+        btnAnswerCall.Click += this.btnAnswerCall_Click;
+
+        btnRejectCall = new Button
+        {
+            Text = "❌ Reject",
+            Location = new Point(525, 148),
+            Size = new Size(85, 32),
+            BackColor = Color.FromArgb(220, 53, 69),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Cursor = Cursors.Hand,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            Visible = false
+        };
+        btnRejectCall.FlatAppearance.BorderSize = 0;
+        btnRejectCall.Click += this.btnRejectCall_Click;
+
+        btnHangUp = new Button
+        {
+            Text = "📴 Hang Up",
+            Location = new Point(430, 148),
+            Size = new Size(100, 32),
+            BackColor = Color.FromArgb(220, 53, 69),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Cursor = Cursors.Hand,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            Visible = false
+        };
+        btnHangUp.FlatAppearance.BorderSize = 0;
+        btnHangUp.Click += this.btnHangUp_Click;
 
         // OpenAI API Key (shown when Local mode is checked)
         lblApiKey = new Label { Text = "API Key:", Location = new Point(15, 118), Size = new Size(55, 23), Visible = false };
@@ -179,12 +236,13 @@ partial class MainForm
             lblUser, txtSipUser, lblAuthUser, txtAuthUser, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
-            chkLocalOpenAI, chkSimliAvatar, chkMonitorAudio,
+            chkLocalOpenAI, chkManualAnswer, chkSimliAvatar, chkMonitorAudio,
             lblApiKey, txtApiKey,
             chkCheaperPipeline, lblDeepgramKey, txtDeepgramKey,
             lblWs, txtWebSocketUrl,
             lblSimliApiKey, txtSimliApiKey, lblSimliFaceId, txtSimliFaceId,
-            btnStartStop, btnMicTest
+            btnStartStop, btnMicTest,
+            btnAnswerCall, btnRejectCall, btnHangUp
         });
 
         // === Avatar Panel (shown when Simli is enabled) ===
@@ -314,6 +372,7 @@ partial class MainForm
     private ComboBox cmbAudioMode;
     private ComboBox cmbResampler;
     private CheckBox chkLocalOpenAI;
+    private CheckBox chkManualAnswer;
     private CheckBox chkSimliAvatar;
     private CheckBox chkCheaperPipeline;
     private CheckBox chkMonitorAudio;
@@ -324,6 +383,9 @@ partial class MainForm
     private Label lblSimliFaceId;
     private Button btnStartStop;
     private Button btnMicTest;
+    private Button btnAnswerCall;
+    private Button btnRejectCall;
+    private Button btnHangUp;
     private Button btnClearLogs;
     private Button btnCopyLogs;
     private Label lblStatus;
