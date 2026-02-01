@@ -612,10 +612,15 @@ public class SimliWebView : UserControl
         let audioBytesSent = 0;
         
         function queueAudio(base64Data) {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                // Only log occasionally to avoid spam
-                if (audioBytesSent === 0) {
-                    log('WebSocket not ready for audio, state: ' + (ws ? ws.readyState : 'null'));
+            if (!ws) {
+                log('Audio dropped: WebSocket is null');
+                return;
+            }
+            
+            if (ws.readyState !== WebSocket.OPEN) {
+                // Log WebSocket state issues
+                if (audioBytesSent % 10000 < 2000 || audioBytesSent < 5000) {
+                    log('Audio dropped: WebSocket state=' + ws.readyState + ' (0=CONNECTING,1=OPEN,2=CLOSING,3=CLOSED)');
                 }
                 return;
             }
