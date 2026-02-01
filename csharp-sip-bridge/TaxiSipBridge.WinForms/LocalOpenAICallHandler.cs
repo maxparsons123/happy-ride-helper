@@ -48,6 +48,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private bool _adaHasStartedSpeaking;
     private bool _needsFadeIn;
 
+    // Diagnostics: confirm ingress frames are actually forwarded to OpenAI
+    private int _ingressFramesForwarded;
+    private int _ingressBytesForwarded;
+
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
 
@@ -139,6 +143,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _isBotSpeaking = false;
         _botStoppedSpeakingAt = DateTime.MinValue;
         _simliAudioSendCount = 0;
+        _ingressFramesForwarded = 0;
+        _ingressBytesForwarded = 0;
 
         // Clean up stale handlers from previous call
         if (_currentHungupHandler != null && _currentUa != null)
@@ -271,6 +277,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 // Send to OpenAI (already at 24kHz)
                 try
                 {
+                    _ingressFramesForwarded++;
+                    _ingressBytesForwarded += pcmBytes.Length;
+                    if (_ingressFramesForwarded == 1 || _ingressFramesForwarded % 50 == 0)
+                    {
+                        Log($"🎙️ [{callId}] Ingress→OpenAI: frames={_ingressFramesForwarded}, bytes={_ingressBytesForwarded}");
+                    }
                     await _aiClient.SendAudioAsync(pcmBytes, 24000);
                 }
                 catch { }
