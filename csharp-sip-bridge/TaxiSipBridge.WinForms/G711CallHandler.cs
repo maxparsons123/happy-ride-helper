@@ -330,7 +330,17 @@ Be concise, warm, and professional.
 
         _aiClient.OnResponseStarted += () =>
         {
+            _isBotSpeaking = true;
             Log($"🤖 [{callId}] AI response started");
+        };
+
+        _aiClient.OnResponseCompleted += () =>
+        {
+            // CRITICAL: Allow user audio forwarding immediately when AI finishes generating,
+            // NOT when playout buffer empties (which can take 10+ seconds for long responses)
+            _isBotSpeaking = false;
+            _botStoppedSpeakingAt = DateTime.UtcNow;
+            Log($"🎤 [{callId}] AI response done - enabling user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
 
         _aiClient.OnAdaSpeaking += _ => { };
