@@ -537,11 +537,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     {
                         var text = ApplySttCorrections(u.GetString()!);
                         
-                        // TRANSCRIPT GUARD: Ignore stale transcripts that arrive within 500ms
+                        // TRANSCRIPT GUARD: Ignore stale transcripts that arrive shortly after
+                        // Ada starts speaking. These are often delayed/queued transcripts from
+                        // audio that was already in OpenAI's ASR pipeline.
                         // of Ada starting to speak. These are from audio processed before we
                         // cleared the buffer and blocked inbound audio.
                         var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-                        if (msSinceResponseCreated < 500 && Volatile.Read(ref _responseActive) == 1)
+                        if (msSinceResponseCreated < 900 && Volatile.Read(ref _responseActive) == 1)
                         {
                             Log($"🚫 Ignoring stale transcript (arrived {msSinceResponseCreated}ms after response.created): {text}");
                             break;
@@ -1102,6 +1104,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         ("Waters Street", "Russell Street"),
         ("Water Street", "Russell Street"),
         ("Walters Street", "Russell Street"),
+
+        // Observed mishearings in recent logs (keep patterns specific to avoid over-correcting)
+        ("Russell Sweeney", "Russell Street"),
+        ("Servant, Russell", "7 Russell"),
+        ("Servant Russell", "7 Russell"),
+        ("Dave Redroth", "David Road"),
     };
 
     // ===========================================
@@ -1184,11 +1192,27 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private static string ApplySttCorrections(string text)
     {
-        var t = text.Trim();
+        var t = (text ?? "").Trim();
+
+        // Normalize common telephony transcript artifacts so exact-match corrections work
+        // even when Whisper adds punctuation.
+        t = t.TrimEnd('.', '!', '?', ',', ';', ':');
+        while (t.Contains("  ", StringComparison.Ordinal))
+            t = t.Replace("  ", " ", StringComparison.Ordinal);
         
         // First try exact match
         if (SttCorrections.TryGetValue(t, out var corrected))
             return corrected;
+
+        // Contextual fixes (avoid global replacements that could damage arbitrary addresses)
+        // Example from logs: "52A Little Road" should be "52A David Road".
+        if (t.Contains("Little Road", StringComparison.OrdinalIgnoreCase) &&
+            (t.Contains("52A", StringComparison.OrdinalIgnoreCase) || t.Contains("52 A", StringComparison.OrdinalIgnoreCase)))
+        {
+            var before = t;
+            t = t.Replace("Little Road", "David Road", StringComparison.OrdinalIgnoreCase);
+            Console.WriteLine($"🔧 STT contextual fix: \"{before}\" → \"{t}\"");
+        }
         
         // Then apply partial/substring corrections
         foreach (var (bad, good) in PartialSttCorrections)
@@ -1211,9 +1235,14 @@ LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone 
 
 FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once ('So that's [passengers] from [pickup] to [destination] at [time]. Correct?') → If changes: update and confirm ONCE more → If correct: 'Shall I get a price?' → book_taxi(request_quote) → Tell fare → 'Confirm booking?' → book_taxi(confirmed) → Give reference ID ONLY (no repeat of journey) → 'Anything else?' → If no: 'You'll receive a WhatsApp with your booking details. Thank you for using Voice Taxibot. Goodbye!' → end_call
 
+DATA SYNC (CRITICAL): After EVERY user message that provides or corrects booking info, call sync_booking_data immediately.
+- Include ALL fields you know so far (caller_name, pickup, destination, passengers, pickup_time), not just the one you just collected.
+- If a user corrects a detail, treat the user's correction as the SOURCE OF TRUTH.
+
 NO REPETITION: After booking is confirmed, say the ACTUAL reference ID from the tool response (e.g. 'Your taxi is booked, reference TX12345.'). NEVER say '[ID]' literally. Do NOT repeat pickup, destination, passengers, or time again.
 
 CORRECTIONS: If user corrects any detail, update it and give ONE new summary. Do not repeat the same summary multiple times.
+- Keep addresses VERBATIM as spoken (do not “improve” them). If user says a hyphen (e.g. '52-8'), keep the hyphen.
 
 PRONUNCIATION: 
 - 4-digit house numbers like '1214A' say 'twelve fourteen A' (NOT 'one two one four' and NOT hyphenated '12-14A')
