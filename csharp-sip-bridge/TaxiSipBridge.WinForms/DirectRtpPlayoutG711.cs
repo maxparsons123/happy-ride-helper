@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Reflection;
 using System.Threading;
 using System.Net;
 using SIPSorcery.Media;
@@ -34,12 +33,10 @@ public class DirectRtpPlayoutG711 : IDisposable
 
     private readonly ConcurrentQueue<byte[]> _frameBuffer = new();
     private readonly VoIPMediaSession _mediaSession;
-    private readonly RTPSession _rtpSession;
     private readonly byte[] _outputBuffer = new byte[FRAME_SIZE_BYTES];
 
     private Thread? _playoutThread;
     private volatile bool _running;
-    private uint _timestamp = 0;
     private bool _isCurrentlySpeaking = false;
     private int _emptyFramesCount = 0;
     private int _framesSent = 0;
@@ -64,50 +61,9 @@ public class DirectRtpPlayoutG711 : IDisposable
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
 
-        // VoIPMediaSession does not expose RTPSession publicly in this build.
-        // We extract it via reflection so we can send *raw* encoded G.711 frames via SendRtpRaw.
-        _rtpSession = TryExtractRtpSession(_mediaSession)
-            ?? throw new InvalidOperationException("Unable to extract RTPSession from VoIPMediaSession (required for raw G.711 playout).");
-
-        _rtpSession.AcceptRtpFromAny = true;
-        _rtpSession.OnRtpPacketReceived += HandleSymmetricRtp;
-    }
-
-    private static RTPSession? TryExtractRtpSession(VoIPMediaSession mediaSession)
-    {
-        // Try common field/property names first, then fallback to scanning for RTPSession-typed members.
-        try
-        {
-            var t = mediaSession.GetType();
-
-            // Common field names in various SIPSorcery versions
-            foreach (var name in new[] { "RtpSession", "_rtpSession", "m_rtpSession", "_audioRtpSession", "AudioRtpSession" })
-            {
-                var f = t.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                if (f?.GetValue(mediaSession) is RTPSession rs1) return rs1;
-
-                var p = t.GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                if (p?.GetValue(mediaSession) is RTPSession rs2) return rs2;
-            }
-
-            // Fallback: scan fields for the first RTPSession instance
-            foreach (var f in t.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
-            {
-                if (f.FieldType == typeof(RTPSession) && f.GetValue(mediaSession) is RTPSession rs) return rs;
-            }
-
-            // Fallback: scan properties
-            foreach (var p in t.GetProperties(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
-            {
-                if (p.PropertyType == typeof(RTPSession) && p.GetValue(mediaSession) is RTPSession rs) return rs;
-            }
-        }
-        catch
-        {
-            // ignore, return null
-        }
-
-        return null;
+        // Use VoIPMediaSession APIs only (no reflection) for maximum compatibility.
+        _mediaSession.AcceptRtpFromAny = true;
+        _mediaSession.OnRtpPacketReceived += HandleSymmetricRtp;
     }
 
     /// <summary>
@@ -133,7 +89,7 @@ public class DirectRtpPlayoutG711 : IDisposable
                 _lastRemoteEndpoint = remoteEndPoint;
                 try
                 {
-                    _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
+                    _mediaSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
                     OnLog?.Invoke($"[NAT] ✓ RTP locked to {remoteEndPoint}");
                 }
                 catch (Exception ex)
@@ -287,12 +243,14 @@ public class DirectRtpPlayoutG711 : IDisposable
     {
         try
         {
-            _rtpSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, _payloadType);
-            _timestamp += FRAME_SIZE_BYTES;
+            // Match other playout engines in this repo: duration is RTP timestamp units.
+            // For 8kHz audio: 20ms = 160 samples.
+            const uint RTP_DURATION = FRAME_SIZE_BYTES;
+            _mediaSession.SendAudio(RTP_DURATION, frame);
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"[RTP] ⚠️ SendRtpRaw error: {ex.Message}");
+            OnLog?.Invoke($"[RTP] ⚠️ SendAudio error: {ex.Message}");
         }
     }
 
@@ -301,15 +259,15 @@ public class DirectRtpPlayoutG711 : IDisposable
         Array.Fill(_outputBuffer, _silenceByte);
         try
         {
-            _rtpSession.SendRtpRaw(SDPMediaTypesEnum.audio, _outputBuffer, _timestamp, 0, _payloadType);
-            _timestamp += FRAME_SIZE_BYTES;
+            const uint RTP_DURATION = FRAME_SIZE_BYTES;
+            _mediaSession.SendAudio(RTP_DURATION, _outputBuffer);
         }
         catch { }
     }
 
     public void Dispose()
     {
-        try { _rtpSession.OnRtpPacketReceived -= HandleSymmetricRtp; } catch { }
+        try { _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp; } catch { }
         Stop();
         Clear();
     }
