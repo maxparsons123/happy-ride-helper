@@ -28,7 +28,7 @@ public class ManualCallHandler : ISipCallHandler, IDisposable
     private Action<SIPDialogue>? _currentHungupHandler;
     private SIPUserAgent? _currentUa;
     private SIPRequest? _pendingRequest;
-    private UASInviteTransaction? _pendingUas;
+    private SIPServerUserAgent? _pendingUas;
     private int _hangupFired;
 
     // ===========================================
