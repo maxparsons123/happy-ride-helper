@@ -9,7 +9,7 @@ namespace TaxiSipBridge;
 /// Handles jitter buffering, G.711/Opus/G.722 decoding, DSP, and resampling.
 /// Outputs fixed 20ms PCM16 frames ready for OpenAI Realtime API.
 /// 
-/// Reusable by both LocalOpenAICallHandler and EdgeFunctionCallHandler.
+/// Uses SpeexDSP for high-quality resampling when available.
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
@@ -70,6 +70,14 @@ public sealed class IngressAudioProcessor : IDisposable
     // CODEC STATE
     // ===========================================
     private readonly Dictionary<int, AudioCodecsEnum> _ptToCodec = new();
+
+    // ===========================================
+    // SPEEX RESAMPLER (high-quality)
+    // ===========================================
+    private IntPtr _speexResampler = IntPtr.Zero;
+    private int _speexFromRate;
+    private int _speexToRate;
+    private static bool _speexAvailable = true;
 
     private int _disposed;
 
@@ -173,6 +181,14 @@ public sealed class IngressAudioProcessor : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        
+        // Cleanup Speex resampler
+        if (_speexResampler != IntPtr.Zero)
+        {
+            try { speex_resampler_destroy(_speexResampler); } catch { }
+            _speexResampler = IntPtr.Zero;
+        }
+        
         Log("[Ingress] Disposed");
     }
 
@@ -406,13 +422,77 @@ public sealed class IngressAudioProcessor : IDisposable
     }
 
     // ===========================================
-    // RESAMPLING
+    // RESAMPLING (SpeexDSP preferred, fallback to linear)
     // ===========================================
-    private static short[] Resample(short[] input, int fromRate, int toRate)
+    private short[] Resample(short[] input, int fromRate, int toRate)
     {
         if (fromRate == toRate) return input;
         if (input.Length == 0) return input;
 
+        // Try SpeexDSP first (much better quality for 3x upsampling)
+        if (_speexAvailable)
+        {
+            try
+            {
+                return ResampleWithSpeex(input, fromRate, toRate);
+            }
+            catch
+            {
+                _speexAvailable = false;
+                Log("[Ingress] SpeexDSP unavailable, using linear interpolation");
+            }
+        }
+
+        // Fallback: linear interpolation
+        return ResampleLinear(input, fromRate, toRate);
+    }
+
+    private short[] ResampleWithSpeex(short[] input, int fromRate, int toRate)
+    {
+        // Create or recreate resampler if rates changed
+        if (_speexResampler == IntPtr.Zero || _speexFromRate != fromRate || _speexToRate != toRate)
+        {
+            if (_speexResampler != IntPtr.Zero)
+            {
+                speex_resampler_destroy(_speexResampler);
+            }
+            
+            int err;
+            _speexResampler = speex_resampler_init(1, (uint)fromRate, (uint)toRate, 8, out err);
+            if (err != 0 || _speexResampler == IntPtr.Zero)
+            {
+                throw new Exception($"Speex init failed: {err}");
+            }
+            _speexFromRate = fromRate;
+            _speexToRate = toRate;
+        }
+
+        // Calculate output size
+        double ratio = (double)toRate / fromRate;
+        int outputLen = (int)Math.Ceiling(input.Length * ratio) + 16; // Extra headroom
+        var output = new short[outputLen];
+
+        uint inLen = (uint)input.Length;
+        uint outLen = (uint)output.Length;
+
+        int result = speex_resampler_process_int(_speexResampler, 0, input, ref inLen, output, ref outLen);
+        if (result != 0)
+        {
+            throw new Exception($"Speex resample failed: {result}");
+        }
+
+        // Trim to actual output
+        if (outLen < output.Length)
+        {
+            var trimmed = new short[outLen];
+            Array.Copy(output, trimmed, outLen);
+            return trimmed;
+        }
+        return output;
+    }
+
+    private static short[] ResampleLinear(short[] input, int fromRate, int toRate)
+    {
         double ratio = (double)fromRate / toRate;
         int outputLength = (int)(input.Length / ratio);
         var output = new short[outputLength];
@@ -444,6 +524,18 @@ public sealed class IngressAudioProcessor : IDisposable
             output[j] = input[i];
         return output;
     }
+
+    // ===========================================
+    // SPEEX NATIVE INTEROP
+    // ===========================================
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr speex_resampler_init(uint channels, uint in_rate, uint out_rate, int quality, out int err);
+
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int speex_resampler_process_int(IntPtr st, uint channel_index, short[] input, ref uint in_len, short[] output, ref uint out_len);
+
+    [DllImport("libspeexdsp", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void speex_resampler_destroy(IntPtr st);
 
     private void Log(string msg) => OnLog?.Invoke(msg);
 }
