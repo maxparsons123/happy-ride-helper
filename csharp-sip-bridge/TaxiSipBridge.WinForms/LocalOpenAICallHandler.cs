@@ -521,31 +521,15 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             var pcmBytes = new byte[pcm16.Length * 2];
             Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-            // For audio monitoring, resample to 8kHz (the monitor expects 8kHz µ-law playback rate)
-            short[] monitorPcm;
-            if (sampleRate == 24000)
-            {
-                // Decimate 24kHz → 8kHz (3:1)
-                monitorPcm = new short[pcm16.Length / 3];
-                for (int j = 0; j < monitorPcm.Length; j++)
-                    monitorPcm[j] = pcm16[j * 3];
-            }
-            else if (sampleRate == 16000)
-            {
-                // Decimate 16kHz → 8kHz (2:1)
-                monitorPcm = new short[pcm16.Length / 2];
-                for (int j = 0; j < monitorPcm.Length; j++)
-                    monitorPcm[j] = pcm16[j * 2];
-            }
-            else
-            {
-                // Already 8kHz
-                monitorPcm = pcm16;
-            }
-            
-            var monitorBytes = new byte[monitorPcm.Length * 2];
-            Buffer.BlockCopy(monitorPcm, 0, monitorBytes, 0, monitorBytes.Length);
-            OnCallerAudioMonitor?.Invoke(monitorBytes);
+            // For audio monitoring, always provide PCM16 at 24kHz (MainForm expects 24kHz and upsamples to 48kHz speakers).
+            // If we feed 8k/16k here, NAudio playback sounds "digital"/fast due to sample-rate mismatch.
+            short[] monitorPcm24 = sampleRate == 24000
+                ? pcm16
+                : AudioCodecs.Resample(pcm16, sampleRate, 24000);
+
+            var monitorBytes24 = new byte[monitorPcm24.Length * 2];
+            Buffer.BlockCopy(monitorPcm24, 0, monitorBytes24, 0, monitorBytes24.Length);
+            OnCallerAudioMonitor?.Invoke(monitorBytes24);
 
             // Send to OpenAI
             try
