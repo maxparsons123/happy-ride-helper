@@ -142,6 +142,9 @@ public class MultiCodecRtpPlayout : IDisposable
         OnLog?.Invoke($"[MultiCodec] Started ({_codec})");
     }
 
+    private int _framesSent = 0;
+    private int _totalSamplesSent = 0;
+
     private void SendFrame(object? state)
     {
         int minSamples = (_samplesPerFrame * MIN_BUFFER_MS) / FRAME_MS;
@@ -156,6 +159,8 @@ public class MultiCodecRtpPlayout : IDisposable
             }
             _isPlaying = true;
             _emptyFramesCount = 0;
+            _framesSent = 0;
+            _totalSamplesSent = 0;
             OnLog?.Invoke($"[RTP] ▶️ Playing ({_sampleBuffer.Count} samples buffered)");
         }
 
@@ -182,6 +187,14 @@ public class MultiCodecRtpPlayout : IDisposable
         {
             _emptyFramesCount = 0;
             EncodeAndSend(frame);
+            _framesSent++;
+            _totalSamplesSent += _samplesPerFrame;
+
+            // Log every 50 frames (~1 second) to confirm audio is being sent
+            if (_framesSent % 50 == 0)
+            {
+                OnLog?.Invoke($"[RTP] 📤 Sent {_framesSent} frames ({_totalSamplesSent} samples, queue: {_sampleBuffer.Count})");
+            }
         }
         else
         {
@@ -195,6 +208,7 @@ public class MultiCodecRtpPlayout : IDisposable
                 if (_isPlaying)
                 {
                     _isPlaying = false;
+                    OnLog?.Invoke($"[RTP] ⏹️ Finished ({_framesSent} frames sent, {_totalSamplesSent} samples total)");
                     OnQueueEmpty?.Invoke();
                 }
                 SendSilence();
