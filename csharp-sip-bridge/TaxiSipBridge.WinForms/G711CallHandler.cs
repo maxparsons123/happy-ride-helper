@@ -190,7 +190,7 @@ Be concise, warm, and professional.
             Log($"📗 [{callId}] Call answered and RTP started");
 
             // Create DirectRtpPlayoutG711 for output (8kHz passthrough, no resampling)
-            _playout = new DirectRtpPlayoutG711(_currentMediaSession.RtpSession);
+            _playout = new DirectRtpPlayoutG711(_currentMediaSession);
             _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
