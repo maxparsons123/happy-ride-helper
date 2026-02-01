@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Net;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
@@ -16,7 +17,6 @@ namespace TaxiSipBridge;
 /// - NAT punch-through via symmetric RTP
 /// - Timer-driven 20ms cadence for stable delivery
 /// - Grace period before OnQueueEmpty to prevent premature cutoff
-/// - Volume boost and soft limiting for telephony clarity
 /// </summary>
 public class DirectRtpPlayoutG711 : IDisposable
 {
@@ -26,7 +26,7 @@ public class DirectRtpPlayoutG711 : IDisposable
     private const int GRACE_PERIOD_FRAMES = 5; // 100ms grace before declaring done
 
     private readonly ConcurrentQueue<byte[]> _frameBuffer = new();
-    private readonly RTPSession _rtpSession;
+    private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _outputBuffer = new byte[FRAME_SIZE_BYTES];
 
     private System.Threading.Timer? _rtpTimer;
@@ -51,11 +51,11 @@ public class DirectRtpPlayoutG711 : IDisposable
 
     public int PendingFrameCount => _frameBuffer.Count;
 
-    public DirectRtpPlayoutG711(RTPSession rtpSession)
+    public DirectRtpPlayoutG711(VoIPMediaSession mediaSession)
     {
-        _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
-        _rtpSession.AcceptRtpFromAny = true;
-        _rtpSession.OnRtpPacketReceived += HandleSymmetricRtp;
+        _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
+        _mediaSession.AcceptRtpFromAny = true;
+        _mediaSession.OnRtpPacketReceived += HandleSymmetricRtp;
     }
 
     /// <summary>
@@ -79,8 +79,15 @@ public class DirectRtpPlayoutG711 : IDisposable
             if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
             {
                 _lastRemoteEndpoint = remoteEndPoint;
-                _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
-                OnLog?.Invoke($"[NAT] ✓ RTP locked to {remoteEndPoint}");
+                try
+                {
+                    _mediaSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
+                    OnLog?.Invoke($"[NAT] ✓ RTP locked to {remoteEndPoint}");
+                }
+                catch (Exception ex)
+                {
+                    OnLog?.Invoke($"[NAT] ⚠️ SetDestination failed: {ex.Message}");
+                }
             }
         }
     }
@@ -191,20 +198,31 @@ public class DirectRtpPlayoutG711 : IDisposable
 
     private void SendRtpFrame(byte[] frame)
     {
-        _rtpSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, _payloadType);
-        _timestamp += FRAME_SIZE_BYTES;
+        try
+        {
+            _mediaSession.SendAudioRaw(frame, (int)_timestamp, 0, _payloadType);
+            _timestamp += FRAME_SIZE_BYTES;
+        }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"[RTP] ⚠️ SendAudioRaw error: {ex.Message}");
+        }
     }
 
     private void SendSilence()
     {
         Array.Fill(_outputBuffer, _silenceByte);
-        _rtpSession.SendRtpRaw(SDPMediaTypesEnum.audio, _outputBuffer, _timestamp, 0, _payloadType);
-        _timestamp += FRAME_SIZE_BYTES;
+        try
+        {
+            _mediaSession.SendAudioRaw(_outputBuffer, (int)_timestamp, 0, _payloadType);
+            _timestamp += FRAME_SIZE_BYTES;
+        }
+        catch { }
     }
 
     public void Dispose()
     {
-        _rtpSession.OnRtpPacketReceived -= HandleSymmetricRtp;
+        _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
         Stop();
         Clear();
     }
