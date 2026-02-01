@@ -217,6 +217,22 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         catch { /* keep call alive */ }
     }
 
+    /// <summary>
+    /// Clear OpenAI's input audio buffer. Call this when Ada starts speaking
+    /// to prevent stale audio from being transcribed.
+    /// </summary>
+    private async Task ClearInputAudioBufferAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        try
+        {
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
+            Log("🧹 Cleared OpenAI input audio buffer");
+        }
+        catch { }
+    }
+
     // =========================
     // AUDIO OUTPUT
     // =========================
@@ -449,6 +465,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
+
+                    // CRITICAL: Clear OpenAI's input audio buffer when Ada starts speaking.
+                    // This prevents stale audio from being transcribed as the user's response.
+                    _ = ClearInputAudioBufferAsync();
 
                     Log("🤖 AI response started");
                     OnResponseStarted?.Invoke();

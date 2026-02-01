@@ -256,8 +256,18 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             {
                 if (cts.Token.IsCancellationRequested) return;
 
+                // CRITICAL: Do NOT send audio while Ada is speaking.
+                // Sending audio during Ada's speech fills OpenAI's input buffer with
+                // old audio, causing VAD to fire on stale content.
+                if (_isBotSpeaking)
+                {
+                    // Still forward to audio monitor so user can hear themselves
+                    OnCallerAudioMonitor?.Invoke(pcmBytes);
+                    return;
+                }
+
                 // Echo guard: skip audio briefly after bot stops speaking
-                if (_adaHasStartedSpeaking && !_isBotSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+                if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
                 {
                     var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
                     if (msSinceBotStopped < ECHO_GUARD_MS) return;
