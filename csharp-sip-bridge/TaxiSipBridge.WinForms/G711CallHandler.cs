@@ -38,7 +38,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private MultiCodecRtpPlayout? _playout;
+    private DirectRtpPlayoutG711? _playout;
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMU; // Default to μ-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -189,8 +189,8 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create MultiCodecRtpPlayout for output
-            _playout = new MultiCodecRtpPlayout(_currentMediaSession);
+            // Create DirectRtpPlayoutG711 for output (8kHz passthrough, no resampling)
+            _playout = new DirectRtpPlayoutG711(_currentMediaSession.RtpSession);
             _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
@@ -203,7 +203,7 @@ Be concise, warm, and professional.
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
+            Log($"🎵 [{callId}] DirectRtpPlayoutG711 started ({_negotiatedCodec})");
 
             // Create OpenAI G711 client
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice);
@@ -242,7 +242,7 @@ Be concise, warm, and professional.
     // ===========================================
     private async Task PlayoutLoopAsync(string callId, CancellationToken ct)
     {
-        Log($"▶️ [{callId}] Playout loop started (codec={_negotiatedCodec})");
+        Log($"▶️ [{callId}] Playout loop started (G711 direct, codec={_negotiatedCodec})");
 
         while (!ct.IsCancellationRequested)
         {
@@ -258,36 +258,14 @@ Be concise, warm, and professional.
                     _isBotSpeaking = true;
                     _adaHasStartedSpeaking = true;
 
-                    // For G.711 codecs, keep audio at 8kHz for minimal latency
-                    if (_negotiatedCodec == AudioCodecsEnum.PCMU)
-                    {
-                        // μ-law → PCM @ 8kHz → 24kHz for MultiCodecRtpPlayout
-                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
-                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
-                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
-                    }
-                    else if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                    {
-                        // μ-law → A-law: Direct transcode using lookup tables (8kHz, no PCM intermediate)
-                        // This is the highest-quality path for A-law carriers
-                        var alawFrame = AudioCodecs.TranscodeMuLawToALaw(ulawFrame);
-                        // Decode to PCM for MultiCodecRtpPlayout (which expects 24kHz PCM)
-                        var pcm8k = AudioCodecs.ALawDecode(alawFrame);
-                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
-                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
-                    }
-                    else
-                    {
-                        // For other codecs (Opus, G.722), decode and upsample
-                        var pcm8k = AudioCodecs.MuLawDecode(ulawFrame);
-                        var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
-                        _playout?.BufferAudio(AudioCodecs.ShortsToBytes(pcm24k));
-                    }
+                    // Direct 8kHz passthrough - no resampling!
+                    // DirectRtpPlayoutG711 handles μ-law→A-law transcode if needed
+                    _playout?.BufferMuLawFrame(ulawFrame);
 
                     _framesSent++;
 
                     if (_framesSent % 50 == 0)
-                        Log($"📤 [{callId}] Playout: {_framesSent} frames sent ({_negotiatedCodec})");
+                        Log($"📤 [{callId}] Playout: {_framesSent} frames buffered ({_negotiatedCodec})");
                 }
                 else
                 {
@@ -303,7 +281,7 @@ Be concise, warm, and professional.
             }
         }
 
-        Log($"⏹️ [{callId}] Playout loop ended ({_framesSent} frames sent)");
+        Log($"⏹️ [{callId}] Playout loop ended ({_framesSent} frames buffered)");
     }
 
     // ===========================================
