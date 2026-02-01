@@ -376,19 +376,34 @@ public class SimliWebView : UserControl
                 
                 // Step 2: Get ICE servers
                 document.getElementById('loading').textContent = 'Getting ICE servers...';
-                log('Requesting ICE servers...');
-                const iceResponse = await fetch('https://api.simli.ai/getIceServer', {
+                log('Requesting ICE servers with key: ' + apiKey.substring(0, 8) + '...');
+                
+                const icePayload = JSON.stringify({ apiKey: apiKey });
+                log('ICE request payload: ' + icePayload.substring(0, 50) + '...');
+                
+                const iceResponse = await fetch('https://api.simli.ai/getIceServers', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ apiKey: apiKey })
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: icePayload
                 });
                 
+                log('ICE response status: ' + iceResponse.status);
+                
                 if (!iceResponse.ok) {
-                    throw new Error('ICE API failed: ' + iceResponse.status);
+                    const errBody = await iceResponse.text();
+                    log('ICE error body: ' + errBody);
+                    // If ICE fails, use fallback STUN servers
+                    log('Using fallback STUN servers...');
                 }
                 
-                const iceData = await iceResponse.json();
-                log('ICE servers received: ' + JSON.stringify(iceData).substring(0, 100));
+                let iceData = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+                if (iceResponse.ok) {
+                    iceData = await iceResponse.json();
+                    log('ICE servers received: ' + JSON.stringify(iceData).substring(0, 100));
+                }
                 
                 // Step 3: Create WebRTC connection
                 document.getElementById('loading').textContent = 'Establishing WebRTC...';
