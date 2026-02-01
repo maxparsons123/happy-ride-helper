@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -13,19 +14,15 @@ namespace TaxiSipBridge;
 /// OpenAI Realtime API client using G.711 @ 8kHz (native OpenAI support).
 /// Supports both μ-law (PCMU) and A-law (PCMA) codecs.
 /// 
-/// Key Benefits:
-/// - No resampling overhead (8kHz throughout)
-/// - Better audio quality (no lossy resampling)
-/// - Lower latency and CPU usage
-/// - Direct passthrough from SIP → OpenAI → SIP
-/// 
-/// Audio Flow:
-/// - Input: G.711 (μ-law or A-law) → OpenAI
-/// - Output: OpenAI → G.711 (μ-law or A-law)
+/// v1.5: Ported full flow from OpenAIRealtimeClient:
+/// - 8s no-reply watchdog, goodbye detection, transcript guard
+/// - STT corrections, keepalive loop, WhatsApp notification
+/// - Echo guard with confirmation bypass
+/// - Memory optimizations (SerializeToUtf8Bytes, Buffer.BlockCopy)
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.4"; // Memory + thread safety improvements
+    public const string VERSION = "1.5";
 
     // =========================
     // G.711 CODEC SELECTION
@@ -47,12 +44,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // Audio format: G.711 @ 8kHz
     private const int SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
-    private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 samples = 160 bytes
-    private const int PCM_FRAME_SIZE_BYTES = FRAME_SIZE_BYTES * 2; // 320 bytes (PCM16)
-
-    // Confirmation patience
-    private const int CONFIRM_NO_REPLY_TIMEOUT_MS = 20000; // 20s before a single gentle nudge
-    private const int MAX_CONFIRM_REPROMPTS = 1;          // Never ask more than 1 extra time
+    private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 bytes
 
     // =========================
     // THREAD-SAFE STATE
@@ -66,9 +58,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private int _greetingSent;
     private int _ignoreUserAudio;
     private int _deferredResponsePending;
-    private int _noReplyWatchdogId; // Incremented to cancel stale watchdogs
+    private int _noReplyWatchdogId;
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
+    private long _lastToolCallAt;
+    private long _responseCreatedAt; // For transcript guard
+
+    // Response ID guards
+    private string? _activeResponseId;
+    private string? _lastCompletedResponseId;
 
     // =========================
     // BOOKING STATE
@@ -84,6 +82,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
     private Task? _receiveLoopTask;
+    private Task? _keepaliveTask;
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
 
     // =========================
@@ -92,9 +91,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
     private const int MAX_QUEUE_FRAMES = 500;
 
-    // Audio delta accumulator (OpenAI deltas are not guaranteed to be 160-byte aligned).
-    // We must accumulate across deltas and only emit full 20ms frames to avoid injecting padding/silence.
-    // Thread-safe with lock for concurrent access from receive loop.
+    // Audio accumulator (thread-safe)
     private readonly byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 10];
     private int _audioAccumOffset;
     private readonly object _audioAccumLock = new();
@@ -104,15 +101,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private long _audioFramesSent;
     private long _audioChunksReceived;
-    private long _lastToolCallAt;
-
-    // Response id guards (copied from OpenAIRealtimeClient)
-    private long _responseCreatedAt;
-    private string? _activeResponseId;
-    private string? _lastCompletedResponseId;
-
-    // Confirmation watchdog state
-    private int _confirmRepromptCount;
 
     // =========================
     // HELPERS
@@ -124,24 +112,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
-    public event Action<byte[]>? OnPcm24Audio; // Not used in G.711 mode, but required by interface
+    public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnConnected;
     public event Action? OnDisconnected;
-    private Action? _onResponseStarted;
-    private Action? _onResponseCompleted;
-    private readonly object _eventLock = new object();
-    
-    public event Action? OnResponseStarted
-    {
-        add { lock (_eventLock) _onResponseStarted += value; }
-        remove { lock (_eventLock) _onResponseStarted -= value; }
-    }
-    
-    public event Action? OnResponseCompleted
-    {
-        add { lock (_eventLock) _onResponseCompleted += value; }
-        remove { lock (_eventLock) _onResponseCompleted -= value; }
-    }
+    public event Action? OnResponseStarted;
+    public event Action? OnResponseCompleted;
     public event Action<string>? OnAdaSpeaking;
     public event Action? OnCallEnded;
     public event Action<BookingState>? OnBookingUpdated;
@@ -168,9 +143,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         _model = model;
         _voice = voice;
         _codec = codec;
-        
-        // Set codec-specific constants
-        // μ-law silence = 0xFF, A-law silence = 0xD5
         _silenceByte = codec == G711Codec.MuLaw ? (byte)0xFF : (byte)0xD5;
         _openAiFormatString = codec == G711Codec.MuLaw ? "g711_ulaw" : "g711_alaw";
     }
@@ -182,13 +154,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public async Task ConnectAsync(string? caller = null, CancellationToken ct = default)
     {
         ThrowIfDisposed();
-
-        // Reset state for new call
         ResetCallState(caller);
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
-        // Match the header used by the PCM16 client; without this the server may enforce a different schema.
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
         using var timeout = new CancellationTokenSource(_connectTimeout);
@@ -202,8 +171,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _receiveLoopTask = Task.Run(ReceiveLoopAsync);
+        _keepaliveTask = Task.Run(KeepaliveLoopAsync);
 
-        // Wait for session.created from OpenAI
+        // Wait for session.created
         Log("⏳ Waiting for session.created...");
         for (int i = 0; i < 100 && Volatile.Read(ref _sessionCreated) == 0; i++)
             await Task.Delay(50, linked.Token).ConfigureAwait(false);
@@ -211,8 +181,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (Volatile.Read(ref _sessionCreated) == 0)
             throw new TimeoutException("Timeout waiting for session.created");
 
-        // Config is sent from the session.created handler (matches OpenAIRealtimeClient flow)
-        Log("✅ Session created");
+        Log("✅ Session created, configuring...");
 
         // Wait for session.updated
         Log("⏳ Waiting for session.updated...");
@@ -224,7 +193,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         Log("✅ Session configured");
 
-        // Greeting is sent from the session.updated handler; wait briefly so the call always starts cleanly.
+        // Wait for greeting
         for (int i = 0; i < 40 && Volatile.Read(ref _greetingSent) == 0; i++)
             await Task.Delay(50, linked.Token).ConfigureAwait(false);
 
@@ -233,7 +202,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Send µ-law audio frame to OpenAI. Input: 160 bytes µ-law @ 8kHz (20ms frame).
+    /// Send G.711 audio frame to OpenAI.
     /// Uses SerializeToUtf8Bytes for reduced GC pressure.
     /// </summary>
     public async Task SendMuLawAsync(byte[] ulawData)
@@ -241,9 +210,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) != 0) return;
 
+        // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 200)
+            return;
+
         try
         {
-            // Use SerializeToUtf8Bytes for lower heap allocation
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "input_audio_buffer.append",
@@ -254,7 +226,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             Volatile.Write(ref _lastUserSpeechAt, NowMs());
 
             var count = Interlocked.Increment(ref _audioFramesSent);
-            if (count % 50 == 0) // Log every 1 second
+            if (count % 50 == 0)
                 Log($"📤 Sent {count} audio frames to OpenAI");
         }
         catch (Exception ex)
@@ -264,34 +236,24 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Send PCM16 @ 8kHz audio. Converts to G.711 (µ-law or A-law based on codec) before sending.
+    /// Send PCM16 @ 8kHz audio. Converts to G.711 before sending.
     /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 8000)
     {
         if (!IsConnected || pcmData == null || pcmData.Length == 0) return;
 
-        // Convert PCM16 bytes → samples
         var samples = AudioCodecs.BytesToShorts(pcmData);
         
-        // Resample if needed
         if (sampleRate != SAMPLE_RATE)
-        {
             samples = AudioCodecs.Resample(samples, sampleRate, SAMPLE_RATE);
-        }
 
-        // Dynamic encoding based on the negotiated codec
-        byte[] encoded;
-        if (_codec == G711Codec.ALaw)
-            encoded = AudioCodecs.ALawEncode(samples);
-        else
-            encoded = AudioCodecs.MuLawEncode(samples);
+        byte[] encoded = _codec == G711Codec.ALaw
+            ? AudioCodecs.ALawEncode(samples)
+            : AudioCodecs.MuLawEncode(samples);
 
         await SendMuLawAsync(encoded).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Get next µ-law frame from outbound queue (160 bytes = 20ms @ 8kHz).
-    /// </summary>
     public byte[]? GetNextMuLawFrame() => _outboundQueue.TryDequeue(out var f) ? f : null;
 
     public void ClearPendingFrames()
@@ -304,16 +266,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         Log("📴 Disconnecting...");
-        Interlocked.Exchange(ref _callEnded, 1);
+        SignalCallEnded("disconnect");
 
         try
         {
             _cts?.Cancel();
             if (_ws?.State == WebSocketState.Open)
-            {
                 await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
                          .ConfigureAwait(false);
-            }
         }
         catch { }
         finally
@@ -325,12 +285,42 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
+    // KEEPALIVE LOOP
+    // =========================
+    private async Task KeepaliveLoopAsync()
+    {
+        const int KEEPALIVE_INTERVAL_MS = 20000;
+
+        try
+        {
+            while (!(_cts?.IsCancellationRequested ?? true))
+            {
+                await Task.Delay(KEEPALIVE_INTERVAL_MS, _cts!.Token).ConfigureAwait(false);
+
+                if (_ws?.State != WebSocketState.Open)
+                {
+                    Log($"⚠️ Keepalive: WebSocket disconnected (state: {_ws?.State})");
+                    break;
+                }
+
+                var responseActive = Volatile.Read(ref _responseActive) == 1;
+                var callEnded = Volatile.Read(ref _callEnded) == 1;
+                Log($"💓 Keepalive: connected (response_active={responseActive}, call_ended={callEnded})");
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Keepalive loop error: {ex.Message}");
+        }
+    }
+
+    // =========================
     // SESSION CONFIGURATION
     // =========================
 
     private async Task ConfigureSessionAsync()
     {
-        // Dynamic codec configuration based on constructor setting
         var config = new
         {
             type = "session.update",
@@ -345,9 +335,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,            // Slightly higher for telephony noise rejection
-                    prefix_padding_ms = 300,     // Reduced from 600 - faster response start
-                    silence_duration_ms = 700    // Reduced from 1200 - snappier turn-taking
+                    threshold = 0.35,
+                    prefix_padding_ms = 600,
+                    silence_duration_ms = 1200
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -361,19 +351,32 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task SendGreetingAsync()
     {
-        var greeting = GetLocalizedGreeting(_detectedLanguage);
+        await Task.Delay(100).ConfigureAwait(false);
+
+        // Force-clear spurious state for first response
+        var respActive = Volatile.Read(ref _responseActive);
+        var respQueued = Volatile.Read(ref _responseQueued);
         
-        var msg = new
+        if (respActive == 1 || respQueued == 1)
+            Log($"⚠️ Greeting: Force-clearing spurious state (active={respActive}, queued={respQueued})");
+        
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
+        _activeResponseId = null;
+
+        var greeting = GetLocalizedGreeting(_detectedLanguage);
+
+        await SendJsonAsync(new
         {
             type = "response.create",
             response = new
             {
                 modalities = new[] { "text", "audio" },
-                instructions = $"Say exactly: \"{greeting}\""
+                instructions = $"Greet the caller warmly in {GetLanguageName(_detectedLanguage)}. Say: \"{greeting}\""
             }
-        };
+        }).ConfigureAwait(false);
 
-        await SendJsonAsync(msg).ConfigureAwait(false);
+        Log("📢 Greeting sent");
     }
 
     // =========================
@@ -417,10 +420,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Log("🔄 Receive loop ended");
         try { _ws?.Dispose(); } catch { }
         _ws = null;
-        
-        // Event safety: capture delegate before invoking
-        var handler = OnDisconnected;
-        handler?.Invoke();
+        OnDisconnected?.Invoke();
     }
 
     // =========================
@@ -444,7 +444,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "session.created":
                     Interlocked.Exchange(ref _sessionCreated, 1);
                     Log("📋 session.created received");
-                    // Match OpenAIRealtimeClient: configure immediately after session.created
                     _ = Task.Run(async () =>
                     {
                         try { await ConfigureSessionAsync().ConfigureAwait(false); }
@@ -455,27 +454,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "session.updated":
                     Interlocked.Exchange(ref _sessionUpdated, 1);
                     Log("📋 session.updated received");
-                    // Match OpenAIRealtimeClient: send greeting after session.updated
                     if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
                     {
                         _ = Task.Run(async () =>
                         {
-                            try
-                            {
-                                await SendGreetingAsync().ConfigureAwait(false);
-                                Log("📢 Greeting sent");
-                            }
-                            catch (Exception ex)
-                            {
-                                Log($"⚠️ Greeting error: {ex.Message}");
-                            }
+                            try { await SendGreetingAsync().ConfigureAwait(false); }
+                            catch (Exception ex) { Log($"⚠️ Greeting error: {ex.Message}"); }
                         });
                     }
                     break;
 
                 case "response.created":
                 {
-                    // OBSERVED start (OpenAI controlled) — guard duplicates
                     var responseId = TryGetResponseId(doc.RootElement);
                     if (responseId != null && _activeResponseId == responseId)
                         break;
@@ -484,19 +474,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Interlocked.Exchange(ref _responseActive, 1);
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
-                    // Clear OpenAI's input buffer so stale audio doesn't create phantom turns
                     _ = ClearInputAudioBufferAsync();
 
                     Log("🤖 AI response started");
-                    Action? startHandler;
-                    lock (_eventLock) startHandler = _onResponseStarted;
-                    startHandler?.Invoke();
+                    OnResponseStarted?.Invoke();
                     break;
                 }
 
                 case "response.done":
                 {
-                    // OBSERVED end (OpenAI controlled) — guard duplicates
                     var responseId = TryGetResponseId(doc.RootElement);
                     if (responseId == null || responseId == _lastCompletedResponseId)
                         break;
@@ -509,20 +495,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastAdaFinishedAt, NowMs());
                     Log("🤖 AI response completed");
-
-                    // Fire event to unblock user audio in call handler
-                    try
-                    {
-                        Action? completedHandler;
-                        lock (_eventLock) completedHandler = _onResponseCompleted;
-                        var hasSubscribers = completedHandler != null;
-                        Log($"📢 Firing OnResponseCompleted (subscribers: {hasSubscribers})");
-                        completedHandler?.Invoke();
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"❌ OnResponseCompleted error: {ex.Message}");
-                    }
+                    OnResponseCompleted?.Invoke();
 
                     // Flush deferred response if pending
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
@@ -539,45 +512,38 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         });
                     }
 
-                    // Patience: only nudge during the "awaiting confirmation" window.
-                    if (_awaitingConfirmation && Volatile.Read(ref _confirmRepromptCount) < MAX_CONFIRM_REPROMPTS)
+                    // Start 8s no-reply watchdog
+                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+                    _ = Task.Run(async () =>
                     {
-                        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                        _ = Task.Run(async () =>
+                        await Task.Delay(8000).ConfigureAwait(false);
+
+                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                        if (Volatile.Read(ref _responseActive) == 1) return;
+
+                        Log("⏰ No-reply watchdog triggered - prompting user");
+
+                        await SendJsonAsync(new
                         {
-                            await Task.Delay(CONFIRM_NO_REPLY_TIMEOUT_MS).ConfigureAwait(false);
-
-                            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                            if (Volatile.Read(ref _responseActive) == 1) return;
-                            if (!_awaitingConfirmation) return;
-
-                            var reprompt = Interlocked.Increment(ref _confirmRepromptCount);
-                            if (reprompt > MAX_CONFIRM_REPROMPTS) return;
-
-                            Log("⏰ Confirmation silence - gentle nudge (once)");
-
-                            await SendJsonAsync(new
+                            type = "conversation.item.create",
+                            item = new
                             {
-                                type = "conversation.item.create",
-                                item = new
+                                type = "message",
+                                role = "system",
+                                content = new[]
                                 {
-                                    type = "message",
-                                    role = "system",
-                                    content = new[]
+                                    new
                                     {
-                                        new
-                                        {
-                                            type = "input_text",
-                                            text = "[CONFIRMATION SILENCE] Be patient. Ask ONE short question: ‘Would you like me to confirm the booking? (yes/no)’. Do not repeat details." 
-                                        }
+                                        type = "input_text",
+                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
                                     }
                                 }
-                            }).ConfigureAwait(false);
+                            }
+                        }).ConfigureAwait(false);
 
-                            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false).ConfigureAwait(false);
-                        });
-                    }
+                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                    });
 
                     break;
                 }
@@ -587,14 +553,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     {
                         var audioBase64 = deltaEl.GetString();
                         if (!string.IsNullOrEmpty(audioBase64))
-                        {
                             ProcessAudioDelta(audioBase64);
-                        }
                     }
                     break;
 
                 case "response.audio.done":
-                    // Flush any leftover partial frame at end-of-audio.
                     FlushAudioAccumulator(padWithSilence: true);
                     break;
 
@@ -615,6 +578,26 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         {
                             Log($"💬 Ada: {text}");
                             OnTranscript?.Invoke($"Ada: {text}");
+
+                            // Goodbye detection watchdog
+                            if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+                                (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+                                 text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
+                                 text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
+                                _ = Task.Run(async () =>
+                                {
+                                    await Task.Delay(5000).ConfigureAwait(false);
+
+                                    if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                        return;
+
+                                    Log("⏰ Goodbye watchdog triggered - forcing end_call");
+                                    Interlocked.Exchange(ref _ignoreUserAudio, 1);
+                                    SignalCallEnded("goodbye_watchdog");
+                                });
+                            }
                         }
                     }
                     break;
@@ -625,20 +608,29 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var text = userTranscriptEl.GetString();
                         if (!string.IsNullOrEmpty(text))
                         {
+                            text = ApplySttCorrections(text);
+
+                            // Transcript guard: ignore stale transcripts
+                            var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
+                            if (msSinceResponseCreated < 900 && Volatile.Read(ref _responseActive) == 1)
+                            {
+                                Log($"🚫 Ignoring stale transcript ({msSinceResponseCreated}ms after response.created): {text}");
+                                break;
+                            }
+
                             Log($"👤 User: {text}");
-                            OnTranscript?.Invoke($"User: {text}");
+                            OnTranscript?.Invoke($"You: {text}");
                         }
                     }
                     break;
 
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
+                    Interlocked.Increment(ref _noReplyWatchdogId);
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    // Commit audio buffer to finalize VAD
                     _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     break;
 
@@ -649,13 +641,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "error":
                     if (doc.RootElement.TryGetProperty("error", out var errorEl))
                     {
-                        var message = errorEl.TryGetProperty("message", out var msgEl) 
-                            ? msgEl.GetString() 
+                        var message = errorEl.TryGetProperty("message", out var msgEl)
+                            ? msgEl.GetString()
                             : "Unknown error";
                         if (!string.IsNullOrEmpty(message) &&
-                            message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
-                            break;
-                        Log($"❌ OpenAI error: {message}");
+                            !message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
+                            Log($"❌ OpenAI error: {message}");
                     }
                     break;
             }
@@ -672,7 +663,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task HandleToolCallAsync(JsonElement root)
     {
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var now = NowMs();
         if (now - Volatile.Read(ref _lastToolCallAt) < 200)
             return;
         Volatile.Write(ref _lastToolCallAt, now);
@@ -714,8 +705,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _booking.Fare = fare;
                     _booking.Eta = eta;
                     _awaitingConfirmation = true;
-                    Interlocked.Exchange(ref _confirmRepromptCount, 0);
-                    Interlocked.Increment(ref _noReplyWatchdogId); // cancel any stale watchdog
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"💰 Quote: {fare}");
@@ -735,11 +724,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _booking.Confirmed = true;
                     _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     _awaitingConfirmation = false;
-                    Interlocked.Exchange(ref _confirmRepromptCount, 0);
-                    Interlocked.Increment(ref _noReplyWatchdogId); // cancel any pending confirmation nudge
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
+
+                    // WhatsApp notification
+                    _ = Task.Run(async () =>
+                    {
+                        try { await SendWhatsAppNotificationAsync(_callerId); }
+                        catch (Exception ex) { Log($"❌ WhatsApp task error: {ex.Message}"); }
+                    });
 
                     await SendToolResultAsync(callId, new
                     {
@@ -751,20 +745,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     }).ConfigureAwait(false);
 
                     await QueueResponseCreateAsync().ConfigureAwait(false);
-                    
-                    // Extended grace period (15s) for "anything else?" flow, then force end
+
+                    // 15s grace period then force end
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(15000).ConfigureAwait(false);
 
-                        // Wait for any current response to finish
                         for (int i = 0; i < 50 && Volatile.Read(ref _responseActive) == 1; i++)
                             await Task.Delay(100).ConfigureAwait(false);
 
                         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                             return;
 
-                        // Only proceed if no response is active/queued
                         if (!CanCreateResponse())
                             return;
 
@@ -792,13 +784,38 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 break;
             }
 
+            case "find_local_events":
+            {
+                var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
+                var near = args.TryGetValue("near", out var ne) ? ne?.ToString() : null;
+                var date = args.TryGetValue("date", out var dt) ? dt?.ToString() ?? "this weekend" : "this weekend";
+
+                Log($"🎭 Events lookup: {category} near {near ?? "unknown"} on {date}");
+
+                var mockEvents = new[]
+                {
+                    new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
+                    new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
+                    new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
+                };
+
+                await SendToolResultAsync(callId, new
+                {
+                    success = true,
+                    events = mockEvents,
+                    message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+                }).ConfigureAwait(false);
+
+                await QueueResponseCreateAsync().ConfigureAwait(false);
+                break;
+            }
+
             case "end_call":
                 Log("📞 End call requested - ignoring further user audio...");
                 Interlocked.Exchange(ref _ignoreUserAudio, 1);
 
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
 
-                // Wait for audio to drain before signaling call end
                 _ = Task.Run(async () =>
                 {
                     var waitStart = NowMs();
@@ -831,7 +848,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task SendToolResultAsync(string callId, object output)
     {
-        var msg = new
+        await SendJsonAsync(new
         {
             type = "conversation.item.create",
             item = new
@@ -840,51 +857,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 call_id = callId,
                 output = JsonSerializer.Serialize(output)
             }
-        };
-        await SendJsonAsync(msg).ConfigureAwait(false);
-    }
-
-    private static string? TryGetResponseId(JsonElement root)
-    {
-        try
-        {
-            if (root.TryGetProperty("response", out var resp) &&
-                resp.TryGetProperty("id", out var idEl))
-                return idEl.GetString();
-        }
-        catch { }
-        return null;
-    }
-
-    /// <summary>
-    /// Clear OpenAI's input audio buffer. Call this when Ada starts speaking
-    /// to avoid stale audio causing phantom transcripts/turns.
-    /// </summary>
-    private async Task ClearInputAudioBufferAsync()
-    {
-        if (_ws?.State != WebSocketState.Open) return;
-
-        try
-        {
-            await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
-            Log("🧹 Cleared OpenAI input audio buffer");
-        }
-        catch { }
-    }
-
-    private void SignalCallEnded(string reason)
-    {
-        if (Interlocked.Exchange(ref _callEnded, 1) == 0)
-        {
-            Log($"📴 Call ended: {reason}");
-            OnCallEnded?.Invoke();
-        }
+        }).ConfigureAwait(false);
     }
 
     // =========================
-    // RESPONSE GATE (copied from original)
+    // RESPONSE GATE
     // =========================
-    
+
     private bool CanCreateResponse()
     {
         return Volatile.Read(ref _responseActive) == 0 &&
@@ -892,13 +871,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 150; // Reduced from 300ms for faster response
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300;
     }
 
-    /// <summary>
-    /// Queue a response.create. Waits for any active response to complete first.
-    /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 20, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -908,17 +884,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Wait for any active response to complete (up to 3s - reduced from 5s)
             if (waitForCurrentResponse)
             {
-                for (int i = 0; i < 60 && Volatile.Read(ref _responseActive) == 1; i++)
+                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
                     await Task.Delay(50).ConfigureAwait(false);
             }
 
-            if (delayMs > 0)
-                await Task.Delay(delayMs).ConfigureAwait(false);
+            await Task.Delay(delayMs).ConfigureAwait(false);
 
-            // If response is still active after waiting, defer to response.done handler
             if (Volatile.Read(ref _responseActive) == 1)
             {
                 Interlocked.Exchange(ref _deferredResponsePending, 1);
@@ -948,15 +921,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Decode base64 to get G.711 bytes (μ-law or A-law depending on config)
             var g711Bytes = Convert.FromBase64String(base64);
             AppendAndEnqueueG711(g711Bytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
-            {
                 Log($"📢 Received {chunks} audio chunks (G.711 {_codec}), queue={_outboundQueue.Count}");
-            }
         }
         catch (Exception ex)
         {
@@ -964,10 +934,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
     }
 
-    /// <summary>
-    /// Accumulates G.711 audio deltas and enqueues full 20ms (160-byte) frames.
-    /// Thread-safe with lock for concurrent access. Uses Buffer.BlockCopy for efficiency.
-    /// </summary>
     private void AppendAndEnqueueG711(byte[] bytes)
     {
         if (bytes.Length == 0) return;
@@ -987,10 +953,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 _audioAccumOffset += toCopy;
                 sourceOffset += toCopy;
 
-                // Emit full frame when we have exactly 160 bytes
                 if (_audioAccumOffset == FRAME_SIZE_BYTES)
                 {
-                    // Cap buffer to prevent runaway memory
                     if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
                     {
                         var frame = new byte[FRAME_SIZE_BYTES];
@@ -1003,10 +967,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
     }
 
-    /// <summary>
-    /// Flushes any remaining audio in the accumulator.
-    /// Thread-safe with lock for concurrent access.
-    /// </summary>
     private void FlushAudioAccumulator(bool padWithSilence)
     {
         lock (_audioAccumLock)
@@ -1018,7 +978,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 var frame = new byte[FRAME_SIZE_BYTES];
                 Buffer.BlockCopy(_audioAccum, 0, frame, 0, _audioAccumOffset);
                 
-                // Pad remaining with silence byte
                 for (int i = _audioAccumOffset; i < FRAME_SIZE_BYTES; i++)
                     frame[i] = _silenceByte;
 
@@ -1028,6 +987,221 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
             _audioAccumOffset = 0;
         }
+    }
+
+    // =========================
+    // HELPERS
+    // =========================
+
+    private static string? TryGetResponseId(JsonElement root)
+    {
+        try
+        {
+            if (root.TryGetProperty("response", out var resp) &&
+                resp.TryGetProperty("id", out var idEl))
+                return idEl.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    private async Task ClearInputAudioBufferAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        try
+        {
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
+            Log("🧹 Cleared OpenAI input audio buffer");
+        }
+        catch { }
+    }
+
+    private void SignalCallEnded(string reason)
+    {
+        if (Interlocked.Exchange(ref _callEnded, 1) == 0)
+        {
+            Log($"📴 Call ended: {reason}");
+            OnCallEnded?.Invoke();
+        }
+    }
+
+    private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
+    {
+        Log($"📲 WhatsApp notification starting... (phone={phoneNumber ?? "null"})");
+        
+        if (string.IsNullOrWhiteSpace(phoneNumber) || phoneNumber == "unknown")
+        {
+            Log("⚠️ WhatsApp notification skipped - no valid phone number");
+            return;
+        }
+        
+        try
+        {
+            var formatted = FormatPhoneForWhatsApp(phoneNumber);
+            
+            if (string.IsNullOrWhiteSpace(formatted) || formatted.Length < 8)
+            {
+                Log($"⚠️ WhatsApp notification skipped - formatted number too short: {formatted}");
+                return;
+            }
+            
+            Log($"📲 Sending WhatsApp webhook: original={phoneNumber} → formatted={formatted}");
+            var (success, msg) = await WhatsAppNotifier.SendAsync(formatted).ConfigureAwait(false);
+            Log($"📱 WhatsApp webhook result: {(success ? "✅ OK" : "❌ FAIL")} {msg}");
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ WhatsApp notification error: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static string FormatPhoneForWhatsApp(string phone)
+    {
+        var digits = new string(phone.Where(char.IsDigit).ToArray());
+        if (digits.StartsWith("00")) digits = digits.Substring(2);
+        if (digits.StartsWith("0")) digits = "44" + digits.Substring(1);
+        return digits;
+    }
+
+    private void ResetCallState(string? caller)
+    {
+        ClearPendingFrames();
+
+        _callerId = caller ?? "";
+        _detectedLanguage = DetectLanguage(caller);
+        _booking.Reset();
+        _awaitingConfirmation = false;
+
+        Interlocked.Exchange(ref _callEnded, 0);
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
+        Interlocked.Exchange(ref _greetingSent, 0);
+        Interlocked.Exchange(ref _sessionCreated, 0);
+        Interlocked.Exchange(ref _sessionUpdated, 0);
+        Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Increment(ref _noReplyWatchdogId);
+
+        _activeResponseId = null;
+        _lastCompletedResponseId = null;
+
+        Volatile.Write(ref _lastAdaFinishedAt, 0);
+        Volatile.Write(ref _lastUserSpeechAt, 0);
+        Volatile.Write(ref _lastToolCallAt, 0);
+        Volatile.Write(ref _responseCreatedAt, 0);
+        Volatile.Write(ref _audioFramesSent, 0);
+        Volatile.Write(ref _audioChunksReceived, 0);
+
+        lock (_audioAccumLock) _audioAccumOffset = 0;
+    }
+
+    private string DetectLanguage(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "en";
+
+        var norm = phone.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        if (norm.StartsWith("06") && norm.Length == 10) return "nl";
+        if (norm.StartsWith("0") && !norm.StartsWith("00") && norm.Length == 10) return "nl";
+
+        if (norm.StartsWith("+")) norm = norm.Substring(1);
+        else if (norm.StartsWith("00") && norm.Length > 4) norm = norm.Substring(2);
+
+        if (norm.Length >= 2)
+        {
+            var code = norm.Substring(0, 2);
+            return code switch
+            {
+                "31" => "nl",
+                "32" => "nl",
+                "33" => "fr",
+                "34" => "es",
+                "39" => "it",
+                "48" => "pl",
+                "49" => "de",
+                _ => "en"
+            };
+        }
+
+        return "en";
+    }
+
+    private static string ApplySttCorrections(string text)
+    {
+        var t = (text ?? "").Trim().TrimEnd('.', '!', '?', ',', ';', ':');
+
+        // Exact match corrections
+        if (SttCorrections.TryGetValue(t, out var exact))
+            return exact;
+
+        // Partial corrections
+        foreach (var (bad, good) in PartialSttCorrections)
+        {
+            if (t.Contains(bad, StringComparison.OrdinalIgnoreCase))
+                t = t.Replace(bad, good, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return t;
+    }
+
+    private static readonly Dictionary<string, string> SttCorrections = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Aren't out", "Bernard" },
+        { "52 I ain't dead bro", "52A David Road" },
+        { "52 I ain't David", "52A David Road" },
+        { "52 ain't David", "52A David Road" },
+        { "52 a David", "52A David Road" },
+        { "for now", "now" },
+        { "right now", "now" },
+        { "as soon as possible", "now" },
+        { "ASAP", "now" },
+        { "yeah please", "yes please" },
+        { "yep", "yes" },
+        { "yup", "yes" },
+        { "yeah", "yes" },
+        { "that's right", "yes" },
+        { "correct", "yes" },
+        { "go ahead", "yes" },
+        { "book it", "yes" },
+    };
+
+    private static readonly (string Bad, string Good)[] PartialSttCorrections =
+    {
+        ("Waters Street", "Russell Street"),
+        ("Water Street", "Russell Street"),
+        ("Walters Street", "Russell Street"),
+        ("Russell Sweeney", "Russell Street"),
+        ("Servant, Russell", "7 Russell"),
+        ("Servant Russell", "7 Russell"),
+        ("Dave Redroth", "David Road"),
+    };
+
+    private static Dictionary<string, object> ParseArgs(JsonElement root)
+    {
+        var args = new Dictionary<string, object>();
+
+        if (!root.TryGetProperty("arguments", out var a) || string.IsNullOrEmpty(a.GetString()))
+            return args;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(a.GetString()!);
+            foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                args[p.Name] = p.Value.ValueKind switch
+                {
+                    JsonValueKind.Number => p.Value.TryGetInt32(out var i) ? i : p.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String => p.Value.GetString() ?? "",
+                    _ => p.Value.ToString() ?? ""
+                };
+            }
+        }
+        catch { }
+
+        return args;
     }
 
     // =========================
@@ -1042,20 +1216,18 @@ FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONF
 
 DATA SYNC (CRITICAL): After EVERY user message that provides booking info, call sync_booking_data immediately.
 
-CONFIRMATION PATIENCE: When asking to confirm the booking, ask ONCE and wait. If silence, you may nudge ONE time after ~20 seconds.
-
 RULES: One question at a time. Under 20 words per response. Use £. Only call end_call after user says no to 'anything else'.";
 
-    private static string GetLanguageName(string c) => c switch 
-    { 
-        "nl" => "Dutch", 
-        "fr" => "French", 
-        "de" => "German", 
-        "es" => "Spanish", 
-        "it" => "Italian", 
-        "pl" => "Polish", 
-        "pt" => "Portuguese", 
-        _ => "English" 
+    private static string GetLanguageName(string c) => c switch
+    {
+        "nl" => "Dutch",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pl" => "Polish",
+        "pt" => "Portuguese",
+        _ => "English"
     };
 
     private static string GetLocalizedGreeting(string lang) => lang switch
@@ -1105,6 +1277,22 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         new
         {
             type = "function",
+            name = "find_local_events",
+            description = "Search for local events",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["category"] = new { type = "string" },
+                    ["near"] = new { type = "string" },
+                    ["date"] = new { type = "string" }
+                }
+            }
+        },
+        new
+        {
+            type = "function",
             name = "end_call",
             description = "End call after goodbye",
             parameters = new
@@ -1120,98 +1308,9 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     };
 
     // =========================
-    // HELPERS
+    // JSON SEND UTILITIES
     // =========================
 
-    private void ResetCallState(string? caller)
-    {
-        ClearPendingFrames();
-
-        _callerId = caller ?? "";
-        _detectedLanguage = DetectLanguage(caller);
-        _booking.Reset();
-        _awaitingConfirmation = false;
-        
-        // Reset all per-call state
-        Interlocked.Exchange(ref _callEnded, 0);
-        Interlocked.Exchange(ref _responseActive, 0);
-        Interlocked.Exchange(ref _responseQueued, 0);
-        Interlocked.Exchange(ref _greetingSent, 0);
-        Interlocked.Exchange(ref _sessionCreated, 0);
-        Interlocked.Exchange(ref _sessionUpdated, 0);
-        Interlocked.Exchange(ref _ignoreUserAudio, 0);
-        Interlocked.Exchange(ref _deferredResponsePending, 0);
-        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any stale watchdogs
-        
-        Volatile.Write(ref _lastAdaFinishedAt, 0);
-        Volatile.Write(ref _lastUserSpeechAt, 0);
-    }
-
-    private string DetectLanguage(string? phone)
-    {
-        if (string.IsNullOrEmpty(phone)) return "en";
-
-        var norm = phone.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
-
-        // Dutch mobile
-        if (norm.StartsWith("06") && norm.Length == 10) return "nl";
-        if (norm.StartsWith("0") && !norm.StartsWith("00") && norm.Length == 10) return "nl";
-
-        // International prefix
-        if (norm.StartsWith("+")) norm = norm.Substring(1);
-        else if (norm.StartsWith("00") && norm.Length > 4) norm = norm.Substring(2);
-
-        if (norm.Length >= 2)
-        {
-            var code = norm.Substring(0, 2);
-            return code switch
-            {
-                "31" => "nl",
-                "32" => "nl", // Belgium
-                "33" => "fr",
-                "34" => "es",
-                "39" => "it",
-                "48" => "pl",
-                "49" => "de",
-                "351" => "pt",
-                _ => "en"
-            };
-        }
-
-        return "en";
-    }
-
-    private static Dictionary<string, object> ParseArgs(JsonElement root)
-    {
-        var args = new Dictionary<string, object>();
-
-        if (!root.TryGetProperty("arguments", out var a) || string.IsNullOrEmpty(a.GetString()))
-            return args;
-
-        try
-        {
-            using var doc = JsonDocument.Parse(a.GetString()!);
-            foreach (var p in doc.RootElement.EnumerateObject())
-            {
-                args[p.Name] = p.Value.ValueKind switch
-                {
-                    JsonValueKind.Number => p.Value.TryGetInt32(out var i) ? i : p.Value.GetDouble(),
-                    JsonValueKind.True => true,
-                    JsonValueKind.False => false,
-                    JsonValueKind.String => p.Value.GetString() ?? "",
-                    _ => p.Value.ToString() ?? ""
-                };
-            }
-        }
-        catch { }
-
-        return args;
-    }
-
-    /// <summary>
-    /// Serialize object to UTF8 bytes and send via WebSocket.
-    /// Uses SerializeToUtf8Bytes for reduced GC pressure (avoids intermediate string).
-    /// </summary>
     private async Task SendJsonAsync(object obj)
     {
         if (_ws?.State != WebSocketState.Open) return;
@@ -1220,9 +1319,6 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         await SendBytesAsync(bytes).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Send raw UTF8 bytes via WebSocket. Thread-safe with mutex.
-    /// </summary>
     private async Task SendBytesAsync(byte[] bytes)
     {
         if (_ws?.State != WebSocketState.Open) return;
@@ -1247,10 +1343,7 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     {
         var ts = DateTime.Now.ToString("HH:mm:ss.fff");
         Console.WriteLine($"{ts} [G711] {message}");
-        
-        // Event safety: capture delegate before invoking
-        var handler = OnLog;
-        handler?.Invoke(message);
+        OnLog?.Invoke(message);
     }
 
     private void ThrowIfDisposed()
@@ -1263,7 +1356,7 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         SignalCallEnded("disposed");
-        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending watchdogs
+        Interlocked.Increment(ref _noReplyWatchdogId);
 
         try { _cts?.Cancel(); } catch { }
         try { _cts?.Dispose(); } catch { }
