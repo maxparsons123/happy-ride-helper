@@ -30,7 +30,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
     
     private VoIPMediaSession? _currentMediaSession;
-    private DirectRtpPlayout? _playout;
+    private MultiCodecRtpPlayout? _playout;
+    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
+    private int _negotiatedPayloadType = 8;
     private OpenAIRealtimeClient? _aiClient;
     private CancellationTokenSource? _callCts;
     private Action<SIPDialogue>? _currentHungupHandler;
@@ -179,6 +181,15 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _currentMediaSession = new VoIPMediaSession(mediaEndPoints);
             _currentMediaSession.AcceptRtpFromAny = true;
 
+            // Track negotiated codec for proper encoding
+            _currentMediaSession.OnAudioFormatsNegotiated += formats =>
+            {
+                var fmt = formats.FirstOrDefault();
+                _negotiatedCodec = fmt.Codec;
+                _negotiatedPayloadType = fmt.FormatID;
+                Log($"🎵 [{callId}] Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
+            };
+
             // Send ringing
             Log($"☎️ [{callId}] Sending 180 Ringing...");
             var uas = ua.AcceptCall(req);
@@ -207,8 +218,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create DirectRtpPlayout
-            _playout = new DirectRtpPlayout(_currentMediaSession);
+            // Create MultiCodecRtpPlayout (supports Opus, G.722, PCMA, PCMU)
+            _playout = new MultiCodecRtpPlayout(_currentMediaSession);
+            _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -220,7 +232,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] DirectRtpPlayout started");
+            Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
@@ -278,7 +290,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 Log($"🔊 [{callId}] Applied anti-glitch fade-in");
             }
 
-            _playout?.BufferAiAudio(processedBytes);
+            _playout?.BufferAudio(processedBytes);
 
             // Send to Simli avatar
             if (_simliSendAudio != null)
