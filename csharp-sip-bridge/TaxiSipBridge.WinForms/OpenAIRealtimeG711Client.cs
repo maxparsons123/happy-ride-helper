@@ -10,7 +10,8 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// OpenAI Realtime API client using G.711 μ-law @ 8kHz (native OpenAI support).
+/// OpenAI Realtime API client using G.711 @ 8kHz (native OpenAI support).
+/// Supports both μ-law (PCMU) and A-law (PCMA) codecs.
 /// 
 /// Key Benefits:
 /// - No resampling overhead (8kHz throughout)
@@ -19,12 +20,21 @@ namespace TaxiSipBridge;
 /// - Direct passthrough from SIP → OpenAI → SIP
 /// 
 /// Audio Flow:
-/// - Input: PCM16 @ 8kHz → G.711 μ-law → OpenAI
-/// - Output: OpenAI → G.711 μ-law → PCM16 @ 8kHz
+/// - Input: G.711 (μ-law or A-law) → OpenAI
+/// - Output: OpenAI → G.711 (μ-law or A-law)
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.1"; // Added booking tools
+    public const string VERSION = "1.2"; // Added A-law support
+
+    // =========================
+    // G.711 CODEC SELECTION
+    // =========================
+    public enum G711Codec { MuLaw, ALaw }
+    
+    private readonly G711Codec _codec;
+    private readonly byte _silenceByte;
+    private readonly string _openAiFormatString;
 
     // =========================
     // CONFIG
@@ -34,11 +44,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly string _voice;
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
-    // Audio format: G.711 μ-law @ 8kHz
-    private const string AUDIO_FORMAT = "audio/pcmu";
+    // Audio format: G.711 @ 8kHz
     private const int SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
-    private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 samples = 160 bytes (μ-law)
+    private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 samples = 160 bytes
     private const int PCM_FRAME_SIZE_BYTES = FRAME_SIZE_BYTES * 2; // 320 bytes (PCM16)
 
     // =========================
@@ -109,11 +118,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public OpenAIRealtimeG711Client(
         string apiKey,
         string model = "gpt-4o-realtime-preview-2025-06-03",
-        string voice = "shimmer")
+        string voice = "shimmer",
+        G711Codec codec = G711Codec.MuLaw)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
+        _codec = codec;
+        
+        // Set codec-specific constants
+        // μ-law silence = 0xFF, A-law silence = 0xD5
+        _silenceByte = codec == G711Codec.MuLaw ? (byte)0xFF : (byte)0xD5;
+        _openAiFormatString = codec == G711Codec.MuLaw ? "g711_ulaw" : "g711_alaw";
     }
 
     // =========================
@@ -135,7 +151,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         using var timeout = new CancellationTokenSource(_connectTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
-        Log($"📞 Connecting to OpenAI Realtime (G.711 μ-law @ 8kHz)...");
+        Log($"📞 Connecting to OpenAI Realtime (G.711 {_codec} @ 8kHz)...");
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
             linked.Token
@@ -173,7 +189,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
 
         OnConnected?.Invoke();
-        Log($"✅ Connected to OpenAI Realtime (G.711 μ-law, voice={_voice})");
+        Log($"✅ Connected to OpenAI Realtime (G.711 {_codec}, voice={_voice})");
     }
 
     /// <summary>
@@ -265,7 +281,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task ConfigureSessionAsync()
     {
-        // Match the working 24kHz client exactly, only change audio format
+        // Dynamic codec configuration based on constructor setting
         var config = new
         {
             type = "session.update",
@@ -274,8 +290,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = "g711_ulaw",
-                output_audio_format = "g711_ulaw",
+                input_audio_format = _openAiFormatString,
+                output_audio_format = _openAiFormatString,
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
@@ -290,7 +306,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
         };
 
-        Log($"🎧 Configuring session: format=g711_ulaw, voice={_voice}, server_vad");
+        Log($"🎧 Configuring session: format={_openAiFormatString}, voice={_voice}, server_vad");
         await SendJsonAsync(config).ConfigureAwait(false);
     }
 
@@ -617,19 +633,19 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Decode base64 to get G.711 μ-law bytes
-            var ulawBytes = Convert.FromBase64String(base64);
+            // Decode base64 to get G.711 bytes (μ-law or A-law depending on config)
+            var g711Bytes = Convert.FromBase64String(base64);
 
             // Frame into 160-byte (20ms) chunks for RTP
-            for (int i = 0; i < ulawBytes.Length; i += FRAME_SIZE_BYTES)
+            for (int i = 0; i < g711Bytes.Length; i += FRAME_SIZE_BYTES)
             {
                 var frame = new byte[FRAME_SIZE_BYTES];
-                var count = Math.Min(FRAME_SIZE_BYTES, ulawBytes.Length - i);
-                Array.Copy(ulawBytes, i, frame, 0, count);
+                var count = Math.Min(FRAME_SIZE_BYTES, g711Bytes.Length - i);
+                Array.Copy(g711Bytes, i, frame, 0, count);
 
-                // Pad with silence (μ-law silence = 0xFF) if needed
+                // Pad with correct silence byte: μ-law = 0xFF, A-law = 0xD5
                 if (count < FRAME_SIZE_BYTES)
-                    Array.Fill(frame, (byte)0xFF, count, FRAME_SIZE_BYTES - count);
+                    Array.Fill(frame, _silenceByte, count, FRAME_SIZE_BYTES - count);
 
                 // Queue management
                 while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
@@ -641,7 +657,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
             {
-                Log($"📢 Received {chunks} audio chunks (G.711 μ-law), queue={_outboundQueue.Count}");
+                Log($"📢 Received {chunks} audio chunks (G.711 {_codec}), queue={_outboundQueue.Count}");
             }
         }
         catch (Exception ex)

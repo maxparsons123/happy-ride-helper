@@ -205,12 +205,15 @@ Be concise, warm, and professional.
             _playout.Start();
             Log($"🎵 [{callId}] DirectRtpPlayoutG711 started ({_negotiatedCodec})");
 
-            // Create OpenAI G711 client
-            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice);
+            // Create OpenAI G711 client with matching codec
+            var aiCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
+                ? OpenAIRealtimeG711Client.G711Codec.ALaw 
+                : OpenAIRealtimeG711Client.G711Codec.MuLaw;
+            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (G.711 μ-law @ 8kHz)...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (G.711 {aiCodec} @ 8kHz)...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
@@ -251,16 +254,15 @@ Be concise, warm, and professional.
                 var ai = _aiClient;
                 if (ai == null || !ai.IsConnected) break;
 
-                // Get μ-law frame from AI client (OpenAI always outputs μ-law)
-                var ulawFrame = ai.GetNextMuLawFrame();
-                if (ulawFrame != null && ulawFrame.Length == FRAME_SIZE_ULAW)
+                // Get G.711 frame from AI client (OpenAI outputs matching codec format)
+                var g711Frame = ai.GetNextMuLawFrame();
+                if (g711Frame != null && g711Frame.Length == FRAME_SIZE_ULAW)
                 {
                     _isBotSpeaking = true;
                     _adaHasStartedSpeaking = true;
 
-                    // Direct 8kHz passthrough - no resampling!
-                    // DirectRtpPlayoutG711 handles μ-law→A-law transcode if needed
-                    _playout?.BufferMuLawFrame(ulawFrame);
+                    // Direct 8kHz passthrough - no resampling, no transcoding!
+                    _playout?.BufferG711Frame(g711Frame);
 
                     _framesSent++;
 
@@ -387,34 +389,30 @@ Be concise, warm, and professional.
 
             try
             {
-                // Get raw payload (should be μ-law for G711 mode)
+                // Get raw payload
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // For PCMU (μ-law), send directly
-                // For PCMA (A-law), direct transcode to μ-law (no PCM intermediate)
-                byte[] ulawPayload;
-                if (_negotiatedCodec == AudioCodecsEnum.PCMU)
+                // Since OpenAI is now configured for the same codec as SIP,
+                // we can pass G.711 frames directly without transcoding!
+                // Both PCMU and PCMA are passed through to OpenAI natively.
+                byte[] g711Payload;
+                if (_negotiatedCodec == AudioCodecsEnum.PCMU || _negotiatedCodec == AudioCodecsEnum.PCMA)
                 {
-                    ulawPayload = payload;
-                }
-                else if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                {
-                    // A-law → μ-law: Direct transcode using lookup tables (highest quality)
-                    ulawPayload = AudioCodecs.TranscodeALawToMuLaw(payload);
+                    // Direct passthrough - no transcoding needed
+                    g711Payload = payload;
                 }
                 else
                 {
-                    // For other codecs, decode to PCM and encode to μ-law
+                    // For wideband codecs, decode to PCM and encode to μ-law
+                    // (fallback path - G711 mode should negotiate G.711 codecs)
                     short[] pcm;
                     if (_negotiatedCodec == AudioCodecsEnum.OPUS)
                     {
                         var stereo = AudioCodecs.OpusDecode(payload);
-                        // Downmix stereo to mono
                         pcm = new short[stereo.Length / 2];
                         for (int i = 0; i < pcm.Length; i++)
                             pcm[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
-                        // Resample 48kHz → 8kHz
                         pcm = AudioCodecs.Resample(pcm, 48000, 8000);
                     }
                     else if (_negotiatedCodec == AudioCodecsEnum.G722)
@@ -426,18 +424,20 @@ Be concise, warm, and professional.
                     {
                         return; // Unknown codec
                     }
-                    ulawPayload = AudioCodecs.MuLawEncode(pcm);
+                    g711Payload = AudioCodecs.MuLawEncode(pcm);
                 }
 
-                // Send μ-law directly to OpenAI
-                await ai.SendMuLawAsync(ulawPayload);
+                // Send G.711 directly to OpenAI (format matches session config)
+                await ai.SendMuLawAsync(g711Payload);
 
                 _framesForwarded++;
                 if (_framesForwarded % 50 == 0)
-                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames → OpenAI");
+                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames → OpenAI ({_negotiatedCodec})");
 
                 // Audio monitor (convert to PCM for speaker output)
-                var monitorPcm = AudioCodecs.MuLawDecode(ulawPayload);
+                var monitorPcm = _negotiatedCodec == AudioCodecsEnum.PCMA
+                    ? AudioCodecs.ALawDecode(g711Payload)
+                    : AudioCodecs.MuLawDecode(g711Payload);
                 var monitor24k = AudioCodecs.ResampleWithSpeex(monitorPcm, 8000, 24000);
                 OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitor24k));
             }
