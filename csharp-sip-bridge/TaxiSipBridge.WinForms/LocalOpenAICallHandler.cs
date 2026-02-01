@@ -51,6 +51,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
 
+    // High-quality ingress audio processor (jitter buffer, DSP, SpeexDSP resampling)
+    private IngressAudioProcessor? _ingressProcessor;
+
     // Simli avatar integration
     private Func<byte[], Task>? _simliSendAudio;
     private int _simliAudioSendCount;
@@ -234,6 +237,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _playout.Start();
             Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
+            // Create ingress audio processor (jitter buffer + DSP + SpeexDSP 24kHz resampling)
+            _ingressProcessor?.Dispose();
+            _ingressProcessor = new IngressAudioProcessor(IngressAudioProcessor.TargetRate.Hz24000, jitterFrames: 6);
+            _ingressProcessor.SetCodecMap(_remotePtToCodec);
+            _ingressProcessor.OnLog += msg => Log(msg);
+            Log($"🎧 [{callId}] IngressAudioProcessor ready (24kHz, jitter=6)");
+
             // Create OpenAI client
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
@@ -243,7 +253,30 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
-            // Wire inbound RTP
+            // Wire ingress processor output to OpenAI
+            _ingressProcessor.OnPcmFrameReady += async pcmBytes =>
+            {
+                if (cts.Token.IsCancellationRequested) return;
+                
+                // Echo guard: skip audio briefly after bot stops speaking
+                if (_adaHasStartedSpeaking && !_isBotSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+                {
+                    var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
+                    if (msSinceBotStopped < ECHO_GUARD_MS) return;
+                }
+
+                // Audio monitoring (already at 24kHz from processor)
+                OnCallerAudioMonitor?.Invoke(pcmBytes);
+
+                // Send to OpenAI (already at 24kHz)
+                try
+                {
+                    await _aiClient.SendAudioAsync(pcmBytes, 24000);
+                }
+                catch { }
+            };
+
+            // Wire inbound RTP to processor
             WireRtpInput(callId, cts);
 
             Log($"✅ [{callId}] Call fully established");
@@ -420,13 +453,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     }
 
     // ===========================================
-    // RTP INPUT HANDLING (Direct)
+    // RTP INPUT HANDLING (via IngressAudioProcessor)
     // ===========================================
     private void WireRtpInput(string callId, CancellationTokenSource cts)
     {
-        if (_currentMediaSession == null || _aiClient == null) return;
+        if (_currentMediaSession == null || _ingressProcessor == null) return;
 
-        _currentMediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
+        _currentMediaSession.OnRtpPacketReceived += (ep, mt, rtp) =>
         {
             if (mt != SDPMediaTypesEnum.audio) return;
             if (cts.Token.IsCancellationRequested) return;
@@ -451,107 +484,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // IMPORTANT: Do NOT block audio while bot is speaking!
-            // OpenAI's VAD handles barge-in detection. We still forward audio.
-            // Only apply echo guard AFTER bot stops speaking.
-            if (_adaHasStartedSpeaking && !_isBotSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
-            {
-                var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
-                if (msSinceBotStopped < ECHO_GUARD_MS) return;
-            }
-
-            var payload = rtp.Payload;
-            if (payload == null || payload.Length == 0) return;
-
-            // Decode based on payload type
-            var pt = rtp.Header.PayloadType;
-            if (!_remotePtToCodec.TryGetValue(pt, out var codec))
-            {
-                codec = pt == 8 ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
-            }
-
-            short[] pcm16;
-            int sampleRate = 8000;
-
-            switch (codec)
-            {
-                case AudioCodecsEnum.PCMU:
-                    pcm16 = payload.Select(b => SIPSorcery.Media.MuLawDecoder.MuLawToLinearSample(b)).ToArray();
-                    break;
-
-                case AudioCodecsEnum.PCMA:
-                    pcm16 = payload.Select(b => SIPSorcery.Media.ALawDecoder.ALawToLinearSample(b)).ToArray();
-                    break;
-
-                case AudioCodecsEnum.OPUS:
-                    try
-                    {
-                        var pcm48 = AudioCodecs.OpusDecode(payload);
-
-                        // Downmix stereo to mono if needed
-                        short[] mono;
-                        if (AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
-                        {
-                            mono = new short[pcm48.Length / 2];
-                            for (int j = 0; j < mono.Length; j++)
-                                mono[j] = (short)((pcm48[j * 2] + pcm48[j * 2 + 1]) / 2);
-                        }
-                        else
-                        {
-                            mono = pcm48;
-                        }
-
-                        // Decimate 48kHz → 24kHz for OpenAI
-                        pcm16 = new short[mono.Length / 2];
-                        for (int j = 0; j < pcm16.Length; j++)
-                            pcm16[j] = mono[j * 2];
-
-                        sampleRate = 24000;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"⚠️ [{callId}] Opus decode error: {ex.Message}");
-                        return;
-                    }
-                    break;
-
-                case AudioCodecsEnum.G722:
-                    try
-                    {
-                        pcm16 = AudioCodecs.G722Decode(payload);
-                        sampleRate = 16000;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"⚠️ [{callId}] G.722 decode error: {ex.Message}");
-                        return;
-                    }
-                    break;
-
-                default:
-                    return;
-            }
-
-            // Convert to bytes for OpenAI (at original sample rate)
-            var pcmBytes = new byte[pcm16.Length * 2];
-            Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
-
-            // For audio monitoring, always provide PCM16 at 24kHz (MainForm expects 24kHz and upsamples to 48kHz speakers).
-            // If we feed 8k/16k here, NAudio playback sounds "digital"/fast due to sample-rate mismatch.
-            short[] monitorPcm24 = sampleRate == 24000
-                ? pcm16
-                : AudioCodecs.Resample(pcm16, sampleRate, 24000);
-
-            var monitorBytes24 = new byte[monitorPcm24.Length * 2];
-            Buffer.BlockCopy(monitorPcm24, 0, monitorBytes24, 0, monitorBytes24.Length);
-            OnCallerAudioMonitor?.Invoke(monitorBytes24);
-
-            // Send to OpenAI
-            try
-            {
-                await _aiClient.SendAudioAsync(pcmBytes, sampleRate);
-            }
-            catch { }
+            // Push to IngressAudioProcessor - it handles:
+            // - Jitter buffering & reordering
+            // - Codec decoding (G.711, Opus, G.722)
+            // - ASR-tuned DSP (DC blocker, pre-emphasis, noise gate, AGC)
+            // - High-quality SpeexDSP upsampling to 24kHz
+            // Output is delivered via OnPcmFrameReady event
+            _ingressProcessor.PushRtpAudio(mt, rtp);
         };
     }
 
@@ -593,6 +532,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             try { _playout.Stop(); } catch { }
             try { _playout.Dispose(); } catch { }
             _playout = null;
+        }
+
+        // Dispose ingress processor
+        if (_ingressProcessor != null)
+        {
+            try { _ingressProcessor.Dispose(); } catch { }
+            _ingressProcessor = null;
         }
 
         // Close media session
