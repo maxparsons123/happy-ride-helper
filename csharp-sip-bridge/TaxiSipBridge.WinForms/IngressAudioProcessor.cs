@@ -13,6 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
+    public const string VERSION = "1.1";
     // ===========================================
     // CONFIGURATION
     // ===========================================
@@ -100,6 +101,8 @@ public sealed class IngressAudioProcessor : IDisposable
 
         _resampledFrame = new short[_targetSamplesPer20ms];
         _outputBytes = new byte[_targetSamplesPer20ms * 2];
+
+        Log($"[Ingress v{VERSION}] Initialized: target={targetRate}Hz, jitter={jitterFrames} frames ({jitterFrames * 20}ms)");
 
         Log($"[Ingress] Initialized: target={targetRate}Hz, jitter={jitterFrames} frames ({jitterFrames * 20}ms)");
     }
