@@ -424,12 +424,11 @@ public class SimliWebView : UserControl
 """;
     }
 
-    protected override void Dispose(bool disposing)
+    /// <summary>
+    /// Clean up resources.
+    /// </summary>
+    public void DisposeResources()
     {
-        if (disposing)
-        {
-            _webView?.Dispose();
-        }
-        base.Dispose(disposing);
+        _webView?.Dispose();
     }
 }
