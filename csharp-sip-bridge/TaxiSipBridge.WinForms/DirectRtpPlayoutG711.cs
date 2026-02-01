@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -30,7 +31,6 @@ public class DirectRtpPlayoutG711 : IDisposable
     private readonly byte[] _outputBuffer = new byte[FRAME_SIZE_BYTES];
 
     private System.Threading.Timer? _rtpTimer;
-    private uint _timestamp = 0;
     private bool _isCurrentlySpeaking = false;
     private int _emptyFramesCount = 0;
     private int _framesSent = 0;
@@ -196,12 +196,14 @@ public class DirectRtpPlayoutG711 : IDisposable
     {
         try
         {
-            _mediaSession.SendAudioRaw(frame, (int)_timestamp, 0, _payloadType);
-            _timestamp += FRAME_SIZE_BYTES;
+            // VoIPMediaSession.SendAudio expects RTP timestamp units.
+            // For G.711 @ 8kHz, 20ms = 160 samples, and the payload is 160 bytes.
+            const uint RTP_DURATION = FRAME_SIZE_BYTES;
+            _mediaSession.SendAudio(RTP_DURATION, frame);
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"[RTP] ⚠️ SendAudioRaw error: {ex.Message}");
+            OnLog?.Invoke($"[RTP] ⚠️ SendAudio error: {ex.Message}");
         }
     }
 
@@ -210,8 +212,8 @@ public class DirectRtpPlayoutG711 : IDisposable
         Array.Fill(_outputBuffer, _silenceByte);
         try
         {
-            _mediaSession.SendAudioRaw(_outputBuffer, (int)_timestamp, 0, _payloadType);
-            _timestamp += FRAME_SIZE_BYTES;
+            const uint RTP_DURATION = FRAME_SIZE_BYTES;
+            _mediaSession.SendAudio(RTP_DURATION, _outputBuffer);
         }
         catch { }
     }
