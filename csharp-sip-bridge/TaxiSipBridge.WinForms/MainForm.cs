@@ -353,8 +353,16 @@ public partial class MainForm : Form
                 _sipLoginManager.OnLog += msg => SafeInvoke(() => AddLog(msg));
                 _sipLoginManager.OnRegistered += () => SafeInvoke(() => SetStatus("🔒 LOCAL AI - Waiting for calls", Color.Green));
                 _sipLoginManager.OnRegistrationFailed += err => SafeInvoke(() => SetStatus($"✗ {err}", Color.Red));
-                _sipLoginManager.OnCallStarted += (id, caller) => SafeInvoke(() => OnCallStarted(id, caller));
-                _sipLoginManager.OnCallEnded += id => SafeInvoke(() => OnCallEnded(id));
+                _sipLoginManager.OnCallStarted += (id, caller) => SafeInvoke(() =>
+                {
+                    OnCallStarted(id, caller);
+                    StartAudioMonitor(); // Start audio monitor when call begins
+                });
+                _sipLoginManager.OnCallEnded += id => SafeInvoke(() =>
+                {
+                    OnCallEnded(id);
+                    StopAudioMonitor(); // Stop audio monitor when call ends
+                });
                 _sipLoginManager.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
 
                 // Create the NEW call handler with dispatch webhook for taxi bookings
