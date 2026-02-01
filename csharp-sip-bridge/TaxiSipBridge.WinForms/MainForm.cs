@@ -71,6 +71,13 @@ public partial class MainForm : Form
         AddLog(_useG711Mode 
             ? "🎵 G711 mode ENABLED (8kHz μ-law passthrough - experimental)" 
             : "🎵 G711 mode DISABLED (24kHz mode)");
+        
+        // Warn if already connected - requires reconnect to take effect
+        if (_sipLoginManager?.IsRegistered == true)
+        {
+            AddLog("⚠️ G711 mode change requires RECONNECT to take effect!");
+            AddLog("   Click Disconnect and then Connect again.");
+        }
     }
 
     // Manual Answer mode checkbox handler
