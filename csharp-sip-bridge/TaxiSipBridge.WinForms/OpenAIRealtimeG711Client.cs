@@ -101,9 +101,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private Timer? _noReplyWatchdog;
     private long _lastResponseDoneAt;
+    private long _lastAudioSentAt; // Track when we last sent audio to OpenAI
     private int _userSpeaking;
-    private const int NO_REPLY_TIMEOUT_MS = 8000; // 8 seconds before forcing commit
-    private const int FORCE_COMMIT_INTERVAL_MS = 3000; // Repeat commit every 3s if still no response
+    private int _noReplyRepromptCount;
+    private const int NO_REPLY_TIMEOUT_MS = 8000; // 8 seconds before re-prompting
+    private const int MAX_NO_REPLY_REPROMPTS = 2; // Maximum re-prompt attempts
 
     // =========================
     // EVENTS
@@ -224,6 +226,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             });
 
             await SendTextAsync(msg).ConfigureAwait(false);
+
+            // Track when we last sent audio (for no-reply watchdog)
+            Volatile.Write(ref _lastAudioSentAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
             var count = Interlocked.Increment(ref _audioFramesSent);
             if (count % 50 == 0) // Log every 1 second
@@ -662,7 +667,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     {
         StopNoReplyWatchdog();
 
-        Log($"⏰ No-reply watchdog started ({NO_REPLY_TIMEOUT_MS}ms timeout, awaiting confirmation)");
+        // Don't start if we've already re-prompted too many times
+        var reprompts = Volatile.Read(ref _noReplyRepromptCount);
+        if (reprompts >= MAX_NO_REPLY_REPROMPTS)
+        {
+            Log($"⚠️ Max re-prompts ({MAX_NO_REPLY_REPROMPTS}) reached, not starting watchdog");
+            return;
+        }
+
+        Log($"⏰ No-reply watchdog started ({NO_REPLY_TIMEOUT_MS}ms timeout, awaiting confirmation, attempt {reprompts + 1}/{MAX_NO_REPLY_REPROMPTS})");
 
         _noReplyWatchdog = new Timer(async _ =>
         {
@@ -681,14 +694,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
             // Check elapsed time since last response.done
             var lastDone = Volatile.Read(ref _lastResponseDoneAt);
-            var elapsed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - lastDone;
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var elapsed = now - lastDone;
 
             if (elapsed >= NO_REPLY_TIMEOUT_MS)
             {
-                Log("⏰ No-reply timeout - forcing audio commit to trigger VAD...");
-                await ForceAudioCommitAsync().ConfigureAwait(false);
+                StopNoReplyWatchdog(); // Stop before re-prompting (will restart after response.done)
+                await SendNoReplyRepromptAsync().ConfigureAwait(false);
             }
-        }, null, NO_REPLY_TIMEOUT_MS, FORCE_COMMIT_INTERVAL_MS);
+        }, null, NO_REPLY_TIMEOUT_MS, Timeout.Infinite); // Fire once, not repeating
     }
 
     private void StopNoReplyWatchdog()
@@ -700,25 +714,55 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
     }
 
-    private async Task ForceAudioCommitAsync()
+    private async Task SendNoReplyRepromptAsync()
     {
-        if (!IsConnected) return;
+        if (!IsConnected || !_awaitingConfirmation) return;
+
+        Interlocked.Increment(ref _noReplyRepromptCount);
 
         try
         {
-            // Force commit the audio buffer - this makes OpenAI process whatever is in the buffer
-            // even if VAD hasn't triggered
-            await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
-            Log("📤 Forced audio buffer commit sent");
+            // Check if we have recent audio - if so, try to commit it first
+            var lastAudioSent = Volatile.Read(ref _lastAudioSentAt);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var audioAge = now - lastAudioSent;
 
-            // Also send a response.create to prompt the AI to respond
-            await Task.Delay(200).ConfigureAwait(false);
+            if (audioAge < 3000) // Audio was sent within last 3 seconds
+            {
+                Log("⏰ No-reply timeout - committing recent audio buffer...");
+                await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
+                await Task.Delay(300).ConfigureAwait(false);
+            }
+            else
+            {
+                Log($"⏰ No-reply timeout - no recent audio (last sent {audioAge}ms ago), sending re-prompt...");
+            }
+
+            // Inject a system message asking for clarification, then trigger response
+            var repromptMsg = new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new { type = "input_text", text = "[SILENCE DETECTED - User may not have heard or responded. Politely ask if they'd like to confirm the booking. Do NOT assume they said yes.]" }
+                    }
+                }
+            };
+
+            await SendJsonAsync(repromptMsg).ConfigureAwait(false);
+            Log("📤 Injected silence-detected system message");
+
+            await Task.Delay(100).ConfigureAwait(false);
             await SendResponseCreateAsync().ConfigureAwait(false);
-            Log("📤 Response.create sent after forced commit");
+            Log("📤 Response.create sent after silence detection");
         }
         catch (Exception ex)
         {
-            Log($"⚠️ Force commit error: {ex.Message}");
+            Log($"⚠️ Re-prompt error: {ex.Message}");
         }
     }
 
@@ -918,7 +962,9 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
         _booking.Reset();
         _awaitingConfirmation = false;
         Interlocked.Exchange(ref _userSpeaking, 0);
+        Interlocked.Exchange(ref _noReplyRepromptCount, 0);
         Volatile.Write(ref _lastResponseDoneAt, 0);
+        Volatile.Write(ref _lastAudioSentAt, 0);
 
         Interlocked.Exchange(ref _callEnded, 0);
         Interlocked.Exchange(ref _responseActive, 0);
