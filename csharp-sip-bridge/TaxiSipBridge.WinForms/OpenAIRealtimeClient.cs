@@ -846,26 +846,23 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private async Task SendGreetingAsync()
     {
-        await Task.Delay(150).ConfigureAwait(false);
+        // Short delay to let session stabilize
+        await Task.Delay(100).ConfigureAwait(false);
 
-        // DEBUG: Log what's blocking the greeting
+        // FORCE greeting to fire — it's the FIRST response, so unconditionally clear any spurious state
+        // This handles race conditions where OpenAI may have pre-queued something
         var respActive = Volatile.Read(ref _responseActive);
         var respQueued = Volatile.Read(ref _responseQueued);
-        var callEnded = Volatile.Read(ref _callEnded);
-        var disposed = Volatile.Read(ref _disposed);
-        var lastSpeech = Volatile.Read(ref _lastUserSpeechAt);
-        var speechGap = NowMs() - lastSpeech;
-
-        Log($"🔍 Greeting check: respActive={respActive}, respQueued={respQueued}, callEnded={callEnded}, disposed={disposed}, speechGap={speechGap}ms");
-
-        // FORCE greeting to fire — it's the first response, so override any spurious state
+        
         if (respActive == 1 || respQueued == 1)
         {
-            Log("⚠️ Greeting: Clearing spurious response state for initial greeting");
-            Interlocked.Exchange(ref _responseActive, 0);
-            Interlocked.Exchange(ref _responseQueued, 0);
-            _activeResponseId = null;
+            Log($"⚠️ Greeting: Force-clearing spurious state (active={respActive}, queued={respQueued})");
         }
+        
+        // Unconditionally reset to ensure greeting fires
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
+        _activeResponseId = null;
 
         var greeting = GetLocalizedGreeting(_detectedLanguage);
 
@@ -879,7 +876,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             }
         }).ConfigureAwait(false);
 
-        Log("📢 Greeting triggered");
+        Log("📢 Greeting sent → Ada should speak now");
     }
 
     // =========================
