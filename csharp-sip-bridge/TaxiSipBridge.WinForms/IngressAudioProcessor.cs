@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
-    public const string VERSION = "1.2";
+    public const string VERSION = "1.3";
     // ===========================================
     // CONFIGURATION
     // ===========================================
@@ -28,8 +28,8 @@ public sealed class IngressAudioProcessor : IDisposable
     // ===========================================
     private const float DC_ALPHA = 0.995f;
     private const float PRE_EMPH = 0.97f;
-    private const float GATE_OPEN_RMS = 40f;    // Very low: telephony audio is quiet (saw RMS 8-10 silence, 200+ speech)
-    private const float GATE_CLOSE_RMS = 20f;   // Very low: close only on true silence
+    private const float GATE_OPEN_RMS = 40f;    // Based on observed raw RMS (silence ~8-10, speech 200-4000)
+    private const float GATE_CLOSE_RMS = 20f;   // Close only on true silence
     private const int GATE_HOLD_FRAMES = 15;    // Hold gate open 300ms after speech
     private const float RMS_ALPHA = 0.995f;
     private const float TARGET_RMS = 8000f;     // Lower target for natural sound
@@ -357,11 +357,15 @@ public sealed class IngressAudioProcessor : IDisposable
     // ===========================================
     private void ApplyAsrDsp(short[] frame)
     {
-        double sumSq = 0;
+        double sumSqProcessed = 0;
+        double sumSqRaw = 0;
 
         for (int i = 0; i < frame.Length; i++)
         {
-            float x = frame[i];
+            float xRaw = frame[i];
+            sumSqRaw += xRaw * xRaw;
+
+            float x = xRaw;
 
             // DC blocker
             _dcState = (DC_ALPHA * _dcState) + ((1f - DC_ALPHA) * x);
@@ -373,23 +377,18 @@ public sealed class IngressAudioProcessor : IDisposable
             x = y;
 
             frame[i] = (short)Math.Clamp(x, short.MinValue, short.MaxValue);
-            sumSq += x * x;
+            sumSqProcessed += x * x;
         }
 
-        float rms = (float)Math.Sqrt(sumSq / frame.Length);
+        // NOTE: Gate decision is based on RAW RMS (before DC/pre-emphasis) to avoid
+        // accidentally classifying speech as silence due to the DSP chain.
+        float rmsRaw = (float)Math.Sqrt(sumSqRaw / frame.Length);
+        float rmsProcessed = (float)Math.Sqrt(sumSqProcessed / frame.Length);
 
-        // Log RMS periodically for diagnostics
-        _framesSinceLastLog++;
-        if (_framesSinceLastLog >= LOG_EVERY_N_FRAMES)
-        {
-            _framesSinceLastLog = 0;
-            Log($"[Ingress] RMS={rms:F0} gate={(_gateOpen ? "OPEN" : "CLOSED")} agc={_agcGain:F2}");
-        }
-
-        // Noise gate
+        // Noise gate (using raw RMS)
         if (_gateOpen)
         {
-            if (rms < GATE_CLOSE_RMS)
+            if (rmsRaw < GATE_CLOSE_RMS)
             {
                 _gateHold++;
                 if (_gateHold >= GATE_HOLD_FRAMES)
@@ -402,23 +401,34 @@ public sealed class IngressAudioProcessor : IDisposable
         }
         else
         {
-            if (rms > GATE_OPEN_RMS)
+            if (rmsRaw > GATE_OPEN_RMS)
             {
                 _gateOpen = true;
                 _gateHold = 0;
             }
         }
 
+        // Log RMS periodically for diagnostics (after gate update so the state is accurate)
+        _framesSinceLastLog++;
+        if (_framesSinceLastLog >= LOG_EVERY_N_FRAMES)
+        {
+            _framesSinceLastLog = 0;
+            Log($"[Ingress v{VERSION}] rmsRaw={rmsRaw:F0} rmsProc={rmsProcessed:F0} gate={(_gateOpen ? "OPEN" : "CLOSED")} agc={_agcGain:F2}");
+        }
+
         if (!_gateOpen)
         {
-            Array.Clear(frame, 0, frame.Length);
+            // Soft gate (do NOT hard-mute).
+            // Hard-muting can cause missed words when the gate toggles quickly.
+            for (int i = 0; i < frame.Length; i++)
+                frame[i] = (short)(frame[i] * 0.10f);
+
             _rmsState *= RMS_ALPHA;
-            _agcGain = 1.0f;
             return;
         }
 
         // AGC
-        _rmsState = (RMS_ALPHA * _rmsState) + ((1f - RMS_ALPHA) * rms * rms);
+        _rmsState = (RMS_ALPHA * _rmsState) + ((1f - RMS_ALPHA) * rmsProcessed * rmsProcessed);
         float curRms = (float)Math.Sqrt(Math.Max(_rmsState, 1f));
         float desired = TARGET_RMS / Math.Max(curRms, 1f);
         desired = Math.Clamp(desired, AGC_MIN, AGC_MAX);
