@@ -29,6 +29,9 @@ public interface IAudioAIClient : IDisposable
     
     /// <summary>Fired when a new AI response starts (for fade-in reset).</summary>
     event Action? OnResponseStarted;
+
+    /// <summary>Fired when the AI finishes generating a response (not when audio playout finishes).</summary>
+    event Action? OnResponseCompleted;
     
     /// <summary>Fired when the AI requests to end the call.</summary>
     event Action? OnCallEnded;

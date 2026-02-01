@@ -41,6 +41,7 @@ public class TextPipelineClient : IAudioAIClient
     public event Action<string>? OnAdaSpeaking;
     public event Action<byte[]>? OnPcm24Audio;
     public event Action? OnResponseStarted;
+    public event Action? OnResponseCompleted;
     public event Action? OnCallEnded;
     
     public bool IsConnected => _stt?.IsConnected == true;
@@ -224,6 +225,11 @@ public class TextPipelineClient : IAudioAIClient
         catch (Exception ex)
         {
             OnLog?.Invoke($"[Pipeline] TTS error: {ex.Message}");
+        }
+        finally
+        {
+            // In the pipeline client, treat "response completed" as "TTS generation done".
+            OnResponseCompleted?.Invoke();
         }
     }
     
