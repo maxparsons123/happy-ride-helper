@@ -330,6 +330,126 @@ public static class AudioCodecs
         return ulaw;
     }
 
+    #region Direct A-law ↔ μ-law Transcoding (No PCM Intermediate)
+
+    // Pre-computed lookup tables for direct A-law ↔ μ-law transcoding
+    // This avoids the quality loss from going through PCM
+    private static readonly byte[] _alawToMulawTable = new byte[256];
+    private static readonly byte[] _mulawToAlawTable = new byte[256];
+    private static bool _transcodeTablesInitialized;
+    private static readonly object _transcodeTableLock = new();
+
+    /// <summary>
+    /// Initialize direct transcode lookup tables.
+    /// Maps each A-law value directly to the best matching μ-law value and vice versa.
+    /// </summary>
+    private static void InitTranscodeTables()
+    {
+        if (_transcodeTablesInitialized) return;
+        
+        lock (_transcodeTableLock)
+        {
+            if (_transcodeTablesInitialized) return;
+            
+            // Build A-law → μ-law table
+            for (int i = 0; i < 256; i++)
+            {
+                // Decode A-law to linear, encode to μ-law
+                byte alaw = (byte)i;
+                int alawXor = alaw ^ 0x55;
+                int sign = (alawXor & 0x80) != 0 ? -1 : 1;
+                int exponent = (alawXor >> 4) & 0x07;
+                int mantissa = alawXor & 0x0F;
+                int magnitude = exponent == 0
+                    ? (mantissa << 4) + 8
+                    : ((mantissa << 4) + 0x108) << (exponent - 1);
+                short linear = (short)(sign * magnitude);
+                
+                // Encode linear to μ-law
+                int s = linear;
+                int mask = 0x80, seg = 8;
+                if (s < 0) { s = -s; mask = 0x00; }
+                s += 0x84;
+                if (s > 0x7FFF) s = 0x7FFF;
+                for (int j = 0x4000; (s & j) == 0 && seg > 0; j >>= 1) seg--;
+                _alawToMulawTable[i] = (byte)~(mask | (seg << 4) | ((s >> (seg + 3)) & 0x0F));
+            }
+            
+            // Build μ-law → A-law table  
+            for (int i = 0; i < 256; i++)
+            {
+                // Decode μ-law to linear
+                int mulaw = ~(byte)i;
+                int sign = (mulaw & 0x80) != 0 ? -1 : 1;
+                int exponent = (mulaw >> 4) & 0x07;
+                int mantissa = mulaw & 0x0F;
+                short linear = (short)(sign * (((mantissa << 3) + 0x84) << exponent) - 0x84);
+                
+                // Encode linear to A-law
+                int s = linear;
+                int alawSign = 0;
+                if (s < 0) { s = -s; alawSign = 0x80; }
+                
+                int alawExponent = 7;
+                int alawMantissa;
+                if (s <= 255)
+                {
+                    alawExponent = 0;
+                    alawMantissa = s >> 4;
+                }
+                else
+                {
+                    // Find exponent
+                    int magnitude = s;
+                    for (alawExponent = 7; alawExponent > 0; alawExponent--)
+                    {
+                        if ((magnitude & (1 << (alawExponent + 7))) != 0) break;
+                    }
+                    alawMantissa = (magnitude >> (alawExponent + 3)) & 0x0F;
+                }
+                
+                byte alaw = (byte)(alawSign | (alawExponent << 4) | alawMantissa);
+                _mulawToAlawTable[i] = (byte)(alaw ^ 0x55);
+            }
+            
+            _transcodeTablesInitialized = true;
+        }
+    }
+
+    /// <summary>
+    /// Direct transcode A-law to μ-law using lookup table.
+    /// Higher quality than A-law → PCM → μ-law because it avoids quantization errors.
+    /// </summary>
+    public static byte[] TranscodeALawToMuLaw(byte[] alaw)
+    {
+        if (!_transcodeTablesInitialized) InitTranscodeTables();
+        
+        var ulaw = new byte[alaw.Length];
+        for (int i = 0; i < alaw.Length; i++)
+        {
+            ulaw[i] = _alawToMulawTable[alaw[i]];
+        }
+        return ulaw;
+    }
+
+    /// <summary>
+    /// Direct transcode μ-law to A-law using lookup table.
+    /// Higher quality than μ-law → PCM → A-law because it avoids quantization errors.
+    /// </summary>
+    public static byte[] TranscodeMuLawToALaw(byte[] ulaw)
+    {
+        if (!_transcodeTablesInitialized) InitTranscodeTables();
+        
+        var alaw = new byte[ulaw.Length];
+        for (int i = 0; i < ulaw.Length; i++)
+        {
+            alaw[i] = _mulawToAlawTable[ulaw[i]];
+        }
+        return alaw;
+    }
+
+    #endregion
+
     #region FIR Anti-Aliasing Filter and Decimation
 
     private const int FIR_TAPS = 101;
