@@ -561,19 +561,26 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     // ===========================================
     private async Task CleanupAsync(string callId, SIPUserAgent ua)
     {
-        Log($"📴 [{callId}] Cleanup...");
+        Log($"📴 [{callId}] Cleanup starting...");
 
+        // Reset call state FIRST to allow new calls
         _isInCall = false;
+        _isBotSpeaking = false;
+        _adaHasStartedSpeaking = false;
+        _inboundFlushComplete = false;
+        _inboundPacketCount = 0;
 
         // Unsubscribe hangup handler
         if (_currentHungupHandler != null && _currentUa != null)
         {
-            _currentUa.OnCallHungup -= _currentHungupHandler;
+            try { _currentUa.OnCallHungup -= _currentHungupHandler; } catch { }
             _currentHungupHandler = null;
         }
 
+        // Hangup SIP call
         try { ua.Hangup(); } catch { }
 
+        // Dispose AI client
         if (_aiClient != null)
         {
             try { await _aiClient.DisconnectAsync(); } catch { }
@@ -581,6 +588,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _aiClient = null;
         }
 
+        // Stop playout
         if (_playout != null)
         {
             try { _playout.Stop(); } catch { }
@@ -588,15 +596,18 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _playout = null;
         }
 
+        // Close media session
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
         }
 
+        // Dispose cancellation token
         try { _callCts?.Dispose(); } catch { }
         _callCts = null;
 
+        Log($"📴 [{callId}] Cleanup complete");
         OnCallEnded?.Invoke(callId);
     }
 

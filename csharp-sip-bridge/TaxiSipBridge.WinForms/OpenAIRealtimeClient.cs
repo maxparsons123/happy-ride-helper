@@ -59,6 +59,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
     private Task? _receiveLoopTask;
+    private Task? _keepaliveTask;
 
     // CRITICAL: ClientWebSocket.SendAsync must be single-flight to avoid interleaving frames
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
@@ -308,6 +309,49 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         OnConnected?.Invoke();
 
         _receiveLoopTask = Task.Run(ReceiveLoopAsync);
+        _keepaliveTask = Task.Run(KeepaliveLoopAsync);
+    }
+
+    /// <summary>
+    /// Keepalive loop sends a lightweight ping every 15 seconds to prevent silent disconnects.
+    /// OpenAI WebSocket connections can timeout during long AI responses or user silence.
+    /// </summary>
+    private async Task KeepaliveLoopAsync()
+    {
+        const int KEEPALIVE_INTERVAL_MS = 15000;
+
+        try
+        {
+            while (IsConnected && !(_cts?.IsCancellationRequested ?? true))
+            {
+                await Task.Delay(KEEPALIVE_INTERVAL_MS, _cts!.Token).ConfigureAwait(false);
+
+                if (!IsConnected || _cts.IsCancellationRequested)
+                    break;
+
+                // Send a harmless input_audio_buffer.clear if no audio is buffered
+                // This keeps the connection alive without affecting state
+                try
+                {
+                    // Only send keepalive if we're not actively in a response
+                    if (Volatile.Read(ref _responseActive) == 0)
+                    {
+                        await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
+                        Log("💓 Keepalive ping");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"⚠️ Keepalive failed: {ex.Message}");
+                    break; // Connection likely dead
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Keepalive loop error: {ex.Message}");
+        }
     }
 
     public async Task DisconnectAsync()
