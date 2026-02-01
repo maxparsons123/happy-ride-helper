@@ -51,6 +51,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
     // Simli avatar integration
     private Func<byte[], Task>? _simliSendAudio;
+    private int _simliAudioSendCount;
 
     // ===========================================
     // CONSTANTS
@@ -129,6 +130,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _needsFadeIn = false;
         _isBotSpeaking = false;
         _botStoppedSpeakingAt = DateTime.MinValue;
+        _simliAudioSendCount = 0;
 
         // Clean up stale handlers from previous call
         if (_currentHungupHandler != null && _currentUa != null)
@@ -276,11 +278,31 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
             _playout?.BufferAiAudio(processedBytes);
 
-            // Send to Simli avatar (fire and forget)
+            // Send to Simli avatar
             if (_simliSendAudio != null)
             {
-                try { await _simliSendAudio(processedBytes); }
-                catch { }
+                try 
+                { 
+                    await _simliSendAudio(processedBytes);
+                    // Log first few audio sends to confirm flow
+                    if (_simliAudioSendCount++ < 3)
+                    {
+                        Log($"🎭 [{callId}] Simli audio sent #{_simliAudioSendCount} ({processedBytes.Length} bytes)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Only log first error to avoid spam
+                    if (_simliAudioSendCount < 10)
+                    {
+                        Log($"🎭 [{callId}] Simli audio send error: {ex.Message}");
+                    }
+                }
+            }
+            else if (_simliAudioSendCount == 0)
+            {
+                Log($"⚠️ [{callId}] _simliSendAudio is null - avatar not wired!");
+                _simliAudioSendCount = 1; // Only log once
             }
         };
 
