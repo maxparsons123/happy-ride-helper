@@ -49,10 +49,15 @@
     <Compile Include="IAudioAIClient.cs" />
     <Compile Include="AIClientFactory.cs" />
     <Compile Include="OpenAIRealtimeClient.cs" />
+    <Compile Include="OpenAIRealtimeG711Client.cs" />
     <Compile Include="PassthroughWebhook.cs" />
     <Compile Include="SimliWebView.cs" />
     <Compile Include="DirectRtpPlayout.cs" />
     <Compile Include="DirectRtpPlayoutExtensions.cs" />
+    <Compile Include="DirectRtpPlayoutG711.cs" />
+    <Compile Include="G711CallHandler.cs" />
+    <Compile Include="Audio\G711Codec.cs" />
+    <Compile Include="Audio\NAudioResampler.cs" />
   </ItemGroup>
 
 </Project>
