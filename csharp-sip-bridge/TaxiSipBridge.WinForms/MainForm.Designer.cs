@@ -123,9 +123,9 @@ partial class MainForm
         // === G711 Mode (8kHz passthrough - experimental) ===
         chkG711Mode = new CheckBox 
         { 
-            Text = "G711", 
-            Location = new Point(530, 118), 
-            Size = new Size(60, 23),
+            Text = "🎵 G711", 
+            Location = new Point(385, 118), // Next to API Key field
+            Size = new Size(75, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(102, 51, 153),
             Visible = false // Only shown in Local OpenAI mode
@@ -186,9 +186,9 @@ partial class MainForm
         // Cheaper Pipeline checkbox (shown when Local mode is checked)
         chkCheaperPipeline = new CheckBox 
         { 
-            Text = "💰 Cheaper Pipeline", 
-            Location = new Point(385, 118), 
-            Size = new Size(140, 23),
+            Text = "💰 Cheaper", 
+            Location = new Point(465, 118), 
+            Size = new Size(90, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(40, 167, 69),
             Visible = false
@@ -196,8 +196,8 @@ partial class MainForm
         chkCheaperPipeline.CheckedChanged += this.chkCheaperPipeline_CheckedChanged;
         
         // Deepgram API Key (shown when cheaper pipeline is checked)
-        lblDeepgramKey = new Label { Text = "Deepgram:", Location = new Point(525, 118), Size = new Size(65, 23), Visible = false };
-        txtDeepgramKey = new TextBox { Location = new Point(595, 115), Size = new Size(100, 23), UseSystemPasswordChar = true, Visible = false };
+        lblDeepgramKey = new Label { Text = "DG:", Location = new Point(560, 118), Size = new Size(25, 23), Visible = false };
+        txtDeepgramKey = new TextBox { Location = new Point(588, 115), Size = new Size(105, 23), UseSystemPasswordChar = true, Visible = false };
         txtDeepgramKey.PlaceholderText = "Deepgram key";
 
         // WebSocket URL (hidden when Local mode is checked)
