@@ -263,29 +263,32 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task ConfigureSessionAsync()
     {
+        // Note: OpenAI Realtime API uses "g711_ulaw" for μ-law format
         var config = new
         {
             type = "session.update",
             session = new
             {
-                model = _model,
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = "pcmu",
-                output_audio_format = "pcmu",
+                input_audio_format = "g711_ulaw",
+                output_audio_format = "g711_ulaw",
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
-                    type = "semantic_vad",
-                    eagerness = "medium",
-                    create_response = true
+                    type = "server_vad",
+                    threshold = 0.35,
+                    prefix_padding_ms = 600,
+                    silence_duration_ms = 1200
                 },
-                tools = GetTools()
+                tools = GetTools(),
+                tool_choice = "auto",
+                temperature = 0.6
             }
         };
 
-        Log($"🎧 Configuring session: format={AUDIO_FORMAT}, voice={_voice}, semantic_vad");
+        Log($"🎧 Configuring session: format=g711_ulaw, voice={_voice}, server_vad");
         await SendJsonAsync(config).ConfigureAwait(false);
     }
 
