@@ -394,8 +394,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     {
         if (_currentMediaSession == null || _aiClient == null) return;
 
-        // Create ingress processor with 16kHz output (best for PSTN ASR)
-        _ingress = new IngressAudioProcessor(IngressAudioProcessor.TargetRate.Hz16000, JITTER_FRAMES);
+        // Create ingress processor with 24kHz output (native OpenAI format - no internal upsampling)
+        _ingress = new IngressAudioProcessor(IngressAudioProcessor.TargetRate.Hz24000, JITTER_FRAMES);
         _ingress.SetCodecMap(_remotePtToCodec);
         _ingress.OnLog += msg => Log(msg);
 
