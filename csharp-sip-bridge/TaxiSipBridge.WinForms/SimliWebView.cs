@@ -308,16 +308,19 @@ public class SimliWebView : UserControl
             font-size: 14px;
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/simli-client@latest/dist/bundle.js"></script>
 </head>
 <body>
     <div id="container">
-        <video id="simli-video" autoplay playsinline></video>
-        <audio id="simli-audio" autoplay></audio>
+        <video id="video" autoplay playsinline></video>
+        <audio id="audio" autoplay></audio>
         <div id="loading">Waiting for connection...</div>
     </div>
     <script>
-        let simliClient = null;
+        let pc = null;
+        let ws = null;
+        let dc = null;
+        let audioQueue = [];
+        let isSending = false;
 
         function log(msg) {
             chrome.webview.postMessage({ type: 'log', message: msg });
@@ -325,96 +328,198 @@ public class SimliWebView : UserControl
 
         function handleCommand(cmd) {
             log('Command: ' + cmd.command);
-            
             switch (cmd.command) {
                 case 'connect':
                     connect(cmd.apiKey, cmd.faceId);
                     break;
                 case 'audio':
-                    sendAudio(cmd.data);
+                    queueAudio(cmd.data);
                     break;
                 case 'disconnect':
                     disconnect();
                     break;
                 case 'clear':
-                    if (simliClient) simliClient.ClearBuffer();
+                    audioQueue = [];
                     break;
             }
         }
 
-        function connect(apiKey, faceId) {
+        async function connect(apiKey, faceId) {
             document.getElementById('loading').textContent = 'Connecting...';
             
             try {
-                simliClient = new SimliClient();
-                
+                // Create peer connection
                 const config = {
-                    apiKey: apiKey,
-                    faceID: faceId,
-                    handleSilence: true,
-                    maxSessionLength: 3600,
-                    maxIdleTime: 600,
-                    videoRef: document.getElementById('simli-video'),
-                    audioRef: document.getElementById('simli-audio'),
-                    enableConsoleLogs: true
+                    sdpSemantics: 'unified-plan',
+                    iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
                 };
+                pc = new RTCPeerConnection(config);
                 
-                simliClient.Initialize(config);
+                pc.addEventListener('track', (evt) => {
+                    if (evt.track.kind === 'video') {
+                        document.getElementById('video').srcObject = evt.streams[0];
+                    } else {
+                        document.getElementById('audio').srcObject = evt.streams[0];
+                    }
+                });
+
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    log('ICE state: ' + pc.iceConnectionState);
+                    if (pc.iceConnectionState === 'connected') {
+                        document.getElementById('loading').style.display = 'none';
+                        chrome.webview.postMessage({ type: 'connected' });
+                    } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                        chrome.webview.postMessage({ type: 'disconnected' });
+                    }
+                });
+
+                // Create data channel for sending audio
+                dc = pc.createDataChannel('datachannel', { ordered: true });
+                dc.binaryType = 'arraybuffer';
                 
-                simliClient.on('connected', () => {
-                    document.getElementById('loading').style.display = 'none';
+                dc.addEventListener('open', () => {
+                    log('Data channel open');
+                    // Send metadata
+                    const metadata = {
+                        faceId: faceId,
+                        isJPG: false,
+                        apiKey: apiKey,
+                        syncAudio: true
+                    };
+                    dc.send(JSON.stringify(metadata));
                     chrome.webview.postMessage({ type: 'connected' });
+                    processAudioQueue();
                 });
                 
-                simliClient.on('disconnected', () => {
-                    document.getElementById('loading').style.display = 'block';
-                    document.getElementById('loading').textContent = 'Disconnected';
+                dc.addEventListener('close', () => {
+                    log('Data channel closed');
                     chrome.webview.postMessage({ type: 'disconnected' });
                 });
                 
-                simliClient.on('failed', () => {
-                    document.getElementById('loading').textContent = 'Connection failed';
-                    chrome.webview.postMessage({ type: 'error', message: 'WebRTC connection failed' });
+                dc.addEventListener('error', (err) => {
+                    log('Data channel error: ' + err);
+                    chrome.webview.postMessage({ type: 'error', message: err.toString() });
+                });
+
+                // Create and send offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                
+                // Wait for ICE gathering
+                await waitForIceGathering();
+                
+                // Connect to Simli WebSocket
+                ws = new WebSocket('wss://api.simli.ai/startWebRTCSession');
+                
+                ws.addEventListener('open', () => {
+                    log('WebSocket connected, sending offer');
+                    ws.send(JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    }));
                 });
                 
-                simliClient.on('speaking', () => {
-                    chrome.webview.postMessage({ type: 'speaking' });
+                ws.addEventListener('message', async (evt) => {
+                    if (typeof evt.data === 'string') {
+                        try {
+                            const message = JSON.parse(evt.data);
+                            if (message.type === 'answer') {
+                                log('Received SDP answer');
+                                await pc.setRemoteDescription(message);
+                            }
+                        } catch (e) {
+                            log('WS message: ' + evt.data);
+                        }
+                    }
                 });
                 
-                simliClient.on('silent', () => {
-                    chrome.webview.postMessage({ type: 'silent' });
+                ws.addEventListener('error', (err) => {
+                    log('WebSocket error');
+                    chrome.webview.postMessage({ type: 'error', message: 'WebSocket connection failed' });
                 });
                 
-                simliClient.start();
-                log('Simli client started');
+                ws.addEventListener('close', () => {
+                    log('WebSocket closed');
+                });
                 
             } catch (err) {
                 document.getElementById('loading').textContent = 'Error: ' + err.message;
                 chrome.webview.postMessage({ type: 'error', message: err.message });
             }
         }
+        
+        function waitForIceGathering() {
+            return new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    const checkState = () => {
+                        if (pc.iceGatheringState === 'complete') {
+                            resolve();
+                        } else {
+                            setTimeout(checkState, 100);
+                        }
+                    };
+                    setTimeout(checkState, 100);
+                }
+            });
+        }
 
-        function sendAudio(base64Data) {
-            if (!simliClient) return;
+        function queueAudio(base64Data) {
+            if (!dc || dc.readyState !== 'open') return;
             
             try {
-                // Decode base64 to Uint8Array
                 const binary = atob(base64Data);
                 const bytes = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) {
                     bytes[i] = binary.charCodeAt(i);
                 }
-                simliClient.sendAudioData(bytes);
+                audioQueue.push(bytes);
+                processAudioQueue();
             } catch (err) {
-                log('Audio send error: ' + err.message);
+                log('Audio queue error: ' + err.message);
             }
+        }
+        
+        function processAudioQueue() {
+            if (isSending || !dc || dc.readyState !== 'open') return;
+            if (audioQueue.length === 0) return;
+            
+            isSending = true;
+            const chunk = audioQueue.shift();
+            
+            try {
+                dc.send(chunk);
+                chrome.webview.postMessage({ type: 'speaking' });
+            } catch (err) {
+                log('Send error: ' + err.message);
+            }
+            
+            // Throttle to prevent overwhelming
+            setTimeout(() => {
+                isSending = false;
+                if (audioQueue.length > 0) {
+                    processAudioQueue();
+                } else {
+                    chrome.webview.postMessage({ type: 'silent' });
+                }
+            }, 20);
         }
 
         function disconnect() {
-            if (simliClient) {
-                simliClient.close();
-                simliClient = null;
+            if (dc) {
+                dc.close();
+                dc = null;
             }
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            audioQueue = [];
             document.getElementById('loading').style.display = 'block';
             document.getElementById('loading').textContent = 'Disconnected';
         }
