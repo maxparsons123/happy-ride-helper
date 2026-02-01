@@ -519,12 +519,35 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     return;
             }
 
-            // Convert to bytes
+            // Convert to bytes for OpenAI (at original sample rate)
             var pcmBytes = new byte[pcm16.Length * 2];
             Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
 
-            // Always emit for audio monitoring (so you can hear caller through speakers)
-            OnCallerAudioMonitor?.Invoke(pcmBytes);
+            // For audio monitoring, resample to 8kHz (the monitor expects 8kHz µ-law playback rate)
+            short[] monitorPcm;
+            if (sampleRate == 24000)
+            {
+                // Decimate 24kHz → 8kHz (3:1)
+                monitorPcm = new short[pcm16.Length / 3];
+                for (int j = 0; j < monitorPcm.Length; j++)
+                    monitorPcm[j] = pcm16[j * 3];
+            }
+            else if (sampleRate == 16000)
+            {
+                // Decimate 16kHz → 8kHz (2:1)
+                monitorPcm = new short[pcm16.Length / 2];
+                for (int j = 0; j < monitorPcm.Length; j++)
+                    monitorPcm[j] = pcm16[j * 2];
+            }
+            else
+            {
+                // Already 8kHz
+                monitorPcm = pcm16;
+            }
+            
+            var monitorBytes = new byte[monitorPcm.Length * 2];
+            Buffer.BlockCopy(monitorPcm, 0, monitorBytes, 0, monitorBytes.Length);
+            OnCallerAudioMonitor?.Invoke(monitorBytes);
 
             // Send to OpenAI
             try
