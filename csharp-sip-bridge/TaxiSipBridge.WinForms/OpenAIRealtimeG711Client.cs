@@ -265,14 +265,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task ConfigureSessionAsync()
     {
-        // Note: OpenAI Realtime API uses "g711_ulaw" for μ-law format
+        // Match the working 24kHz client exactly, only change audio format
         var config = new
         {
             type = "session.update",
             session = new
             {
-                // Required by OpenAI for some realtime session schemas (seen in SIP/G.711 flows)
-                type = "realtime",
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
