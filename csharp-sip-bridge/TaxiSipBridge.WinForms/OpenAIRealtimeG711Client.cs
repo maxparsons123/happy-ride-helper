@@ -129,6 +129,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
+        // Match the header used by the PCM16 client; without this the server may enforce a different schema.
+        _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
         using var timeout = new CancellationTokenSource(_connectTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
@@ -269,6 +271,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             type = "session.update",
             session = new
             {
+                // Required by OpenAI for some realtime session schemas (seen in SIP/G.711 flows)
+                type = "realtime",
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
