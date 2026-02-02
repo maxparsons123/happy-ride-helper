@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TaxiSipBridge.Audio;
+using TaxiSipBridge.WinForms;
 
 namespace TaxiSipBridge;
 
@@ -727,22 +728,26 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 if (action == "request_quote")
                 {
-                    var (fare, eta, _) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination)
-                                                             .ConfigureAwait(false);
+                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(_booking.Pickup, _booking.Destination)
+                                                         .ConfigureAwait(false);
 
-                    _booking.Fare = fare;
-                    _booking.Eta = eta;
+                    _booking.Fare = fareResult.Fare;
+                    _booking.Eta = fareResult.Eta;
+                    _booking.PickupLat = fareResult.PickupLat;
+                    _booking.PickupLon = fareResult.PickupLon;
+                    _booking.DestLat = fareResult.DestLat;
+                    _booking.DestLon = fareResult.DestLon;
                     _awaitingConfirmation = true;
 
                     OnBookingUpdated?.Invoke(_booking);
-                    Log($"💰 Quote: {fare}");
+                    Log($"💰 Quote: {fareResult.Fare}");
 
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
-                        fare,
-                        eta,
-                        message = $"Fare is {fare}, driver arrives in {eta}. Book it?"
+                        fare = fareResult.Fare,
+                        eta = fareResult.Eta,
+                        message = $"Fare is {fareResult.Fare}, driver arrives in {fareResult.Eta}. Book it?"
                     }).ConfigureAwait(false);
 
                     await QueueResponseCreateAsync().ConfigureAwait(false);
@@ -755,6 +760,63 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
+
+                    // Parse pickup time
+                    DateTimeOffset departureTime = DateTimeOffset.Now;
+                    if (!string.IsNullOrEmpty(_booking.PickupTime))
+                    {
+                        // Try parsing common formats: "now", "15 minutes", "3:30pm", etc.
+                        var timeStr = _booking.PickupTime.ToLowerInvariant().Trim();
+                        if (timeStr == "now" || timeStr == "asap")
+                        {
+                            departureTime = DateTimeOffset.Now;
+                        }
+                        else if (timeStr.Contains("minute"))
+                        {
+                            var match = System.Text.RegularExpressions.Regex.Match(timeStr, @"(\d+)");
+                            if (match.Success && int.TryParse(match.Groups[1].Value, out var mins))
+                            {
+                                departureTime = DateTimeOffset.Now.AddMinutes(mins);
+                            }
+                        }
+                        else if (DateTimeOffset.TryParse(_booking.PickupTime, out var parsed))
+                        {
+                            departureTime = parsed;
+                        }
+                    }
+
+                    // BSQD dispatch
+                    var taxiBotRequest = new TaxiBotRequest
+                    {
+                        departure_address = new AddressDto
+                        {
+                            lat = _booking.PickupLat ?? 0,
+                            lon = _booking.PickupLon ?? 0,
+                            street_name = ParseStreetName(_booking.Pickup),
+                            street_number = ParseStreetNumber(_booking.Pickup),
+                            postal_code = ParsePostalCode(_booking.Pickup),
+                            city = ParseCity(_booking.Pickup),
+                            formatted_depa_address = _booking.Pickup ?? "Unknown"
+                        },
+                        destination_address = new AddressDto
+                        {
+                            lat = _booking.DestLat ?? 0,
+                            lon = _booking.DestLon ?? 0,
+                            street_name = ParseStreetName(_booking.Destination),
+                            street_number = ParseStreetNumber(_booking.Destination),
+                            postal_code = ParsePostalCode(_booking.Destination),
+                            city = ParseCity(_booking.Destination),
+                            formatted_dest_address = _booking.Destination ?? "Unknown"
+                        },
+                        departure_time = departureTime,
+                        first_name = _booking.Name ?? "Customer",
+                        total_price = ParseFareValue(_booking.Fare),
+                        phoneNumber = FormatE164(_callerId),
+                        passengers = (_booking.Passengers ?? 1).ToString()
+                    };
+
+                    TaxiBotClient.OnLog += msg => Log(msg);
+                    TaxiBotClient.DispatchBooking(taxiBotRequest);
 
                     // WhatsApp notification
                     _ = Task.Run(async () =>
@@ -1335,6 +1397,117 @@ RULES: One question at a time. Under 20 words per response. Use £. Only call en
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    }
+
+    // =========================
+    // ADDRESS PARSING HELPERS
+    // =========================
+
+    /// <summary>
+    /// Format phone to E.164 format (+31652328530)
+    /// </summary>
+    private static string FormatE164(string phone)
+    {
+        if (string.IsNullOrWhiteSpace(phone)) return "+31000000000";
+
+        var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
+
+        if (clean.StartsWith("00"))
+            clean = "+" + clean.Substring(2);
+
+        if (!clean.StartsWith("+"))
+            clean = "+" + clean;
+
+        // Dutch number fix: +310 -> +31
+        if (clean.StartsWith("+310") && clean.Length > 11)
+            clean = "+31" + clean.Substring(4);
+
+        return clean;
+    }
+
+    /// <summary>
+    /// Parse fare string like "£12.50" to "12.50"
+    /// </summary>
+    private static string ParseFareValue(string? fare)
+    {
+        if (string.IsNullOrWhiteSpace(fare)) return "0.00";
+
+        var clean = new string(fare.Where(c => char.IsDigit(c) || c == '.' || c == ',').ToArray());
+        clean = clean.Replace(',', '.');
+
+        if (decimal.TryParse(clean, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var amount))
+        {
+            return amount.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return "0.00";
+    }
+
+    /// <summary>
+    /// Extract street name from address like "Hoofdweg 4, 1275 AA, Amsterdam"
+    /// </summary>
+    private static string ParseStreetName(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "Unknown";
+
+        var parts = address.Split(',');
+        if (parts.Length > 0)
+        {
+            var streetPart = parts[0].Trim();
+            var match = System.Text.RegularExpressions.Regex.Match(streetPart, @"^(.+?)\s+\d+[A-Za-z]*$");
+            if (match.Success)
+                return match.Groups[1].Value;
+            return streetPart;
+        }
+        return address;
+    }
+
+    /// <summary>
+    /// Extract street number from address
+    /// </summary>
+    private static int ParseStreetNumber(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return 0;
+
+        var parts = address.Split(',');
+        if (parts.Length > 0)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(parts[0], @"\s+(\d+)[A-Za-z]*$");
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var num))
+                return num;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Extract postal code from address (NL format: 1234 AB)
+    /// </summary>
+    private static string ParsePostalCode(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+
+        var match = System.Text.RegularExpressions.Regex.Match(address, @"\d{4}\s*[A-Z]{2}");
+        return match.Success ? match.Value : "";
+    }
+
+    /// <summary>
+    /// Extract city from address (usually last part after comma)
+    /// </summary>
+    private static string ParseCity(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+
+        var parts = address.Split(',').Select(p => p.Trim()).ToArray();
+        
+        // City is usually the last part, unless it's a postal code
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(parts[i], @"\d{4}\s*[A-Z]{2}"))
+                return parts[i];
+        }
+
+        return "Amsterdam"; // Default
     }
 
     public void Dispose()

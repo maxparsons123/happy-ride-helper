@@ -1406,10 +1406,17 @@ public sealed class BookingState
     public bool Confirmed { get; set; }
     public string? BookingRef { get; set; }
 
+    // Geocoded coordinates for dispatch
+    public double? PickupLat { get; set; }
+    public double? PickupLon { get; set; }
+    public double? DestLat { get; set; }
+    public double? DestLon { get; set; }
+
     public void Reset()
     {
         Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
+        PickupLat = PickupLon = DestLat = DestLon = null;
         Confirmed = false;
     }
 }
