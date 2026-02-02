@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -129,7 +130,11 @@ public static class BsqdDispatcher
     /// </summary>
     public static async Task SendAsync(TaxiBotRequest request)
     {
-        var json = JsonSerializer.Serialize(request);
+        var options = new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+        var json = JsonSerializer.Serialize(request, options);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
         Log($"🚕 BSQD Dispatch → {request.phoneNumber}");
