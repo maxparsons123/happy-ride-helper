@@ -245,11 +245,15 @@ Be concise, warm, and professional.
     // ===========================================
     private async Task PlayoutLoopAsync(string callId, CancellationToken ct)
     {
-        Log($"▶️ [{callId}] Playout loop started (G711 direct, codec={_negotiatedCodec})");
+        Log($"▶️ [{callId}] Playout loop started (Jitter Buffer enabled)");
 
         bool aiDisconnected = false;
         int drainAttempts = 0;
         const int MAX_DRAIN_ATTEMPTS = 500; // 10 seconds max drain time (500 * 20ms)
+
+        // Warm-up configuration: wait for buffer before starting playout
+        bool isWarmedUp = false;
+        const int JITTER_BUFFER_THRESHOLD = 5; // Wait for 100ms of audio (5 frames * 20ms)
 
         while (!ct.IsCancellationRequested)
         {
@@ -267,7 +271,26 @@ Be concise, warm, and professional.
                     }
                 }
 
-                // Get G.711 frame from AI client
+                // 1. Check pending frames in AI client queue
+                int pendingInAiClient = ai?.PendingFrameCount ?? 0;
+
+                // 2. Warm-up Logic: Only start playout if we have enough frames or AI disconnected
+                if (!isWarmedUp && !aiDisconnected)
+                {
+                    if (pendingInAiClient >= JITTER_BUFFER_THRESHOLD)
+                    {
+                        isWarmedUp = true;
+                        Log($"🚀 [{callId}] Jitter buffer ready ({pendingInAiClient} frames). Starting playout.");
+                    }
+                    else
+                    {
+                        // Still buffering... wait 10ms and check again
+                        await Task.Delay(10, ct);
+                        continue;
+                    }
+                }
+
+                // 3. Pull G.711 frame from AI client
                 var g711Frame = ai?.GetNextMuLawFrame();
                 if (g711Frame != null && g711Frame.Length == FRAME_SIZE_ULAW)
                 {
@@ -285,7 +308,13 @@ Be concise, warm, and professional.
                 }
                 else
                 {
-                    // No audio available
+                    // No audio available - reset warm-up for next response
+                    if (isWarmedUp && !aiDisconnected)
+                    {
+                        Log($"📉 [{callId}] Buffer underrun - resetting warm-up state.");
+                        isWarmedUp = false;
+                    }
+
                     if (aiDisconnected)
                     {
                         // AI is gone - check if playout buffer is also empty
@@ -347,12 +376,14 @@ Be concise, warm, and professional.
 
         _aiClient.OnAdaSpeaking += _ => { };
         
-        // Barge-in: Clear playout buffer when user interrupts AI
+        // Barge-in: Clear ALL buffers when user interrupts AI
         _aiClient.OnBargeIn += () =>
         {
-            _playout?.Clear();
+            _playout?.Clear();           // Clear RTP output buffer
+            _aiClient?.ClearPendingFrames(); // Clear AI client queue
             _isBotSpeaking = false;
-            Log($"✂️ [{callId}] Barge-in: AI audio truncated, playout cleared");
+            _botStoppedSpeakingAt = DateTime.UtcNow;
+            Log($"✂️ [{callId}] Barge-in: All audio buffers cleared");
         };
 
         // AI-triggered hangup
