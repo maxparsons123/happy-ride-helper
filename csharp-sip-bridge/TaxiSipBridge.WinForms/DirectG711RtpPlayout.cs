@@ -24,7 +24,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
 {
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
-    private const int MIN_BUFFER_FRAMES = 6; // 120ms buffer before starting playout (balance latency vs jitter)
+    private const int MIN_BUFFER_FRAMES = 1; // 20ms - minimal buffering for lowest latency
     private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
 
     private readonly VoIPMediaSession _mediaSession;
