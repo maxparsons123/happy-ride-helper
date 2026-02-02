@@ -85,10 +85,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
 
     // =========================
-    // AUDIO OUTPUT (now via OnPcm24Audio event to DirectRtpPlayout)
+    // AUDIO OUTPUT
     // =========================
-    // NOTE: _outboundQueue is no longer used - audio flows via OnPcm24Audio → DirectRtpPlayout
-    // Kept for IAudioAIClient interface compatibility (GetNextMuLawFrame returns null)
+    // Primary path (new): PCM16 @ 24kHz streamed via OnPcm24Audio → playout engine (DirectRtpPlayout).
+    // Compatibility path (legacy): some call flows still poll GetNextMuLawFrame (e.g. SipAudioPlayout
+    // or older SIP handlers). For those, we also maintain a small outbound G.711 frame queue.
+    private const int MAX_OUTBOUND_FRAMES = 2000; // ~40s @ 20ms frames; prevents burst dropouts
+    private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
+    private int _outboundQueueCount;
 
     // =========================
     // STATS
@@ -253,11 +257,28 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         await SendMuLawAsync(encoded).ConfigureAwait(false);
     }
 
-    // NOTE: Audio now flows via OnPcm24Audio event, not through queue
-    // These methods kept for IAudioAIClient interface compatibility
-    public byte[]? GetNextMuLawFrame() => null;
-    public void ClearPendingFrames() { }
-    public int PendingFrameCount => 0;
+    /// <summary>
+    /// Legacy pull-based playout.
+    /// NOTE: Despite the name, this returns a 20ms G.711 frame matching the configured codec
+    /// (A-law or μ-law).
+    /// </summary>
+    public byte[]? GetNextMuLawFrame()
+    {
+        if (_outboundQueue.TryDequeue(out var frame))
+        {
+            Interlocked.Decrement(ref _outboundQueueCount);
+            return frame;
+        }
+        return null;
+    }
+
+    public void ClearPendingFrames()
+    {
+        while (_outboundQueue.TryDequeue(out _)) { }
+        Interlocked.Exchange(ref _outboundQueueCount, 0);
+    }
+
+    public int PendingFrameCount => Math.Max(0, Volatile.Read(ref _outboundQueueCount));
 
     public async Task DisconnectAsync()
     {
@@ -971,6 +992,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             // Fire event for call handler (DirectRtpPlayout applies DSP + encodes to G.711)
             OnPcm24Audio?.Invoke(pcm24kBytes);
 
+            // Also enqueue G.711 frames for any legacy polling playout paths.
+            EnqueueG711FramesFromPcm24k(pcm24kBytes);
+
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
             {
@@ -981,6 +1005,75 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         {
             Log($"⚠️ ProcessAudioDelta error: {ex.Message}");
         }
+    }
+
+    private void EnqueueG711FramesFromPcm24k(byte[] pcm24kBytes)
+    {
+        if (pcm24kBytes == null || pcm24kBytes.Length < 2) return;
+
+        try
+        {
+            var pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
+
+            short[] pcm8k;
+            try
+            {
+                // Prefer SpeexDSP when available (best quality)
+                pcm8k = AudioCodecs.ResampleWithSpeex(pcm24k, 24000, 8000);
+            }
+            catch
+            {
+                // Fallback: simple 3:1 FIR decimation (0.25, 0.5, 0.25)
+                pcm8k = Downsample24kTo8kFallback(pcm24k);
+            }
+
+            byte[] g711 = _codec == G711Codec.ALaw
+                ? AudioCodecs.ALawEncode(pcm8k)
+                : AudioCodecs.MuLawEncode(pcm8k);
+
+            // Frame into exact 20ms chunks (160 bytes).
+            for (int i = 0; i < g711.Length; i += FRAME_SIZE_BYTES)
+            {
+                var frame = new byte[FRAME_SIZE_BYTES];
+                var count = Math.Min(FRAME_SIZE_BYTES, g711.Length - i);
+                Array.Copy(g711, i, frame, 0, count);
+                if (count < FRAME_SIZE_BYTES)
+                    Array.Fill(frame, _silenceByte, count, FRAME_SIZE_BYTES - count);
+
+                // Overflow protection: drop oldest frames.
+                while (Volatile.Read(ref _outboundQueueCount) >= MAX_OUTBOUND_FRAMES)
+                {
+                    if (_outboundQueue.TryDequeue(out _))
+                        Interlocked.Decrement(ref _outboundQueueCount);
+                    else
+                        break;
+                }
+
+                _outboundQueue.Enqueue(frame);
+                Interlocked.Increment(ref _outboundQueueCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ EnqueueG711FramesFromPcm24k error: {ex.Message}");
+        }
+    }
+
+    private static short[] Downsample24kTo8kFallback(short[] pcm24k)
+    {
+        if (pcm24k.Length < 3) return Array.Empty<short>();
+
+        int outLen = pcm24k.Length / 3;
+        var pcm8k = new short[outLen];
+
+        for (int i = 0; i < outLen; i++)
+        {
+            int idx = i * 3;
+            // Weighted average: 0.25, 0.5, 0.25 (anti-alias-ish)
+            pcm8k[i] = (short)(pcm24k[idx] * 0.25f + pcm24k[idx + 1] * 0.5f + pcm24k[idx + 2] * 0.25f);
+        }
+
+        return pcm8k;
     }
 
     // NOTE: AppendAndEnqueueG711 and FlushAudioAccumulator removed
