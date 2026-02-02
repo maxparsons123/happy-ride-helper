@@ -197,8 +197,8 @@ Be concise, warm, and professional.
             WireAiClientEvents(callId, cts);
 
             // Create timer-driven RTP playout (pulls from AI client every 20ms)
-            var rtpSession = _currentMediaSession.RtpSession;
-            _playout = new SipAudioPlayout(rtpSession, () => _aiClient?.GetNextMuLawFrame(), _negotiatedCodec);
+            // VoIPMediaSession inherits from RTPSession, so we pass it directly
+            _playout = new SipAudioPlayout(_currentMediaSession, () => _aiClient?.GetNextMuLawFrame(), _negotiatedCodec);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
