@@ -42,6 +42,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA; // Default to A-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
+    private G711CallFeatures? _features;
     private CancellationTokenSource? _callCts;
     private Action<SIPDialogue>? _currentHungupHandler;
     private SIPUserAgent? _currentUa;
@@ -194,6 +195,20 @@ Be concise, warm, and professional.
                 ? OpenAIRealtimeG711Client.G711Codec.ALaw 
                 : OpenAIRealtimeG711Client.G711Codec.MuLaw;
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
+
+            // Feature add-ons: tool handling + booking state + dispatch
+            _features?.Dispose();
+            _features = new G711CallFeatures(_aiClient, callId, callerPhone: caller);
+            _features.OnLog += Log;
+            _features.OnCallEnded += () =>
+            {
+                Log($"📞 [{callId}] Features requested call end");
+                try { cts.Cancel(); } catch { }
+            };
+
+            // Route OpenAI tool calls to feature handler
+            _aiClient.OnToolCall += async (toolName, toolCallId, args) =>
+                await _features.HandleToolCallAsync(toolName, toolCallId, args).ConfigureAwait(false);
             
             // Create DirectG711RtpPlayout (clean push-based RTP with 20ms timer)
             _playout = new DirectG711RtpPlayout(_currentMediaSession, aiCodec);
@@ -206,8 +221,9 @@ Be concise, warm, and professional.
                     _botStoppedSpeakingAt = DateTime.UtcNow;
                     Log($"🔇 [{callId}] Playout queue empty - echo guard started");
                     
-                    // Notify AI client that playout is complete - this starts the accurate no-reply watchdog
-                    _aiClient?.NotifyPlayoutComplete();
+                    // Notify AI client + start watchdog from playout completion
+                    if (_features != null) _features.OnPlayoutComplete();
+                    else _aiClient?.NotifyPlayoutComplete();
                 }
             };
             _playout.Start();
@@ -285,6 +301,7 @@ Be concise, warm, and professional.
             _playout?.Clear();  // Immediately stop Ada speaking
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
+            _features?.CancelWatchdog();
             Log($"✂️ [{callId}] Barge-in (VAD): cleared playout queue");
         };
 
@@ -514,6 +531,9 @@ Be concise, warm, and professional.
         _botStoppedSpeakingAt = DateTime.MinValue;
         _framesForwarded = 0;
         _framesSent = 0;
+
+        try { _features?.Dispose(); } catch { }
+        _features = null;
         
         // Reset ingress DSP state for new call
         IngressDsp.Reset();
@@ -543,6 +563,12 @@ Be concise, warm, and professional.
             try { await _aiClient.DisconnectAsync(); } catch { }
             try { _aiClient.Dispose(); } catch { }
             _aiClient = null;
+        }
+
+        if (_features != null)
+        {
+            try { _features.Dispose(); } catch { }
+            _features = null;
         }
 
         if (_playout != null)
@@ -588,6 +614,7 @@ Be concise, warm, and professional.
         try { _callCts?.Cancel(); } catch { }
         try { _playout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
+        try { _features?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
 
         GC.SuppressFinalize(this);
