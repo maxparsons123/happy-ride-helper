@@ -88,7 +88,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // AUDIO OUTPUT
     // =========================
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
-    private const int MAX_QUEUE_FRAMES = 500;
+    private const int MAX_QUEUE_FRAMES = 2000; // 40s buffer - OpenAI sends audio faster than realtime
 
     // Audio accumulator for egress (G.711 bytes - direct passthrough)
     private readonly byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 10];
