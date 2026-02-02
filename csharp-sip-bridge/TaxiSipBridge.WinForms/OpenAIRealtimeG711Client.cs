@@ -200,8 +200,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Send G.711 audio frame directly to OpenAI (native 8kHz passthrough).
-    /// No decoding, no resampling - just base64 encode and send.
+    /// Send G.711 audio frame to OpenAI.
+    /// Decodes G.711 → PCM16, upsamples 8kHz → 24kHz, sends as PCM16 (session expects pcm16@24kHz).
     /// </summary>
     public async Task SendMuLawAsync(byte[] g711Data)
     {
@@ -214,11 +214,30 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Direct passthrough: G.711 → base64 → OpenAI (no conversion!)
+            // Step 1: Decode G.711 to PCM16 @ 8kHz
+            short[] pcm8k = _codec == G711Codec.ALaw
+                ? AudioCodecs.ALawDecode(g711Data)
+                : AudioCodecs.MuLawDecode(g711Data);
+
+            // Step 2: Upsample 8kHz → 24kHz (session expects pcm16@24kHz)
+            short[] pcm24k;
+            try
+            {
+                pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
+            }
+            catch
+            {
+                // Fallback: simple 3x linear interpolation
+                pcm24k = Upsample8kTo24kFallback(pcm8k);
+            }
+
+            // Step 3: Convert to bytes and send
+            byte[] pcmBytes = AudioCodecs.ShortsToBytes(pcm24k);
+            
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "input_audio_buffer.append",
-                audio = Convert.ToBase64String(g711Data)
+                audio = Convert.ToBase64String(pcmBytes)
             });
 
             await SendBytesAsync(bytes).ConfigureAwait(false);
@@ -228,13 +247,34 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             if (count % 50 == 0)
             {
                 var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-                Log($"📤 Sent {count} audio frames to OpenAI (8kHz {codecName} direct)");
+                Log($"📤 Sent {count} audio frames to OpenAI ({codecName}→PCM24k)");
             }
         }
         catch (Exception ex)
         {
             Log($"⚠️ SendMuLawAsync error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Simple 3x upsample fallback when SpeexDSP unavailable.
+    /// </summary>
+    private static short[] Upsample8kTo24kFallback(short[] pcm8k)
+    {
+        if (pcm8k.Length == 0) return Array.Empty<short>();
+        
+        var pcm24k = new short[pcm8k.Length * 3];
+        for (int i = 0; i < pcm8k.Length; i++)
+        {
+            short current = pcm8k[i];
+            short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
+            
+            // Linear interpolation: 3 output samples per input sample
+            pcm24k[i * 3] = current;
+            pcm24k[i * 3 + 1] = (short)((current * 2 + next) / 3);
+            pcm24k[i * 3 + 2] = (short)((current + next * 2) / 3);
+        }
+        return pcm24k;
     }
 
     /// <summary>
