@@ -202,10 +202,13 @@ Be concise, warm, and professional.
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
-                if (_adaHasStartedSpeaking)
+                // Only update timestamp ONCE when transitioning from speaking → silent
+                // (not continuously every 20ms during silence)
+                if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
+                    Log($"🔇 [{callId}] Playout queue empty - echo guard started");
                 }
             };
             _playout.Start();
