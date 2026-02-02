@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -10,11 +11,10 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Ultra-clean push-based RTP playout for native G.711 mode.
 /// 
-/// SIMPLIFIED: Direct passthrough with NO buffering, NO decay, NO DSP.
-/// Just raw G.711 bytes from OpenAI → RTP at 20ms intervals.
+/// DIRECT PASSTHROUGH: No buffering, no decay, no DSP.
+/// Raw G.711 bytes from OpenAI → RTP at precise 20ms intervals.
 /// 
-/// Golden rule: Never send RTP from the WebSocket thread.
-///              Always send RTP from a 20ms timer.
+/// Uses Stopwatch-based timing for high precision (sub-ms accuracy).
 /// </summary>
 public sealed class DirectG711RtpPlayout : IDisposable
 {
@@ -28,7 +28,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
     private readonly ConcurrentQueue<byte[]> _queue = new();
     private readonly byte[] _silenceFrame;
-    private Timer? _timer;
+    private Thread? _playoutThread;
+    private volatile bool _running;
     private int _disposed;
     private int _queueCount;
     private int _framesSent;
@@ -87,32 +88,79 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
     public void Start()
     {
-        if (Volatile.Read(ref _disposed) != 0) return;
+        if (Volatile.Read(ref _disposed) != 0 || _running) return;
 
         _framesSent = 0;
         _wasPlaying = false;
+        _running = true;
         
         // Random start timestamp (RFC 3550 compliant)
         _timestamp = (uint)Random.Shared.Next();
 
-        // 20ms timer - the heart of telephony timing
-        _timer = new Timer(SendFrame, null, FRAME_MS, FRAME_MS);
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (20ms timer, ts={_timestamp})");
+        // High-precision playout thread
+        _playoutThread = new Thread(PlayoutLoop)
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.Highest,
+            Name = "G711RtpPlayout"
+        };
+        _playoutThread.Start();
+        
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (high-precision thread, ts={_timestamp})");
     }
 
     public void Stop()
     {
-        _timer?.Change(Timeout.Infinite, Timeout.Infinite);
-        _timer?.Dispose();
-        _timer = null;
+        _running = false;
+        _playoutThread?.Join(500);
+        _playoutThread = null;
         OnLog?.Invoke($"[DirectG711RtpPlayout] Stopped ({_framesSent} frames sent)");
     }
 
-    private void SendFrame(object? state)
+    /// <summary>
+    /// High-precision 20ms playout loop using Stopwatch timing.
+    /// </summary>
+    private void PlayoutLoop()
     {
-        if (Volatile.Read(ref _disposed) != 0)
-            return;
+        var sw = Stopwatch.StartNew();
+        double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
 
+        while (_running && Volatile.Read(ref _disposed) == 0)
+        {
+            double now = sw.Elapsed.TotalMilliseconds;
+
+            // Wait for next frame time with high precision
+            if (now < nextFrameTimeMs)
+            {
+                double waitMs = nextFrameTimeMs - now;
+                if (waitMs > 2.0)
+                {
+                    Thread.Sleep((int)(waitMs - 1));
+                }
+                else if (waitMs > 0.1)
+                {
+                    Thread.SpinWait(100);
+                }
+                continue;
+            }
+
+            // Send frame
+            SendNextFrame();
+
+            // Schedule next frame (accumulate to avoid drift)
+            nextFrameTimeMs += FRAME_MS;
+
+            // Drift correction: if we're way behind, catch up
+            now = sw.Elapsed.TotalMilliseconds;
+            if (now - nextFrameTimeMs > 40)
+            {
+                nextFrameTimeMs = now + FRAME_MS;
+            }
+        }
+    }
+
+    private void SendNextFrame()
+    {
         byte[] frameToSend;
 
         if (_queue.TryDequeue(out var audioFrame))
@@ -127,7 +175,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         }
         else
         {
-            // Queue empty - send pure silence (no decay, no filtering)
+            // Queue empty - send pure silence
             frameToSend = _silenceFrame;
             
             // Fire OnQueueEmpty once when transitioning from playing to empty
