@@ -161,8 +161,8 @@ public static class BsqdDispatcher
     // =========================
 
     /// <summary>
-    /// Format phone to E.164 (+31612345678).
-    /// Handles Dutch number edge cases.
+    /// Format phone to E.164 (+31612345678 or +447539025332).
+    /// Detects country codes intelligently.
     /// </summary>
     public static string FormatE164(string? phone)
     {
@@ -174,15 +174,36 @@ public static class BsqdDispatcher
         if (clean.StartsWith("00"))
             clean = "+" + clean.Substring(2);
 
-        // Ensure + prefix
-        if (!clean.StartsWith("+"))
-            clean = "+31" + clean; // Default to NL
+        // If already has +, we're done (after cleaning)
+        if (clean.StartsWith("+"))
+        {
+            // Dutch mobile: remove extra 0 after +31 (e.g., +3106 → +316)
+            if (clean.StartsWith("+310") && clean.Length > 11)
+                clean = "+31" + clean.Substring(4);
+            return clean;
+        }
 
-        // Dutch mobile: remove extra 0 after +31 (e.g., +3106 → +316)
-        if (clean.StartsWith("+310") && clean.Length > 11)
-            clean = "+31" + clean.Substring(4);
+        // Detect existing country code by common prefixes
+        // UK: 44, NL: 31, DE: 49, FR: 33, BE: 32, etc.
+        if (clean.StartsWith("44") && clean.Length >= 11)  // UK
+            return "+" + clean;
+        if (clean.StartsWith("31") && clean.Length >= 10)  // Netherlands
+            return "+" + clean;
+        if (clean.StartsWith("49") && clean.Length >= 10)  // Germany
+            return "+" + clean;
+        if (clean.StartsWith("33") && clean.Length >= 10)  // France
+            return "+" + clean;
+        if (clean.StartsWith("32") && clean.Length >= 9)   // Belgium
+            return "+" + clean;
+        if (clean.StartsWith("1") && clean.Length == 11)   // USA/Canada
+            return "+" + clean;
 
-        return clean;
+        // Local Dutch number (starts with 0) - add +31
+        if (clean.StartsWith("0"))
+            return "+31" + clean.Substring(1);
+
+        // Unknown format - default to +31
+        return "+31" + clean;
     }
 
     // =========================
