@@ -401,8 +401,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 {
                     type = "server_vad",
                     threshold = 0.35,             // v2.1: Matched to OpenAIRealtimeClient for better speech sensitivity
-                    prefix_padding_ms = 600,      // v2.1: Captures more speech start (was 400)
-                    silence_duration_ms = 1200    // v2.1: More patient turn detection (was 1000)
+                    prefix_padding_ms = 400,      // v2.2: Reduced for faster response (was 600)
+                    silence_duration_ms = 700     // v2.2: Faster response after speech (was 1200)
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
