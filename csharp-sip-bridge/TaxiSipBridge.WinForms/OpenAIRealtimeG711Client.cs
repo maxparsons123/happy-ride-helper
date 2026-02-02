@@ -399,8 +399,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,              // Lowered from 0.6 to improve speech detection sensitivity
-                    prefix_padding_ms = 250,      // Lowered from 400 for faster speech detection
+                    threshold = 0.4,              // v1.1: Lowered from 0.6 to improve speech detection sensitivity
+                    prefix_padding_ms = 250,      // v1.1: Lowered from 400 for faster speech detection
                     silence_duration_ms = 1000    // 1 second silence = end of turn
                 },
                 tools = GetTools(),
