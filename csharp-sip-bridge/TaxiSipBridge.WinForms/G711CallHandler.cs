@@ -38,7 +38,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private DirectRtpPlayout? _playout;   // Use DirectRtpPlayout for proper DSP (AGC, DC removal, soft limiting)
+    private DirectG711RtpPlayout? _playout;   // Clean push-based RTP playout for native G.711
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA; // Default to A-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -195,8 +195,8 @@ Be concise, warm, and professional.
                 : OpenAIRealtimeG711Client.G711Codec.MuLaw;
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
             
-            // Create DirectRtpPlayout in NATIVE G.711 MODE (zero DSP passthrough)
-            _playout = new DirectRtpPlayout(_currentMediaSession, nativeG711Mode: true);
+            // Create DirectG711RtpPlayout (clean push-based RTP with 20ms timer)
+            _playout = new DirectG711RtpPlayout(_currentMediaSession, aiCodec);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -204,11 +204,11 @@ Be concise, warm, and professional.
                 {
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] DirectRtpPlayout queue empty - echo guard started");
+                    Log($"🔇 [{callId}] Playout queue empty - echo guard started");
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] DirectRtpPlayout started (NATIVE G.711 - zero DSP passthrough)");
+            Log($"🎵 [{callId}] DirectG711RtpPlayout started (push-based, 20ms timer)");
 
             // Wire AI client events (using native G.711 audio path)
             WireAiClientEvents(callId, cts);
@@ -250,14 +250,13 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // NATIVE G.711 PATH: Route raw G.711 audio directly to DirectRtpPlayout (zero DSP)
+        // NATIVE G.711 PATH: Push raw G.711 audio directly to playout (zero DSP)
+        // 🔥 THIS IS THE IMPORTANT LINE - push-based, not polling
         _aiClient.OnG711Audio += g711Bytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            
-            // DirectRtpPlayout in native mode: direct G.711 passthrough
-            _playout?.BufferG711Audio(g711Bytes);
+            _playout?.PushAudio(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -276,17 +275,14 @@ Be concise, warm, and professional.
         // Barge-in handler - only act if Ada is actually speaking or queue has audio
         Action bargeInHandler = () =>
         {
-            // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn - not a barge-in
-            if (!_isBotSpeaking && (_playout == null || _playout.IsEmpty))
-            {
-                // Normal new turn - no need to clear anything
+            // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
+            if (!_isBotSpeaking && (_playout == null || _playout.PendingFrameCount == 0))
                 return;
-            }
             
-            _playout?.Clear();
+            _playout?.Clear();  // Immediately stop Ada speaking
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
-            Log($"✂️ [{callId}] Barge-in (VAD): cleared DirectRtpPlayout queue");
+            Log($"✂️ [{callId}] Barge-in (VAD): cleared playout queue");
         };
 
         try
