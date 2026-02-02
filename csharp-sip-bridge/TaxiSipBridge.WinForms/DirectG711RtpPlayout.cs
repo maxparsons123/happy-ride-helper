@@ -8,46 +8,38 @@ using SIPSorceryMedia.Abstractions;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Clean push-based RTP playout for native G.711 mode.
+/// Ultra-clean push-based RTP playout for native G.711 mode.
+/// 
+/// SIMPLIFIED: Direct passthrough with NO buffering, NO decay, NO DSP.
+/// Just raw G.711 bytes from OpenAI → RTP at 20ms intervals.
 /// 
 /// Golden rule: Never send RTP from the WebSocket thread.
 ///              Always send RTP from a 20ms timer.
-/// 
-/// Features:
-/// - Push-based API via PushAudio() for OnG711Audio events
-/// - Fixed 20ms timer pacing (PBX-friendly)
-/// - No decoding, no resampling, no DSP
-/// - Barge-in support via Clear()
-/// - Direct RTP with proper timestamp/sequence management
 /// </summary>
 public sealed class DirectG711RtpPlayout : IDisposable
 {
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
-    private const int MIN_BUFFER_FRAMES = 10; // 200ms buffer - matches non-G711 mode for smooth delivery
     private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
-    private const int GRACE_PERIOD_FRAMES = 5; // Continue sending decaying audio before declaring empty
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
     private readonly byte _payloadType;
 
     private readonly ConcurrentQueue<byte[]> _queue = new();
-    private readonly byte[] _frameBuffer = new byte[FRAME_SIZE];
+    private readonly byte[] _silenceFrame;
     private Timer? _timer;
     private int _disposed;
     private int _queueCount;
-    private bool _isPlaying;
     private int _framesSent;
-    private int _emptyFramesCount;
+    private bool _wasPlaying;
     private uint _timestamp;
-    private byte _lastByte; // For smooth decay
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
 
     public int PendingFrameCount => Volatile.Read(ref _queueCount);
-    public bool IsPlaying => _isPlaying;
+    public bool IsPlaying => Volatile.Read(ref _queueCount) > 0;
 
     public DirectG711RtpPlayout(
         VoIPMediaSession mediaSession,
@@ -56,8 +48,10 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _silence = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
         _payloadType = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)8 : (byte)0;
-        _lastByte = _silence; // Initialize decay byte to silence
-        // Timestamp and sequence initialized in Start() with random values
+        
+        // Pre-allocate silence frame
+        _silenceFrame = new byte[FRAME_SIZE];
+        Array.Fill(_silenceFrame, _silence);
     }
 
     /// <summary>
@@ -96,14 +90,12 @@ public sealed class DirectG711RtpPlayout : IDisposable
         if (Volatile.Read(ref _disposed) != 0) return;
 
         _framesSent = 0;
-        _isPlaying = false;
-        _emptyFramesCount = 0;
-        _lastByte = _silence;
-        // Random start timestamp is RFC-friendly; RTP sequence is managed internally by SIPSorcery.
+        _wasPlaying = false;
+        
+        // Random start timestamp (RFC 3550 compliant)
         _timestamp = (uint)Random.Shared.Next();
 
         // 20ms timer - the heart of telephony timing
-        // Start with FRAME_MS delay (not 0) to avoid immediate fire + timestamp skew
         _timer = new Timer(SendFrame, null, FRAME_MS, FRAME_MS);
         OnLog?.Invoke($"[DirectG711RtpPlayout] Started (20ms timer, ts={_timestamp})");
     }
@@ -121,83 +113,44 @@ public sealed class DirectG711RtpPlayout : IDisposable
         if (Volatile.Read(ref _disposed) != 0)
             return;
 
-        var queueCount = Volatile.Read(ref _queueCount);
-
-        // Buffer up before starting playout (absorbs network jitter)
-        if (!_isPlaying && queueCount < MIN_BUFFER_FRAMES)
-        {
-            // Send silence while buffering
-            Array.Fill(_frameBuffer, _silence);
-            SendRtpFrame(_frameBuffer);
-            return;
-        }
-
-        if (!_isPlaying && queueCount >= MIN_BUFFER_FRAMES)
-        {
-            _isPlaying = true;
-            OnLog?.Invoke($"[DirectG711RtpPlayout] Buffered {queueCount} frames, starting playout");
-        }
-
-        bool hasData = false;
+        byte[] frameToSend;
 
         if (_queue.TryDequeue(out var audioFrame))
         {
             Interlocked.Decrement(ref _queueCount);
-            Array.Copy(audioFrame, _frameBuffer, FRAME_SIZE);
-            _lastByte = audioFrame[FRAME_SIZE - 1]; // Track last byte for decay
+            frameToSend = audioFrame;
             _framesSent++;
-            hasData = true;
+            _wasPlaying = true;
 
-            if (_framesSent % 100 == 0)
+            if (_framesSent % 500 == 0)
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Sent {_framesSent} frames (queue: {Volatile.Read(ref _queueCount)})");
         }
         else
         {
-            // Queue empty - use last byte for smooth decay (like non-G711 mode)
-            Array.Fill(_frameBuffer, _lastByte);
-        }
-
-        if (hasData)
-        {
-            _emptyFramesCount = 0;
-            SendRtpFrame(_frameBuffer);
-        }
-        else
-        {
-            _emptyFramesCount++;
-
-            if (_emptyFramesCount < GRACE_PERIOD_FRAMES)
+            // Queue empty - send pure silence (no decay, no filtering)
+            frameToSend = _silenceFrame;
+            
+            // Fire OnQueueEmpty once when transitioning from playing to empty
+            if (_wasPlaying)
             {
-                // Grace period: continue sending decaying audio
-                SendRtpFrame(_frameBuffer);
-            }
-            else
-            {
-                if (_isPlaying)
-                {
-                    _isPlaying = false;
-                    OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
-                    OnQueueEmpty?.Invoke();
-                }
-                // Send silence
-                Array.Fill(_frameBuffer, _silence);
-                SendRtpFrame(_frameBuffer);
+                _wasPlaying = false;
+                OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
+                OnQueueEmpty?.Invoke();
             }
         }
+
+        SendRtpFrame(frameToSend);
     }
 
     private void SendRtpFrame(byte[] frame)
     {
         try
         {
-            // Use SendRtpRaw for direct G.711 byte passthrough (no encoding).
-            // NOTE: In SIPSorcery, the RTP sequence number is managed internally.
-            // The 4th parameter here is the marker bit (0/1), not a sequence override.
             _mediaSession.SendRtpRaw(
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                0,
+                0,  // marker bit
                 (int)_payloadType
             );
             _timestamp += FRAME_SIZE;
@@ -216,9 +169,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         while (_queue.TryDequeue(out _))
             Interlocked.Decrement(ref _queueCount);
 
-        _isPlaying = false;
-        _emptyFramesCount = 0;
-        _lastByte = _silence;
+        _wasPlaying = false;
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
     }
 
