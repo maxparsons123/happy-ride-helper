@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Threading;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
@@ -16,25 +18,27 @@ namespace TaxiSipBridge;
 /// - Fixed 20ms timer pacing (PBX-friendly)
 /// - No decoding, no resampling, no DSP
 /// - Barge-in support via Clear()
-/// - NAT-friendly (relies on SIPSorcery's symmetric RTP)
+/// - Direct RTP with proper timestamp/sequence management
 /// </summary>
 public sealed class DirectG711RtpPlayout : IDisposable
 {
-    private const int SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
-    private const int MIN_BUFFER_FRAMES = 6; // 120ms buffer before starting playout
+    private const int MIN_BUFFER_FRAMES = 4; // 80ms buffer before starting playout (reduced for lower latency)
     private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
+    private readonly byte _payloadType;
 
     private readonly ConcurrentQueue<byte[]> _queue = new();
+    private readonly byte[] _frameBuffer = new byte[FRAME_SIZE];
     private Timer? _timer;
     private int _disposed;
     private int _queueCount;
     private bool _isPlaying;
     private int _framesSent;
+    private uint _timestamp;
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -48,8 +52,10 @@ public sealed class DirectG711RtpPlayout : IDisposable
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _silence = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
+        _payloadType = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)8 : (byte)0;
+        _timestamp = 0;
 
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Created (codec={codec})");
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Created (codec={codec}, PT={_payloadType})");
     }
 
     /// <summary>
@@ -89,10 +95,11 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
         _framesSent = 0;
         _isPlaying = false;
+        _timestamp = 0;
 
         // 20ms timer - the heart of telephony timing
         _timer = new Timer(SendFrame, null, 0, FRAME_MS);
-        OnLog?.Invoke("[DirectG711RtpPlayout] Started (20ms timer)");
+        OnLog?.Invoke("[DirectG711RtpPlayout] Started (20ms timer, SendRtpRaw)");
     }
 
     public void Stop()
@@ -108,16 +115,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
         if (Volatile.Read(ref _disposed) != 0)
             return;
 
-        byte[] frame;
         var queueCount = Volatile.Read(ref _queueCount);
 
         // Buffer up before starting playout (absorbs network jitter)
         if (!_isPlaying && queueCount < MIN_BUFFER_FRAMES)
         {
             // Send silence while buffering
-            frame = new byte[FRAME_SIZE];
-            Array.Fill(frame, _silence);
-            SendRtpFrame(frame);
+            Array.Fill(_frameBuffer, _silence);
+            SendRtpFrame(_frameBuffer);
             return;
         }
 
@@ -130,7 +135,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         if (_queue.TryDequeue(out var audioFrame))
         {
             Interlocked.Decrement(ref _queueCount);
-            frame = audioFrame;
+            Array.Copy(audioFrame, _frameBuffer, FRAME_SIZE);
             _framesSent++;
 
             if (_framesSent % 100 == 0)
@@ -139,8 +144,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         else
         {
             // Queue empty - send silence
-            frame = new byte[FRAME_SIZE];
-            Array.Fill(frame, _silence);
+            Array.Fill(_frameBuffer, _silence);
 
             if (_isPlaying)
             {
@@ -150,20 +154,21 @@ public sealed class DirectG711RtpPlayout : IDisposable
             }
         }
 
-        SendRtpFrame(frame);
+        SendRtpFrame(_frameBuffer);
     }
 
     private void SendRtpFrame(byte[] frame)
     {
         try
         {
-            // Use VoIPMediaSession.SendAudio which handles RTP sequencing and timing internally
-            // Duration = 160 samples = 20ms @ 8kHz
-            _mediaSession.SendAudio(160, frame);
+            // Use SendRtpRaw for direct G.711 byte passthrough (no encoding)
+            // This matches the proven DirectRtpPlayout pattern
+            _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, (int)_payloadType);
+            _timestamp += FRAME_SIZE;
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"[DirectG711RtpPlayout] SendAudio error: {ex.Message}");
+            OnLog?.Invoke($"[DirectG711RtpPlayout] SendRtpRaw error: {ex.Message}");
         }
     }
 
