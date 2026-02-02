@@ -993,19 +993,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             // Receive 24kHz PCM16 from OpenAI
             var pcm24kBytes = Convert.FromBase64String(base64);
             
-            // Use NAudio WDL high-quality resampler (24kHz → 8kHz) + G.711 encode
+            // High-quality resample 24kHz → 8kHz using NAudio WDL resampler (proper anti-aliasing)
+            var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
+            
+            // Encode to G.711 using proven lookup-table codec
             byte[] g711Bytes;
             if (_codec == G711Codec.ALaw)
             {
-                g711Bytes = NAudioResampler.ConvertToALaw(pcm24kBytes);
+                g711Bytes = Audio.G711Codec.Pcm16ToAlaw(pcm8kBytes);
             }
             else
             {
-                // MuLaw path - resample then encode
-                var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
-                var pcm8k = new short[pcm8kBytes.Length / 2];
-                Buffer.BlockCopy(pcm8kBytes, 0, pcm8k, 0, pcm8kBytes.Length);
-                g711Bytes = AudioCodecs.MuLawEncode(pcm8k);
+                g711Bytes = Audio.G711Codec.Pcm16ToUlaw(pcm8kBytes);
             }
             
             AppendAndEnqueueG711(g711Bytes);
