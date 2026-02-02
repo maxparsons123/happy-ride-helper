@@ -562,6 +562,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
 
+                    // Commit any buffered audio to finalize Ada's turn cleanly.
+                    // This ensures subsequent user speech starts a fresh input turn
+                    // rather than being treated as a barge-in/interruption.
+                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                    Log("📝 Committed audio buffer (turn finalized)");
+
                     // Flush deferred response if pending
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
