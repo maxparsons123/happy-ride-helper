@@ -3,9 +3,14 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace TaxiSipBridge.WinForms;
+
+// =========================
+// BSQD API DTOs
+// =========================
 
 public class AddressDto
 {
@@ -30,128 +35,159 @@ public class TaxiBotRequest
     public string passengers { get; set; } = "1";
 }
 
-public class TaxiBotClient
+// =========================
+// REUSABLE DISPATCHER
+// =========================
+
+/// <summary>
+/// Unified BSQD TaxiBot dispatcher. 
+/// Takes BookingState + caller info and sends to BSQD API.
+/// Uses geocoded address components when available, falls back to string parsing.
+/// </summary>
+public static class BsqdDispatcher
 {
     private static readonly string Url =
         "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
 
-    private static readonly string BearerToken = "RhjpZxqLXl2snLNMBwK7iIVq"; // Same as WhatsApp notifier
+    private static readonly string BearerToken = "RhjpZxqLXl2snLNMBwK7iIVq";
 
     public static event Action<string>? OnLog;
 
     /// <summary>
-    /// Fire-and-forget dispatch with logging
+    /// Fire-and-forget dispatch from BookingState.
+    /// Call this after booking confirmation.
     /// </summary>
-    public static void DispatchBooking(TaxiBotRequest payload)
+    public static void Dispatch(BookingState booking, string callerId)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await SendAsync(payload);
+                var request = BuildRequest(booking, callerId);
+                await SendAsync(request);
             }
             catch (Exception ex)
             {
-                Log($"❌ TaxiBot Dispatch ERROR: {ex.Message}");
+                Log($"❌ BSQD Dispatch ERROR: {ex.Message}");
             }
         });
     }
 
-    public static async Task SendAsync(TaxiBotRequest payload)
+    /// <summary>
+    /// Build TaxiBotRequest from BookingState.
+    /// Uses geocoded components when available, falls back to string parsing.
+    /// </summary>
+    public static TaxiBotRequest BuildRequest(BookingState booking, string callerId)
     {
-        var json = JsonSerializer.Serialize(payload);
+        // Parse departure time
+        var departureTime = DateTimeOffset.Now.AddMinutes(5);
+        if (!string.IsNullOrWhiteSpace(booking.PickupTime))
+        {
+            var normalized = booking.PickupTime.Trim().ToLowerInvariant();
+            if (normalized == "now" || normalized == "asap" || normalized == "nu" || normalized == "direct")
+            {
+                departureTime = DateTimeOffset.Now.AddMinutes(2);
+            }
+            else if (DateTimeOffset.TryParse(booking.PickupTime, out var parsed))
+            {
+                departureTime = parsed;
+            }
+        }
+
+        return new TaxiBotRequest
+        {
+            departure_address = new AddressDto
+            {
+                lat = booking.PickupLat ?? 0,
+                lon = booking.PickupLon ?? 0,
+                street_name = booking.PickupStreet ?? ParseStreetName(booking.Pickup),
+                street_number = booking.PickupNumber ?? ParseStreetNumber(booking.Pickup),
+                postal_code = booking.PickupPostalCode ?? ParsePostalCode(booking.Pickup),
+                city = booking.PickupCity ?? ParseCity(booking.Pickup),
+                formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "Unknown"
+            },
+            destination_address = new AddressDto
+            {
+                lat = booking.DestLat ?? 0,
+                lon = booking.DestLon ?? 0,
+                street_name = booking.DestStreet ?? ParseStreetName(booking.Destination),
+                street_number = booking.DestNumber ?? ParseStreetNumber(booking.Destination),
+                postal_code = booking.DestPostalCode ?? ParsePostalCode(booking.Destination),
+                city = booking.DestCity ?? ParseCity(booking.Destination),
+                formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "Unknown"
+            },
+            departure_time = departureTime,
+            first_name = booking.Name ?? "Customer",
+            total_price = ParseFare(booking.Fare),
+            phoneNumber = FormatE164(callerId),
+            passengers = (booking.Passengers ?? 1).ToString()
+        };
+    }
+
+    /// <summary>
+    /// Send request to BSQD API.
+    /// </summary>
+    public static async Task SendAsync(TaxiBotRequest request)
+    {
+        var json = JsonSerializer.Serialize(request);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        Log($"🚕 TaxiBot Dispatch → {payload.phoneNumber}");
+        Log($"🚕 BSQD Dispatch → {request.phoneNumber}");
         Log($"📦 Payload: {json}");
 
-        using var client = new HttpClient();
-        client.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", BearerToken);
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", BearerToken);
 
         var response = await client.PostAsync(Url, content);
         var responseBody = await response.Content.ReadAsStringAsync();
 
         if (response.IsSuccessStatusCode)
         {
-            Log($"✅ TaxiBot Dispatch OK: {(int)response.StatusCode}");
+            Log($"✅ BSQD Dispatch OK: {(int)response.StatusCode}");
         }
         else
         {
-            Log($"❌ TaxiBot Dispatch FAIL: {(int)response.StatusCode} - {responseBody}");
+            Log($"❌ BSQD Dispatch FAIL: {(int)response.StatusCode} - {responseBody}");
         }
-
-        response.EnsureSuccessStatusCode();
     }
+
+    // =========================
+    // PHONE FORMATTING
+    // =========================
 
     /// <summary>
-    /// Helper to create request from call data
+    /// Format phone to E.164 (+31612345678).
+    /// Handles Dutch number edge cases.
     /// </summary>
-    public static TaxiBotRequest CreateFromCallData(
-        string phoneNumber,
-        string? firstName,
-        string? pickup,
-        double pickupLat,
-        double pickupLon,
-        string? destination,
-        double destLat,
-        double destLon,
-        DateTimeOffset? departureTime,
-        string? fare,
-        int passengers = 1)
-    {
-        var (pickupStreet, pickupNumber, pickupPostal, pickupCity) = ParseAddress(pickup);
-        var (destStreet, destNumber, destPostal, destCity) = ParseAddress(destination);
-
-        return new TaxiBotRequest
-        {
-            departure_address = new AddressDto
-            {
-                lat = pickupLat,
-                lon = pickupLon,
-                street_name = pickupStreet,
-                street_number = pickupNumber,
-                postal_code = pickupPostal,
-                city = pickupCity,
-                formatted_depa_address = pickup ?? "Unknown"
-            },
-            destination_address = new AddressDto
-            {
-                lat = destLat,
-                lon = destLon,
-                street_name = destStreet,
-                street_number = destNumber,
-                postal_code = destPostal,
-                city = destCity,
-                formatted_dest_address = destination ?? "Unknown"
-            },
-            departure_time = departureTime ?? DateTimeOffset.Now,
-            first_name = firstName ?? "Customer",
-            total_price = ParseFare(fare),
-            phoneNumber = FormatE164(phoneNumber),
-            passengers = passengers.ToString()
-        };
-    }
-
-    private static string FormatE164(string phone)
+    public static string FormatE164(string? phone)
     {
         if (string.IsNullOrWhiteSpace(phone)) return "+31000000000";
 
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
 
+        // Convert 00 prefix to +
         if (clean.StartsWith("00"))
             clean = "+" + clean.Substring(2);
 
+        // Ensure + prefix
         if (!clean.StartsWith("+"))
-            clean = "+" + clean;
+            clean = "+31" + clean; // Default to NL
 
+        // Dutch mobile: remove extra 0 after +31 (e.g., +3106 → +316)
         if (clean.StartsWith("+310") && clean.Length > 11)
             clean = "+31" + clean.Substring(4);
 
         return clean;
     }
 
-    private static string ParseFare(string? fare)
+    // =========================
+    // FARE PARSING
+    // =========================
+
+    /// <summary>
+    /// Parse fare string to decimal format "15.50"
+    /// </summary>
+    public static string ParseFare(string? fare)
     {
         if (string.IsNullOrWhiteSpace(fare)) return "0.00";
 
@@ -167,65 +203,96 @@ public class TaxiBotClient
         return "0.00";
     }
 
-    private static (string street, int number, string postal, string city) ParseAddress(string? address)
+    // =========================
+    // ADDRESS PARSING (FALLBACK)
+    // =========================
+
+    /// <summary>
+    /// Extract street name from "Hoofdweg 4, 1275 AA, Amsterdam"
+    /// </summary>
+    public static string ParseStreetName(string? address)
     {
-        if (string.IsNullOrWhiteSpace(address))
-            return ("Unknown", 0, "", "");
+        if (string.IsNullOrWhiteSpace(address)) return "Unknown";
 
-        try
+        var parts = address.Split(',');
+        if (parts.Length > 0)
         {
-            var parts = address.Split(',').Select(p => p.Trim()).ToArray();
-
-            string street = "";
-            int number = 0;
-            string postal = "";
-            string city = "";
-
-            if (parts.Length >= 1)
-            {
-                var streetPart = parts[0];
-                var match = System.Text.RegularExpressions.Regex.Match(streetPart, @"^(.+?)\s+(\d+[A-Za-z]?)$");
-                if (match.Success)
-                {
-                    street = match.Groups[1].Value;
-                    int.TryParse(new string(match.Groups[2].Value.Where(char.IsDigit).ToArray()), out number);
-                }
-                else
-                {
-                    street = streetPart;
-                }
-            }
-
-            if (parts.Length >= 2)
-            {
-                var secondPart = parts[1].Trim();
-                if (System.Text.RegularExpressions.Regex.IsMatch(secondPart, @"\d{4}\s*[A-Z]{2}"))
-                {
-                    postal = secondPart;
-                }
-                else
-                {
-                    city = secondPart;
-                }
-            }
-
-            if (parts.Length >= 3)
-            {
-                city = parts[2].Trim();
-            }
-
-            if (string.IsNullOrEmpty(city) && !string.IsNullOrEmpty(postal))
-            {
-                city = "Amsterdam";
-            }
-
-            return (street, number, postal, city);
+            var streetPart = parts[0].Trim();
+            var match = Regex.Match(streetPart, @"^(.+?)\s+\d+[A-Za-z\-]*$");
+            if (match.Success)
+                return match.Groups[1].Value;
+            return streetPart;
         }
-        catch
+        return address;
+    }
+
+    /// <summary>
+    /// Extract street number from address (handles 52-8 format)
+    /// </summary>
+    public static int ParseStreetNumber(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return 0;
+
+        var parts = address.Split(',');
+        if (parts.Length > 0)
         {
-            return (address, 0, "", "");
+            // Match number with optional suffix like "4", "52-8", "100A"
+            var match = Regex.Match(parts[0], @"\s+(\d+)[\-A-Za-z0-9]*$");
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var num))
+                return num;
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// Extract Dutch postal code (1234 AB format)
+    /// </summary>
+    public static string ParsePostalCode(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+
+        var match = Regex.Match(address, @"\d{4}\s*[A-Z]{2}", RegexOptions.IgnoreCase);
+        return match.Success ? match.Value.ToUpperInvariant() : "";
+    }
+
+    /// <summary>
+    /// Extract city (last non-postal-code part)
+    /// </summary>
+    public static string ParseCity(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+
+        var parts = address.Split(',').Select(p => p.Trim()).ToArray();
+
+        // City is usually the last part that isn't a postal code
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            if (!Regex.IsMatch(parts[i], @"\d{4}\s*[A-Z]{2}", RegexOptions.IgnoreCase))
+                return parts[i];
+        }
+
+        return "Amsterdam"; // Default for NL
     }
 
     private static void Log(string msg) => OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+}
+
+// =========================
+// LEGACY COMPATIBILITY
+// =========================
+
+/// <summary>
+/// Legacy TaxiBotClient - delegates to BsqdDispatcher.
+/// Keep for backward compatibility.
+/// </summary>
+public static class TaxiBotClient
+{
+    public static event Action<string>? OnLog
+    {
+        add => BsqdDispatcher.OnLog += value;
+        remove => BsqdDispatcher.OnLog -= value;
+    }
+
+    public static void DispatchBooking(TaxiBotRequest payload) =>
+        Task.Run(async () => await BsqdDispatcher.SendAsync(payload));
 }
