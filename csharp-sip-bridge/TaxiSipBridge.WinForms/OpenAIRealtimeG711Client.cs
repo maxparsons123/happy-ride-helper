@@ -755,7 +755,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                // Don't call QueueResponseCreateAsync - OpenAI continues automatically after tool result
+                // Force OpenAI to continue after tool result - it doesn't auto-continue!
+                await SendEventAsync(new { type = "response.create" }).ConfigureAwait(false);
                 break;
 
             case "book_taxi":
