@@ -396,57 +396,108 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // Decode G.711 to PCM16 @ 8kHz
-                short[] pcm8k;
-                if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                // NATIVE G.711 MODE: Send raw G.711 bytes directly to OpenAI
+                // OpenAI is configured to receive g711_alaw or g711_ulaw @ 8kHz
+                // This eliminates decode → upsample → encode roundtrip for best quality
+                
+                if (_negotiatedCodec == AudioCodecsEnum.PCMA || _negotiatedCodec == AudioCodecsEnum.PCMU)
                 {
-                    pcm8k = AudioCodecs.ALawDecode(payload);
-                }
-                else if (_negotiatedCodec == AudioCodecsEnum.PCMU)
-                {
-                    pcm8k = AudioCodecs.MuLawDecode(payload);
-                }
-                else if (_negotiatedCodec == AudioCodecsEnum.OPUS)
-                {
-                    var stereo = AudioCodecs.OpusDecode(payload);
-                    pcm8k = new short[stereo.Length / 2];
-                    for (int i = 0; i < pcm8k.Length; i++)
-                        pcm8k[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
-                    pcm8k = AudioCodecs.Resample(pcm8k, 48000, 8000);
-                }
-                else if (_negotiatedCodec == AudioCodecsEnum.G722)
-                {
-                    pcm8k = AudioCodecs.G722Decode(payload);
-                    pcm8k = AudioCodecs.Resample(pcm8k, 16000, 8000);
+                    // Direct G.711 passthrough - no resampling!
+                    // Note: If bot is speaking, we could apply soft-gate at G.711 level,
+                    // but OpenAI's server VAD handles this well, so just pass through
+                    
+                    if (applySoftGate)
+                    {
+                        // Decode → attenuate → re-encode for soft gate during bot speaking
+                        short[] pcm8k;
+                        if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                            pcm8k = AudioCodecs.ALawDecode(payload);
+                        else
+                            pcm8k = AudioCodecs.MuLawDecode(payload);
+                        
+                        // Apply soft gate (90% attenuation unless loud barge-in)
+                        bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate: true);
+                        
+                        if (isBargeIn)
+                        {
+                            Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
+                        }
+                        
+                        // Re-encode to G.711 (matching negotiated codec)
+                        byte[] gatedG711;
+                        if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                            gatedG711 = AudioCodecs.ALawEncode(pcm8k);
+                        else
+                            gatedG711 = AudioCodecs.MuLawEncode(pcm8k);
+                        
+                        await ai.SendMuLawAsync(gatedG711);
+                    }
+                    else
+                    {
+                        // TRUE PASSTHROUGH: Raw G.711 → OpenAI (zero processing)
+                        await ai.SendMuLawAsync(payload);
+                    }
+                    
+                    _framesForwarded++;
+                    if (_framesForwarded % 50 == 0)
+                    {
+                        var codecName = _negotiatedCodec == AudioCodecsEnum.PCMA ? "PCMA" : "PCMU";
+                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({codecName} native 8kHz → OpenAI){(applySoftGate ? " [soft-gated]" : "")}");
+                    }
                 }
                 else
                 {
-                    return; // Unknown codec
+                    // Wideband codecs: Decode → Resample → Send as PCM
+                    short[] pcm8k;
+                    if (_negotiatedCodec == AudioCodecsEnum.OPUS)
+                    {
+                        var stereo = AudioCodecs.OpusDecode(payload);
+                        pcm8k = new short[stereo.Length / 2];
+                        for (int i = 0; i < pcm8k.Length; i++)
+                            pcm8k[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
+                        pcm8k = AudioCodecs.Resample(pcm8k, 48000, 8000);
+                    }
+                    else if (_negotiatedCodec == AudioCodecsEnum.G722)
+                    {
+                        pcm8k = AudioCodecs.G722Decode(payload);
+                        pcm8k = AudioCodecs.Resample(pcm8k, 16000, 8000);
+                    }
+                    else
+                    {
+                        return; // Unknown codec
+                    }
+
+                    // Apply soft gate for wideband
+                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate);
+                    if (applySoftGate && isBargeIn)
+                    {
+                        Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
+                    }
+
+                    // For wideband: encode to G.711 matching OpenAI config
+                    byte[] g711;
+                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                        g711 = AudioCodecs.ALawEncode(pcm8k);
+                    else
+                        g711 = AudioCodecs.MuLawEncode(pcm8k);
+                    
+                    await ai.SendMuLawAsync(g711);
+
+                    _framesForwarded++;
+                    if (_framesForwarded % 50 == 0)
+                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({_negotiatedCodec} → G.711 8kHz) → OpenAI{(applySoftGate ? " [soft-gated]" : "")}");
                 }
 
-                // Apply STT-optimized DSP with soft gate (DC removal, pre-emphasis, normalization)
-                // Soft gate attenuates by 90% when bot speaking, but allows loud barge-ins through
-                bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate);
-                
-                if (applySoftGate && isBargeIn)
+                // Audio monitor (decode for monitoring if needed)
+                if (OnCallerAudioMonitor != null)
                 {
-                    Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
+                    short[] monitorPcm;
+                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                        monitorPcm = AudioCodecs.ALawDecode(payload);
+                    else
+                        monitorPcm = AudioCodecs.MuLawDecode(payload);
+                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm));
                 }
-
-                // Resample 8kHz → 24kHz for OpenAI (uses SpeexDSP for high quality)
-                var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
-                var pcm24kBytes = AudioCodecs.ShortsToBytes(pcm24k);
-
-                // Send PCM16 @ 24kHz to OpenAI
-                await ai.SendAudioAsync(pcm24kBytes, 24000);
-
-                _framesForwarded++;
-                if (_framesForwarded % 50 == 0)
-                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (8kHz {_negotiatedCodec} → 24kHz PCM) → OpenAI{(applySoftGate ? " [soft-gated]" : "")}");
-
-
-                // Audio monitor
-                OnCallerAudioMonitor?.Invoke(pcm24kBytes);
             }
             catch (Exception ex)
             {
