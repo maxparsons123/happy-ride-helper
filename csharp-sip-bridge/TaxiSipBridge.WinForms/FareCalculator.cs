@@ -34,11 +34,19 @@ public static class FareCalculator
     /// <summary>
     /// Calculate fare based on pickup and destination addresses using real geocoding.
     /// This is the async version that uses OpenStreetMap for accurate distances.
+    /// Also returns geocoded coordinates for dispatch integration.
     /// </summary>
-    public static async Task<(string Fare, string Eta, double DistanceMiles)> CalculateFareAsync(string? pickup, string? destination)
+    public static async Task<FareResult> CalculateFareWithCoordsAsync(string? pickup, string? destination)
     {
+        var result = new FareResult
+        {
+            Fare = FormatFare(MIN_FARE),
+            Eta = "5 minutes",
+            DistanceMiles = 0
+        };
+
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
-            return (FormatFare(MIN_FARE), "5 minutes", 0);
+            return result;
 
         try
         {
@@ -51,6 +59,18 @@ public static class FareCalculator
             var pickupCoord = await pickupTask;
             var destCoord = await destTask;
 
+            // Store coordinates
+            if (pickupCoord.HasValue)
+            {
+                result.PickupLat = pickupCoord.Value.Lat;
+                result.PickupLon = pickupCoord.Value.Lon;
+            }
+            if (destCoord.HasValue)
+            {
+                result.DestLat = destCoord.Value.Lat;
+                result.DestLon = destCoord.Value.Lon;
+            }
+
             if (pickupCoord.HasValue && destCoord.HasValue)
             {
                 // Calculate real distance using Haversine
@@ -61,11 +81,15 @@ public static class FareCalculator
                 var fare = CalculateFareFromDistanceDecimal(distanceMiles);
                 var eta = EstimateEta(distanceMiles);
 
+                result.Fare = FormatFare(fare);
+                result.Eta = eta;
+                result.DistanceMiles = distanceMiles;
+
                 Console.WriteLine($"[FareCalculator] Geocoded distance: {distanceMiles:F2} miles");
                 Console.WriteLine($"[FareCalculator] Pickup: {pickup} → ({pickupCoord.Value.Lat:F4}, {pickupCoord.Value.Lon:F4})");
                 Console.WriteLine($"[FareCalculator] Dest: {destination} → ({destCoord.Value.Lat:F4}, {destCoord.Value.Lon:F4})");
 
-                return (FormatFare(fare), eta, distanceMiles);
+                return result;
             }
         }
         catch (Exception ex)
@@ -76,7 +100,19 @@ public static class FareCalculator
         // Fallback to keyword-based estimation
         var fallbackDistance = EstimateFromKeywords(pickup, destination);
         var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
-        return (FormatFare(fallbackFare), EstimateEta(fallbackDistance), fallbackDistance);
+        result.Fare = FormatFare(fallbackFare);
+        result.Eta = EstimateEta(fallbackDistance);
+        result.DistanceMiles = fallbackDistance;
+        return result;
+    }
+
+    /// <summary>
+    /// Legacy method for backwards compatibility.
+    /// </summary>
+    public static async Task<(string Fare, string Eta, double DistanceMiles)> CalculateFareAsync(string? pickup, string? destination)
+    {
+        var result = await CalculateFareWithCoordsAsync(pickup, destination);
+        return (result.Fare, result.Eta, result.DistanceMiles);
     }
 
     /// <summary>
@@ -238,4 +274,18 @@ public static class FareCalculator
         var cleaned = fare.Replace("£", "").Replace("$", "").Replace("€", "").Trim();
         return decimal.TryParse(cleaned, out var value) ? value : 0m;
     }
+}
+
+/// <summary>
+/// Result from fare calculation including coordinates for dispatch.
+/// </summary>
+public class FareResult
+{
+    public string Fare { get; set; } = "";
+    public string Eta { get; set; } = "";
+    public double DistanceMiles { get; set; }
+    public double? PickupLat { get; set; }
+    public double? PickupLon { get; set; }
+    public double? DestLat { get; set; }
+    public double? DestLon { get; set; }
 }
