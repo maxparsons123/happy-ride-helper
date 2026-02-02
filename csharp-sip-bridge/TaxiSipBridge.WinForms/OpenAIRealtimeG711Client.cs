@@ -22,7 +22,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.2-vad-aggressive";  // v1.2: threshold=0.3, prefix=200ms
+    public const string VERSION = "2.0-stable";  // Reverted to original VAD settings
 
     // =========================
     // G.711 CODEC SELECTION (from SIP negotiation)
@@ -399,8 +399,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.3,              // v1.2: Lowered from 0.4 for maximum speech sensitivity
-                    prefix_padding_ms = 200,      // v1.2: Lowered from 250 for faster detection
+                    threshold = 0.6,              // Original: higher threshold reduces false barge-ins
+                    prefix_padding_ms = 400,      // Original: more confirmation before speech_started
                     silence_duration_ms = 1000    // 1 second silence = end of turn
                 },
                 tools = GetTools(),
