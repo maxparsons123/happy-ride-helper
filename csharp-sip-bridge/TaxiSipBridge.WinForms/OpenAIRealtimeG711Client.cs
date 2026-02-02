@@ -11,27 +11,25 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// OpenAI Realtime API client using G.711 @ 8kHz (native OpenAI support).
-/// Supports both μ-law (PCMU) and A-law (PCMA) codecs.
+/// OpenAI Realtime API client using 24kHz PCM16 internally, G.711 on SIP side.
+/// Uses fast linear interpolation resampling for low-latency VAD triggering.
 /// 
-/// v1.5: Ported full flow from OpenAIRealtimeClient:
-/// - 8s no-reply watchdog, goodbye detection, transcript guard
-/// - STT corrections, keepalive loop, WhatsApp notification
-/// - Echo guard with confirmation bypass
-/// - Memory optimizations (SerializeToUtf8Bytes, Buffer.BlockCopy)
+/// v1.6: Switched from native G.711 to 24kHz PCM for better VAD responsiveness
+/// - Upsample 8kHz→24kHz on ingress (linear interpolation)
+/// - Downsample 24kHz→8kHz on egress (simple decimation)
+/// - Full flow from OpenAIRealtimeClient preserved
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.5";
+    public const string VERSION = "1.6";
 
     // =========================
-    // G.711 CODEC SELECTION
+    // G.711 CODEC SELECTION (SIP side)
     // =========================
     public enum G711Codec { MuLaw, ALaw }
     
     private readonly G711Codec _codec;
     private readonly byte _silenceByte;
-    private readonly string _openAiFormatString;
 
     // =========================
     // CONFIG
@@ -41,10 +39,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly string _voice;
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
-    // Audio format: G.711 @ 8kHz
-    private const int SAMPLE_RATE = 8000;
+    // Audio format: 24kHz PCM16 for OpenAI (better VAD), G.711 8kHz for SIP
+    private const int OPENAI_SAMPLE_RATE = 24000;
+    private const int SIP_SAMPLE_RATE = 8000;
     private const int FRAME_MS = 20;
-    private const int FRAME_SIZE_BYTES = SAMPLE_RATE * FRAME_MS / 1000; // 160 bytes
+    private const int SIP_FRAME_SIZE_BYTES = SIP_SAMPLE_RATE * FRAME_MS / 1000; // 160 bytes (G.711)
+    private const int PCM24K_FRAME_SAMPLES = OPENAI_SAMPLE_RATE * FRAME_MS / 1000; // 480 samples
 
     // =========================
     // THREAD-SAFE STATE
@@ -91,8 +91,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
     private const int MAX_QUEUE_FRAMES = 500;
 
-    // Audio accumulator (thread-safe)
-    private readonly byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 10];
+    // Audio accumulator for egress (G.711 bytes after downsampling)
+    private readonly byte[] _audioAccum = new byte[SIP_FRAME_SIZE_BYTES * 10];
     private int _audioAccumOffset;
     private readonly object _audioAccumLock = new();
 
@@ -144,7 +144,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         _voice = voice;
         _codec = codec;
         _silenceByte = codec == G711Codec.MuLaw ? (byte)0xFF : (byte)0xD5;
-        _openAiFormatString = codec == G711Codec.MuLaw ? "g711_ulaw" : "g711_alaw";
     }
 
     // =========================
@@ -163,7 +162,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         using var timeout = new CancellationTokenSource(_connectTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
-        Log($"📞 Connecting to OpenAI Realtime (G.711 {_codec} @ 8kHz)...");
+        Log($"📞 Connecting to OpenAI Realtime (24kHz PCM, SIP: G.711 {_codec})...");
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
             linked.Token
@@ -198,16 +197,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             await Task.Delay(50, linked.Token).ConfigureAwait(false);
 
         OnConnected?.Invoke();
-        Log($"✅ Connected to OpenAI Realtime (G.711 {_codec}, voice={_voice})");
+        Log($"✅ Connected to OpenAI Realtime (24kHz PCM, voice={_voice})");
     }
 
     /// <summary>
-    /// Send G.711 audio frame to OpenAI.
-    /// Uses SerializeToUtf8Bytes for reduced GC pressure.
+    /// Send G.711 audio frame to OpenAI (decodes to PCM, upsamples to 24kHz).
+    /// Uses fast linear interpolation for 8kHz→24kHz upsampling.
     /// </summary>
-    public async Task SendMuLawAsync(byte[] ulawData)
+    public async Task SendMuLawAsync(byte[] g711Data)
     {
-        if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
+        if (!IsConnected || g711Data == null || g711Data.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) != 0) return;
 
         // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
@@ -216,10 +215,22 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
+            // 1. Decode G.711 to PCM16 @ 8kHz
+            short[] pcm8k = _codec == G711Codec.ALaw
+                ? AudioCodecs.ALawDecode(g711Data)
+                : AudioCodecs.MuLawDecode(g711Data);
+
+            // 2. Upsample 8kHz → 24kHz using linear interpolation
+            short[] pcm24k = Upsample8kTo24k(pcm8k);
+
+            // 3. Convert to bytes and send to OpenAI
+            var pcm24kBytes = new byte[pcm24k.Length * 2];
+            Buffer.BlockCopy(pcm24k, 0, pcm24kBytes, 0, pcm24kBytes.Length);
+
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "input_audio_buffer.append",
-                audio = Convert.ToBase64String(ulawData)
+                audio = Convert.ToBase64String(pcm24kBytes)
             });
 
             await SendBytesAsync(bytes).ConfigureAwait(false);
@@ -227,12 +238,65 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
             var count = Interlocked.Increment(ref _audioFramesSent);
             if (count % 50 == 0)
-                Log($"📤 Sent {count} audio frames to OpenAI");
+                Log($"📤 Sent {count} audio frames to OpenAI (24kHz PCM)");
         }
         catch (Exception ex)
         {
             Log($"⚠️ SendMuLawAsync error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Upsample 8kHz PCM to 24kHz PCM (3x) using linear interpolation.
+    /// Fast and clean for VAD sensitivity.
+    /// </summary>
+    private static short[] Upsample8kTo24k(short[] input)
+    {
+        if (input == null || input.Length == 0) return Array.Empty<short>();
+
+        var output = new short[input.Length * 3];
+
+        for (int i = 0; i < input.Length - 1; i++)
+        {
+            int outIdx = i * 3;
+            short current = input[i];
+            short next = input[i + 1];
+
+            output[outIdx] = current;
+            // Linear interpolation for 2 intermediate points
+            output[outIdx + 1] = (short)(current + (next - current) / 3);
+            output[outIdx + 2] = (short)(current + (next - current) * 2 / 3);
+        }
+
+        // Handle last sample
+        if (input.Length > 0)
+        {
+            int lastIdx = (input.Length - 1) * 3;
+            output[lastIdx] = input[input.Length - 1];
+            output[lastIdx + 1] = input[input.Length - 1];
+            output[lastIdx + 2] = input[input.Length - 1];
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Downsample 24kHz PCM to 8kHz PCM (1/3x) by taking every 3rd sample.
+    /// Simple decimation for minimum latency.
+    /// </summary>
+    private static short[] Downsample24kTo8k(short[] input)
+    {
+        if (input == null || input.Length == 0) return Array.Empty<short>();
+
+        int outputLength = input.Length / 3;
+        var output = new short[outputLength];
+
+        for (int i = 0; i < outputLength; i++)
+        {
+            output[i] = input[i * 3];
+        }
+
+        return output;
     }
 
     /// <summary>
@@ -329,8 +393,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = _openAiFormatString,
-                output_audio_format = _openAiFormatString,
+                input_audio_format = "pcm16",
+                output_audio_format = "pcm16",
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
@@ -345,7 +409,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
         };
 
-        Log($"🎧 Configuring session: format={_openAiFormatString}, voice={_voice}, server_vad");
+        Log($"🎧 Configuring session: format=pcm16@24kHz, voice={_voice}, server_vad");
         await SendJsonAsync(config).ConfigureAwait(false);
     }
 
@@ -915,7 +979,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // AUDIO PROCESSING
+    // AUDIO PROCESSING (24kHz PCM → 8kHz G.711)
     // =========================
 
     private void ProcessAudioDelta(string base64)
@@ -924,12 +988,26 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            var g711Bytes = Convert.FromBase64String(base64);
+            // Receive 24kHz PCM16 from OpenAI
+            var pcm24kBytes = Convert.FromBase64String(base64);
+            
+            // Convert bytes to shorts
+            var pcm24k = new short[pcm24kBytes.Length / 2];
+            Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
+            
+            // Downsample 24kHz → 8kHz
+            var pcm8k = Downsample24kTo8k(pcm24k);
+            
+            // Encode to G.711 for SIP
+            var g711Bytes = _codec == G711Codec.ALaw
+                ? AudioCodecs.ALawEncode(pcm8k)
+                : AudioCodecs.MuLawEncode(pcm8k);
+            
             AppendAndEnqueueG711(g711Bytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
-                Log($"📢 Received {chunks} audio chunks (G.711 {_codec}), queue={_outboundQueue.Count}");
+                Log($"📢 Received {chunks} audio chunks (24kHz→8kHz {_codec}), queue={_outboundQueue.Count}");
         }
         catch (Exception ex)
         {
@@ -947,7 +1025,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
             while (sourceOffset < bytes.Length)
             {
-                int needed = FRAME_SIZE_BYTES - _audioAccumOffset;
+                int needed = SIP_FRAME_SIZE_BYTES - _audioAccumOffset;
                 int remainingInRaw = bytes.Length - sourceOffset;
                 int toCopy = Math.Min(needed, remainingInRaw);
 
@@ -956,12 +1034,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 _audioAccumOffset += toCopy;
                 sourceOffset += toCopy;
 
-                if (_audioAccumOffset == FRAME_SIZE_BYTES)
+                if (_audioAccumOffset == SIP_FRAME_SIZE_BYTES)
                 {
                     if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
                     {
-                        var frame = new byte[FRAME_SIZE_BYTES];
-                        Buffer.BlockCopy(_audioAccum, 0, frame, 0, FRAME_SIZE_BYTES);
+                        var frame = new byte[SIP_FRAME_SIZE_BYTES];
+                        Buffer.BlockCopy(_audioAccum, 0, frame, 0, SIP_FRAME_SIZE_BYTES);
                         _outboundQueue.Enqueue(frame);
                     }
                     _audioAccumOffset = 0;
@@ -978,10 +1056,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
             if (padWithSilence)
             {
-                var frame = new byte[FRAME_SIZE_BYTES];
+                var frame = new byte[SIP_FRAME_SIZE_BYTES];
                 Buffer.BlockCopy(_audioAccum, 0, frame, 0, _audioAccumOffset);
                 
-                for (int i = _audioAccumOffset; i < FRAME_SIZE_BYTES; i++)
+                for (int i = _audioAccumOffset; i < SIP_FRAME_SIZE_BYTES; i++)
                     frame[i] = _silenceByte;
 
                 if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
