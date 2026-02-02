@@ -401,8 +401,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 {
                     type = "server_vad",
                     threshold = 0.35,
-                    prefix_padding_ms = 600,
-                    silence_duration_ms = 1200
+                    prefix_padding_ms = 400,      // Reduced from 600 for faster turn detection
+                    silence_duration_ms = 1000    // Reduced from 1200 (conservative but faster)
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -936,10 +936,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300; // Match OpenAIRealtimeClient exactly
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 150; // Reduced from 300ms for faster responses
     }
 
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 20, bool waitForCurrentResponse = true)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -949,10 +949,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Wait for any active response to complete (up to 5s) - matches OpenAIRealtimeClient
+            // Wait for any active response to complete (up to 3s) - reduced from 5s for faster turnaround
             if (waitForCurrentResponse)
             {
-                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
+                for (int i = 0; i < 60 && Volatile.Read(ref _responseActive) == 1; i++)
                     await Task.Delay(50).ConfigureAwait(false);
             }
 
@@ -969,7 +969,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             if (!CanCreateResponse())
                 return;
 
-            // DO NOT set _responseActive = 1 here — let OpenAI's response.created do it
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
             Log("🔄 response.create sent");
         }
