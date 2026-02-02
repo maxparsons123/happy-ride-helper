@@ -195,8 +195,8 @@ Be concise, warm, and professional.
                 : OpenAIRealtimeG711Client.G711Codec.MuLaw;
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
             
-            // Create DirectRtpPlayout for proper DSP (AGC, DC removal, soft limiting, FIR downsampling)
-            _playout = new DirectRtpPlayout(_currentMediaSession);
+            // Create DirectRtpPlayout in NATIVE G.711 MODE (zero DSP passthrough)
+            _playout = new DirectRtpPlayout(_currentMediaSession, nativeG711Mode: true);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -208,20 +208,20 @@ Be concise, warm, and professional.
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] DirectRtpPlayout started (DSP: AGC + DC removal + soft limiting)");
+            Log($"🎵 [{callId}] DirectRtpPlayout started (NATIVE G.711 - zero DSP passthrough)");
 
-            // Wire AI client events (including PCM24k audio routing)
+            // Wire AI client events (using native G.711 audio path)
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM16 24kHz → DSP → {aiCodec})...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (native G.711 {aiCodec} @ 8kHz)...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call fully established (DSP mode, DirectRtpPlayout)");
+            Log($"✅ [{callId}] Call fully established (NATIVE G.711 mode - zero DSP)");
 
             // Keep call alive
             while (!cts.IsCancellationRequested && _aiClient.IsConnected && !_disposed)
@@ -250,14 +250,14 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // Route PCM24k audio to DirectRtpPlayout for DSP processing
-        _aiClient.OnPcm24Audio += pcm24kBytes =>
+        // NATIVE G.711 PATH: Route raw G.711 audio directly to DirectRtpPlayout (zero DSP)
+        _aiClient.OnG711Audio += g711Bytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
             
-            // DirectRtpPlayout applies FIR downsampling, DC removal, AGC, soft limiting
-            _playout?.BufferAiAudio(pcm24kBytes);
+            // DirectRtpPlayout in native mode: direct G.711 passthrough
+            _playout?.BufferG711Audio(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>

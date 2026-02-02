@@ -128,7 +128,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     public event Action<string>? OnLog;
     public event Action<string>? OnTranscript;
-    public event Action<byte[]>? OnPcm24Audio;
+    public event Action<byte[]>? OnPcm24Audio;  // Legacy: PCM16 @ 24kHz (for DSP path)
+    public event Action<byte[]>? OnG711Audio;   // Native: Raw G.711 @ 8kHz (zero DSP)
     public event Action? OnConnected;
     public event Action? OnDisconnected;
     public event Action? OnResponseStarted;
@@ -1034,29 +1035,33 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         try
         {
             // NATIVE G.711 MODE: OpenAI sends G.711 @ 8kHz directly
-            // No resampling needed - just decode base64 and use!
             byte[] g711Bytes = Convert.FromBase64String(base64);
 
-            // Fire OnPcm24Audio event for legacy compatibility (convert G.711 to PCM24k)
-            // This allows DirectRtpPlayout to still work if needed
-            short[] pcm8k = _codec == G711Codec.ALaw
-                ? AudioCodecs.ALawDecode(g711Bytes)
-                : AudioCodecs.MuLawDecode(g711Bytes);
-            
-            // Simple 3x linear upsample for DSP path compatibility
-            short[] pcm24k = new short[pcm8k.Length * 3];
-            for (int i = 0; i < pcm8k.Length; i++)
-            {
-                short current = pcm8k[i];
-                short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
-                pcm24k[i * 3] = current;
-                pcm24k[i * 3 + 1] = (short)((current * 2 + next) / 3);
-                pcm24k[i * 3 + 2] = (short)((current + next * 2) / 3);
-            }
-            byte[] pcm24kBytes = AudioCodecs.ShortsToBytes(pcm24k);
-            OnPcm24Audio?.Invoke(pcm24kBytes);
+            // PRIMARY PATH: Fire OnG711Audio for native zero-DSP passthrough
+            OnG711Audio?.Invoke(g711Bytes);
 
-            // Direct G.711 path: enqueue raw G.711 frames for RTP (ZERO resampling)
+            // LEGACY PATH: Convert to PCM24k for older handlers that expect it
+            if (OnPcm24Audio != null)
+            {
+                short[] pcm8k = _codec == G711Codec.ALaw
+                    ? AudioCodecs.ALawDecode(g711Bytes)
+                    : AudioCodecs.MuLawDecode(g711Bytes);
+                
+                // Simple 3x linear upsample for DSP path compatibility
+                short[] pcm24k = new short[pcm8k.Length * 3];
+                for (int i = 0; i < pcm8k.Length; i++)
+                {
+                    short current = pcm8k[i];
+                    short next = (i + 1 < pcm8k.Length) ? pcm8k[i + 1] : current;
+                    pcm24k[i * 3] = current;
+                    pcm24k[i * 3 + 1] = (short)((current * 2 + next) / 3);
+                    pcm24k[i * 3 + 2] = (short)((current + next * 2) / 3);
+                }
+                byte[] pcm24kBytes = AudioCodecs.ShortsToBytes(pcm24k);
+                OnPcm24Audio.Invoke(pcm24kBytes);
+            }
+
+            // Legacy queue for pull-based handlers (GetNextMuLawFrame)
             EnqueueG711FramesDirect(g711Bytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
