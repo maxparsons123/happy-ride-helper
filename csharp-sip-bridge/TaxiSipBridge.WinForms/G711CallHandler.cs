@@ -344,11 +344,22 @@ Be concise, warm, and professional.
             Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
 
-        Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
+        // Barge-in: triggered by OpenAI's semantic VAD (speech_started event)
+        // This is more reliable than triggering on raw RTP arrival (which fires on line noise)
+        _aiClient.OnBargeIn += () =>
+        {
+            var pendingPlayoutFrames = _playout?.PendingFrameCount ?? 0;
+            if (pendingPlayoutFrames > 0)
+            {
+                _playout?.Clear();
+                _aiClient?.ClearPendingFrames();
+                Log($"✂️ [{callId}] Barge-in (VAD): cleared playout ({pendingPlayoutFrames} frames) + AI queue");
+            }
+        };
+
+        Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted, OnBargeIn");
 
         _aiClient.OnAdaSpeaking += _ => { };
-        // NOTE: Barge-in is handled in WireRtpInput by clearing playout when user audio arrives
-        // while AI audio is still buffered.
 
         // AI-triggered hangup
         Action? endCallHandler = null;
@@ -450,15 +461,8 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // Barge-in: if AI audio is still buffered for RTP, cut it immediately.
-                // (This avoids relying on a client-specific event and works across builds.)
-                var pendingPlayoutFrames = _playout?.PendingFrameCount ?? 0;
-                if (pendingPlayoutFrames > 0)
-                {
-                    _playout?.Clear();
-                    ai.ClearPendingFrames();
-                    Log($"✂️ [{callId}] Barge-in: cleared playout ({pendingPlayoutFrames} frames) + AI queue");
-                }
+                // NOTE: Barge-in is now handled via OnBargeIn event (semantic VAD from OpenAI)
+                // This prevents false triggers from line noise that plagued the raw RTP approach
 
                 // Since OpenAI is now configured for the same codec as SIP,
                 // we can pass G.711 frames directly without transcoding!
