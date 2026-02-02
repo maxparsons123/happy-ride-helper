@@ -190,13 +190,11 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create OpenAI client - MUST match the SIP-negotiated codec exactly!
-            // OpenAI sends raw G.711 bytes that go straight to RTP, so codec MUST match.
-            var sipCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
-                ? OpenAIRealtimeG711Client.G711Codec.ALaw 
-                : OpenAIRealtimeG711Client.G711Codec.MuLaw;
+            // FORCE A-LAW: Hardcoded to eliminate codec mismatch debugging
+            // TODO: Restore dynamic codec selection once audio verified working
+            var sipCodec = OpenAIRealtimeG711Client.G711Codec.ALaw;
             
-            Log($"🎵 [{callId}] SIP negotiated {_negotiatedCodec}, configuring OpenAI for {sipCodec}");
+            Log($"🎵 [{callId}] FORCED A-law (ignoring SIP negotiated {_negotiatedCodec})");
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, sipCodec);
 
             // Feature add-ons: tool handling + booking state + dispatch
