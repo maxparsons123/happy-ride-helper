@@ -273,9 +273,16 @@ Be concise, warm, and professional.
             Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
 
-        // Barge-in handler
+        // Barge-in handler - only act if Ada is actually speaking or queue has audio
         Action bargeInHandler = () =>
         {
+            // If Ada isn't speaking, this is just normal speech starting a new turn - not a barge-in
+            if (!_isBotSpeaking && (_playout == null || _playout.QueueCount == 0))
+            {
+                // Normal new turn - no need to clear anything
+                return;
+            }
+            
             _playout?.Clear();
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
