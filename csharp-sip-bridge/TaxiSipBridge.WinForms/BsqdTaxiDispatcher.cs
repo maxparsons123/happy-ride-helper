@@ -49,7 +49,7 @@ public static class BsqdDispatcher
     private static readonly string Url =
         "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
 
-    private static readonly string BearerToken = "RhjpZxqLXl2snLNMBwK7iIVq";
+    private static readonly string BearerToken = "sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v";
 
     public static event Action<string>? OnLog;
 
