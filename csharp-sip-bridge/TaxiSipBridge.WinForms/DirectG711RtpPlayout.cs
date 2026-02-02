@@ -39,6 +39,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private bool _isPlaying;
     private int _framesSent;
     private uint _timestamp;
+    private ushort _sequence; // Critical: must increment per packet for jitter buffer
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -53,9 +54,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _silence = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
         _payloadType = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)8 : (byte)0;
-        _timestamp = 0;
-
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Created (codec={codec}, PT={_payloadType})");
+        // Timestamp and sequence initialized in Start() with random values
     }
 
     /// <summary>
@@ -95,11 +94,15 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
         _framesSent = 0;
         _isPlaying = false;
-        _timestamp = 0;
+        
+        // RFC 3550: Random start values for timestamp and sequence
+        _timestamp = (uint)Random.Shared.Next();
+        _sequence = (ushort)Random.Shared.Next(0, ushort.MaxValue);
 
         // 20ms timer - the heart of telephony timing
-        _timer = new Timer(SendFrame, null, 0, FRAME_MS);
-        OnLog?.Invoke("[DirectG711RtpPlayout] Started (20ms timer, SendRtpRaw)");
+        // Start with FRAME_MS delay (not 0) to avoid immediate fire + timestamp skew
+        _timer = new Timer(SendFrame, null, FRAME_MS, FRAME_MS);
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (20ms timer, seq={_sequence}, ts={_timestamp})");
     }
 
     public void Stop()
@@ -162,8 +165,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
         try
         {
             // Use SendRtpRaw for direct G.711 byte passthrough (no encoding)
-            // This matches the proven DirectRtpPlayout pattern
-            _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, (int)_payloadType);
+            // Critical: _sequence++ ensures proper jitter buffer handling
+            _mediaSession.SendRtpRaw(
+                SDPMediaTypesEnum.audio,
+                frame,
+                _timestamp,
+                _sequence++,  // Must increment per packet!
+                (int)_payloadType
+            );
             _timestamp += FRAME_SIZE;
         }
         catch (Exception ex)
