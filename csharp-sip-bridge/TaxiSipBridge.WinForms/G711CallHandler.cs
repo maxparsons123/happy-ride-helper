@@ -346,6 +346,14 @@ Be concise, warm, and professional.
         Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
 
         _aiClient.OnAdaSpeaking += _ => { };
+        
+        // Barge-in: Clear playout buffer when user interrupts AI
+        _aiClient.OnBargeIn += () =>
+        {
+            _playout?.Clear();
+            _isBotSpeaking = false;
+            Log($"✂️ [{callId}] Barge-in: AI audio truncated, playout cleared");
+        };
 
         // AI-triggered hangup
         Action? endCallHandler = null;
