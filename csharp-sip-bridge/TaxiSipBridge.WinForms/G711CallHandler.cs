@@ -396,53 +396,36 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // NATIVE G.711 MODE: Send raw G.711 bytes directly to OpenAI
-                // OpenAI is configured to receive g711_alaw or g711_ulaw @ 8kHz
-                // This eliminates decode → upsample → encode roundtrip for best quality
+                // NATIVE G.711 MODE with DSP enhancement
+                // Decode G.711 → Apply ingress DSP → Re-encode G.711 for OpenAI
+                // This preserves audio quality while adding DC removal + normalization for better STT
                 
                 if (_negotiatedCodec == AudioCodecsEnum.PCMA || _negotiatedCodec == AudioCodecsEnum.PCMU)
                 {
-                    // Direct G.711 passthrough - no resampling!
-                    // Note: If bot is speaking, we could apply soft-gate at G.711 level,
-                    // but OpenAI's server VAD handles this well, so just pass through
-                    
-                    if (applySoftGate)
-                    {
-                        // Decode → attenuate → re-encode for soft gate during bot speaking
-                        short[] pcm8k;
-                        if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                            pcm8k = AudioCodecs.ALawDecode(payload);
-                        else
-                            pcm8k = AudioCodecs.MuLawDecode(payload);
-                        
-                        // Apply soft gate (90% attenuation unless loud barge-in)
-                        bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: true);
-                        
-                        if (isBargeIn)
-                        {
-                            Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
-                        }
-                        
-                        // Re-encode to G.711 (matching negotiated codec)
-                        byte[] gatedG711;
-                        if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                            gatedG711 = AudioCodecs.ALawEncode(pcm8k);
-                        else
-                            gatedG711 = AudioCodecs.MuLawEncode(pcm8k);
-                        
-                        await ai.SendMuLawAsync(gatedG711);
-                    }
+                    // Always decode → apply DSP → re-encode for consistent quality
+                    short[] pcm8k;
+                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+                        pcm8k = AudioCodecs.ALawDecode(payload);
                     else
+                        pcm8k = AudioCodecs.MuLawDecode(payload);
+                    
+                    // Apply ingress DSP (DC removal, normalization, soft gate if needed)
+                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: applySoftGate);
+                    
+                    if (applySoftGate && isBargeIn)
                     {
-                        // TRUE PASSTHROUGH: Raw G.711 → OpenAI (zero processing)
-                        await ai.SendMuLawAsync(payload);
+                        Log($"🎤 [{callId}] Barge-in detected via soft gate");
                     }
+                    
+                    // Re-encode to G.711 (use A-law since OpenAI is configured for it)
+                    byte[] processedG711 = AudioCodecs.ALawEncode(pcm8k);
+                    await ai.SendMuLawAsync(processedG711);
                     
                     _framesForwarded++;
                     if (_framesForwarded % 50 == 0)
                     {
                         var codecName = _negotiatedCodec == AudioCodecsEnum.PCMA ? "PCMA" : "PCMU";
-                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({codecName} native 8kHz → OpenAI){(applySoftGate ? " [soft-gated]" : "")}");
+                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({codecName} → DSP → G711 alaw → OpenAI){(applySoftGate ? " [gated]" : "")}");
                     }
                 }
                 else
