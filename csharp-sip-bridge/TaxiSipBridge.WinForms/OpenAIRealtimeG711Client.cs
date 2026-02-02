@@ -22,7 +22,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.0-native-g711";
+    public const string VERSION = "2.1-vad-tuning";  // v1.1: threshold=0.4, prefix=250ms
 
     // =========================
     // G.711 CODEC SELECTION (from SIP negotiation)
