@@ -205,6 +205,9 @@ Be concise, warm, and professional.
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
                     Log($"🔇 [{callId}] Playout queue empty - echo guard started");
+                    
+                    // Notify AI client that playout is complete - this starts the accurate no-reply watchdog
+                    _aiClient?.NotifyPlayoutComplete();
                 }
             };
             _playout.Start();

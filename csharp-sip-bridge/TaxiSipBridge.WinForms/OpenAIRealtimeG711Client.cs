@@ -140,6 +140,54 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action? OnBargeIn; // Fired when user interrupts AI
     public event Action<BookingState>? OnBookingUpdated;
 
+    /// <summary>
+    /// Notify that the playout queue has emptied (Ada's audio finished playing).
+    /// This resets the no-reply watchdog timer for accurate user response time measurement.
+    /// </summary>
+    public void NotifyPlayoutComplete()
+    {
+        // Reset watchdog start time to NOW (when audio actually finished)
+        // This gives the user the full timeout window from when they actually hear silence
+        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+        
+        // Increment watchdog ID to cancel any running watchdog, then start a new one
+        var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
+        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+        
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
+
+            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+            if (Volatile.Read(ref _responseActive) == 1) return;
+
+            Log($"⏰ No-reply watchdog triggered - prompting user");
+
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "input_text",
+                            text = "[SILENCE DETECTED] The user has not responded. Say something brief like 'Are you still there?' or 'Hello?' - do NOT repeat your previous question or offer. Wait for their response."
+                        }
+                    }
+                }
+            }).ConfigureAwait(false);
+
+            await Task.Delay(20).ConfigureAwait(false);
+            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+            Log("🔄 response.create sent (no-reply watchdog from playout empty)");
+        });
+    }
+
     // =========================
     // PROPERTIES
     // =========================
@@ -584,45 +632,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         });
                     }
 
-                    // No-reply watchdog: give the caller enough time to respond AFTER Ada finishes.
-                    // NOTE: response.done can arrive slightly before the final audio finishes playout,
-                    // so we intentionally use a more patient timeout.
-                    var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
-                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
-
-                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                        if (Volatile.Read(ref _responseActive) == 1) return;
-
-                        Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
-
-                        await SendJsonAsync(new
-                        {
-                            type = "conversation.item.create",
-                            item = new
-                            {
-                                type = "message",
-                                role = "system",
-                                content = new[]
-                                {
-                                    new
-                                    {
-                                        type = "input_text",
-                                        text = "[SILENCE DETECTED] The user has not responded. Say something brief like 'Are you still there?' or 'Hello?' - do NOT repeat your previous question or offer. Wait for their response."
-                                    }
-                                }
-                            }
-                        }).ConfigureAwait(false);
-
-                        // Send response.create directly - bypass CanCreateResponse() since we've already
-                        // confirmed prolonged silence, and _lastUserSpeechAt may be updated by soft-gated audio
-                        await Task.Delay(20).ConfigureAwait(false);
-                        await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-                        Log("🔄 response.create sent (no-reply watchdog)");
-                    });
+                    // No-reply watchdog: The primary watchdog is now triggered by NotifyPlayoutComplete()
+                    // which fires when the playout queue empties (when user actually hears silence).
+                    // This response.done handler only cancels any stale watchdog.
+                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any running watchdog
+                    // The actual watchdog will be started by NotifyPlayoutComplete() from the call handler
 
                     break;
                 }
