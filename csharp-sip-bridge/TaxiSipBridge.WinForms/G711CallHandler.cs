@@ -38,8 +38,8 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private SipAudioPlayout? _playout;
-    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMU; // Default to μ-law for G711 mode
+    private DirectRtpPlayout? _playout;   // Use DirectRtpPlayout for proper DSP (AGC, DC removal, soft limiting)
+    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA; // Default to A-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
     private CancellationTokenSource? _callCts;
@@ -189,40 +189,39 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create OpenAI G711 client with matching codec
+            // Create OpenAI client - uses PCM16 @ 24kHz for DSP benefits
             var aiCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
                 ? OpenAIRealtimeG711Client.G711Codec.ALaw 
                 : OpenAIRealtimeG711Client.G711Codec.MuLaw;
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
-            WireAiClientEvents(callId, cts);
-
-            // Create timer-driven RTP playout (pulls from AI client every 20ms)
-            // VoIPMediaSession inherits from RTPSession, so we pass it directly
-            _playout = new SipAudioPlayout(_currentMediaSession, () => _aiClient?.GetNextMuLawFrame(), _negotiatedCodec);
+            
+            // Create DirectRtpPlayout for proper DSP (AGC, DC removal, soft limiting, FIR downsampling)
+            _playout = new DirectRtpPlayout(_currentMediaSession);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
-                // Only update timestamp ONCE when transitioning from speaking → silent
-                // (not continuously every 20ms during silence)
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] Playout queue empty - echo guard started");
+                    Log($"🔇 [{callId}] DirectRtpPlayout queue empty - echo guard started");
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] SipAudioPlayout started ({_negotiatedCodec})");
+            Log($"🎵 [{callId}] DirectRtpPlayout started (DSP: AGC + DC removal + soft limiting)");
+
+            // Wire AI client events (including PCM24k audio routing)
+            WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (G.711 {aiCodec} @ 8kHz)...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM16 24kHz → DSP → {aiCodec})...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call fully established (G711 mode, timer-driven playout)");
+            Log($"✅ [{callId}] Call fully established (DSP mode, DirectRtpPlayout)");
 
             // Keep call alive
             while (!cts.IsCancellationRequested && _aiClient.IsConnected && !_disposed)
@@ -251,6 +250,16 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
+        // Route PCM24k audio to DirectRtpPlayout for DSP processing
+        _aiClient.OnPcm24Audio += pcm24kBytes =>
+        {
+            _isBotSpeaking = true;
+            _adaHasStartedSpeaking = true;
+            
+            // DirectRtpPlayout applies FIR downsampling, DC removal, AGC, soft limiting
+            _playout?.BufferAiAudio(pcm24kBytes);
+        };
+
         _aiClient.OnResponseStarted += () =>
         {
             _isBotSpeaking = true;
@@ -259,21 +268,18 @@ Be concise, warm, and professional.
 
         _aiClient.OnResponseCompleted += () =>
         {
-            // CRITICAL: Allow user audio forwarding immediately when AI finishes generating,
-            // NOT when playout buffer empties (which can take 10+ seconds for long responses)
             _isBotSpeaking = false;
             _botStoppedSpeakingAt = DateTime.UtcNow;
             Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
 
-        // Barge-in: triggered by OpenAI semantic VAD (input_audio_buffer.speech_started).
-        // Some local builds may not yet expose an OnBargeIn event; wire it via reflection for compatibility.
+        // Barge-in handler
         Action bargeInHandler = () =>
         {
-            _aiClient?.ClearPendingFrames();
+            _playout?.Clear();
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
-            Log($"✂️ [{callId}] Barge-in (VAD): cleared AI audio queue");
+            Log($"✂️ [{callId}] Barge-in (VAD): cleared DirectRtpPlayout queue");
         };
 
         try
@@ -283,21 +289,17 @@ Be concise, warm, and professional.
             {
                 var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
                 evt.AddEventHandler(_aiClient, del);
-                Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted, OnBargeIn");
+                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio, OnResponseStarted, OnResponseCompleted, OnBargeIn");
             }
             else
             {
-                Log($"⚠️ [{callId}] OnBargeIn event not found on OpenAIRealtimeG711Client; barge-in disabled.");
-                Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
+                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio, OnResponseStarted, OnResponseCompleted");
             }
         }
         catch (Exception ex)
         {
-            Log($"⚠️ [{callId}] Failed to wire OnBargeIn via reflection: {ex.Message}");
-            Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
+            Log($"⚠️ [{callId}] Failed to wire OnBargeIn: {ex.Message}");
         }
-
-        _aiClient.OnAdaSpeaking += _ => { };
 
         // AI-triggered hangup
         Action? endCallHandler = null;
@@ -399,56 +401,47 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // NOTE: Barge-in is now handled via OnBargeIn event (semantic VAD from OpenAI)
-                // This prevents false triggers from line noise that plagued the raw RTP approach
-
-                // Since OpenAI is now configured for the same codec as SIP,
-                // we can pass G.711 frames directly without transcoding!
-                // Both PCMU and PCMA are passed through to OpenAI natively.
-                byte[] g711Payload;
-                if (_negotiatedCodec == AudioCodecsEnum.PCMU || _negotiatedCodec == AudioCodecsEnum.PCMA)
+                // Decode G.711 to PCM16 @ 8kHz, then resample to 24kHz for OpenAI
+                short[] pcm8k;
+                if (_negotiatedCodec == AudioCodecsEnum.PCMA)
                 {
-                    // Direct passthrough - no transcoding needed
-                    g711Payload = payload;
+                    pcm8k = AudioCodecs.ALawDecode(payload);
+                }
+                else if (_negotiatedCodec == AudioCodecsEnum.PCMU)
+                {
+                    pcm8k = AudioCodecs.MuLawDecode(payload);
+                }
+                else if (_negotiatedCodec == AudioCodecsEnum.OPUS)
+                {
+                    var stereo = AudioCodecs.OpusDecode(payload);
+                    pcm8k = new short[stereo.Length / 2];
+                    for (int i = 0; i < pcm8k.Length; i++)
+                        pcm8k[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
+                    pcm8k = AudioCodecs.Resample(pcm8k, 48000, 8000);
+                }
+                else if (_negotiatedCodec == AudioCodecsEnum.G722)
+                {
+                    pcm8k = AudioCodecs.G722Decode(payload);
+                    pcm8k = AudioCodecs.Resample(pcm8k, 16000, 8000);
                 }
                 else
                 {
-                    // For wideband codecs, decode to PCM and encode to μ-law
-                    // (fallback path - G711 mode should negotiate G.711 codecs)
-                    short[] pcm;
-                    if (_negotiatedCodec == AudioCodecsEnum.OPUS)
-                    {
-                        var stereo = AudioCodecs.OpusDecode(payload);
-                        pcm = new short[stereo.Length / 2];
-                        for (int i = 0; i < pcm.Length; i++)
-                            pcm[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
-                        pcm = AudioCodecs.Resample(pcm, 48000, 8000);
-                    }
-                    else if (_negotiatedCodec == AudioCodecsEnum.G722)
-                    {
-                        pcm = AudioCodecs.G722Decode(payload);
-                        pcm = AudioCodecs.Resample(pcm, 16000, 8000);
-                    }
-                    else
-                    {
-                        return; // Unknown codec
-                    }
-                    g711Payload = AudioCodecs.MuLawEncode(pcm);
+                    return; // Unknown codec
                 }
 
-                // Send G.711 directly to OpenAI (format matches session config)
-                await ai.SendMuLawAsync(g711Payload);
+                // Resample 8kHz → 24kHz for OpenAI (uses SpeexDSP for high quality)
+                var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
+                var pcm24kBytes = AudioCodecs.ShortsToBytes(pcm24k);
+
+                // Send PCM16 @ 24kHz to OpenAI
+                await ai.SendAudioAsync(pcm24kBytes, 24000);
 
                 _framesForwarded++;
                 if (_framesForwarded % 50 == 0)
-                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames → OpenAI ({_negotiatedCodec})");
+                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (8kHz {_negotiatedCodec} → 24kHz PCM) → OpenAI");
 
-                // Audio monitor (convert to PCM for speaker output)
-                var monitorPcm = _negotiatedCodec == AudioCodecsEnum.PCMA
-                    ? AudioCodecs.ALawDecode(g711Payload)
-                    : AudioCodecs.MuLawDecode(g711Payload);
-                var monitor24k = AudioCodecs.ResampleWithSpeex(monitorPcm, 8000, 24000);
-                OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitor24k));
+                // Audio monitor
+                OnCallerAudioMonitor?.Invoke(pcm24kBytes);
             }
             catch (Exception ex)
             {

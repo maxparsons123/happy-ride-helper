@@ -85,15 +85,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
 
     // =========================
-    // AUDIO OUTPUT
+    // AUDIO OUTPUT (now via OnPcm24Audio event to DirectRtpPlayout)
     // =========================
-    private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
-    private const int MAX_QUEUE_FRAMES = 2000; // 40s buffer - OpenAI sends audio faster than realtime
-
-    // Audio accumulator for egress (G.711 bytes - direct passthrough)
-    private readonly byte[] _audioAccum = new byte[FRAME_SIZE_BYTES * 10];
-    private int _audioAccumOffset;
-    private readonly object _audioAccumLock = new();
+    // NOTE: _outboundQueue is no longer used - audio flows via OnPcm24Audio → DirectRtpPlayout
+    // Kept for IAudioAIClient interface compatibility (GetNextMuLawFrame returns null)
 
     // =========================
     // STATS
@@ -128,7 +123,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Volatile.Read(ref _disposed) == 0 &&
         _ws?.State == WebSocketState.Open;
 
-    public int PendingFrameCount => _outboundQueue.Count;
+    // NOTE: PendingFrameCount is now always 0 - audio flows through DirectRtpPlayout
 
     // =========================
     // CONSTRUCTOR
@@ -162,8 +157,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         using var timeout = new CancellationTokenSource(_connectTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
-        var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        Log($"📞 Connecting to OpenAI Realtime (NATIVE 8kHz {codecName})...");
+        Log($"📞 Connecting to OpenAI Realtime (PCM16 24kHz with DSP)...");
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
             linked.Token
@@ -198,8 +192,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             await Task.Delay(50, linked.Token).ConfigureAwait(false);
 
         OnConnected?.Invoke();
-        var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        Log($"✅ Connected to OpenAI Realtime (NATIVE 8kHz {codecName}, voice={_voice})");
+        Log($"✅ Connected to OpenAI Realtime (PCM16 24kHz → DSP → {(_codec == G711Codec.ALaw ? "A-law" : "μ-law")}, voice={_voice})");
     }
 
     /// <summary>
@@ -260,12 +253,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         await SendMuLawAsync(encoded).ConfigureAwait(false);
     }
 
-    public byte[]? GetNextMuLawFrame() => _outboundQueue.TryDequeue(out var f) ? f : null;
-
-    public void ClearPendingFrames()
-    {
-        while (_outboundQueue.TryDequeue(out _)) { }
-    }
+    // NOTE: Audio now flows via OnPcm24Audio event, not through queue
+    // These methods kept for IAudioAIClient interface compatibility
+    public byte[]? GetNextMuLawFrame() => null;
+    public void ClearPendingFrames() { }
+    public int PendingFrameCount => 0;
 
     public async Task DisconnectAsync()
     {
@@ -327,8 +319,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private async Task ConfigureSessionAsync()
     {
-        var codecFormat = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        
+        // Use PCM16 @ 24kHz for high-quality output with DSP processing
+        // The call handler will apply DSP (AGC, DC removal, soft limiting) then encode to G.711
         var config = new
         {
             type = "session.update",
@@ -337,8 +329,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = codecFormat,   // Native 8kHz G.711
-                output_audio_format = codecFormat,  // Native 8kHz G.711
+                input_audio_format = "pcm16",       // 24kHz PCM16 input (we'll convert from G.711)
+                output_audio_format = "pcm16",      // 24kHz PCM16 output (DSP then encode to G.711)
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
@@ -353,7 +345,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
         };
 
-        Log($"🎧 Configuring session: format={codecFormat}@8kHz, voice={_voice}, server_vad");
+        Log($"🎧 Configuring session: format=pcm16@24kHz, voice={_voice}, server_vad (DSP enabled)");
         await SendJsonAsync(config).ConfigureAwait(false);
     }
 
@@ -831,23 +823,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 _ = Task.Run(async () =>
                 {
-                    var waitStart = NowMs();
-                    const int MAX_WAIT_MS = 10000;
-                    const int CHECK_INTERVAL_MS = 100;
-
-                    while (NowMs() - waitStart < MAX_WAIT_MS)
-                    {
-                        if (_outboundQueue.IsEmpty)
-                        {
-                            Log("✅ Audio buffer drained, ending call");
-                            break;
-                        }
-                        await Task.Delay(CHECK_INTERVAL_MS).ConfigureAwait(false);
-                    }
-
-                    if (!_outboundQueue.IsEmpty)
-                        Log($"⚠️ Buffer still has {_outboundQueue.Count} frames, ending anyway");
-
+                    // Audio now flows through DirectRtpPlayout - just wait a moment for any remaining audio
+                    await Task.Delay(2000).ConfigureAwait(false);
+                    Log("✅ Grace period complete, ending call");
                     SignalCallEnded("end_call");
                 });
                 break;
@@ -927,7 +905,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // AUDIO PROCESSING (Native 8kHz G.711 - direct passthrough)
+    // AUDIO PROCESSING (PCM16 @ 24kHz - output via OnPcm24Audio for DSP)
     // =========================
 
     private void ProcessAudioDelta(string base64)
@@ -936,17 +914,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Direct passthrough: OpenAI sends native 8kHz G.711
-            byte[] g711Bytes = Convert.FromBase64String(base64);
+            // OpenAI sends PCM16 @ 24kHz - pass to call handler for DSP processing
+            byte[] pcm24kBytes = Convert.FromBase64String(base64);
 
-            // Queue directly for SIP RTP - no conversion needed!
-            AppendAndEnqueueG711(g711Bytes);
+            // Fire event for call handler (DirectRtpPlayout applies DSP + encodes to G.711)
+            OnPcm24Audio?.Invoke(pcm24kBytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
             if (chunks % 10 == 0)
             {
-                var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-                Log($"📢 Received {chunks} audio chunks (8kHz {codecName} direct), queue={_outboundQueue.Count}");
+                Log($"📢 Received {chunks} audio chunks (PCM16 24kHz → DSP), bytes={pcm24kBytes.Length}");
             }
         }
         catch (Exception ex)
@@ -955,60 +932,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
     }
 
-    private void AppendAndEnqueueG711(byte[] bytes)
-    {
-        if (bytes.Length == 0) return;
-
-        lock (_audioAccumLock)
-        {
-            int sourceOffset = 0;
-
-            while (sourceOffset < bytes.Length)
-            {
-                int needed = FRAME_SIZE_BYTES - _audioAccumOffset;
-                int remainingInRaw = bytes.Length - sourceOffset;
-                int toCopy = Math.Min(needed, remainingInRaw);
-
-                Buffer.BlockCopy(bytes, sourceOffset, _audioAccum, _audioAccumOffset, toCopy);
-
-                _audioAccumOffset += toCopy;
-                sourceOffset += toCopy;
-
-                if (_audioAccumOffset == FRAME_SIZE_BYTES)
-                {
-                    if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
-                    {
-                        var frame = new byte[FRAME_SIZE_BYTES];
-                        Buffer.BlockCopy(_audioAccum, 0, frame, 0, FRAME_SIZE_BYTES);
-                        _outboundQueue.Enqueue(frame);
-                    }
-                    _audioAccumOffset = 0;
-                }
-            }
-        }
-    }
-
-    private void FlushAudioAccumulator(bool padWithSilence)
-    {
-        lock (_audioAccumLock)
-        {
-            if (_audioAccumOffset <= 0) return;
-
-            if (padWithSilence)
-            {
-                var frame = new byte[FRAME_SIZE_BYTES];
-                Buffer.BlockCopy(_audioAccum, 0, frame, 0, _audioAccumOffset);
-                
-                for (int i = _audioAccumOffset; i < FRAME_SIZE_BYTES; i++)
-                    frame[i] = _silenceByte;
-
-                if (_outboundQueue.Count < MAX_QUEUE_FRAMES)
-                    _outboundQueue.Enqueue(frame);
-            }
-
-            _audioAccumOffset = 0;
-        }
-    }
+    // NOTE: AppendAndEnqueueG711 and FlushAudioAccumulator removed
+    // Audio now flows through OnPcm24Audio → DirectRtpPlayout (DSP) → RTP
 
     // =========================
     // HELPERS
