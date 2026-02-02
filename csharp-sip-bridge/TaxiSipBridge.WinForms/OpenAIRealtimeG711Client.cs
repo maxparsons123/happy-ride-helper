@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -992,17 +993,20 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             // Receive 24kHz PCM16 from OpenAI
             var pcm24kBytes = Convert.FromBase64String(base64);
             
-            // Convert bytes to shorts
-            var pcm24k = new short[pcm24kBytes.Length / 2];
-            Buffer.BlockCopy(pcm24kBytes, 0, pcm24k, 0, pcm24kBytes.Length);
-            
-            // Downsample 24kHz → 8kHz
-            var pcm8k = Downsample24kTo8k(pcm24k);
-            
-            // Encode to G.711 for SIP
-            var g711Bytes = _codec == G711Codec.ALaw
-                ? AudioCodecs.ALawEncode(pcm8k)
-                : AudioCodecs.MuLawEncode(pcm8k);
+            // Use NAudio WDL high-quality resampler (24kHz → 8kHz) + G.711 encode
+            byte[] g711Bytes;
+            if (_codec == G711Codec.ALaw)
+            {
+                g711Bytes = NAudioResampler.ConvertToALaw(pcm24kBytes);
+            }
+            else
+            {
+                // MuLaw path - resample then encode
+                var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
+                var pcm8k = new short[pcm8kBytes.Length / 2];
+                Buffer.BlockCopy(pcm8kBytes, 0, pcm8k, 0, pcm8kBytes.Length);
+                g711Bytes = AudioCodecs.MuLawEncode(pcm8k);
+            }
             
             AppendAndEnqueueG711(g711Bytes);
 
