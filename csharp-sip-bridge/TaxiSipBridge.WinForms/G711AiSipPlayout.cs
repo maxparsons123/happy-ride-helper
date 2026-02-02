@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.SIP.App;
@@ -50,8 +51,10 @@ public class G711AiSipPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _ua = ua;
 
-        // Detect negotiated codec
-        var codec = _mediaSession.AudioStreams[0]?.GetNegotiatedCodec()?.Name ?? "NONE";
+        // Detect negotiated codec from remote SDP
+        var remoteDesc = _mediaSession.RemoteDescription;
+        var audioAnnouncement = remoteDesc?.Media?.FirstOrDefault(m => m.Media == SIPSorceryMedia.Abstractions.SDPMediaTypesEnum.audio);
+        var codec = audioAnnouncement?.MediaFormats?.Values?.FirstOrDefault()?.Name() ?? "NONE";
         _useALaw = codec == "PCMA";
 
         if (codec != "PCMA" && codec != "PCMU")
@@ -132,8 +135,8 @@ public class G711AiSipPlayout : IDisposable
             return false;
         }
 
-        // Check SDP for hold indicators (sendonly/inactive = on hold)
-        var sdp = _ua.CallDescriptor?.SDP?.ToString() ?? "";
+        // Check remote SDP for hold indicators (sendonly/inactive = on hold)
+        var sdp = _mediaSession.RemoteDescription?.ToString() ?? "";
         if (sdp.Contains("a=sendonly") || sdp.Contains("a=inactive"))
         {
             Log("❌ Call is ON HOLD (SDP shows sendonly/inactive) → MOH will mix with AI audio");
