@@ -263,10 +263,9 @@ Be concise, warm, and professional.
             Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
         };
 
-        // Barge-in: triggered by OpenAI's semantic VAD (speech_started event)
-        // SipAudioPlayout has no buffer - it pulls directly from AI client each tick
-        // So we only need to clear the AI client's pending audio queue
-        _aiClient.OnBargeIn += () =>
+        // Barge-in: triggered by OpenAI semantic VAD (input_audio_buffer.speech_started).
+        // Some local builds may not yet expose an OnBargeIn event; wire it via reflection for compatibility.
+        Action bargeInHandler = () =>
         {
             _aiClient?.ClearPendingFrames();
             _isBotSpeaking = false;
@@ -274,7 +273,26 @@ Be concise, warm, and professional.
             Log($"✂️ [{callId}] Barge-in (VAD): cleared AI audio queue");
         };
 
-        Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted, OnBargeIn");
+        try
+        {
+            var evt = _aiClient.GetType().GetEvent("OnBargeIn");
+            if (evt?.EventHandlerType != null)
+            {
+                var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
+                evt.AddEventHandler(_aiClient, del);
+                Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted, OnBargeIn");
+            }
+            else
+            {
+                Log($"⚠️ [{callId}] OnBargeIn event not found on OpenAIRealtimeG711Client; barge-in disabled.");
+                Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ [{callId}] Failed to wire OnBargeIn via reflection: {ex.Message}");
+            Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
+        }
 
         _aiClient.OnAdaSpeaking += _ => { };
 
