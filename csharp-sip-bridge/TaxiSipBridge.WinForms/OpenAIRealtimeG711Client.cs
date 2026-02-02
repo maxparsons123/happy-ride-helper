@@ -724,16 +724,28 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Interlocked.Increment(ref _noReplyWatchdogId);
                     
                     // Proactive barge-in: Stop OpenAI's server-side generation
-                    if (_activeResponseId != null && Volatile.Read(ref _responseActive) == 1)
+                    // IMPORTANT: Capture the response ID atomically and validate it's still active
+                    // to avoid "Item with item_id not found" errors from race conditions
+                    var truncateResponseId = _activeResponseId;
+                    var isResponseStillActive = Volatile.Read(ref _responseActive) == 1;
+                    
+                    if (truncateResponseId != null && isResponseStillActive && truncateResponseId != _lastCompletedResponseId)
                     {
                         _ = Task.Run(async () =>
                         {
+                            // Double-check the response hasn't completed before sending truncate
+                            if (_activeResponseId != truncateResponseId || Volatile.Read(ref _responseActive) == 0)
+                            {
+                                Log("⚠️ Response completed before truncate could be sent - skipping");
+                                return;
+                            }
+                            
                             try
                             {
                                 await SendJsonAsync(new
                                 {
                                     type = "conversation.item.truncate",
-                                    item_id = _activeResponseId,
+                                    item_id = truncateResponseId,
                                     content_index = 0,
                                     audio_end_ms = 0
                                 }).ConfigureAwait(false);
@@ -741,7 +753,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             }
                             catch (Exception ex)
                             {
-                                Log($"⚠️ Truncate error: {ex.Message}");
+                                // Suppress "Item not found" errors - response completed just before truncate
+                                if (ex.Message?.Contains("not found", StringComparison.OrdinalIgnoreCase) == true)
+                                    Log("⚠️ Truncate skipped (response already completed)");
+                                else
+                                    Log($"⚠️ Truncate error: {ex.Message}");
                             }
                         });
                     }
@@ -766,8 +782,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var message = errorEl.TryGetProperty("message", out var msgEl)
                             ? msgEl.GetString()
                             : "Unknown error";
+                        // Suppress benign errors:
+                        // - "buffer too small": harmless audio buffer warning
+                        // - "Item with item_id not found": truncate race condition (response completed before truncate)
                         if (!string.IsNullOrEmpty(message) &&
-                            !message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
+                            !message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase) &&
+                            !message.Contains("not found", StringComparison.OrdinalIgnoreCase))
                             Log($"❌ OpenAI error: {message}");
                     }
                     break;
