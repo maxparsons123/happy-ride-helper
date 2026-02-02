@@ -74,8 +74,10 @@ public class DirectRtpPlayout : IDisposable
         if (pcm24kBytes == null || pcm24kBytes.Length < 6) return;
 
         int sampleCount24k = pcm24kBytes.Length / 2;
-        float alpha = 0.40f;
-        float volumeBoost = 1.4f;
+        
+        // Cleaner DSP: minimal filtering, gentle volume, wide headroom
+        float alpha = 0.85f;        // Higher = less smoothing, more natural
+        float volumeBoost = 1.15f;  // Gentle boost only
 
         for (int i = 0; i < sampleCount24k - 2; i += 3)
         {
@@ -83,17 +85,19 @@ public class DirectRtpPlayout : IDisposable
             short s2 = BitConverter.ToInt16(pcm24kBytes, (i + 1) * 2);
             short s3 = BitConverter.ToInt16(pcm24kBytes, (i + 2) * 2);
 
-            // 3-tap FIR filter [0.25, 0.5, 0.25] for anti-aliasing
-            float target = (s1 * 0.25f) + (s2 * 0.5f) + (s3 * 0.25f);
-            _filterState = (_filterState * (1 - alpha)) + (target * alpha);
+            // Simple 3:1 decimation with light averaging (less aggressive than before)
+            float sample = (s1 * 0.2f) + (s2 * 0.6f) + (s3 * 0.2f);
+            
+            // Light IIR for DC removal and smoothing
+            _filterState = (_filterState * (1 - alpha)) + (sample * alpha);
 
-            float boosted = _filterState * volumeBoost;
+            float output = _filterState * volumeBoost;
 
-            // Soft limiter to prevent clipping
-            if (boosted > 28000) boosted = 28000 + (boosted - 28000) * 0.2f;
-            if (boosted < -28000) boosted = -28000 + (boosted + 28000) * 0.2f;
+            // Gentle soft-knee limiter with higher threshold
+            if (output > 30000) output = 30000 + (output - 30000) * 0.1f;
+            if (output < -30000) output = -30000 + (output + 30000) * 0.1f;
 
-            _sampleBuffer.Enqueue((short)Math.Clamp(boosted, short.MinValue, short.MaxValue));
+            _sampleBuffer.Enqueue((short)Math.Clamp(output, short.MinValue, short.MaxValue));
         }
     }
 
