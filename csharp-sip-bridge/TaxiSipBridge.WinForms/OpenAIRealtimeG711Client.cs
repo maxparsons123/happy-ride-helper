@@ -91,6 +91,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action<string>? OnAdaSpeaking;
     public event Action<BookingState>? OnBookingUpdated;
 
+    // Tool calling (handled externally, e.g. by G711CallFeatures)
+    // toolName, toolCallId, argumentsJson
+    public event Func<string, string, JsonElement, Task<object>>? OnToolCall;
+
     // =========================
     // PROPERTIES
     // =========================
@@ -99,6 +103,35 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private void Log(string msg) => OnLog?.Invoke(msg);
+
+    // =========================
+    // RESPONSE GATE (for tool continuation)
+    // =========================
+    private async Task QueueResponseCreateAsync(int delayMs = 40)
+    {
+        if (_disposed != 0 || _callEnded != 0)
+            return;
+
+        if (Interlocked.CompareExchange(ref _responseQueued, 1, 0) == 1)
+            return;
+
+        try
+        {
+            await Task.Delay(delayMs).ConfigureAwait(false);
+
+            // Only create a new response when OpenAI has ended the previous one
+            if (Volatile.Read(ref _responseActive) == 1)
+                return;
+
+            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+            Log("🔄 response.create sent");
+        }
+        catch { }
+        finally
+        {
+            Interlocked.Exchange(ref _responseQueued, 0);
+        }
+    }
 
     // =========================
     // CONSTRUCTOR
@@ -300,6 +333,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 }
                 break;
 
+            case "response.function_call_arguments.done":
+                await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
+                break;
+
             case "response.audio.delta":
                 if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
                 {
@@ -370,6 +407,62 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
+    // TOOL HANDLING
+    // =========================
+    private async Task HandleToolCallAsync(JsonElement root)
+    {
+        try
+        {
+            if (!root.TryGetProperty("name", out var n) || !root.TryGetProperty("call_id", out var c))
+                return;
+
+            var toolName = n.GetString();
+            var toolCallId = c.GetString();
+            if (string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(toolCallId))
+                return;
+
+            var argsJson = root.TryGetProperty("arguments", out var a) ? a.GetString() : null;
+            if (string.IsNullOrWhiteSpace(argsJson))
+                argsJson = "{}";
+
+            Log($"🔧 Tool: {toolName}");
+
+            object result;
+            var handler = OnToolCall;
+            if (handler == null)
+            {
+                result = new { error = "No tool handler configured" };
+            }
+            else
+            {
+                using var argsDoc = JsonDocument.Parse(argsJson);
+                result = await handler(toolName!, toolCallId!, argsDoc.RootElement.Clone()).ConfigureAwait(false);
+            }
+
+            await SendToolResultAsync(toolCallId!, result).ConfigureAwait(false);
+            await QueueResponseCreateAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Tool handler error: {ex.Message}");
+        }
+    }
+
+    private async Task SendToolResultAsync(string callId, object result)
+    {
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "function_call_output",
+                call_id = callId,
+                output = JsonSerializer.Serialize(result)
+            }
+        }).ConfigureAwait(false);
+    }
+
+    // =========================
     // SESSION CONFIG
     // =========================
     private async Task ConfigureSessionAsync()
@@ -394,17 +487,77 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     threshold = 0.35,
                     prefix_padding_ms = 400,
                     silence_duration_ms = 700
-                }
+                },
+                tools = GetTools(),
+                tool_choice = "auto",
+                temperature = 0.6
             }
         });
     }
 
     private static string GetDefaultInstructions() => @"
 You are Ada, a friendly taxi booking assistant for Voice Taxibot.
-Be concise, warm, and professional.
-Collect: name, pickup address, destination, passenger count, pickup time.
-Confirm details before booking.
+
+STYLE: Be concise, warm, and professional.
+
+GOAL: Collect (in this order): name, pickup address, destination, passengers, pickup time.
+
+DATA SYNC (CRITICAL): After EVERY user message that provides or corrects booking info, call sync_booking_data immediately.
+
+FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → Confirm once → If correct: ask 'Shall I get a price?' → book_taxi(action=request_quote) → Tell fare/eta → Ask 'Confirm booking?' → book_taxi(action=confirmed) → Give booking reference → Ask if anything else → end_call.
 ";
+
+    private static object[] GetTools() => new object[]
+    {
+        new
+        {
+            type = "function",
+            name = "sync_booking_data",
+            description = "Save booking data as collected",
+            parameters = new
+            {
+                type = "object",
+                properties = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["caller_name"] = new { type = "string" },
+                    ["pickup"] = new { type = "string" },
+                    ["destination"] = new { type = "string" },
+                    ["passengers"] = new { type = "integer" },
+                    ["pickup_time"] = new { type = "string" }
+                }
+            }
+        },
+        new
+        {
+            type = "function",
+            name = "book_taxi",
+            description = "Request quote or confirm booking",
+            parameters = new
+            {
+                type = "object",
+                properties = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } }
+                },
+                required = new[] { "action" }
+            }
+        },
+        new
+        {
+            type = "function",
+            name = "end_call",
+            description = "End call after goodbye",
+            parameters = new
+            {
+                type = "object",
+                properties = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["reason"] = new { type = "string" }
+                },
+                required = new[] { "reason" }
+            }
+        }
+    };
 
     /// <summary>
     /// Send initial greeting to start the conversation.
