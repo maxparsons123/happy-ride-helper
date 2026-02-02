@@ -25,8 +25,8 @@ public class DirectRtpPlayoutG711 : IDisposable
 {
     private const int FRAME_SIZE_BYTES = 160;  // 20ms @ 8kHz = 160 bytes G.711
     private const int FRAME_MS = 20;
-    private const int MIN_FRAMES_TO_START = 10; // 200ms cushion - balanced for responsiveness
-    private const int GRACE_PERIOD_FRAMES = 5;  // 100ms grace period at end
+    private const int MIN_FRAMES_TO_START = 12; // 240ms cushion - stable without excessive latency
+    private const int GRACE_PERIOD_FRAMES = 6;  // 120ms grace period at end
     // OpenAI can deliver audio faster-than-realtime (burst). We must buffer it and pace out at 20ms.
     // Do NOT keep this too small or you'll drop speech and it will sound choppy.
     private const int MAX_QUEUE_FRAMES = 3000; // 60s max safety cap
@@ -34,6 +34,7 @@ public class DirectRtpPlayoutG711 : IDisposable
     private readonly ConcurrentQueue<byte[]> _frameBuffer = new();
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte[] _outputBuffer = new byte[FRAME_SIZE_BYTES];
+    private byte[]? _lastAudioFrame = null; // Track last frame for smooth fade-out
 
     private Thread? _playoutThread;
     private volatile bool _running;
@@ -144,6 +145,7 @@ public class DirectRtpPlayoutG711 : IDisposable
         while (_frameBuffer.TryDequeue(out _)) { }
         _isCurrentlySpeaking = false;
         _emptyFramesCount = 0;
+        _lastAudioFrame = null; // Clear fade-out reference
     }
 
     public void Start()
@@ -205,6 +207,7 @@ public class DirectRtpPlayoutG711 : IDisposable
             if (_frameBuffer.TryDequeue(out var g711Frame))
             {
                 _emptyFramesCount = 0;
+                _lastAudioFrame = g711Frame; // Store for potential fade-out
                 SendRtpFrame(g711Frame);
 
                 _framesSent++;
@@ -217,13 +220,15 @@ public class DirectRtpPlayoutG711 : IDisposable
 
                 if (_emptyFramesCount < GRACE_PERIOD_FRAMES)
                 {
-                    SendSilence();
+                    // Fade out gradually during grace period to avoid abrupt silence (gruuuf noise)
+                    SendFadeOutFrame(_emptyFramesCount);
                 }
                 else
                 {
                     if (_isCurrentlySpeaking)
                     {
                         _isCurrentlySpeaking = false;
+                        _lastAudioFrame = null;
                         OnLog?.Invoke($"[RTP] ⏹️ Finished ({_framesSent} frames sent, {_framesSent * FRAME_SIZE_BYTES} samples total)");
                         OnQueueEmpty?.Invoke();
                     }
@@ -257,6 +262,38 @@ public class DirectRtpPlayoutG711 : IDisposable
     private void SendSilence()
     {
         Array.Fill(_outputBuffer, _silenceByte);
+        try
+        {
+            const uint RTP_DURATION = FRAME_SIZE_BYTES;
+            _mediaSession.SendAudio(RTP_DURATION, _outputBuffer);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Send a fade-out frame during grace period to smooth the transition to silence.
+    /// This prevents the "gruuuf" noise caused by abrupt audio→silence jumps.
+    /// </summary>
+    private void SendFadeOutFrame(int frameIndex)
+    {
+        if (_lastAudioFrame == null)
+        {
+            SendSilence();
+            return;
+        }
+
+        // Calculate fade multiplier (1.0 → 0.0 over grace period)
+        float fadeMultiplier = 1.0f - ((float)frameIndex / GRACE_PERIOD_FRAMES);
+        
+        // Blend last audio frame towards silence
+        for (int i = 0; i < FRAME_SIZE_BYTES; i++)
+        {
+            // For G.711, we blend towards the silence byte
+            // Simple linear interpolation in the encoded domain
+            float blend = _lastAudioFrame[i] * fadeMultiplier + _silenceByte * (1.0f - fadeMultiplier);
+            _outputBuffer[i] = (byte)Math.Clamp(blend, 0, 255);
+        }
+
         try
         {
             const uint RTP_DURATION = FRAME_SIZE_BYTES;
