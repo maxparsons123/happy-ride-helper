@@ -8,7 +8,6 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TaxiSipBridge.Audio;
-using TaxiSipBridge.WinForms;
 
 namespace TaxiSipBridge;
 
@@ -71,7 +70,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     // BOOKING STATE
     // =========================
-    private readonly BookingState _booking = new();
+    private readonly TaxiSipBridge.BookingState _booking = new TaxiSipBridge.BookingState();
     private string _callerId = "";
     private string _detectedLanguage = "en";
     private bool _awaitingConfirmation;
