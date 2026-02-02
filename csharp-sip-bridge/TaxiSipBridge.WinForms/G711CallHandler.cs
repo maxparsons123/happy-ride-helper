@@ -190,11 +190,14 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create OpenAI client - uses PCM16 @ 24kHz for DSP benefits
-            var aiCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
+            // Create OpenAI client - MUST match the SIP-negotiated codec exactly!
+            // OpenAI sends raw G.711 bytes that go straight to RTP, so codec MUST match.
+            var sipCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
                 ? OpenAIRealtimeG711Client.G711Codec.ALaw 
                 : OpenAIRealtimeG711Client.G711Codec.MuLaw;
-            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
+            
+            Log($"🎵 [{callId}] SIP negotiated {_negotiatedCodec}, configuring OpenAI for {sipCodec}");
+            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, sipCodec);
 
             // Feature add-ons: tool handling + booking state + dispatch
             _features?.Dispose();
@@ -210,8 +213,8 @@ Be concise, warm, and professional.
             _aiClient.OnToolCall += async (toolName, toolCallId, args) =>
                 await _features.HandleToolCallAsync(toolName, toolCallId, args).ConfigureAwait(false);
             
-            // Create DirectG711RtpPlayout (clean push-based RTP with 20ms timer)
-            _playout = new DirectG711RtpPlayout(_currentMediaSession, aiCodec);
+            // Create DirectG711RtpPlayout - uses SIP-negotiated codec for correct payload type
+            _playout = new DirectG711RtpPlayout(_currentMediaSession, sipCodec);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -232,15 +235,16 @@ Be concise, warm, and professional.
             // Wire AI client events (using native G.711 audio path)
             WireAiClientEvents(callId, cts);
 
-            // Connect to OpenAI
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (native G.711 {aiCodec} @ 8kHz)...");
+            // Connect to OpenAI - codec must match SIP for zero-transcode passthrough
+            var codecName = sipCodec == OpenAIRealtimeG711Client.G711Codec.ALaw ? "A-law (PT8)" : "μ-law (PT0)";
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime ({codecName} @ 8kHz)...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call fully established (NATIVE G.711 mode - zero DSP)");
+            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI ({sipCodec}) - ZERO TRANSCODE");
             
             // Start keepalive loop
             _features?.StartKeepalive();
