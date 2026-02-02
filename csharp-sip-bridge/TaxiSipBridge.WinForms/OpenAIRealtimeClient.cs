@@ -603,18 +603,21 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         });
                     }
 
-                    // Start no-reply watchdog (8 seconds of silence triggers re-prompt)
+                    // No-reply watchdog: give the caller enough time to respond AFTER Ada finishes.
+                    // NOTE: response.done can arrive slightly before the final audio finishes playout,
+                    // so we intentionally use a more patient timeout.
+                    var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
                     var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
                     _ = Task.Run(async () =>
                     {
-                        await Task.Delay(8000).ConfigureAwait(false);
+                        await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
 
                         // Abort if cancelled, call ended, or user spoke
                         if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
                         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
                         if (Volatile.Read(ref _responseActive) == 1) return;
 
-                        Log("⏰ No-reply watchdog triggered - prompting user");
+                        Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
 
                         await SendJsonAsync(new
                         {
