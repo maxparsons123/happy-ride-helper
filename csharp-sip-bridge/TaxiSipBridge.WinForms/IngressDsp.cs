@@ -22,8 +22,9 @@ public static class IngressDsp
     private const float MAX_GAIN = 4.0f;            // Reduced from 8.0 - less noise amplification
     private const float NOISE_FLOOR_RMS = 100f;     // Below this RMS, audio is likely noise
     
-    // Soft gate settings - less aggressive to preserve speech quality
-    private const float SOFT_GATE_ATTENUATION = 0.15f;  // 85% reduction (was 90%)
+    // Soft gate settings - GENTLE attenuation to allow VAD to still detect speech
+    // Changed from 0.15 (85% reduction) to 0.35 (-9dB) so OpenAI VAD can still hear user
+    private const float SOFT_GATE_ATTENUATION = 0.35f;  // ~65% reduction (-9dB, was 85%)
     private const float BARGE_IN_RMS_THRESHOLD = 1500f; // Lowered for easier barge-in detection
     
     // Stats for diagnostics
@@ -68,12 +69,10 @@ public static class IngressDsp
             // Check if this is a potential barge-in (loud enough to break through)
             bool isBargeIn = rawRms >= BARGE_IN_RMS_THRESHOLD;
             
-            // If audio is below noise floor and bot is speaking, zero it out
-            if (rawRms < NOISE_FLOOR_RMS && isBotSpeaking)
-            {
-                Array.Clear(pcm, 0, pcm.Length);
-                return false;
-            }
+            // NOTE: We no longer zero audio below noise floor during bot speaking.
+            // This was too aggressive and prevented OpenAI VAD from detecting speech.
+            // Instead, we let the soft gate attenuation handle echo suppression,
+            // which still allows VAD to detect user speech for barge-in.
             
             // Pass 1: DC removal only (NO pre-emphasis - OpenAI handles this)
             for (int i = 0; i < pcm.Length; i++)
