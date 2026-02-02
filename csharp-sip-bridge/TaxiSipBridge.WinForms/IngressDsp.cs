@@ -1,9 +1,9 @@
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Simple ingress DSP for improving STT quality.
-/// Applies minimal processing: DC removal, pre-emphasis, normalization, and soft gate.
-/// NO hard blocking - uses soft gate to allow loud barge-ins to break through.
+/// Ingress DSP optimized for OpenAI Whisper STT quality.
+/// Minimal processing to preserve speech clarity.
+/// NO pre-emphasis (OpenAI handles this internally).
 /// </summary>
 public static class IngressDsp
 {
@@ -11,21 +11,24 @@ public static class IngressDsp
     // DSP STATE (per-call, reset between calls)
     // ===========================================
     private static float _dcState;
-    private static float _preEmphPrev;
     private static readonly object _lock = new();
     
     // ===========================================
-    // CONSTANTS
+    // CONSTANTS (tuned for OpenAI Whisper STT)
     // ===========================================
-    private const float DC_ALPHA = 0.995f;      // DC blocker time constant
-    private const float PRE_EMPH = 0.97f;       // Standard pre-emphasis for speech
-    private const float TARGET_RMS = 6000f;     // Target RMS for normalization
-    private const float MIN_GAIN = 0.5f;        // Minimum AGC gain
-    private const float MAX_GAIN = 8.0f;        // Maximum AGC gain (boost quiet callers)
+    private const float DC_ALPHA = 0.995f;          // DC blocker time constant
+    private const float TARGET_RMS = 4000f;         // Reduced from 6000 - less aggressive normalization
+    private const float MIN_GAIN = 0.8f;            // Less compression (was 0.5)
+    private const float MAX_GAIN = 4.0f;            // Reduced from 8.0 - less noise amplification
+    private const float NOISE_FLOOR_RMS = 100f;     // Below this RMS, audio is likely noise
     
-    // Soft gate settings
-    private const float SOFT_GATE_ATTENUATION = 0.10f;  // 90% reduction while bot speaking
-    private const float BARGE_IN_RMS_THRESHOLD = 2000f; // RMS threshold to bypass soft gate
+    // Soft gate settings - less aggressive to preserve speech quality
+    private const float SOFT_GATE_ATTENUATION = 0.15f;  // 85% reduction (was 90%)
+    private const float BARGE_IN_RMS_THRESHOLD = 1500f; // Lowered for easier barge-in detection
+    
+    // Stats for diagnostics
+    private static int _framesProcessed;
+    private static float _avgRms;
     
     /// <summary>
     /// Reset DSP state between calls.
@@ -35,13 +38,15 @@ public static class IngressDsp
         lock (_lock)
         {
             _dcState = 0;
-            _preEmphPrev = 0;
+            _framesProcessed = 0;
+            _avgRms = 0;
         }
     }
     
     /// <summary>
     /// Apply STT-optimized DSP to PCM16 audio.
     /// Modifies the input array in-place.
+    /// SIMPLIFIED: DC removal + gentle normalization only (no pre-emphasis).
     /// </summary>
     /// <param name="pcm">Audio samples to process</param>
     /// <param name="isBotSpeaking">If true, applies soft gate attenuation</param>
@@ -49,8 +54,6 @@ public static class IngressDsp
     public static bool ApplyForStt(short[] pcm, bool isBotSpeaking = false)
     {
         if (pcm == null || pcm.Length == 0) return false;
-        
-        float rawRms;
         
         lock (_lock)
         {
@@ -60,29 +63,31 @@ public static class IngressDsp
             {
                 rawSumSq += (double)pcm[i] * pcm[i];
             }
-            rawRms = (float)Math.Sqrt(rawSumSq / pcm.Length);
+            float rawRms = (float)Math.Sqrt(rawSumSq / pcm.Length);
             
             // Check if this is a potential barge-in (loud enough to break through)
             bool isBargeIn = rawRms >= BARGE_IN_RMS_THRESHOLD;
             
-            // Pass 1: DC removal + pre-emphasis
+            // If audio is below noise floor and bot is speaking, zero it out
+            if (rawRms < NOISE_FLOOR_RMS && isBotSpeaking)
+            {
+                Array.Clear(pcm, 0, pcm.Length);
+                return false;
+            }
+            
+            // Pass 1: DC removal only (NO pre-emphasis - OpenAI handles this)
             for (int i = 0; i < pcm.Length; i++)
             {
                 float x = pcm[i];
                 
-                // DC blocker (high-pass)
+                // DC blocker (high-pass filter to remove DC offset)
                 _dcState = (DC_ALPHA * _dcState) + ((1f - DC_ALPHA) * x);
                 x -= _dcState;
-                
-                // Pre-emphasis (boost high frequencies)
-                float y = x - (PRE_EMPH * _preEmphPrev);
-                _preEmphPrev = x;
-                x = y;
                 
                 pcm[i] = (short)Math.Clamp(x, short.MinValue, short.MaxValue);
             }
             
-            // Pass 2: Calculate processed RMS and normalize
+            // Pass 2: Calculate processed RMS and apply gentle normalization
             double sumSq = 0;
             for (int i = 0; i < pcm.Length; i++)
             {
@@ -90,7 +95,12 @@ public static class IngressDsp
             }
             float rms = (float)Math.Sqrt(sumSq / pcm.Length);
             
-            if (rms > 10) // Only normalize if there's meaningful audio
+            // Update running average for diagnostics
+            _framesProcessed++;
+            _avgRms = _avgRms + (rms - _avgRms) / Math.Min(_framesProcessed, 100);
+            
+            // Only normalize if there's meaningful audio above noise floor
+            if (rms > NOISE_FLOOR_RMS)
             {
                 float gain = Math.Clamp(TARGET_RMS / rms, MIN_GAIN, MAX_GAIN);
                 
@@ -103,15 +113,23 @@ public static class IngressDsp
                 for (int i = 0; i < pcm.Length; i++)
                 {
                     float val = pcm[i] * gain;
-                    // Soft limit to prevent clipping
-                    if (val > 28000) val = 28000 + (val - 28000) * 0.1f;
-                    else if (val < -28000) val = -28000 + (val + 28000) * 0.1f;
+                    // Gentle soft limit to prevent clipping (smoother curve)
+                    if (val > 24000) val = 24000 + (val - 24000) * 0.05f;
+                    else if (val < -24000) val = -24000 + (val + 24000) * 0.05f;
                     pcm[i] = (short)Math.Clamp(val, short.MinValue, short.MaxValue);
                 }
             }
             
             return isBargeIn;
         }
+    }
+    
+    /// <summary>
+    /// Get current average RMS for diagnostics.
+    /// </summary>
+    public static float GetAverageRms()
+    {
+        lock (_lock) { return _avgRms; }
     }
     
     /// <summary>
