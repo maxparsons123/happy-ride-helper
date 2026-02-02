@@ -102,7 +102,7 @@ public static class BsqdDispatcher
                 lat = booking.PickupLat ?? 0,
                 lon = booking.PickupLon ?? 0,
                 street_name = booking.PickupStreet ?? ParseStreetName(booking.Pickup),
-                street_number = booking.PickupNumber ?? ParseStreetNumber(booking.Pickup),
+                street_number = ParseInt(booking.PickupNumber) ?? ParseStreetNumber(booking.Pickup),
                 postal_code = booking.PickupPostalCode ?? ParsePostalCode(booking.Pickup),
                 city = booking.PickupCity ?? ParseCity(booking.Pickup),
                 formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "Unknown"
@@ -112,7 +112,7 @@ public static class BsqdDispatcher
                 lat = booking.DestLat ?? 0,
                 lon = booking.DestLon ?? 0,
                 street_name = booking.DestStreet ?? ParseStreetName(booking.Destination),
-                street_number = booking.DestNumber ?? ParseStreetNumber(booking.Destination),
+                street_number = ParseInt(booking.DestNumber) ?? ParseStreetNumber(booking.Destination),
                 postal_code = booking.DestPostalCode ?? ParsePostalCode(booking.Destination),
                 city = booking.DestCity ?? ParseCity(booking.Destination),
                 formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "Unknown"
@@ -123,6 +123,17 @@ public static class BsqdDispatcher
             phoneNumber = FormatE164(callerId),
             passengers = (booking.Passengers ?? 1).ToString()
         };
+    }
+    
+    /// <summary>
+    /// Parse string to int (handles string-based house numbers from BookingState).
+    /// </summary>
+    private static int? ParseInt(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        // Extract leading digits (handles "52A", "100-8", etc.)
+        var digits = new string(value.TakeWhile(char.IsDigit).ToArray());
+        return int.TryParse(digits, out var num) ? num : null;
     }
 
     /// <summary>
