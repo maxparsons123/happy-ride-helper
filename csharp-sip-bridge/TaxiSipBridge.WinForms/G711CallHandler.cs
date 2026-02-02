@@ -38,7 +38,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private DirectRtpPlayoutG711? _playout;
+    private SipAudioPlayout? _playout;
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMU; // Default to μ-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -189,9 +189,16 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create DirectRtpPlayoutG711 for output (8kHz passthrough, no resampling)
-            _playout = new DirectRtpPlayoutG711(_currentMediaSession);
-            _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
+            // Create OpenAI G711 client with matching codec
+            var aiCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
+                ? OpenAIRealtimeG711Client.G711Codec.ALaw 
+                : OpenAIRealtimeG711Client.G711Codec.MuLaw;
+            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
+            WireAiClientEvents(callId, cts);
+
+            // Create timer-driven RTP playout (pulls from AI client every 20ms)
+            var rtpSession = _currentMediaSession.RtpSession;
+            _playout = new SipAudioPlayout(rtpSession, () => _aiClient?.GetNextMuLawFrame(), _negotiatedCodec);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -199,18 +206,10 @@ Be concise, warm, and professional.
                 {
                     _isBotSpeaking = false;
                     _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] DirectRtpPlayoutG711 started ({_negotiatedCodec})");
-
-            // Create OpenAI G711 client with matching codec
-            var aiCodec = _negotiatedCodec == AudioCodecsEnum.PCMA 
-                ? OpenAIRealtimeG711Client.G711Codec.ALaw 
-                : OpenAIRealtimeG711Client.G711Codec.MuLaw;
-            _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, aiCodec);
-            WireAiClientEvents(callId, cts);
+            Log($"🎵 [{callId}] SipAudioPlayout started ({_negotiatedCodec})");
 
             // Connect to OpenAI
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime (G.711 {aiCodec} @ 8kHz)...");
@@ -220,10 +219,7 @@ Be concise, warm, and professional.
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call fully established (G711 mode)");
-
-            // Playout loop: pull μ-law frames from AI client and buffer to RTP
-            _ = Task.Run(async () => await PlayoutLoopAsync(callId, cts.Token));
+            Log($"✅ [{callId}] Call fully established (G711 mode, timer-driven playout)");
 
             // Keep call alive
             while (!cts.IsCancellationRequested && _aiClient.IsConnected && !_disposed)
@@ -240,84 +236,7 @@ Be concise, warm, and professional.
         }
     }
 
-    // ===========================================
-    // PLAYOUT LOOP (AI → RTP)
-    // ===========================================
-    private async Task PlayoutLoopAsync(string callId, CancellationToken ct)
-    {
-        Log($"▶️ [{callId}] Playout loop started (G711 direct, codec={_negotiatedCodec})");
-
-        bool aiDisconnected = false;
-        int drainAttempts = 0;
-        const int MAX_DRAIN_ATTEMPTS = 500; // 10 seconds max drain time (500 * 20ms)
-
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                var ai = _aiClient;
-
-                // Check if AI is still connected
-                if (ai == null || !ai.IsConnected)
-                {
-                    if (!aiDisconnected)
-                    {
-                        aiDisconnected = true;
-                        Log($"🔌 [{callId}] AI disconnected, draining remaining audio buffer...");
-                    }
-                }
-
-                // Pull G.711 frame from AI client and push to RTP playout engine
-                // The RTP engine (DirectRtpPlayoutG711) handles its own jitter buffering
-                var g711Frame = ai?.GetNextMuLawFrame();
-                if (g711Frame != null && g711Frame.Length == FRAME_SIZE_ULAW)
-                {
-                    _isBotSpeaking = true;
-                    _adaHasStartedSpeaking = true;
-
-                    // Direct 8kHz passthrough - no resampling, no transcoding!
-                    _playout?.BufferG711Frame(g711Frame);
-
-                    _framesSent++;
-                    drainAttempts = 0; // Reset drain counter when we get audio
-
-                    if (_framesSent % 50 == 0)
-                        Log($"📤 [{callId}] Playout: {_framesSent} frames buffered ({_negotiatedCodec})");
-                }
-                else
-                {
-                    // No audio available
-                    if (aiDisconnected)
-                    {
-                        // AI is gone - check if playout buffer is also empty
-                        var pending = _playout?.PendingFrameCount ?? 0;
-                        if (pending == 0)
-                        {
-                            Log($"✅ [{callId}] Buffer fully drained after AI disconnect");
-                            break;
-                        }
-
-                        drainAttempts++;
-                        if (drainAttempts >= MAX_DRAIN_ATTEMPTS)
-                        {
-                            Log($"⚠️ [{callId}] Drain timeout, {pending} frames still in playout buffer");
-                            break;
-                        }
-                    }
-
-                    await Task.Delay(5, ct);
-                }
-            }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                Log($"⚠️ [{callId}] Playout error: {ex.Message}");
-                await Task.Delay(10, ct);
-            }
-        }
-
-        Log($"⏹️ [{callId}] Playout loop ended ({_framesSent} frames buffered)");
-    }
+    // NOTE: PlayoutLoopAsync removed - SipAudioPlayout handles timer-driven RTP transmission
 
     // ===========================================
     // AI CLIENT EVENT WIRING
@@ -345,16 +264,14 @@ Be concise, warm, and professional.
         };
 
         // Barge-in: triggered by OpenAI's semantic VAD (speech_started event)
-        // This is more reliable than triggering on raw RTP arrival (which fires on line noise)
+        // SipAudioPlayout has no buffer - it pulls directly from AI client each tick
+        // So we only need to clear the AI client's pending audio queue
         _aiClient.OnBargeIn += () =>
         {
-            var pendingPlayoutFrames = _playout?.PendingFrameCount ?? 0;
-            if (pendingPlayoutFrames > 0)
-            {
-                _playout?.Clear();
-                _aiClient?.ClearPendingFrames();
-                Log($"✂️ [{callId}] Barge-in (VAD): cleared playout ({pendingPlayoutFrames} frames) + AI queue");
-            }
+            _aiClient?.ClearPendingFrames();
+            _isBotSpeaking = false;
+            _adaHasStartedSpeaking = true;
+            Log($"✂️ [{callId}] Barge-in (VAD): cleared AI audio queue");
         };
 
         Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted, OnBargeIn");
