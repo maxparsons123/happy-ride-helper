@@ -62,7 +62,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     // ===========================================
     // CONSTANTS
     // ===========================================
-    private const int ECHO_GUARD_MS = 200;
+    private const int ECHO_GUARD_MS = 120; // Reduced from 200ms for faster turn-taking
     private const int FLUSH_PACKETS = 20;
     private const int EARLY_PROTECTION_MS = 500;
     private const int HANGUP_GRACE_MS = 5000;

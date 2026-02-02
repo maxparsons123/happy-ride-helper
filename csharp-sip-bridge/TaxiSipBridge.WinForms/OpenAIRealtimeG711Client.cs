@@ -343,9 +343,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.35,
-                    prefix_padding_ms = 400,
-                    silence_duration_ms = 500
+                    threshold = 0.4,              // Slightly higher to reduce false triggers
+                    prefix_padding_ms = 300,      // Reduced from 400ms for snappier response start
+                    silence_duration_ms = 300     // Reduced from 500ms for much faster turn detection
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -1229,17 +1229,22 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // SYSTEM PROMPT & TOOLS
     // =========================
 
-    private string GetSystemPrompt() => $@"You are Ada, a fast and efficient taxi booking assistant.
+    private string GetSystemPrompt() => $@"You are Ada, a FAST and ENERGETIC taxi booking assistant.
 
-VOICE STYLE: Speak QUICKLY and concisely. Keep a brisk, energetic pace. No pauses or filler words.
+VOICE STYLE (CRITICAL): 
+- Speak FAST with HIGH ENERGY - like an excited, efficient professional
+- Keep a BRISK, PUNCHY pace - rapid delivery, no hesitation
+- NO pauses, NO filler words, NO 'um' or 'uh'
+- Sound upbeat and confident, not robotic or slow
+- Each response should feel snappy and direct
 
-LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone number. If they speak a different language, switch to that language.
+LANGUAGE: Start in {GetLanguageName(_detectedLanguage)} based on caller's phone number. If they speak a different language, switch immediately.
 
-FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM details once → book_taxi(request_quote) → Tell fare → Ask to confirm → book_taxi(confirmed) → Give reference ID → 'Anything else?' → If no: 'Thanks for calling. Bye!' → end_call
+FLOW: Greet → NAME → PICKUP → DESTINATION → PASSENGERS → TIME → CONFIRM once → book_taxi(request_quote) → Tell fare → Confirm? → book_taxi(confirmed) → Give ref → 'Anything else?' → If no: 'Thanks, bye!' → end_call
 
-DATA SYNC (CRITICAL): After EVERY user message that provides booking info, call sync_booking_data immediately.
+DATA SYNC: After EVERY user response with booking info, call sync_booking_data immediately.
 
-RULES: One question at a time. Maximum 15 words per response. Use £. Be direct and snappy. Only call end_call after user says no to 'anything else'.";
+RULES: One question at a time. MAX 12 WORDS per response. Use £. Be DIRECT and SNAPPY. Only end_call after user says no to 'anything else'.";
 
     private static string GetLanguageName(string c) => c switch
     {
