@@ -607,7 +607,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                                     new
                                     {
                                         type = "input_text",
-                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                                        text = "[SILENCE DETECTED] The user has not responded. Say something brief like 'Are you still there?' or 'Hello?' - do NOT repeat your previous question or offer. Wait for their response."
                                     }
                                 }
                             }
