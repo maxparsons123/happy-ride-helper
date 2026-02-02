@@ -680,8 +680,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             text = ApplySttCorrections(text);
 
                             // Transcript guard: ignore stale transcripts
+                            // Native G.711 mode has lower buffering latency; 900ms was too aggressive
+                            // and was dropping legitimate fast corrections. Use 400ms instead.
                             var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-                            if (msSinceResponseCreated < 900 && Volatile.Read(ref _responseActive) == 1)
+                            if (msSinceResponseCreated < 400 && Volatile.Read(ref _responseActive) == 1)
                             {
                                 Log($"🚫 Ignoring stale transcript ({msSinceResponseCreated}ms after response.created): {text}");
                                 break;
@@ -1338,14 +1340,23 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private static readonly Dictionary<string, string> SttCorrections = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Aren't out", "Bernard" },
+        // Name mishearings (first turn)
+        { "It's mucks", "It's Max" },
+        { "Its mucks", "It's Max" },
+        { "mucks", "Max" },
+        // Address corrections
         { "52 I ain't dead bro", "52A David Road" },
         { "52 I ain't David", "52A David Road" },
         { "52 ain't David", "52A David Road" },
         { "52 a David", "52A David Road" },
+        { "Dalebridge Road", "David Road" },
+        { "Dale Bridge Road", "David Road" },
+        // Time corrections
         { "for now", "now" },
         { "right now", "now" },
         { "as soon as possible", "now" },
         { "ASAP", "now" },
+        // Confirmation corrections
         { "yeah please", "yes please" },
         { "yep", "yes" },
         { "yup", "yes" },
