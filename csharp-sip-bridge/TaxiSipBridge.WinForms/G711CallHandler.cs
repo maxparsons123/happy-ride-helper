@@ -416,7 +416,7 @@ Be concise, warm, and professional.
                             pcm8k = AudioCodecs.MuLawDecode(payload);
                         
                         // Apply soft gate (90% attenuation unless loud barge-in)
-                        bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate: true);
+                        bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: true);
                         
                         if (isBargeIn)
                         {
@@ -468,7 +468,7 @@ Be concise, warm, and professional.
                     }
 
                     // Apply soft gate for wideband
-                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate);
+                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: applySoftGate);
                     if (applySoftGate && isBargeIn)
                     {
                         Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
