@@ -58,6 +58,8 @@
     <Compile Include="G711CallHandler.cs" />
     <Compile Include="Audio\G711Codec.cs" />
     <Compile Include="Audio\NAudioResampler.cs" />
+    <Compile Include="BsqdTaxiDispatcher.cs" />
+    <Compile Include="FareCalculator.cs" />
   </ItemGroup>
 
 </Project>
