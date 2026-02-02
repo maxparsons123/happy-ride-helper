@@ -401,7 +401,7 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // Decode G.711 to PCM16 @ 8kHz, then resample to 24kHz for OpenAI
+                // Decode G.711 to PCM16 @ 8kHz
                 short[] pcm8k;
                 if (_negotiatedCodec == AudioCodecsEnum.PCMA)
                 {
@@ -428,6 +428,9 @@ Be concise, warm, and professional.
                 {
                     return; // Unknown codec
                 }
+
+                // Apply STT-optimized DSP (DC removal, pre-emphasis, normalization)
+                IngressDsp.ApplyForStt(pcm8k);
 
                 // Resample 8kHz → 24kHz for OpenAI (uses SpeexDSP for high quality)
                 var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
@@ -464,6 +467,9 @@ Be concise, warm, and professional.
         _botStoppedSpeakingAt = DateTime.MinValue;
         _framesForwarded = 0;
         _framesSent = 0;
+        
+        // Reset ingress DSP state for new call
+        IngressDsp.Reset();
     }
 
     // ===========================================
