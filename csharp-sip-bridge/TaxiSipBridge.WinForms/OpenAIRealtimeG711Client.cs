@@ -300,7 +300,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Send PCM16 @ 8kHz audio. Converts to G.711 before sending.
+    /// Send PCM16 audio. Converts to G.711 and upsamples to 24kHz before sending.
     /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 8000)
     {
@@ -308,8 +308,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         var samples = AudioCodecs.BytesToShorts(pcmData);
         
-        if (sampleRate != SAMPLE_RATE)
-            samples = AudioCodecs.Resample(samples, sampleRate, SAMPLE_RATE);
+        // Resample to 8kHz if needed, then encode to G.711
+        if (sampleRate != SIP_SAMPLE_RATE)
+            samples = AudioCodecs.Resample(samples, sampleRate, SIP_SAMPLE_RATE);
 
         byte[] encoded = _codec == G711Codec.ALaw
             ? AudioCodecs.ALawEncode(samples)
