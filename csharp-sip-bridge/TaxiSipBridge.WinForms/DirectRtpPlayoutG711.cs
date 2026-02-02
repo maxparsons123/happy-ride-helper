@@ -272,7 +272,7 @@ public class DirectRtpPlayoutG711 : IDisposable
 
     /// <summary>
     /// Send a fade-out frame during grace period to smooth the transition to silence.
-    /// This prevents the "gruuuf" noise caused by abrupt audio→silence jumps.
+    /// IMPORTANT: G.711 is logarithmic - we must decode→fade→re-encode in linear PCM domain.
     /// </summary>
     private void SendFadeOutFrame(int frameIndex)
     {
@@ -283,15 +283,14 @@ public class DirectRtpPlayoutG711 : IDisposable
         }
 
         // Calculate fade multiplier (1.0 → 0.0 over grace period)
-        float fadeMultiplier = 1.0f - ((float)frameIndex / GRACE_PERIOD_FRAMES);
+        float fadeMultiplier = 1.0f - ((float)(frameIndex + 1) / GRACE_PERIOD_FRAMES);
         
-        // Blend last audio frame towards silence
         for (int i = 0; i < FRAME_SIZE_BYTES; i++)
         {
-            // For G.711, we blend towards the silence byte
-            // Simple linear interpolation in the encoded domain
-            float blend = _lastAudioFrame[i] * fadeMultiplier + _silenceByte * (1.0f - fadeMultiplier);
-            _outputBuffer[i] = (byte)Math.Clamp(blend, 0, 255);
+            // Decode G.711 to linear PCM, apply fade, re-encode
+            short pcmSample = _useALaw ? ALawDecode(_lastAudioFrame[i]) : MuLawDecode(_lastAudioFrame[i]);
+            short fadedSample = (short)(pcmSample * fadeMultiplier);
+            _outputBuffer[i] = _useALaw ? ALawEncode(fadedSample) : MuLawEncode(fadedSample);
         }
 
         try
@@ -300,6 +299,66 @@ public class DirectRtpPlayoutG711 : IDisposable
             _mediaSession.SendAudio(RTP_DURATION, _outputBuffer);
         }
         catch { }
+    }
+
+    // G.711 A-Law decode (ITU-T G.711)
+    private static short ALawDecode(byte alaw)
+    {
+        alaw ^= 0x55;
+        int sign = (alaw & 0x80) != 0 ? -1 : 1;
+        int exponent = (alaw >> 4) & 0x07;
+        int mantissa = alaw & 0x0F;
+        int magnitude = exponent == 0 
+            ? (mantissa << 4) + 8 
+            : ((mantissa << 4) + 264) << (exponent - 1);
+        return (short)(sign * magnitude);
+    }
+
+    // G.711 A-Law encode (ITU-T G.711)
+    private static byte ALawEncode(short pcm)
+    {
+        int sign = (pcm >> 8) & 0x80;
+        if (sign != 0) pcm = (short)-pcm;
+        if (pcm > 32635) pcm = 32635;
+        
+        byte encoded;
+        if (pcm >= 256)
+        {
+            int exponent = 7;
+            for (int expMask = 0x4000; (pcm & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
+            int mantissa = (pcm >> (exponent + 3)) & 0x0F;
+            encoded = (byte)((exponent << 4) | mantissa);
+        }
+        else
+        {
+            encoded = (byte)(pcm >> 4);
+        }
+        return (byte)((encoded ^ 0x55) | sign);
+    }
+
+    // G.711 Mu-Law decode (ITU-T G.711)
+    private static short MuLawDecode(byte ulaw)
+    {
+        ulaw = (byte)~ulaw;
+        int sign = (ulaw & 0x80) != 0 ? -1 : 1;
+        int exponent = (ulaw >> 4) & 0x07;
+        int mantissa = ulaw & 0x0F;
+        int magnitude = ((mantissa << 3) + 132) << exponent - 132;
+        return (short)(sign * magnitude);
+    }
+
+    // G.711 Mu-Law encode (ITU-T G.711)
+    private static byte MuLawEncode(short pcm)
+    {
+        const int BIAS = 132;
+        int sign = (pcm >> 8) & 0x80;
+        if (sign != 0) pcm = (short)-pcm;
+        pcm = (short)Math.Min(pcm + BIAS, 32767);
+        
+        int exponent = 7;
+        for (int expMask = 0x4000; (pcm & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
+        int mantissa = (pcm >> (exponent + 3)) & 0x0F;
+        return (byte)~(sign | (exponent << 4) | mantissa);
     }
 
     public void Dispose()
