@@ -25,8 +25,8 @@ public class DirectRtpPlayoutG711 : IDisposable
 {
     private const int FRAME_SIZE_BYTES = 160;  // 20ms @ 8kHz = 160 bytes G.711
     private const int FRAME_MS = 20;
-    private const int MIN_FRAMES_TO_START = 10; // 200ms cushion (matches DirectRtpPlayout)
-    private const int GRACE_PERIOD_FRAMES = 5;  // 100ms grace (matches DirectRtpPlayout)
+    private const int MIN_FRAMES_TO_START = 15; // 300ms cushion to prevent start cutoff
+    private const int GRACE_PERIOD_FRAMES = 8;  // 160ms grace to prevent end cutoff
     // OpenAI can deliver audio faster-than-realtime (burst). We must buffer it and pace out at 20ms.
     // Do NOT keep this too small or you'll drop speech and it will sound choppy.
     private const int MAX_QUEUE_FRAMES = 3000; // 60s max safety cap
