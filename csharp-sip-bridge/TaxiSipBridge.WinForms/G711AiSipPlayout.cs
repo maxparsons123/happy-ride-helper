@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.SIP.App;
+using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
@@ -53,7 +54,7 @@ public class G711AiSipPlayout : IDisposable
 
         // Detect negotiated codec from remote SDP
         var remoteDesc = _mediaSession.RemoteDescription;
-        var audioAnnouncement = remoteDesc?.Media?.FirstOrDefault(m => m.Media == SIPSorceryMedia.Abstractions.SDPMediaTypesEnum.audio);
+        var audioAnnouncement = remoteDesc?.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
         var codec = audioAnnouncement?.MediaFormats?.Values?.FirstOrDefault()?.Name() ?? "NONE";
         _useALaw = codec == "PCMA";
 
