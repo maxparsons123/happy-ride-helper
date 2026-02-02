@@ -719,22 +719,44 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 if (action == "request_quote")
                 {
-                    var (fare, eta, _) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination)
-                                                             .ConfigureAwait(false);
+                    // Use CalculateFareWithCoordsAsync to get geocoded address details for dispatch
+                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                        _booking.Pickup, 
+                        _booking.Destination,
+                        _callerId).ConfigureAwait(false);
 
-                    _booking.Fare = fare;
-                    _booking.Eta = eta;
+                    _booking.Fare = fareResult.Fare;
+                    _booking.Eta = fareResult.Eta;
+                    
+                    // Populate geocoded pickup details
+                    _booking.PickupLat = fareResult.PickupLat;
+                    _booking.PickupLon = fareResult.PickupLon;
+                    _booking.PickupStreet = fareResult.PickupStreet;
+                    _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                    _booking.PickupPostalCode = fareResult.PickupPostalCode;
+                    _booking.PickupCity = fareResult.PickupCity;
+                    _booking.PickupFormatted = fareResult.PickupFormatted;
+                    
+                    // Populate geocoded destination details
+                    _booking.DestLat = fareResult.DestLat;
+                    _booking.DestLon = fareResult.DestLon;
+                    _booking.DestStreet = fareResult.DestStreet;
+                    _booking.DestNumber = fareResult.DestNumber?.ToString();
+                    _booking.DestPostalCode = fareResult.DestPostalCode;
+                    _booking.DestCity = fareResult.DestCity;
+                    _booking.DestFormatted = fareResult.DestFormatted;
+                    
                     _awaitingConfirmation = true;
 
                     OnBookingUpdated?.Invoke(_booking);
-                    Log($"💰 Quote: {fare}");
+                    Log($"💰 Quote: {fareResult.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
 
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
-                        fare,
-                        eta,
-                        message = $"Fare is {fare}, driver arrives in {eta}. Book it?"
+                        fare = fareResult.Fare,
+                        eta = fareResult.Eta,
+                        message = $"Fare is {fareResult.Fare}, driver arrives in {fareResult.Eta}. Book it?"
                     }).ConfigureAwait(false);
 
                     await QueueResponseCreateAsync().ConfigureAwait(false);
@@ -747,6 +769,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
+
+                    // Dispatch to BSQD API with geocoded address components
+                    if (!string.IsNullOrEmpty(_callerId))
+                    {
+                        BsqdDispatcher.OnLog += msg => Log(msg);
+                        BsqdDispatcher.Dispatch(_booking, _callerId);
+                    }
 
                     // Fire-and-forget with explicit error logging
                     _ = Task.Run(async () =>

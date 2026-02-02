@@ -18,6 +18,7 @@ public sealed class G711CallFeatures : IDisposable
     private readonly OpenAIRealtimeG711Client _client;
     private readonly BookingState _booking = new();
     private readonly string _callId;
+    private string? _callerPhone; // For geocoding region detection
     
     // =========================
     // WATCHDOG STATE
@@ -49,10 +50,11 @@ public sealed class G711CallFeatures : IDisposable
     // =========================
     // CONSTRUCTOR
     // =========================
-    public G711CallFeatures(OpenAIRealtimeG711Client client, string callId)
+    public G711CallFeatures(OpenAIRealtimeG711Client client, string callId, string? callerPhone = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _callId = callId;
+        _callerPhone = callerPhone;
         
         // Wire up to base client events
         _client.OnLog += msg => OnLog?.Invoke(msg);
@@ -215,9 +217,9 @@ public sealed class G711CallFeatures : IDisposable
     
     private string HandleSyncBookingData(JsonElement args)
     {
-        // Extract booking fields
+        // Extract booking fields - map to BookingState (from BookingState.cs)
         if (args.TryGetProperty("caller_name", out var name))
-            _booking.CallerName = name.GetString();
+            _booking.Name = name.GetString();
         if (args.TryGetProperty("pickup", out var pickup))
             _booking.Pickup = pickup.GetString();
         if (args.TryGetProperty("destination", out var dest))
@@ -229,7 +231,7 @@ public sealed class G711CallFeatures : IDisposable
         
         OnBookingUpdated?.Invoke(_booking);
         
-        Log($"📋 [{_callId}] Booking synced: {_booking.CallerName}, {_booking.Pickup} → {_booking.Destination}, {_booking.Passengers} pax");
+        Log($"📋 [{_callId}] Booking synced: {_booking.Name}, {_booking.Pickup} → {_booking.Destination}, {_booking.Passengers} pax");
         
         return "Booking data synchronized";
     }
@@ -242,23 +244,63 @@ public sealed class G711CallFeatures : IDisposable
         {
             _awaitingConfirmation = true;
             
-            // Generate a quote (mock for now)
-            var quote = CalculateMockQuote();
-            _booking.Quote = quote;
+            // Calculate real fare using FareCalculator with geocoding
+            try
+            {
+                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                    _booking.Pickup, 
+                    _booking.Destination,
+                    _callerPhone);
+                
+                // Populate geocoded address details in BookingState
+                _booking.Fare = fareResult.Fare;
+                _booking.Eta = fareResult.Eta;
+                
+                // Pickup geocoded data
+                _booking.PickupLat = fareResult.PickupLat;
+                _booking.PickupLon = fareResult.PickupLon;
+                _booking.PickupStreet = fareResult.PickupStreet;
+                _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                _booking.PickupPostalCode = fareResult.PickupPostalCode;
+                _booking.PickupCity = fareResult.PickupCity;
+                _booking.PickupFormatted = fareResult.PickupFormatted;
+                
+                // Destination geocoded data
+                _booking.DestLat = fareResult.DestLat;
+                _booking.DestLon = fareResult.DestLon;
+                _booking.DestStreet = fareResult.DestStreet;
+                _booking.DestNumber = fareResult.DestNumber?.ToString();
+                _booking.DestPostalCode = fareResult.DestPostalCode;
+                _booking.DestCity = fareResult.DestCity;
+                _booking.DestFormatted = fareResult.DestFormatted;
+                
+                Log($"💰 [{_callId}] Quote: {fareResult.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ [{_callId}] Fare calculation failed: {ex.Message}");
+                _booking.Fare = "£10.00"; // Fallback
+            }
             
-            Log($"💰 [{_callId}] Quote: {quote}");
             OnBookingUpdated?.Invoke(_booking);
             
-            return $"Quote generated: {quote}. Ask user to confirm.";
+            return $"Quote generated: {_booking.Fare}. Ask user to confirm.";
         }
         
         // Confirmed booking
         _awaitingConfirmation = false;
-        _booking.BookingRef = $"VT{DateTime.Now:yyMMddHHmmss}";
-        _booking.Status = "confirmed";
+        _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
+        _booking.Confirmed = true;
         
         Log($"✅ [{_callId}] Booking confirmed: {_booking.BookingRef}");
         OnBookingUpdated?.Invoke(_booking);
+        
+        // Dispatch to BSQD API with geocoded address components
+        if (!string.IsNullOrEmpty(_callerPhone))
+        {
+            BsqdDispatcher.OnLog += msg => Log(msg);
+            BsqdDispatcher.Dispatch(_booking, _callerPhone);
+        }
         
         // Schedule call end after goodbye
         _ = Task.Run(async () =>
@@ -317,15 +359,7 @@ public sealed class G711CallFeatures : IDisposable
         await SendToOpenAIAsync(new { type = "response.create" });
     }
     
-    private string CalculateMockQuote()
-    {
-        // Simple mock quote based on destination
-        var random = new Random();
-        var base_fare = 5.0 + random.NextDouble() * 20;
-        var pax_surcharge = (_booking.Passengers ?? 1) > 4 ? 5.0 : 0;
-        var total = base_fare + pax_surcharge;
-        return $"£{total:F2}";
-    }
+    // CalculateMockQuote removed - now using real FareCalculator.CalculateFareWithCoordsAsync()
     
     // =========================
     // RESPONSE HANDLING
@@ -374,22 +408,5 @@ public sealed class G711CallFeatures : IDisposable
     }
 }
 
-/// <summary>
-/// Simple booking state container.
-/// </summary>
-public class BookingState
-{
-    public string? CallerName { get; set; }
-    public string? Pickup { get; set; }
-    public string? Destination { get; set; }
-    public int? Passengers { get; set; }
-    public string? PickupTime { get; set; }
-    public string? Quote { get; set; }
-    public string? BookingRef { get; set; }
-    public string? Status { get; set; }
-    
-    public bool IsComplete => 
-        !string.IsNullOrEmpty(Pickup) && 
-        !string.IsNullOrEmpty(Destination) && 
-        Passengers.HasValue;
-}
+// BookingState is now imported from BookingState.cs (TaxiSipBridge namespace)
+// Removed duplicate definition that was missing geocoded fields
