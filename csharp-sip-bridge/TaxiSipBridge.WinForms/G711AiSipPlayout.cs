@@ -55,7 +55,10 @@ public class G711AiSipPlayout : IDisposable
         // Detect negotiated codec from remote SDP
         var remoteDesc = _mediaSession.RemoteDescription;
         var audioAnnouncement = remoteDesc?.Media?.FirstOrDefault(m => m.Media == SDPMediaTypesEnum.audio);
-        var codec = audioAnnouncement?.MediaFormats?.Values?.FirstOrDefault()?.Name() ?? "NONE";
+        // NOTE: SDPAudioVideoMediaFormat is a non-nullable struct, so avoid null-conditionals on the format itself.
+        var codec = audioAnnouncement?.MediaFormats?.Values
+            .Select(v => v.Name())
+            .FirstOrDefault() ?? "NONE";
         _useALaw = codec == "PCMA";
 
         if (codec != "PCMA" && codec != "PCMU")

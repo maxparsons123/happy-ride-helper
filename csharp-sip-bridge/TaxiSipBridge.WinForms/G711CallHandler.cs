@@ -375,16 +375,8 @@ Be concise, warm, and professional.
         Log($"📌 [{callId}] Event handlers wired: OnResponseStarted, OnResponseCompleted");
 
         _aiClient.OnAdaSpeaking += _ => { };
-        
-        // Barge-in: Clear ALL buffers when user interrupts AI
-        _aiClient.OnBargeIn += () =>
-        {
-            _playout?.Clear();           // Clear RTP output buffer
-            _aiClient?.ClearPendingFrames(); // Clear AI client queue
-            _isBotSpeaking = false;
-            _botStoppedSpeakingAt = DateTime.UtcNow;
-            Log($"✂️ [{callId}] Barge-in: All audio buffers cleared");
-        };
+        // NOTE: Barge-in is handled in WireRtpInput by clearing playout when user audio arrives
+        // while AI audio is still buffered.
 
         // AI-triggered hangup
         Action? endCallHandler = null;
@@ -485,6 +477,16 @@ Be concise, warm, and professional.
                 // Get raw payload
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
+
+                // Barge-in: if AI audio is still buffered for RTP, cut it immediately.
+                // (This avoids relying on a client-specific event and works across builds.)
+                var pendingPlayoutFrames = _playout?.PendingFrameCount ?? 0;
+                if (pendingPlayoutFrames > 0)
+                {
+                    _playout?.Clear();
+                    ai.ClearPendingFrames();
+                    Log($"✂️ [{callId}] Barge-in: cleared playout ({pendingPlayoutFrames} frames) + AI queue");
+                }
 
                 // Since OpenAI is now configured for the same codec as SIP,
                 // we can pass G.711 frames directly without transcoding!
