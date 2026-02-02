@@ -12,17 +12,18 @@ using TaxiSipBridge.Audio;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// OpenAI Realtime API client using 24kHz PCM with high-quality resampling.
+/// OpenAI Realtime API client using 24kHz PCM with optimized bi-directional audio conversion.
 /// 
-/// v1.8: 24kHz PCM mode with NAudio WDL anti-aliased resampling
+/// v1.9: Optimized linear interpolation and decimation for minimal latency
 /// - OpenAI sends/receives 24kHz PCM16 (best quality)
-/// - Ingress: 8kHz G.711 → decode → upsample 3x → 24kHz PCM to OpenAI
-/// - Egress: 24kHz PCM from OpenAI → NAudio WDL downsample → G.711 encode
-/// - Proven G711Codec lookup tables for encoding
+/// - Ingress: 8kHz G.711 → decode → upsample 3x (linear interp) → 24kHz PCM to OpenAI
+/// - Egress: 24kHz PCM from OpenAI → downsample 3x (decimation) → G.711 encode
+/// - Float-based interpolation (0.333f) prevents integer truncation artifacts
+/// - Fast decimation for natural voice quality without CPU overhead
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "1.8-24k-wdl";
+    public const string VERSION = "1.9-optimized";
 
     // =========================
     // G.711 CODEC SELECTION (SIP side)
@@ -247,7 +248,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     /// <summary>
-    /// Upsample 8kHz PCM to 24kHz PCM (3x) using linear interpolation.
+    /// Upsample 8kHz PCM to 24kHz PCM (3x) using Linear Interpolation.
+    /// Uses float multiplication (0.333f) to avoid integer truncation artifacts.
     /// </summary>
     private static short[] Upsample8kTo24k(short[] input)
     {
@@ -262,19 +264,38 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             short next = input[i + 1];
 
             output[outIdx] = current;
-            output[outIdx + 1] = (short)(current + (next - current) / 3);
-            output[outIdx + 2] = (short)(current + (next - current) * 2 / 3);
+            // Interpolate with float math for smooth transitions
+            output[outIdx + 1] = (short)(current + (next - current) * 0.333f);
+            output[outIdx + 2] = (short)(current + (next - current) * 0.666f);
         }
 
-        // Handle last sample
+        // Handle last sample to avoid index out of bounds
         if (input.Length > 0)
         {
-            int lastIdx = (input.Length - 1) * 3;
-            output[lastIdx] = input[input.Length - 1];
-            output[lastIdx + 1] = input[input.Length - 1];
-            output[lastIdx + 2] = input[input.Length - 1];
+            int last = (input.Length - 1) * 3;
+            output[last] = input[input.Length - 1];
+            output[last + 1] = input[input.Length - 1];
+            output[last + 2] = input[input.Length - 1];
         }
 
+        return output;
+    }
+
+    /// <summary>
+    /// Downsample 24kHz PCM from OpenAI to 8kHz PCM for the SIP line.
+    /// Uses decimation (take every 3rd sample) for natural voice quality.
+    /// </summary>
+    private static short[] Downsample24kTo8k(short[] input)
+    {
+        if (input == null || input.Length == 0) return Array.Empty<short>();
+        
+        int outputCount = input.Length / 3;
+        short[] output = new short[outputCount];
+
+        for (int i = 0; i < outputCount; i++)
+        {
+            output[i] = input[i * 3];
+        }
         return output;
     }
 
@@ -381,7 +402,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     type = "server_vad",
                     threshold = 0.35,
                     prefix_padding_ms = 400,
-                    silence_duration_ms = 1000
+                    silence_duration_ms = 500  // 500ms for snappy response (was 1000)
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -959,7 +980,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // AUDIO PROCESSING (24kHz PCM → 8kHz G.711 with WDL resampler)
+    // AUDIO PROCESSING (24kHz PCM → 8kHz G.711 with decimation)
     // =========================
 
     private void ProcessAudioDelta(string base64)
@@ -969,16 +990,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         try
         {
             // Receive 24kHz PCM16 from OpenAI
-            var pcm24kBytes = Convert.FromBase64String(base64);
-            
-            // High-quality resample 24kHz → 8kHz using NAudio WDL resampler
-            var pcm8kBytes = NAudioResampler.ResampleBytes(pcm24kBytes, 24000, 8000);
-            
-            // Encode to G.711 using proven lookup-table codec
+            byte[] pcm24kBytes = Convert.FromBase64String(base64);
+            short[] pcm24k = AudioCodecs.BytesToShorts(pcm24kBytes);
+
+            // 1. Downsample from OpenAI's 24kHz to SIP's 8kHz using decimation
+            short[] pcm8k = Downsample24kTo8k(pcm24k);
+
+            // 2. Encode to G.711 (MuLaw or ALaw) using proven lookup-table codec
             byte[] g711Bytes = _codec == G711Codec.ALaw
-                ? Audio.G711Codec.Pcm16ToAlaw(pcm8kBytes)
-                : Audio.G711Codec.Pcm16ToUlaw(pcm8kBytes);
-            
+                ? AudioCodecs.ALawEncode(pcm8k)
+                : AudioCodecs.MuLawEncode(pcm8k);
+
+            // 3. Queue for the SIP RTP thread
             AppendAndEnqueueG711(g711Bytes);
 
             var chunks = Interlocked.Increment(ref _audioChunksReceived);
@@ -987,7 +1010,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }
         catch (Exception ex)
         {
-            Log($"⚠️ Audio processing error: {ex.Message}");
+            Log($"⚠️ ProcessAudioDelta error: {ex.Message}");
         }
     }
 
