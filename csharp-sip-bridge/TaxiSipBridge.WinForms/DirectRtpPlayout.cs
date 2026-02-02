@@ -74,30 +74,12 @@ public class DirectRtpPlayout : IDisposable
         if (pcm24kBytes == null || pcm24kBytes.Length < 6) return;
 
         int sampleCount24k = pcm24kBytes.Length / 2;
-        
-        // Cleaner DSP: minimal filtering, gentle volume, wide headroom
-        float alpha = 0.85f;        // Higher = less smoothing, more natural
-        float volumeBoost = 1.15f;  // Gentle boost only
 
+        // BYPASS MODE: No filtering, pure 3:1 decimation (take middle sample)
         for (int i = 0; i < sampleCount24k - 2; i += 3)
         {
-            short s1 = BitConverter.ToInt16(pcm24kBytes, i * 2);
-            short s2 = BitConverter.ToInt16(pcm24kBytes, (i + 1) * 2);
-            short s3 = BitConverter.ToInt16(pcm24kBytes, (i + 2) * 2);
-
-            // Simple 3:1 decimation with light averaging (less aggressive than before)
-            float sample = (s1 * 0.2f) + (s2 * 0.6f) + (s3 * 0.2f);
-            
-            // Light IIR for DC removal and smoothing
-            _filterState = (_filterState * (1 - alpha)) + (sample * alpha);
-
-            float output = _filterState * volumeBoost;
-
-            // Gentle soft-knee limiter with higher threshold
-            if (output > 30000) output = 30000 + (output - 30000) * 0.1f;
-            if (output < -30000) output = -30000 + (output + 30000) * 0.1f;
-
-            _sampleBuffer.Enqueue((short)Math.Clamp(output, short.MinValue, short.MaxValue));
+            short sample = BitConverter.ToInt16(pcm24kBytes, (i + 1) * 2);
+            _sampleBuffer.Enqueue(sample);
         }
     }
 
