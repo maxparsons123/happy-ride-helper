@@ -336,8 +336,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 {
                     type = "server_vad",
                     threshold = 0.35,
-                    prefix_padding_ms = 300,
-                    silence_duration_ms = 700
+                    prefix_padding_ms = 600,
+                    silence_duration_ms = 1200
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -871,10 +871,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 150; // Reduced from 300ms for snappier responses
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300; // Match OpenAIRealtimeClient exactly
     }
 
-    private async Task QueueResponseCreateAsync(int delayMs = 20, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -884,15 +884,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
+            // Wait for any active response to complete (up to 5s) - matches OpenAIRealtimeClient
             if (waitForCurrentResponse)
             {
-                // Reduced from 100 iterations (5s) to 60 iterations (3s) for faster fallthrough
-                for (int i = 0; i < 60 && Volatile.Read(ref _responseActive) == 1; i++)
+                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
                     await Task.Delay(50).ConfigureAwait(false);
             }
 
             await Task.Delay(delayMs).ConfigureAwait(false);
 
+            // If response is still active after waiting, defer to response.done handler
             if (Volatile.Read(ref _responseActive) == 1)
             {
                 Interlocked.Exchange(ref _deferredResponsePending, 1);
@@ -903,6 +904,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             if (!CanCreateResponse())
                 return;
 
+            // DO NOT set _responseActive = 1 here — let OpenAI's response.created do it
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
             Log("🔄 response.create sent");
         }
