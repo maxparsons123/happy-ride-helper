@@ -424,14 +424,18 @@ Be concise, warm, and professional.
                         Log($"🎤 [{callId}] Barge-in detected via soft gate");
                     }
                     
-                    // Re-encode to match the OpenAI session's configured codec.
-                    // (Bug fix: we used to always encode A-law, which breaks PCMU trunks where
-                    // OpenAI is configured for g711_ulaw.)
-                    byte[] processedG711 = ai.NegotiatedCodec == OpenAIRealtimeG711Client.G711Codec.ALaw
-                        ? AudioCodecs.ALawEncode(pcm8k)
-                        : AudioCodecs.MuLawEncode(pcm8k);
-
-                    await ai.SendMuLawAsync(processedG711);
+                    // Re-encode to match the OpenAI session's configured codec AND use correct send method.
+                    // (Bug fix: we used to always encode A-law and call SendMuLawAsync, causing codec mismatch.)
+                    if (ai.NegotiatedCodec == OpenAIRealtimeG711Client.G711Codec.ALaw)
+                    {
+                        byte[] processedG711 = AudioCodecs.ALawEncode(pcm8k);
+                        await ai.SendALawAsync(processedG711);
+                    }
+                    else
+                    {
+                        byte[] processedG711 = AudioCodecs.MuLawEncode(pcm8k);
+                        await ai.SendMuLawAsync(processedG711);
+                    }
                     
                     _framesForwarded++;
                     if (_framesForwarded % 50 == 0)
