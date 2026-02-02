@@ -60,6 +60,7 @@
     <Compile Include="Audio\NAudioResampler.cs" />
     <Compile Include="BsqdTaxiDispatcher.cs" />
     <Compile Include="FareCalculator.cs" />
+    <Compile Include="BookingState.cs" />
   </ItemGroup>
 
 </Project>
