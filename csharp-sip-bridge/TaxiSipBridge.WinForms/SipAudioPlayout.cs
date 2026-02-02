@@ -23,8 +23,6 @@ public sealed class SipAudioPlayout : IDisposable
 
     private Timer? _timer;
     private uint _timestamp;
-    private ushort _sequence;
-    private readonly uint _ssrc;
 
     private int _disposed;
     private int _framesSent;
@@ -50,7 +48,6 @@ public sealed class SipAudioPlayout : IDisposable
     public void Start()
     {
         _timestamp = 0;
-        _sequence = 0;
         _framesSent = 0;
 
         // High-precision timer at 20ms intervals
@@ -80,7 +77,7 @@ public sealed class SipAudioPlayout : IDisposable
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                _sequence++,
+                0, // marker bit (sequence number is managed internally by SIPSorcery)
                 _payloadType
             );
 
