@@ -628,7 +628,30 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     Interlocked.Increment(ref _noReplyWatchdogId);
                     
-                    // Barge-in: Notify handler to clear outbound audio
+                    // Proactive barge-in: Stop OpenAI's server-side generation
+                    if (_activeResponseId != null && Volatile.Read(ref _responseActive) == 1)
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await SendJsonAsync(new
+                                {
+                                    type = "conversation.item.truncate",
+                                    item_id = _activeResponseId,
+                                    content_index = 0,
+                                    audio_end_ms = 0
+                                }).ConfigureAwait(false);
+                                Log("✂️ Truncated server-side response");
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"⚠️ Truncate error: {ex.Message}");
+                            }
+                        });
+                    }
+                    
+                    // Notify handler to clear local outbound audio
                     OnBargeIn?.Invoke();
                     Log("✂️ Barge-in detected");
                     break;
