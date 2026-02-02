@@ -41,8 +41,6 @@ public sealed class SipAudioPlayout : IDisposable
         bool useALaw = codec == AudioCodecsEnum.PCMA;
         _payloadType = useALaw ? (byte)8 : (byte)0;
         _silenceByte = useALaw ? (byte)0xD5 : (byte)0xFF;
-
-        _ssrc = (uint)new Random().Next();
     }
 
     public void Start()
