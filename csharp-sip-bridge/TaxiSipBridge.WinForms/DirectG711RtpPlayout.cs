@@ -24,8 +24,9 @@ public sealed class DirectG711RtpPlayout : IDisposable
 {
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
-    private const int MIN_BUFFER_FRAMES = 5; // 100ms buffer - smooths OpenAI WebSocket delivery jitter
+    private const int MIN_BUFFER_FRAMES = 10; // 200ms buffer - matches non-G711 mode for smooth delivery
     private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
+    private const int GRACE_PERIOD_FRAMES = 5; // Continue sending decaying audio before declaring empty
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
@@ -38,7 +39,9 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private int _queueCount;
     private bool _isPlaying;
     private int _framesSent;
+    private int _emptyFramesCount;
     private uint _timestamp;
+    private byte _lastByte; // For smooth decay
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -53,6 +56,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _silence = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
         _payloadType = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)8 : (byte)0;
+        _lastByte = _silence; // Initialize decay byte to silence
         // Timestamp and sequence initialized in Start() with random values
     }
 
@@ -93,7 +97,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
         _framesSent = 0;
         _isPlaying = false;
-        
+        _emptyFramesCount = 0;
+        _lastByte = _silence;
         // Random start timestamp is RFC-friendly; RTP sequence is managed internally by SIPSorcery.
         _timestamp = (uint)Random.Shared.Next();
 
@@ -133,29 +138,52 @@ public sealed class DirectG711RtpPlayout : IDisposable
             OnLog?.Invoke($"[DirectG711RtpPlayout] Buffered {queueCount} frames, starting playout");
         }
 
+        bool hasData = false;
+
         if (_queue.TryDequeue(out var audioFrame))
         {
             Interlocked.Decrement(ref _queueCount);
             Array.Copy(audioFrame, _frameBuffer, FRAME_SIZE);
+            _lastByte = audioFrame[FRAME_SIZE - 1]; // Track last byte for decay
             _framesSent++;
+            hasData = true;
 
             if (_framesSent % 100 == 0)
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Sent {_framesSent} frames (queue: {Volatile.Read(ref _queueCount)})");
         }
         else
         {
-            // Queue empty - send silence
-            Array.Fill(_frameBuffer, _silence);
-
-            if (_isPlaying)
-            {
-                _isPlaying = false;
-                OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
-                OnQueueEmpty?.Invoke();
-            }
+            // Queue empty - use last byte for smooth decay (like non-G711 mode)
+            Array.Fill(_frameBuffer, _lastByte);
         }
 
-        SendRtpFrame(_frameBuffer);
+        if (hasData)
+        {
+            _emptyFramesCount = 0;
+            SendRtpFrame(_frameBuffer);
+        }
+        else
+        {
+            _emptyFramesCount++;
+
+            if (_emptyFramesCount < GRACE_PERIOD_FRAMES)
+            {
+                // Grace period: continue sending decaying audio
+                SendRtpFrame(_frameBuffer);
+            }
+            else
+            {
+                if (_isPlaying)
+                {
+                    _isPlaying = false;
+                    OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
+                    OnQueueEmpty?.Invoke();
+                }
+                // Send silence
+                Array.Fill(_frameBuffer, _silence);
+                SendRtpFrame(_frameBuffer);
+            }
+        }
     }
 
     private void SendRtpFrame(byte[] frame)
@@ -189,6 +217,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
             Interlocked.Decrement(ref _queueCount);
 
         _isPlaying = false;
+        _emptyFramesCount = 0;
+        _lastByte = _silence;
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
     }
 
