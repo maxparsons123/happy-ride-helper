@@ -603,7 +603,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             }
                         }).ConfigureAwait(false);
 
-                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                        // Send response.create directly - bypass CanCreateResponse() since we've already
+                        // confirmed 8s of silence, and _lastUserSpeechAt is updated by soft-gated audio
+                        await Task.Delay(20).ConfigureAwait(false);
+                        await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                        Log("🔄 response.create sent (no-reply watchdog)");
                     });
 
                     break;
