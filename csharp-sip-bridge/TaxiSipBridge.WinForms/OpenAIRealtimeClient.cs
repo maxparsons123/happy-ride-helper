@@ -1411,12 +1411,28 @@ public sealed class BookingState
     public double? PickupLon { get; set; }
     public double? DestLat { get; set; }
     public double? DestLon { get; set; }
+    
+    // Geocoded address components for accurate dispatch
+    public string? PickupStreet { get; set; }
+    public int? PickupNumber { get; set; }
+    public string? PickupPostalCode { get; set; }
+    public string? PickupCity { get; set; }
+    public string? PickupFormatted { get; set; }
+    
+    public string? DestStreet { get; set; }
+    public int? DestNumber { get; set; }
+    public string? DestPostalCode { get; set; }
+    public string? DestCity { get; set; }
+    public string? DestFormatted { get; set; }
 
     public void Reset()
     {
         Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
+        PickupStreet = PickupPostalCode = PickupCity = PickupFormatted = null;
+        DestStreet = DestPostalCode = DestCity = DestFormatted = null;
+        PickupNumber = DestNumber = null;
         Confirmed = false;
     }
 }

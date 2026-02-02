@@ -728,19 +728,39 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                 if (action == "request_quote")
                 {
-                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(_booking.Pickup, _booking.Destination)
-                                                         .ConfigureAwait(false);
+                    // Pass phone number for region-based geocoding
+                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                        _booking.Pickup, 
+                        _booking.Destination,
+                        _callerId  // Phone number for region detection
+                    ).ConfigureAwait(false);
 
                     _booking.Fare = fareResult.Fare;
                     _booking.Eta = fareResult.Eta;
+                    
+                    // Store geocoded coordinates
                     _booking.PickupLat = fareResult.PickupLat;
                     _booking.PickupLon = fareResult.PickupLon;
                     _booking.DestLat = fareResult.DestLat;
                     _booking.DestLon = fareResult.DestLon;
+                    
+                    // Store parsed address components from geocoding
+                    _booking.PickupStreet = fareResult.PickupStreet;
+                    _booking.PickupNumber = fareResult.PickupNumber;
+                    _booking.PickupPostalCode = fareResult.PickupPostalCode;
+                    _booking.PickupCity = fareResult.PickupCity;
+                    _booking.PickupFormatted = fareResult.PickupFormatted;
+                    
+                    _booking.DestStreet = fareResult.DestStreet;
+                    _booking.DestNumber = fareResult.DestNumber;
+                    _booking.DestPostalCode = fareResult.DestPostalCode;
+                    _booking.DestCity = fareResult.DestCity;
+                    _booking.DestFormatted = fareResult.DestFormatted;
+                    
                     _awaitingConfirmation = true;
 
                     OnBookingUpdated?.Invoke(_booking);
-                    Log($"💰 Quote: {fareResult.Fare}");
+                    Log($"💰 Quote: {fareResult.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
 
                     await SendToolResultAsync(callId, new
                     {
@@ -765,7 +785,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     DateTimeOffset departureTime = DateTimeOffset.Now;
                     if (!string.IsNullOrEmpty(_booking.PickupTime))
                     {
-                        // Try parsing common formats: "now", "15 minutes", "3:30pm", etc.
                         var timeStr = _booking.PickupTime.ToLowerInvariant().Trim();
                         if (timeStr == "now" || timeStr == "asap")
                         {
@@ -785,28 +804,28 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         }
                     }
 
-                    // BSQD dispatch
+                    // BSQD dispatch - use geocoded address components from FareResult
                     var taxiBotRequest = new TaxiBotRequest
                     {
                         departure_address = new AddressDto
                         {
                             lat = _booking.PickupLat ?? 0,
                             lon = _booking.PickupLon ?? 0,
-                            street_name = ParseStreetName(_booking.Pickup),
-                            street_number = ParseStreetNumber(_booking.Pickup),
-                            postal_code = ParsePostalCode(_booking.Pickup),
-                            city = ParseCity(_booking.Pickup),
-                            formatted_depa_address = _booking.Pickup ?? "Unknown"
+                            street_name = _booking.PickupStreet ?? ParseStreetName(_booking.Pickup),
+                            street_number = _booking.PickupNumber ?? ParseStreetNumber(_booking.Pickup),
+                            postal_code = _booking.PickupPostalCode ?? ParsePostalCode(_booking.Pickup),
+                            city = _booking.PickupCity ?? ParseCity(_booking.Pickup),
+                            formatted_depa_address = _booking.PickupFormatted ?? _booking.Pickup ?? "Unknown"
                         },
                         destination_address = new AddressDto
                         {
                             lat = _booking.DestLat ?? 0,
                             lon = _booking.DestLon ?? 0,
-                            street_name = ParseStreetName(_booking.Destination),
-                            street_number = ParseStreetNumber(_booking.Destination),
-                            postal_code = ParsePostalCode(_booking.Destination),
-                            city = ParseCity(_booking.Destination),
-                            formatted_dest_address = _booking.Destination ?? "Unknown"
+                            street_name = _booking.DestStreet ?? ParseStreetName(_booking.Destination),
+                            street_number = _booking.DestNumber ?? ParseStreetNumber(_booking.Destination),
+                            postal_code = _booking.DestPostalCode ?? ParsePostalCode(_booking.Destination),
+                            city = _booking.DestCity ?? ParseCity(_booking.Destination),
+                            formatted_dest_address = _booking.DestFormatted ?? _booking.Destination ?? "Unknown"
                         },
                         departure_time = departureTime,
                         first_name = _booking.Name ?? "Customer",

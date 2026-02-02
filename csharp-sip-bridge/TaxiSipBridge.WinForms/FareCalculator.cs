@@ -5,8 +5,8 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Local fare calculator for taxi bookings.
-/// Uses real geocoding (OpenStreetMap) + Haversine formula for accurate distance.
-/// Fallback to keyword-based estimation if geocoding fails.
+/// Uses Google Maps Geocoding for accurate address resolution with phone-based region detection.
+/// Fallback to OpenStreetMap then keyword-based estimation if geocoding fails.
 /// </summary>
 public static class FareCalculator
 {
@@ -18,6 +18,9 @@ public static class FareCalculator
 
     /// <summary>Minimum fare in pounds</summary>
     public const decimal MIN_FARE = 4.00m;
+
+    // API keys loaded from environment
+    private static string? _googleMapsApiKey;
 
     // Lazy-initialized to avoid static constructor failures (TypeInitializationException)
     private static HttpClient? _httpClientBacking;
@@ -32,11 +35,23 @@ public static class FareCalculator
     }
 
     /// <summary>
-    /// Calculate fare based on pickup and destination addresses using real geocoding.
-    /// This is the async version that uses OpenStreetMap for accurate distances.
-    /// Also returns geocoded coordinates for dispatch integration.
+    /// Set the Google Maps API key (call once at startup from config)
     /// </summary>
-    public static async Task<FareResult> CalculateFareWithCoordsAsync(string? pickup, string? destination)
+    public static void SetGoogleMapsApiKey(string apiKey)
+    {
+        _googleMapsApiKey = apiKey;
+        Console.WriteLine("[FareCalculator] Google Maps API key configured");
+    }
+
+    /// <summary>
+    /// Calculate fare based on pickup and destination addresses using real geocoding.
+    /// Uses phone number to detect region for better geocoding accuracy.
+    /// Also returns geocoded coordinates and parsed address components for dispatch.
+    /// </summary>
+    public static async Task<FareResult> CalculateFareWithCoordsAsync(
+        string? pickup, 
+        string? destination,
+        string? phoneNumber = null)
     {
         var result = new FareResult
         {
@@ -48,35 +63,51 @@ public static class FareCalculator
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
             return result;
 
+        // Detect region from phone number
+        var regionBias = DetectRegionFromPhone(phoneNumber);
+        Console.WriteLine($"[FareCalculator] Detected region: {regionBias.Country} (code: {regionBias.CountryCode})");
+
         try
         {
             // Geocode both addresses in parallel
-            var pickupTask = GeocodeAddressAsync(pickup);
-            var destTask = GeocodeAddressAsync(destination);
+            var pickupTask = GeocodeAddressAsync(pickup, regionBias);
+            var destTask = GeocodeAddressAsync(destination, regionBias);
             
             await Task.WhenAll(pickupTask, destTask);
             
-            var pickupCoord = await pickupTask;
-            var destCoord = await destTask;
+            var pickupGeo = await pickupTask;
+            var destGeo = await destTask;
 
-            // Store coordinates
-            if (pickupCoord.HasValue)
+            // Store pickup details
+            if (pickupGeo != null)
             {
-                result.PickupLat = pickupCoord.Value.Lat;
-                result.PickupLon = pickupCoord.Value.Lon;
-            }
-            if (destCoord.HasValue)
-            {
-                result.DestLat = destCoord.Value.Lat;
-                result.DestLon = destCoord.Value.Lon;
+                result.PickupLat = pickupGeo.Lat;
+                result.PickupLon = pickupGeo.Lon;
+                result.PickupStreet = pickupGeo.StreetName;
+                result.PickupNumber = pickupGeo.StreetNumber;
+                result.PickupPostalCode = pickupGeo.PostalCode;
+                result.PickupCity = pickupGeo.City;
+                result.PickupFormatted = pickupGeo.FormattedAddress;
             }
 
-            if (pickupCoord.HasValue && destCoord.HasValue)
+            // Store destination details  
+            if (destGeo != null)
+            {
+                result.DestLat = destGeo.Lat;
+                result.DestLon = destGeo.Lon;
+                result.DestStreet = destGeo.StreetName;
+                result.DestNumber = destGeo.StreetNumber;
+                result.DestPostalCode = destGeo.PostalCode;
+                result.DestCity = destGeo.City;
+                result.DestFormatted = destGeo.FormattedAddress;
+            }
+
+            if (pickupGeo != null && destGeo != null)
             {
                 // Calculate real distance using Haversine
                 var distanceMiles = HaversineDistanceMiles(
-                    pickupCoord.Value.Lat, pickupCoord.Value.Lon,
-                    destCoord.Value.Lat, destCoord.Value.Lon);
+                    pickupGeo.Lat, pickupGeo.Lon,
+                    destGeo.Lat, destGeo.Lon);
 
                 var fare = CalculateFareFromDistanceDecimal(distanceMiles);
                 var eta = EstimateEta(distanceMiles);
@@ -86,8 +117,8 @@ public static class FareCalculator
                 result.DistanceMiles = distanceMiles;
 
                 Console.WriteLine($"[FareCalculator] Geocoded distance: {distanceMiles:F2} miles");
-                Console.WriteLine($"[FareCalculator] Pickup: {pickup} → ({pickupCoord.Value.Lat:F4}, {pickupCoord.Value.Lon:F4})");
-                Console.WriteLine($"[FareCalculator] Dest: {destination} → ({destCoord.Value.Lat:F4}, {destCoord.Value.Lon:F4})");
+                Console.WriteLine($"[FareCalculator] Pickup: {pickup} → {pickupGeo.FormattedAddress} ({pickupGeo.Lat:F4}, {pickupGeo.Lon:F4})");
+                Console.WriteLine($"[FareCalculator] Dest: {destination} → {destGeo.FormattedAddress} ({destGeo.Lat:F4}, {destGeo.Lon:F4})");
 
                 return result;
             }
@@ -116,42 +147,240 @@ public static class FareCalculator
     }
 
     /// <summary>
-    /// Geocode an address using OpenStreetMap Nominatim API.
-    /// Returns lat/lon coordinates or null if not found.
+    /// Detect region/country from phone number prefix for geocoding bias.
     /// </summary>
-    private static async Task<(double Lat, double Lon)?> GeocodeAddressAsync(string address)
+    private static RegionInfo DetectRegionFromPhone(string? phoneNumber)
+    {
+        if (string.IsNullOrWhiteSpace(phoneNumber))
+            return new RegionInfo { Country = "United Kingdom", CountryCode = "GB", DefaultCity = "London" };
+
+        // Clean the phone number
+        var clean = new string(phoneNumber.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        if (clean.StartsWith("00")) clean = "+" + clean.Substring(2);
+        if (!clean.StartsWith("+") && clean.Length > 0) clean = "+" + clean;
+
+        // Match country codes
+        if (clean.StartsWith("+31")) // Netherlands
+            return new RegionInfo { Country = "Netherlands", CountryCode = "NL", DefaultCity = "Amsterdam" };
+        if (clean.StartsWith("+44")) // UK
+            return new RegionInfo { Country = "United Kingdom", CountryCode = "GB", DefaultCity = "London" };
+        if (clean.StartsWith("+1")) // US/Canada
+            return new RegionInfo { Country = "United States", CountryCode = "US", DefaultCity = "New York" };
+        if (clean.StartsWith("+33")) // France
+            return new RegionInfo { Country = "France", CountryCode = "FR", DefaultCity = "Paris" };
+        if (clean.StartsWith("+49")) // Germany
+            return new RegionInfo { Country = "Germany", CountryCode = "DE", DefaultCity = "Berlin" };
+        if (clean.StartsWith("+32")) // Belgium
+            return new RegionInfo { Country = "Belgium", CountryCode = "BE", DefaultCity = "Brussels" };
+        if (clean.StartsWith("+34")) // Spain
+            return new RegionInfo { Country = "Spain", CountryCode = "ES", DefaultCity = "Madrid" };
+        if (clean.StartsWith("+39")) // Italy
+            return new RegionInfo { Country = "Italy", CountryCode = "IT", DefaultCity = "Rome" };
+        if (clean.StartsWith("+48")) // Poland
+            return new RegionInfo { Country = "Poland", CountryCode = "PL", DefaultCity = "Warsaw" };
+        if (clean.StartsWith("+351")) // Portugal
+            return new RegionInfo { Country = "Portugal", CountryCode = "PT", DefaultCity = "Lisbon" };
+        if (clean.StartsWith("+353")) // Ireland
+            return new RegionInfo { Country = "Ireland", CountryCode = "IE", DefaultCity = "Dublin" };
+
+        // Default to UK
+        return new RegionInfo { Country = "United Kingdom", CountryCode = "GB", DefaultCity = "London" };
+    }
+
+    /// <summary>
+    /// Geocode an address using Google Maps Geocoding API (preferred) or OSM fallback.
+    /// Returns full address components for dispatch integration.
+    /// </summary>
+    private static async Task<GeocodedAddress?> GeocodeAddressAsync(string address, RegionInfo region)
+    {
+        // Try Google Maps first if API key is available
+        if (!string.IsNullOrEmpty(_googleMapsApiKey))
+        {
+            var googleResult = await GeocodeWithGoogleAsync(address, region);
+            if (googleResult != null) return googleResult;
+        }
+
+        // Fallback to OpenStreetMap
+        return await GeocodeWithOsmAsync(address, region);
+    }
+
+    /// <summary>
+    /// Geocode using Google Maps Geocoding API with region bias.
+    /// </summary>
+    private static async Task<GeocodedAddress?> GeocodeWithGoogleAsync(string address, RegionInfo region)
     {
         try
         {
-            // Add UK bias for better results
+            // Add region context if not already present
             var searchAddress = address;
-            if (!address.ToLowerInvariant().Contains("uk") && 
-                !address.ToLowerInvariant().Contains("united kingdom") &&
-                !address.ToLowerInvariant().Contains("netherlands") &&
-                !address.ToLowerInvariant().Contains("nederland"))
+            if (!ContainsRegionContext(address, region))
             {
-                searchAddress = $"{address}, UK";
+                searchAddress = $"{address}, {region.Country}";
             }
 
-            var url = $"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(searchAddress)}&format=json&limit=1";
-            
+            var url = $"https://maps.googleapis.com/maps/api/geocode/json" +
+                      $"?address={Uri.EscapeDataString(searchAddress)}" +
+                      $"&region={region.CountryCode.ToLower()}" +
+                      $"&key={_googleMapsApiKey}";
+
+            var response = await GetHttpClient().GetStringAsync(url);
+            var doc = JsonDocument.Parse(response);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("status", out var status) && status.GetString() == "OK")
+            {
+                if (root.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
+                {
+                    var first = results[0];
+                    var result = new GeocodedAddress();
+
+                    // Get coordinates
+                    if (first.TryGetProperty("geometry", out var geometry) &&
+                        geometry.TryGetProperty("location", out var location))
+                    {
+                        result.Lat = location.GetProperty("lat").GetDouble();
+                        result.Lon = location.GetProperty("lng").GetDouble();
+                    }
+
+                    // Get formatted address
+                    if (first.TryGetProperty("formatted_address", out var formatted))
+                    {
+                        result.FormattedAddress = formatted.GetString() ?? address;
+                    }
+
+                    // Parse address components
+                    if (first.TryGetProperty("address_components", out var components))
+                    {
+                        foreach (var comp in components.EnumerateArray())
+                        {
+                            var types = comp.GetProperty("types").EnumerateArray()
+                                           .Select(t => t.GetString()).ToList();
+                            var longName = comp.GetProperty("long_name").GetString() ?? "";
+                            var shortName = comp.TryGetProperty("short_name", out var sn) 
+                                           ? sn.GetString() ?? "" : longName;
+
+                            if (types.Contains("street_number"))
+                            {
+                                int.TryParse(new string(longName.Where(char.IsDigit).ToArray()), out var num);
+                                result.StreetNumber = num;
+                            }
+                            else if (types.Contains("route"))
+                            {
+                                result.StreetName = longName;
+                            }
+                            else if (types.Contains("postal_code"))
+                            {
+                                result.PostalCode = longName;
+                            }
+                            else if (types.Contains("locality"))
+                            {
+                                result.City = longName;
+                            }
+                            else if (types.Contains("postal_town") && string.IsNullOrEmpty(result.City))
+                            {
+                                result.City = longName;
+                            }
+                            else if (types.Contains("administrative_area_level_2") && string.IsNullOrEmpty(result.City))
+                            {
+                                result.City = longName;
+                            }
+                        }
+                    }
+
+                    Console.WriteLine($"[FareCalculator] Google geocoded: {address} → {result.City}, {result.PostalCode}");
+                    return result;
+                }
+            }
+            else
+            {
+                var statusStr = status.GetString();
+                Console.WriteLine($"[FareCalculator] Google geocode status: {statusStr}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Google geocode error for '{address}': {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Geocode using OpenStreetMap Nominatim API as fallback.
+    /// </summary>
+    private static async Task<GeocodedAddress?> GeocodeWithOsmAsync(string address, RegionInfo region)
+    {
+        try
+        {
+            var searchAddress = address;
+            if (!ContainsRegionContext(address, region))
+            {
+                searchAddress = $"{address}, {region.Country}";
+            }
+
+            var url = $"https://nominatim.openstreetmap.org/search" +
+                      $"?q={Uri.EscapeDataString(searchAddress)}" +
+                      $"&format=json&limit=1&addressdetails=1" +
+                      $"&countrycodes={region.CountryCode.ToLower()}";
+
             var response = await GetHttpClient().GetStringAsync(url);
             var results = JsonSerializer.Deserialize<JsonElement[]>(response);
 
             if (results != null && results.Length > 0)
             {
                 var first = results[0];
-                var lat = double.Parse(first.GetProperty("lat").GetString()!);
-                var lon = double.Parse(first.GetProperty("lon").GetString()!);
-                return (lat, lon);
+                var result = new GeocodedAddress
+                {
+                    Lat = double.Parse(first.GetProperty("lat").GetString()!),
+                    Lon = double.Parse(first.GetProperty("lon").GetString()!),
+                    FormattedAddress = first.TryGetProperty("display_name", out var dn) 
+                                       ? dn.GetString() ?? address : address
+                };
+
+                // Parse address details if available
+                if (first.TryGetProperty("address", out var addr))
+                {
+                    if (addr.TryGetProperty("road", out var road))
+                        result.StreetName = road.GetString() ?? "";
+                    if (addr.TryGetProperty("house_number", out var houseNum))
+                    {
+                        var numStr = houseNum.GetString() ?? "";
+                        int.TryParse(new string(numStr.Where(char.IsDigit).ToArray()), out var num);
+                        result.StreetNumber = num;
+                    }
+                    if (addr.TryGetProperty("postcode", out var pc))
+                        result.PostalCode = pc.GetString() ?? "";
+                    if (addr.TryGetProperty("city", out var city))
+                        result.City = city.GetString() ?? "";
+                    else if (addr.TryGetProperty("town", out var town))
+                        result.City = town.GetString() ?? "";
+                    else if (addr.TryGetProperty("village", out var village))
+                        result.City = village.GetString() ?? "";
+                }
+
+                Console.WriteLine($"[FareCalculator] OSM geocoded: {address} → {result.City}");
+                return result;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Geocode error for '{address}': {ex.Message}");
+            Console.WriteLine($"[FareCalculator] OSM geocode error for '{address}': {ex.Message}");
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Check if address already contains region/country context.
+    /// </summary>
+    private static bool ContainsRegionContext(string address, RegionInfo region)
+    {
+        var lower = address.ToLowerInvariant();
+        return lower.Contains(region.Country.ToLower()) ||
+               lower.Contains(region.CountryCode.ToLower()) ||
+               lower.Contains(region.DefaultCity.ToLower()) ||
+               System.Text.RegularExpressions.Regex.IsMatch(address, @"\d{4}\s*[A-Z]{2}") || // NL postcode
+               System.Text.RegularExpressions.Regex.IsMatch(address, @"[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}"); // UK postcode
     }
 
     /// <summary>
@@ -210,7 +439,7 @@ public static class FareCalculator
         // Airport trips are typically longer
         if (combined.Contains("airport") || combined.Contains("heathrow") || 
             combined.Contains("gatwick") || combined.Contains("stansted") ||
-            combined.Contains("schiphol"))
+            combined.Contains("schiphol") || combined.Contains("luton"))
         {
             return 15.0;
         }
@@ -277,15 +506,53 @@ public static class FareCalculator
 }
 
 /// <summary>
-/// Result from fare calculation including coordinates for dispatch.
+/// Region information detected from phone number.
+/// </summary>
+public class RegionInfo
+{
+    public string Country { get; set; } = "United Kingdom";
+    public string CountryCode { get; set; } = "GB";
+    public string DefaultCity { get; set; } = "London";
+}
+
+/// <summary>
+/// Geocoded address with full components.
+/// </summary>
+public class GeocodedAddress
+{
+    public double Lat { get; set; }
+    public double Lon { get; set; }
+    public string StreetName { get; set; } = "";
+    public int StreetNumber { get; set; }
+    public string PostalCode { get; set; } = "";
+    public string City { get; set; } = "";
+    public string FormattedAddress { get; set; } = "";
+}
+
+/// <summary>
+/// Result from fare calculation including coordinates and address components for dispatch.
 /// </summary>
 public class FareResult
 {
     public string Fare { get; set; } = "";
     public string Eta { get; set; } = "";
     public double DistanceMiles { get; set; }
+    
+    // Pickup details
     public double? PickupLat { get; set; }
     public double? PickupLon { get; set; }
+    public string? PickupStreet { get; set; }
+    public int? PickupNumber { get; set; }
+    public string? PickupPostalCode { get; set; }
+    public string? PickupCity { get; set; }
+    public string? PickupFormatted { get; set; }
+    
+    // Destination details
     public double? DestLat { get; set; }
     public double? DestLon { get; set; }
+    public string? DestStreet { get; set; }
+    public int? DestNumber { get; set; }
+    public string? DestPostalCode { get; set; }
+    public string? DestCity { get; set; }
+    public string? DestFormatted { get; set; }
 }
