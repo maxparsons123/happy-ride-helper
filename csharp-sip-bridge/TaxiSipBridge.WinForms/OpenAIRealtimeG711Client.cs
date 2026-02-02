@@ -559,7 +559,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     break;
 
                 case "response.audio.done":
-                    FlushAudioAccumulator(padWithSilence: true);
+                    // Audio accumulator removed - audio flows through OnPcm24Audio → DirectRtpPlayout
                     break;
 
                 case "response.audio_transcript.delta":
@@ -1143,7 +1143,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Volatile.Write(ref _audioFramesSent, 0);
         Volatile.Write(ref _audioChunksReceived, 0);
 
-        lock (_audioAccumLock) _audioAccumOffset = 0;
+        // Audio accumulator removed - audio flows through OnPcm24Audio → DirectRtpPlayout
     }
 
     private string DetectLanguage(string? phone)
