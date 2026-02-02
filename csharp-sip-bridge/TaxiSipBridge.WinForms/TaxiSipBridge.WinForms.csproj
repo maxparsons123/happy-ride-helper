@@ -35,6 +35,8 @@
     <Compile Include="EdgeFunctionCallHandler.cs" />
     <Compile Include="LocalOpenAICallHandler.cs" />
     <Compile Include="IngressAudioProcessor.cs" />
+    <Compile Include="IngressDsp.cs" />
+    <Compile Include="WhatsAppNotifier.cs" />
 
     <!-- Audio utilities -->
     <Compile Include="AudioCodecs.cs" />
@@ -55,6 +57,7 @@
     <Compile Include="DirectRtpPlayout.cs" />
     <Compile Include="DirectRtpPlayoutExtensions.cs" />
     <Compile Include="DirectRtpPlayoutG711.cs" />
+    <Compile Include="DirectG711RtpPlayout.cs" />
     <Compile Include="G711CallHandler.cs" />
     <Compile Include="Audio\G711Codec.cs" />
     <Compile Include="Audio\NAudioResampler.cs" />
