@@ -9,17 +9,19 @@ using SIPSorceryMedia.Abstractions;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Ultra-clean push-based RTP playout for native G.711 mode.
+/// Push-based RTP playout for native G.711 mode with minimal jitter buffer.
 /// 
-/// DIRECT PASSTHROUGH: No buffering, no decay, no DSP.
-/// Raw G.711 bytes from OpenAI → RTP at precise 20ms intervals.
+/// DIRECT PASSTHROUGH: No DSP, no resampling.
+/// Raw G.711 bytes from OpenAI → small jitter buffer → RTP at 20ms intervals.
 /// 
 /// Uses Stopwatch-based timing for high precision (sub-ms accuracy).
+/// 60ms jitter buffer smooths out WebSocket delivery bursts.
 /// </summary>
 public sealed class DirectG711RtpPlayout : IDisposable
 {
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
+    private const int JITTER_BUFFER_FRAMES = 3; // 60ms jitter buffer - smooths WebSocket bursts
     private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
 
     private readonly VoIPMediaSession _mediaSession;
@@ -30,6 +32,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private readonly byte[] _silenceFrame;
     private Thread? _playoutThread;
     private volatile bool _running;
+    private volatile bool _isBuffering; // True while accumulating jitter buffer
     private int _disposed;
     private int _queueCount;
     private int _framesSent;
@@ -40,7 +43,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
     public event Action? OnQueueEmpty;
 
     public int PendingFrameCount => Volatile.Read(ref _queueCount);
-    public bool IsPlaying => Volatile.Read(ref _queueCount) > 0;
+    public bool IsPlaying => _wasPlaying;
 
     public DirectG711RtpPlayout(
         VoIPMediaSession mediaSession,
@@ -92,6 +95,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
         _framesSent = 0;
         _wasPlaying = false;
+        _isBuffering = true; // Start in buffering mode
         _running = true;
         
         // Random start timestamp (RFC 3550 compliant)
@@ -106,7 +110,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         };
         _playoutThread.Start();
         
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (high-precision thread, ts={_timestamp})");
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (60ms jitter buffer, ts={_timestamp})");
     }
 
     public void Stop()
@@ -161,6 +165,24 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
     private void SendNextFrame()
     {
+        int currentCount = Volatile.Read(ref _queueCount);
+
+        // Jitter buffer: wait until we have enough frames before starting playout
+        if (_isBuffering)
+        {
+            if (currentCount >= JITTER_BUFFER_FRAMES)
+            {
+                _isBuffering = false;
+                OnLog?.Invoke($"[DirectG711RtpPlayout] Jitter buffer ready ({currentCount} frames), starting playout");
+            }
+            else
+            {
+                // Still buffering - send silence
+                SendRtpFrame(_silenceFrame);
+                return;
+            }
+        }
+
         byte[] frameToSend;
 
         if (_queue.TryDequeue(out var audioFrame))
@@ -175,13 +197,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
         }
         else
         {
-            // Queue empty - send pure silence
+            // Queue empty - send pure silence and re-enter buffering mode
             frameToSend = _silenceFrame;
             
             // Fire OnQueueEmpty once when transitioning from playing to empty
             if (_wasPlaying)
             {
                 _wasPlaying = false;
+                _isBuffering = true; // Re-enter buffering mode for next audio burst
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
                 OnQueueEmpty?.Invoke();
             }
@@ -218,6 +241,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
             Interlocked.Decrement(ref _queueCount);
 
         _wasPlaying = false;
+        _isBuffering = true; // Re-enter buffering mode
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
     }
 
