@@ -1,156 +1,163 @@
 using System;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace TaxiSipBridge.WinForms;
 
-/// <summary>
-/// Sends taxi booking data to BSQD API for dispatch processing.
-/// Uses the same bearer token as WhatsAppNotifier.
-/// </summary>
-public static class BsqdTaxiDispatcher
+public class AddressDto
 {
-    private const string ApiUrl = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
-    private const string BearerToken = "RhjpZxqLXl2snLNMBwK7iIVq"; // Same as WhatsApp notifier
+    public double lat { get; set; }
+    public double lon { get; set; }
+    public string street_name { get; set; } = "";
+    public int street_number { get; set; }
+    public string postal_code { get; set; } = "";
+    public string city { get; set; } = "";
+    public string? formatted_depa_address { get; set; }   // for departure
+    public string? formatted_dest_address { get; set; }   // for destination
+}
 
-    private static readonly HttpClient _http = new HttpClient();
+public class TaxiBotRequest
+{
+    public AddressDto departure_address { get; set; } = new();
+    public AddressDto destination_address { get; set; } = new();
+    public DateTimeOffset departure_time { get; set; }
+    public string first_name { get; set; } = "";
+    public string total_price { get; set; } = "";
+    public string phoneNumber { get; set; } = "";
+    public string passengers { get; set; } = "1";
+}
+
+public class TaxiBotClient
+{
+    private static readonly string Url =
+        "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
+
+    private static readonly string BearerToken = "RhjpZxqLXl2snLNMBwK7iIVq"; // Same as WhatsApp notifier
 
     public static event Action<string>? OnLog;
 
     /// <summary>
-    /// Dispatches a taxi booking to BSQD API.
-    /// Fire-and-forget with logging.
+    /// Fire-and-forget dispatch with logging
     /// </summary>
-    public static void DispatchBooking(BsqdBookingRequest booking)
+    public static void DispatchBooking(TaxiBotRequest payload)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                var json = JsonSerializer.Serialize(booking, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-                });
-
-                Log($"🚕 BSQD Dispatch → {booking.PhoneNumber}");
-                Log($"📦 Payload: {json}");
-
-                using var request = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
-                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", BearerToken);
-                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await _http.SendAsync(request);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                {
-                    Log($"✅ BSQD Dispatch OK: {(int)response.StatusCode}");
-                }
-                else
-                {
-                    Log($"❌ BSQD Dispatch FAIL: {(int)response.StatusCode} - {responseBody}");
-                }
+                await SendAsync(payload);
             }
             catch (Exception ex)
             {
-                Log($"❌ BSQD Dispatch ERROR: {ex.Message}");
+                Log($"❌ TaxiBot Dispatch ERROR: {ex.Message}");
             }
         });
     }
 
-    /// <summary>
-    /// Creates a booking request from extracted call data.
-    /// </summary>
-    public static BsqdBookingRequest CreateFromCallData(
-        string phoneNumber,
-        string? firstName,
-        string? pickup,
-        double? pickupLat,
-        double? pickupLon,
-        string? destination,
-        double? destLat,
-        double? destLon,
-        DateTime? departureTime,
-        string? fare,
-        int passengers = 1)
+    public static async Task SendAsync(TaxiBotRequest payload)
     {
-        // Parse addresses into components (best effort)
-        var (pickupStreet, pickupNumber, pickupPostal, pickupCity) = ParseAddress(pickup);
-        var (destStreet, destNumber, destPostal, destCity) = ParseAddress(destination);
+        var json = JsonSerializer.Serialize(payload);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        return new BsqdBookingRequest
+        Log($"🚕 TaxiBot Dispatch → {payload.phoneNumber}");
+        Log($"📦 Payload: {json}");
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", BearerToken);
+
+        var response = await client.PostAsync(Url, content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (response.IsSuccessStatusCode)
         {
-            PhoneNumber = FormatE164(phoneNumber),
-            FirstName = firstName ?? "Customer",
-            Passengers = passengers.ToString(),
-            TotalPrice = ParseFare(fare),
-            DepartureTime = (departureTime ?? DateTime.Now).ToString("yyyy-MM-ddTHH:mm:ss.fffzzz"),
-            DepartureAddress = new BsqdAddress
-            {
-                Lat = pickupLat ?? 0,
-                Lon = pickupLon ?? 0,
-                StreetName = pickupStreet,
-                StreetNumber = pickupNumber,
-                PostalCode = pickupPostal,
-                City = pickupCity,
-                FormattedDepaAddress = pickup ?? "Unknown"
-            },
-            DestinationAddress = new BsqdAddress
-            {
-                Lat = destLat ?? 0,
-                Lon = destLon ?? 0,
-                StreetName = destStreet,
-                StreetNumber = destNumber,
-                PostalCode = destPostal,
-                City = destCity,
-                FormattedDestAddress = destination ?? "Unknown"
-            }
-        };
+            Log($"✅ TaxiBot Dispatch OK: {(int)response.StatusCode}");
+        }
+        else
+        {
+            Log($"❌ TaxiBot Dispatch FAIL: {(int)response.StatusCode} - {responseBody}");
+        }
+
+        response.EnsureSuccessStatusCode();
     }
 
     /// <summary>
-    /// Format phone to E.164 format (+31652328530)
+    /// Helper to create request from call data
     /// </summary>
+    public static TaxiBotRequest CreateFromCallData(
+        string phoneNumber,
+        string? firstName,
+        string? pickup,
+        double pickupLat,
+        double pickupLon,
+        string? destination,
+        double destLat,
+        double destLon,
+        DateTimeOffset? departureTime,
+        string? fare,
+        int passengers = 1)
+    {
+        var (pickupStreet, pickupNumber, pickupPostal, pickupCity) = ParseAddress(pickup);
+        var (destStreet, destNumber, destPostal, destCity) = ParseAddress(destination);
+
+        return new TaxiBotRequest
+        {
+            departure_address = new AddressDto
+            {
+                lat = pickupLat,
+                lon = pickupLon,
+                street_name = pickupStreet,
+                street_number = pickupNumber,
+                postal_code = pickupPostal,
+                city = pickupCity,
+                formatted_depa_address = pickup ?? "Unknown"
+            },
+            destination_address = new AddressDto
+            {
+                lat = destLat,
+                lon = destLon,
+                street_name = destStreet,
+                street_number = destNumber,
+                postal_code = destPostal,
+                city = destCity,
+                formatted_dest_address = destination ?? "Unknown"
+            },
+            departure_time = departureTime ?? DateTimeOffset.Now,
+            first_name = firstName ?? "Customer",
+            total_price = ParseFare(fare),
+            phoneNumber = FormatE164(phoneNumber),
+            passengers = passengers.ToString()
+        };
+    }
+
     private static string FormatE164(string phone)
     {
         if (string.IsNullOrWhiteSpace(phone)) return "+31000000000";
 
-        // Remove spaces, dashes, parentheses
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
 
-        // Handle 00 prefix -> +
         if (clean.StartsWith("00"))
             clean = "+" + clean.Substring(2);
 
-        // Ensure + prefix
         if (!clean.StartsWith("+"))
             clean = "+" + clean;
 
-        // Dutch number fix: +310 -> +31
         if (clean.StartsWith("+310") && clean.Length > 11)
             clean = "+31" + clean.Substring(4);
 
         return clean;
     }
 
-    /// <summary>
-    /// Parse fare string like "£12.50" or "€15.15" to "12.50" or "15.15"
-    /// </summary>
     private static string ParseFare(string? fare)
     {
         if (string.IsNullOrWhiteSpace(fare)) return "0.00";
 
-        // Remove currency symbols and whitespace
         var clean = new string(fare.Where(c => char.IsDigit(c) || c == '.' || c == ',').ToArray());
-
-        // Replace comma with dot for decimal
         clean = clean.Replace(',', '.');
 
-        // Ensure valid decimal format
         if (decimal.TryParse(clean, System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var amount))
         {
@@ -160,10 +167,6 @@ public static class BsqdTaxiDispatcher
         return "0.00";
     }
 
-    /// <summary>
-    /// Best-effort address parsing into components.
-    /// Example: "Hoofdweg 4, 1275 AA, Amsterdam" -> ("Hoofdweg", 4, "1275 AA", "Amsterdam")
-    /// </summary>
     private static (string street, int number, string postal, string city) ParseAddress(string? address)
     {
         if (string.IsNullOrWhiteSpace(address))
@@ -171,7 +174,6 @@ public static class BsqdTaxiDispatcher
 
         try
         {
-            // Split by comma
             var parts = address.Split(',').Select(p => p.Trim()).ToArray();
 
             string street = "";
@@ -181,7 +183,6 @@ public static class BsqdTaxiDispatcher
 
             if (parts.Length >= 1)
             {
-                // First part: "Hoofdweg 4" or "Hoofdweg 4A"
                 var streetPart = parts[0];
                 var match = System.Text.RegularExpressions.Regex.Match(streetPart, @"^(.+?)\s+(\d+[A-Za-z]?)$");
                 if (match.Success)
@@ -197,7 +198,6 @@ public static class BsqdTaxiDispatcher
 
             if (parts.Length >= 2)
             {
-                // Second part might be postal code or city
                 var secondPart = parts[1].Trim();
                 if (System.Text.RegularExpressions.Regex.IsMatch(secondPart, @"\d{4}\s*[A-Z]{2}"))
                 {
@@ -214,10 +214,9 @@ public static class BsqdTaxiDispatcher
                 city = parts[2].Trim();
             }
 
-            // If city is empty, try to infer from known locations
             if (string.IsNullOrEmpty(city) && !string.IsNullOrEmpty(postal))
             {
-                city = "Amsterdam"; // Default for NL postcodes
+                city = "Amsterdam";
             }
 
             return (street, number, postal, city);
@@ -229,81 +228,4 @@ public static class BsqdTaxiDispatcher
     }
 
     private static void Log(string msg) => OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
-}
-
-/// <summary>
-/// BSQD API booking request model
-/// </summary>
-public class BsqdBookingRequest
-{
-    [JsonPropertyName("departure_address")]
-    public BsqdAddress DepartureAddress { get; set; } = new();
-
-    [JsonPropertyName("destination_address")]
-    public BsqdAddress DestinationAddress { get; set; } = new();
-
-    /// <summary>
-    /// ISO 8601 format: "2026-02-02T10:45:00.000+01:00"
-    /// </summary>
-    [JsonPropertyName("departure_time")]
-    public string DepartureTime { get; set; } = "";
-
-    [JsonPropertyName("first_name")]
-    public string FirstName { get; set; } = "";
-
-    /// <summary>
-    /// Price as string, e.g. "15.15"
-    /// </summary>
-    [JsonPropertyName("total_price")]
-    public string TotalPrice { get; set; } = "";
-
-    /// <summary>
-    /// E.164 format: "+31652328530"
-    /// </summary>
-    [JsonPropertyName("phoneNumber")]
-    public string PhoneNumber { get; set; } = "";
-
-    /// <summary>
-    /// Passenger count as string
-    /// </summary>
-    [JsonPropertyName("passengers")]
-    public string Passengers { get; set; } = "1";
-}
-
-/// <summary>
-/// Address component for BSQD API
-/// </summary>
-public class BsqdAddress
-{
-    [JsonPropertyName("lat")]
-    public double Lat { get; set; }
-
-    [JsonPropertyName("lon")]
-    public double Lon { get; set; }
-
-    [JsonPropertyName("street_name")]
-    public string StreetName { get; set; } = "";
-
-    [JsonPropertyName("street_number")]
-    public int StreetNumber { get; set; }
-
-    [JsonPropertyName("postal_code")]
-    public string PostalCode { get; set; } = "";
-
-    [JsonPropertyName("city")]
-    public string City { get; set; } = "";
-
-    /// <summary>
-    /// Human-readable pickup address (only for departure)
-    /// </summary>
-    [JsonPropertyName("formatted_depa_address")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? FormattedDepaAddress { get; set; }
-
-    /// <summary>
-    /// Human-readable destination address (only for destination)
-    /// </summary>
-    [JsonPropertyName("formatted_dest_address")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? FormattedDestAddress { get; set; }
 }
