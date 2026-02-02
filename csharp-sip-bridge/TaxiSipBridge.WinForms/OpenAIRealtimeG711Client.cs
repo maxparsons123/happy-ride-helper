@@ -118,6 +118,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action? OnResponseCompleted;
     public event Action<string>? OnAdaSpeaking;
     public event Action? OnCallEnded;
+    public event Action? OnBargeIn; // Fired when user interrupts AI
     public event Action<BookingState>? OnBookingUpdated;
 
     // =========================
@@ -634,6 +635,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     Interlocked.Increment(ref _noReplyWatchdogId);
+                    
+                    // Barge-in: Notify handler to clear outbound audio
+                    OnBargeIn?.Invoke();
+                    Log("✂️ Barge-in detected");
                     break;
 
                 case "input_audio_buffer.speech_stopped":
