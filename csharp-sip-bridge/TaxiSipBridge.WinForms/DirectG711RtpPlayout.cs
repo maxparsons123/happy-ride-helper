@@ -39,7 +39,6 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private bool _isPlaying;
     private int _framesSent;
     private uint _timestamp;
-    private ushort _sequence; // Critical: must increment per packet for jitter buffer
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -95,14 +94,13 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _framesSent = 0;
         _isPlaying = false;
         
-        // RFC 3550: Random start values for timestamp and sequence
+        // Random start timestamp is RFC-friendly; RTP sequence is managed internally by SIPSorcery.
         _timestamp = (uint)Random.Shared.Next();
-        _sequence = (ushort)Random.Shared.Next(0, ushort.MaxValue);
 
         // 20ms timer - the heart of telephony timing
         // Start with FRAME_MS delay (not 0) to avoid immediate fire + timestamp skew
         _timer = new Timer(SendFrame, null, FRAME_MS, FRAME_MS);
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (20ms timer, seq={_sequence}, ts={_timestamp})");
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (20ms timer, ts={_timestamp})");
     }
 
     public void Stop()
@@ -164,13 +162,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
     {
         try
         {
-            // Use SendRtpRaw for direct G.711 byte passthrough (no encoding)
-            // Critical: _sequence++ ensures proper jitter buffer handling
+            // Use SendRtpRaw for direct G.711 byte passthrough (no encoding).
+            // NOTE: In SIPSorcery, the RTP sequence number is managed internally.
+            // The 4th parameter here is the marker bit (0/1), not a sequence override.
             _mediaSession.SendRtpRaw(
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                _sequence++,  // Must increment per packet!
+                0,
                 (int)_payloadType
             );
             _timestamp += FRAME_SIZE;
