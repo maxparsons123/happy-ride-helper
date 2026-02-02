@@ -371,24 +371,19 @@ Be concise, warm, and professional.
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // Don't send audio while bot is speaking
+            // Determine if we should apply soft gate (bot speaking or echo guard)
+            bool applySoftGate = false;
+            
             if (_isBotSpeaking)
             {
-                // Log periodically to diagnose blocking
-                if (_inboundPacketCount % 100 == 0)
-                    Log($"🚫 [{callId}] Ingress blocked: bot speaking (packet #{_inboundPacketCount})");
-                return;
+                applySoftGate = true;
             }
-
-            // Echo guard
-            if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+            else if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
             {
                 var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
                 if (msSinceBotStopped < ECHO_GUARD_MS)
                 {
-                    if (_inboundPacketCount % 50 == 0)
-                        Log($"🛡️ [{callId}] Ingress blocked: echo guard ({msSinceBotStopped:F0}ms < {ECHO_GUARD_MS}ms)");
-                    return;
+                    applySoftGate = true;
                 }
             }
 
@@ -429,8 +424,14 @@ Be concise, warm, and professional.
                     return; // Unknown codec
                 }
 
-                // Apply STT-optimized DSP (DC removal, pre-emphasis, normalization)
-                IngressDsp.ApplyForStt(pcm8k);
+                // Apply STT-optimized DSP with soft gate (DC removal, pre-emphasis, normalization)
+                // Soft gate attenuates by 90% when bot speaking, but allows loud barge-ins through
+                bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, applySoftGate);
+                
+                if (applySoftGate && isBargeIn)
+                {
+                    Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
+                }
 
                 // Resample 8kHz → 24kHz for OpenAI (uses SpeexDSP for high quality)
                 var pcm24k = AudioCodecs.ResampleWithSpeex(pcm8k, 8000, 24000);
@@ -441,7 +442,8 @@ Be concise, warm, and professional.
 
                 _framesForwarded++;
                 if (_framesForwarded % 50 == 0)
-                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (8kHz {_negotiatedCodec} → 24kHz PCM) → OpenAI");
+                    Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (8kHz {_negotiatedCodec} → 24kHz PCM) → OpenAI{(applySoftGate ? " [soft-gated]" : "")}");
+
 
                 // Audio monitor
                 OnCallerAudioMonitor?.Invoke(pcm24kBytes);
