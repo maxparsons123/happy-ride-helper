@@ -25,12 +25,30 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public const string VERSION = "2.0-native-g711";
 
     // =========================
-    // G.711 CODEC SELECTION (SIP side)
+    // G.711 CODEC SELECTION (from SIP negotiation)
     // =========================
     public enum G711Codec { MuLaw, ALaw }
     
     private readonly G711Codec _codec;
     private readonly byte _silenceByte;
+    
+    /// <summary>
+    /// The negotiated codec for this session (PCMA = A-law, PCMU = μ-law).
+    /// </summary>
+    public G711Codec NegotiatedCodec => _codec;
+    
+    /// <summary>
+    /// Helper to create client from SIP codec name (PCMA/PCMU).
+    /// </summary>
+    public static G711Codec ParseSipCodec(string codecName)
+    {
+        return codecName?.ToUpperInvariant() switch
+        {
+            "PCMA" => G711Codec.ALaw,
+            "PCMU" => G711Codec.MuLaw,
+            _ => G711Codec.MuLaw // Default to μ-law if unknown
+        };
+    }
 
     // =========================
     // CONFIG
