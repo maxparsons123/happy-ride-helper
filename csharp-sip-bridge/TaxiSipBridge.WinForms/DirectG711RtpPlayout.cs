@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Threading;
 using SIPSorcery.Media;
-using SIPSorcery.Net;
 
 namespace TaxiSipBridge;
 
@@ -96,6 +95,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
         OnLog?.Invoke("[DirectG711RtpPlayout] Started (20ms timer)");
     }
 
+    public void Stop()
+    {
+        _timer?.Change(Timeout.Infinite, Timeout.Infinite);
+        _timer?.Dispose();
+        _timer = null;
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Stopped ({_framesSent} frames sent)");
+    }
+
     private void SendFrame(object? state)
     {
         if (Volatile.Read(ref _disposed) != 0)
@@ -170,14 +177,6 @@ public sealed class DirectG711RtpPlayout : IDisposable
 
         _isPlaying = false;
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
-    }
-
-    public void Stop()
-    {
-        _timer?.Change(Timeout.Infinite, Timeout.Infinite);
-        _timer?.Dispose();
-        _timer = null;
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Stopped ({_framesSent} frames sent)");
     }
 
     public void Dispose()
