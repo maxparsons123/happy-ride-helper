@@ -906,8 +906,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 {
                     type = "server_vad",
                     threshold = 0.35,
-                    prefix_padding_ms = 600,
-                    silence_duration_ms = 1200
+                    prefix_padding_ms = 400,      // v2.2: Reduced for faster response
+                    silence_duration_ms = 700     // v2.2: Faster response after speech (was 1200)
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
