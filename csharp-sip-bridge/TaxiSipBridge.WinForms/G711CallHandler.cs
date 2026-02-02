@@ -276,8 +276,8 @@ Be concise, warm, and professional.
         // Barge-in handler - only act if Ada is actually speaking or queue has audio
         Action bargeInHandler = () =>
         {
-            // If Ada isn't speaking, this is just normal speech starting a new turn - not a barge-in
-            if (!_isBotSpeaking && (_playout == null || _playout.QueueCount == 0))
+            // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn - not a barge-in
+            if (!_isBotSpeaking && (_playout == null || _playout.IsEmpty))
             {
                 // Normal new turn - no need to clear anything
                 return;

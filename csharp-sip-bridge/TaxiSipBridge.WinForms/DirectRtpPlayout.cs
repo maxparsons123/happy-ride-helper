@@ -49,6 +49,12 @@ public class DirectRtpPlayout : IDisposable
 
     public event Action? OnQueueEmpty;
     public event Action<string>? OnLog;
+    
+    /// <summary>
+    /// Returns true if both audio buffers are empty.
+    /// Used to determine if a barge-in event should be processed.
+    /// </summary>
+    public bool IsEmpty => _g711Buffer.IsEmpty && _sampleBuffer.IsEmpty;
 
     public DirectRtpPlayout(RTPSession rtpSession, bool nativeG711Mode = false)
     {
