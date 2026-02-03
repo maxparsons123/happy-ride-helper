@@ -22,7 +22,6 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
-    private readonly string _systemPrompt;
     private readonly string? _dispatchWebhookUrl;
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
@@ -103,13 +102,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
         string voice = "shimmer",
-        string? systemPrompt = null,
         string? dispatchWebhookUrl = null)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
-        _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
         _dispatchWebhookUrl = dispatchWebhookUrl;
     }
 
@@ -1473,8 +1470,6 @@ These phrases mean YES - proceed immediately:
 ## RESPONSE STYLE
 
 One question at a time. Under 20 words per response. Only call end_call after user says no to 'anything else'.";
-
-    private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
 
     private static string GetLanguageName(string c) => c switch { "nl" => "Dutch", "fr" => "French", "de" => "German", "es" => "Spanish", "it" => "Italian", "pl" => "Polish", "pt" => "Portuguese", _ => "English" };
 
