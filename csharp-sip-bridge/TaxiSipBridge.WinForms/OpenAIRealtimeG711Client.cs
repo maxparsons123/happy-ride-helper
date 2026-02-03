@@ -19,7 +19,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.2-final-g711";
+    public const string VERSION = "2.3-pcm24-dsp";
 
     // =========================
     // G.711 CONFIG
@@ -156,7 +156,10 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     {
         ThrowIfDisposed();
 
-        Log("📞 Connecting to OpenAI Realtime (PCM16 24kHz with DSP)...");
+        // Reset TtsPreConditioner state for new call
+        TtsPreConditioner.Reset();
+        
+        Log("📞 Connecting to OpenAI Realtime (PCM16 24kHz → local DSP → G.711)...");
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
@@ -196,7 +199,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             throw new TimeoutException("session.updated not received");
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"✅ Connected to OpenAI Realtime (PCM16 24kHz → DSP → {codecName}, voice={_voice})");
+        Log($"✅ Connected to OpenAI Realtime (PCM16@24kHz → TtsPreConditioner → {codecName}, voice={_voice})");
     }
 
     // =========================
@@ -343,14 +346,23 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     var b64 = deltaEl.GetString();
                     if (!string.IsNullOrEmpty(b64))
                     {
-                        var bytes = Convert.FromBase64String(b64);
-                        OnG711Audio?.Invoke(bytes);
+                        var pcm24Bytes = Convert.FromBase64String(b64);
+                        
+                        // Fire PCM24 event for external DSP processing
+                        OnPcm24Audio?.Invoke(pcm24Bytes);
+                        
+                        // Also process internally and fire G711 for backward compatibility
+                        var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
+                        if (g711Bytes.Length > 0)
+                        {
+                            OnG711Audio?.Invoke(g711Bytes);
+                        }
                         
                         var count = Interlocked.Increment(ref _audioChunksReceived);
                         if (count % 10 == 0)
                         {
-                            var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-                            Log($"📢 Received {count} audio chunks ({codecName} native 8kHz - zero resample), bytes={bytes.Length}");
+                            var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
+                            Log($"📢 Received {count} audio chunks (PCM24→DSP→{codecName}), in={pcm24Bytes.Length}B out={g711Bytes.Length}B");
                         }
                     }
                 }
@@ -463,12 +475,43 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
+    // PCM24 → G.711 PROCESSING
+    // =========================
+    /// <summary>
+    /// Process 24kHz PCM from OpenAI through TtsPreConditioner DSP, then encode to G.711.
+    /// Pipeline: PCM24 → DC removal → 3.4kHz LPF → normalize → soft-clip → 8kHz → G.711
+    /// </summary>
+    private byte[] ProcessPcm24ToG711(byte[] pcm24Bytes)
+    {
+        if (pcm24Bytes == null || pcm24Bytes.Length == 0)
+            return Array.Empty<byte>();
+
+        // Convert bytes to shorts
+        short[] samples24k = TtsPreConditioner.BytesToPcm(pcm24Bytes);
+        
+        // Process through TtsPreConditioner (handles any length, not just 20ms frames)
+        short[] samples8k = TtsPreConditioner.ProcessFrame(samples24k);
+        
+        // Encode to G.711
+        byte[] g711;
+        if (_codec == G711Codec.ALaw)
+            g711 = AudioCodecs.ALawEncode(samples8k);
+        else
+            g711 = AudioCodecs.MuLawEncode(samples8k);
+        
+        return g711;
+    }
+
+    // =========================
     // SESSION CONFIG
     // =========================
     private async Task ConfigureSessionAsync()
     {
-        var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        Log($"🎧 Configuring session: format={codecName}@8kHz (NATIVE - zero resampling), voice={_voice}, server_vad");
+        // Request 24kHz PCM output for local DSP processing (richer audio quality)
+        var inputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
+        var outputCodec = "pcm16"; // 24kHz PCM - we'll apply DSP and encode to G.711 locally
+        
+        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@24kHz (DSP→G.711), voice={_voice}");
 
         await SendJsonAsync(new
         {
@@ -478,8 +521,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 voice = _voice,
                 instructions = GetDefaultInstructions(),
-                input_audio_format = codecName,
-                output_audio_format = codecName,
+                input_audio_format = inputCodec,
+                output_audio_format = outputCodec,
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {

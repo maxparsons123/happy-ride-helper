@@ -233,16 +233,16 @@ Be concise, warm, and professional.
             // Wire AI client events (using native G.711 audio path)
             WireAiClientEvents(callId, cts);
 
-            // Connect to OpenAI - codec must match SIP for zero-transcode passthrough
+            // Connect to OpenAI - using 24kHz PCM with local DSP for richer audio
             var codecName = sipCodec == OpenAIRealtimeG711Client.G711Codec.ALaw ? "A-law (PT8)" : "μ-law (PT0)";
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime ({codecName} @ 8kHz)...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM24 → DSP → {codecName})...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI ({sipCodec}) - ZERO TRANSCODE");
+            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI (PCM24→DSP→{sipCodec})");
             
             // Start keepalive loop
             _features?.StartKeepalive();
