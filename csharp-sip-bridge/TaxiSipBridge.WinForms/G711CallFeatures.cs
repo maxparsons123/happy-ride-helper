@@ -198,7 +198,7 @@ public sealed class G711CallFeatures : IDisposable
         switch (toolName)
         {
             case "sync_booking_data":
-                result = HandleSyncBookingData(arguments);
+                result = await HandleSyncBookingDataAsync(arguments);
                 break;
                 
             case "book_taxi":
@@ -223,15 +223,23 @@ public sealed class G711CallFeatures : IDisposable
         return result;
     }
     
-    private object HandleSyncBookingData(JsonElement args)
+    private async Task<object> HandleSyncBookingDataAsync(JsonElement args)
     {
         // Extract booking fields - map to BookingState (from BookingState.cs)
+        string? newPickup = null, newDest = null;
+        
         if (args.TryGetProperty("caller_name", out var name))
             _booking.Name = name.GetString();
         if (args.TryGetProperty("pickup", out var pickup))
-            _booking.Pickup = pickup.GetString();
+        {
+            newPickup = pickup.GetString();
+            _booking.Pickup = newPickup;
+        }
         if (args.TryGetProperty("destination", out var dest))
-            _booking.Destination = dest.GetString();
+        {
+            newDest = dest.GetString();
+            _booking.Destination = newDest;
+        }
         if (args.TryGetProperty("passengers", out var pax))
         {
             try
@@ -247,6 +255,58 @@ public sealed class G711CallFeatures : IDisposable
         }
         if (args.TryGetProperty("pickup_time", out var time))
             _booking.PickupTime = time.GetString();
+        
+        // Verify addresses with Google Maps (region-biased) to enrich with geocoded details
+        var verificationTasks = new List<Task<(string type, AddressVerifyResult result)>>();
+        
+        if (!string.IsNullOrWhiteSpace(newPickup))
+        {
+            verificationTasks.Add(Task.Run(async () => 
+            {
+                var result = await FareCalculator.VerifyAddressAsync(newPickup, _callerPhone);
+                return ("pickup", result);
+            }));
+        }
+        
+        if (!string.IsNullOrWhiteSpace(newDest))
+        {
+            verificationTasks.Add(Task.Run(async () =>
+            {
+                var result = await FareCalculator.VerifyAddressAsync(newDest, _callerPhone);
+                return ("destination", result);
+            }));
+        }
+        
+        // Wait for all verifications
+        var verifications = await Task.WhenAll(verificationTasks);
+        
+        foreach (var (type, vResult) in verifications)
+        {
+            if (!vResult.Success) continue;
+            
+            if (type == "pickup")
+            {
+                _booking.PickupLat = vResult.Lat;
+                _booking.PickupLon = vResult.Lon;
+                _booking.PickupStreet = vResult.Street;
+                _booking.PickupNumber = vResult.Number;
+                _booking.PickupPostalCode = vResult.PostalCode;
+                _booking.PickupCity = vResult.City;
+                _booking.PickupFormatted = vResult.VerifiedAddress;
+                Log($"📍 [{_callId}] Pickup verified: {vResult.Number} {vResult.Street}, {vResult.City} ({vResult.PostalCode})");
+            }
+            else if (type == "destination")
+            {
+                _booking.DestLat = vResult.Lat;
+                _booking.DestLon = vResult.Lon;
+                _booking.DestStreet = vResult.Street;
+                _booking.DestNumber = vResult.Number;
+                _booking.DestPostalCode = vResult.PostalCode;
+                _booking.DestCity = vResult.City;
+                _booking.DestFormatted = vResult.VerifiedAddress;
+                Log($"📍 [{_callId}] Dest verified: {vResult.Number} {vResult.Street}, {vResult.City} ({vResult.PostalCode})");
+            }
+        }
         
         OnBookingUpdated?.Invoke(_booking);
         
@@ -288,7 +348,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.PickupLat = fareResult.PickupLat;
                 _booking.PickupLon = fareResult.PickupLon;
                 _booking.PickupStreet = fareResult.PickupStreet;
-                _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                _booking.PickupNumber = fareResult.PickupNumber;
                 _booking.PickupPostalCode = fareResult.PickupPostalCode;
                 _booking.PickupCity = fareResult.PickupCity;
                 _booking.PickupFormatted = fareResult.PickupFormatted;
@@ -297,7 +357,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.DestLat = fareResult.DestLat;
                 _booking.DestLon = fareResult.DestLon;
                 _booking.DestStreet = fareResult.DestStreet;
-                _booking.DestNumber = fareResult.DestNumber?.ToString();
+                _booking.DestNumber = fareResult.DestNumber;
                 _booking.DestPostalCode = fareResult.DestPostalCode;
                 _booking.DestCity = fareResult.DestCity;
                 _booking.DestFormatted = fareResult.DestFormatted;
@@ -349,7 +409,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.PickupLat = fareResult.PickupLat;
                 _booking.PickupLon = fareResult.PickupLon;
                 _booking.PickupStreet = fareResult.PickupStreet;
-                _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                _booking.PickupNumber = fareResult.PickupNumber;
                 _booking.PickupPostalCode = fareResult.PickupPostalCode;
                 _booking.PickupCity = fareResult.PickupCity;
                 _booking.PickupFormatted = fareResult.PickupFormatted;
@@ -357,7 +417,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.DestLat = fareResult.DestLat;
                 _booking.DestLon = fareResult.DestLon;
                 _booking.DestStreet = fareResult.DestStreet;
-                _booking.DestNumber = fareResult.DestNumber?.ToString();
+                _booking.DestNumber = fareResult.DestNumber;
                 _booking.DestPostalCode = fareResult.DestPostalCode;
                 _booking.DestCity = fareResult.DestCity;
                 _booking.DestFormatted = fareResult.DestFormatted;
