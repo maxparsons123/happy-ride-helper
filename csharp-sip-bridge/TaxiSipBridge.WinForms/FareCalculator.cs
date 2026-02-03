@@ -122,6 +122,14 @@ public static class FareCalculator
 
                 return result;
             }
+            else
+            {
+                // Log which geocoding failed
+                if (pickupGeo == null)
+                    Console.WriteLine($"[FareCalculator] ⚠️ Pickup geocoding FAILED for: '{pickup}'");
+                if (destGeo == null)
+                    Console.WriteLine($"[FareCalculator] ⚠️ Destination geocoding FAILED for: '{destination}'");
+            }
         }
         catch (Exception ex)
         {
@@ -129,6 +137,7 @@ public static class FareCalculator
         }
 
         // Fallback to keyword-based estimation
+        Console.WriteLine($"[FareCalculator] Using keyword fallback for: '{pickup}' → '{destination}'");
         var fallbackDistance = EstimateFromKeywords(pickup, destination);
         var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
         result.Fare = FormatFare(fallbackFare);

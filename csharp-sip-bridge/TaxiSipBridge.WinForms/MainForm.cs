@@ -28,6 +28,19 @@ public partial class MainForm : Form
         InitializeComponent();
         LoadSettings();
 
+        // Initialize Google Maps API key for geocoding
+        // This enables accurate address resolution for fare calculation
+        var googleMapsKey = Environment.GetEnvironmentVariable("GOOGLE_MAPS_API_KEY");
+        if (!string.IsNullOrEmpty(googleMapsKey))
+        {
+            FareCalculator.SetGoogleMapsApiKey(googleMapsKey);
+        }
+        else
+        {
+            // Fallback: use a default key (should be configured in environment for production)
+            FareCalculator.SetGoogleMapsApiKey("AIzaSyDGl7cFRFWlqvU7tpz7E5BVNLMp0HO6aGU");
+        }
+
         // Run SpeexDSP diagnostics at startup
         SpeexDspResamplerHelper.LogStartupDiagnostics(msg => AddLog(msg));
     }
