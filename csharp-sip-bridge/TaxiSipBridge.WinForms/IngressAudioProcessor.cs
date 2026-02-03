@@ -74,6 +74,17 @@ public sealed class IngressAudioProcessor : IDisposable
     // ===========================================
     private int _framesEmitted;
     private int _framesEmittedWithSubscriber;
+    
+    // Verbose diagnostics for debugging STT issues
+    private bool _verboseDiagnostics;
+    private float _minRmsRaw = float.MaxValue;
+    private float _maxRmsRaw = float.MinValue;
+    private float _minRmsProc = float.MaxValue;
+    private float _maxRmsProc = float.MinValue;
+    private int _gateCloseCount;
+    private int _totalFramesProcessed;
+    private float _avgRmsRaw;
+    private float _avgRmsProc;
 
     // ===========================================
     // CODEC STATE
@@ -109,8 +120,30 @@ public sealed class IngressAudioProcessor : IDisposable
         _outputBytes = new byte[_targetSamplesPer20ms * 2];
 
         Log($"[Ingress v{VERSION}] Initialized: target={targetRate}Hz, jitter={jitterFrames} frames ({jitterFrames * 20}ms)");
+    }
 
-        Log($"[Ingress] Initialized: target={targetRate}Hz, jitter={jitterFrames} frames ({jitterFrames * 20}ms)");
+    /// <summary>
+    /// Enable verbose diagnostics to debug STT/address recognition issues.
+    /// Logs detailed audio level information.
+    /// </summary>
+    public void EnableVerboseDiagnostics(bool enable = true)
+    {
+        _verboseDiagnostics = enable;
+        Log($"[Ingress v{VERSION}] Verbose diagnostics: {(enable ? "ENABLED" : "DISABLED")}");
+    }
+
+    /// <summary>
+    /// Get current diagnostic summary for troubleshooting STT issues.
+    /// </summary>
+    public string GetDiagnosticSummary()
+    {
+        if (_totalFramesProcessed == 0)
+            return "[Ingress] No frames processed yet";
+
+        return $"[Ingress DIAG] frames={_totalFramesProcessed} " +
+               $"rmsRaw=[{_minRmsRaw:F0}-{_maxRmsRaw:F0}, avg={_avgRmsRaw:F0}] " +
+               $"rmsProc=[{_minRmsProc:F0}-{_maxRmsProc:F0}, avg={_avgRmsProc:F0}] " +
+               $"gateCloses={_gateCloseCount} agc={_agcGain:F2}";
     }
 
     // ===========================================
@@ -185,6 +218,16 @@ public sealed class IngressAudioProcessor : IDisposable
         _gateOpen = true;
         _gateHold = 0;
         _ptToCodec.Clear();
+        
+        // Reset diagnostic stats
+        _minRmsRaw = float.MaxValue;
+        _maxRmsRaw = float.MinValue;
+        _minRmsProc = float.MaxValue;
+        _maxRmsProc = float.MinValue;
+        _gateCloseCount = 0;
+        _totalFramesProcessed = 0;
+        _avgRmsRaw = 0;
+        _avgRmsProc = 0;
 
         Log("[Ingress] State reset");
     }
@@ -411,15 +454,28 @@ public sealed class IngressAudioProcessor : IDisposable
         // accidentally classifying speech as silence due to the DSP chain.
         float rmsRaw = (float)Math.Sqrt(sumSqRaw / frame.Length);
         float rmsProcessed = (float)Math.Sqrt(sumSqProcessed / frame.Length);
+        
+        // Update diagnostic stats
+        _totalFramesProcessed++;
+        if (rmsRaw < _minRmsRaw) _minRmsRaw = rmsRaw;
+        if (rmsRaw > _maxRmsRaw) _maxRmsRaw = rmsRaw;
+        if (rmsProcessed < _minRmsProc) _minRmsProc = rmsProcessed;
+        if (rmsProcessed > _maxRmsProc) _maxRmsProc = rmsProcessed;
+        _avgRmsRaw += (rmsRaw - _avgRmsRaw) / _totalFramesProcessed;
+        _avgRmsProc += (rmsProcessed - _avgRmsProc) / _totalFramesProcessed;
 
         // Noise gate (using raw RMS)
+        bool wasGateOpen = _gateOpen;
         if (_gateOpen)
         {
             if (rmsRaw < GATE_CLOSE_RMS)
             {
                 _gateHold++;
                 if (_gateHold >= GATE_HOLD_FRAMES)
+                {
                     _gateOpen = false;
+                    _gateCloseCount++;
+                }
             }
             else
             {
@@ -437,10 +493,24 @@ public sealed class IngressAudioProcessor : IDisposable
 
         // Log RMS periodically for diagnostics (after gate update so the state is accurate)
         _framesSinceLastLog++;
-        if (_framesSinceLastLog >= LOG_EVERY_N_FRAMES)
+        bool shouldLog = _framesSinceLastLog >= LOG_EVERY_N_FRAMES;
+        
+        // Verbose mode: log on gate state transitions (important for STT debugging)
+        if (_verboseDiagnostics && wasGateOpen != _gateOpen)
+        {
+            Log($"[Ingress VERBOSE] Gate {(wasGateOpen ? "CLOSED" : "OPENED")} rmsRaw={rmsRaw:F0} threshold={(_gateOpen ? GATE_OPEN_RMS : GATE_CLOSE_RMS)}");
+        }
+        
+        if (shouldLog)
         {
             _framesSinceLastLog = 0;
-            Log($"[Ingress v{VERSION}] rmsRaw={rmsRaw:F0} rmsProc={rmsProcessed:F0} gate={(_gateOpen ? "OPEN" : "CLOSED")} agc={_agcGain:F2}");
+            string logMsg = $"[Ingress v{VERSION}] rmsRaw={rmsRaw:F0} rmsProc={rmsProcessed:F0} gate={(_gateOpen ? "OPEN" : "CLOSED")} agc={_agcGain:F2}";
+            
+            if (_verboseDiagnostics)
+            {
+                logMsg += $" | avg_raw={_avgRmsRaw:F0} range=[{_minRmsRaw:F0}-{_maxRmsRaw:F0}] gateCloses={_gateCloseCount}";
+            }
+            Log(logMsg);
         }
 
         if (!_gateOpen)
