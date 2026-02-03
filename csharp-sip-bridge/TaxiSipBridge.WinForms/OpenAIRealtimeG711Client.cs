@@ -483,8 +483,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     // Record timestamp for transcript guard
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
-                    // v2.5: DO NOT clear audio buffer here - it causes transcript truncation
-                    // Only clear AFTER response.done when we're sure the current turn is complete
+                    // v2.6: Clear audio buffer ONLY HERE on response.created
+                    // This is the ONLY place buffer should be cleared
+                    _ = ClearInputAudioBufferAsync();
 
                     Log("🤖 AI response started");
                     OnResponseStarted?.Invoke();
@@ -508,8 +509,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                     Interlocked.Exchange(ref _responseActive, 0);
                     
-                    // v2.5: Clear audio buffer AFTER response completes (not during response.created)
-                    _ = ClearInputAudioBufferAsync();
+                    // v2.6: DO NOT clear buffer here - only clear on response.created
+                    // Clearing here cuts off words mid-turn
                     
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
