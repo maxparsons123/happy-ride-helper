@@ -135,11 +135,17 @@ serve(async (req) => {
 4. **Landmarks:** Train stations, airports, shopping centres, hospitals - use these to identify the city.
 
 **Address Formatting:**
-- Include house number if provided
+- CRITICAL: Always include the house number if the user provided one
 - Include street name
 - Include city/town
 - Include postal code if you can infer it
 - Format: "[Number] [Street], [City], [PostalCode]"
+- Examples: "52A David Road, Coventry", "7 Russell Street, Coventry, CV1 4GE"
+
+**House Number Extraction:**
+- Extract house numbers exactly as spoken: "52A" → "52A", "52-8" → "52-8", "7" → "7"
+- If user says "fifty-two A", convert to "52A"
+- Do NOT invent or guess house numbers if not provided
 
 **Ambiguity Protocol:**
 - If a street exists in multiple locations and the phone number is a mobile with no city mentioned, provide the top 3 most likely options.
@@ -151,14 +157,18 @@ serve(async (req) => {
   "region_source": "landline_area_code | destination_landmark | text_mention | unknown",
   "pickup": {
     "resolved": true/false,
-    "address": "Full formatted address",
+    "address": "Full formatted address with house number",
+    "house_number": "House number exactly as provided (e.g., '52A', '7', '15-17')",
+    "street": "Street name only",
     "city": "City name",
     "confidence": 0.0-1.0,
     "alternatives": ["Alt address 1", "Alt address 2"] // only if ambiguous
   },
   "destination": {
     "resolved": true/false, 
-    "address": "Full formatted address",
+    "address": "Full formatted address with house number",
+    "house_number": "House number exactly as provided",
+    "street": "Street name only",
     "city": "City name",
     "confidence": 0.0-1.0,
     "alternatives": []

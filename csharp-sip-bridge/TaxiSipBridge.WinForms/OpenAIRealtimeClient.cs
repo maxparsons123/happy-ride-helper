@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "3.0";
+    public const string VERSION = "3.1";
 
     // =========================
     // CONFIG
@@ -749,8 +749,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         break;
                     }
 
-                    // Use CalculateFareWithCoordsAsync to get geocoded address details for dispatch
-                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                    // Use CalculateFareWithAiAsync to get AI-based region detection and geocoded address details
+                    var fareResult = await FareCalculator.CalculateFareWithAiAsync(
                         _booking.Pickup, 
                         _booking.Destination,
                         _callerId).ConfigureAwait(false);
@@ -822,7 +822,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     {
                         try
                         {
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                            var fareResult = await FareCalculator.CalculateFareWithAiAsync(
                                 _booking.Pickup,
                                 _booking.Destination,
                                 _callerId).ConfigureAwait(false);
