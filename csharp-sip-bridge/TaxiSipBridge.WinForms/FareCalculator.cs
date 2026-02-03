@@ -33,6 +33,14 @@ public static class FareCalculator
     private static readonly Dictionary<string, (double Lat, double Lon, DateTime CachedAt)> _callerLocationCache = new();
     private static readonly TimeSpan _locationCacheExpiry = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// Optional log callback - wire this up to your OnLog handler for unified logging.
+    /// Example: FareCalculator.OnLog = msg => OnLog?.Invoke(msg);
+    /// </summary>
+    public static Action<string>? OnLog;
+    
+    private static void Log(string msg) => OnLog?.Invoke(msg);
+
     // Known UK cities/towns for detection
     private static readonly HashSet<string> _knownUkCities = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -73,7 +81,7 @@ public static class FareCalculator
     public static void SetGoogleMapsApiKey(string apiKey)
     {
         _googleMapsApiKey = apiKey;
-        Console.WriteLine("[FareCalculator] Google Maps API key configured (Places Search enabled)");
+        Log("🗺️ Google Maps API key configured (Places Search enabled)");
     }
 
     /// <summary>
@@ -83,7 +91,7 @@ public static class FareCalculator
     {
         _supabaseUrl = url.TrimEnd('/');
         _supabaseAnonKey = anonKey;
-        Console.WriteLine($"[FareCalculator] Supabase configured for AI address extraction");
+        Log("🤖 Supabase configured for AI address extraction");
     }
 
     /// <summary>
@@ -107,7 +115,7 @@ public static class FareCalculator
         {
             result.Status = "error";
             result.RawResponse = "Supabase not configured";
-            Console.WriteLine("[FareCalculator] ⚠️ AI extraction failed: Supabase not configured");
+            Log("⚠️ AI extraction failed: Supabase not configured");
             return result;
         }
 
@@ -130,7 +138,7 @@ public static class FareCalculator
             };
             request.Headers.Add("Authorization", $"Bearer {_supabaseAnonKey}");
 
-            Console.WriteLine($"[FareCalculator] 🤖 AI extraction: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
+            Log($"🤖 AI extraction: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
 
             var response = await GetHttpClient().SendAsync(request);
             var responseBody = await response.Content.ReadAsStringAsync();
@@ -139,7 +147,7 @@ public static class FareCalculator
             {
                 result.Status = "error";
                 result.RawResponse = responseBody;
-                Console.WriteLine($"[FareCalculator] ⚠️ AI extraction HTTP {(int)response.StatusCode}: {responseBody}");
+                Log($"⚠️ AI extraction HTTP {(int)response.StatusCode}: {responseBody}");
                 return result;
             }
 
@@ -226,47 +234,47 @@ public static class FareCalculator
             }
 
             // Detailed logging of AI extraction results
-            Console.WriteLine($"[FareCalculator] ════════════════════════════════════════════════════");
-            Console.WriteLine($"[FareCalculator] 🤖 AI ADDRESS EXTRACTION RESULTS (V3)");
-            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
-            Console.WriteLine($"[FareCalculator] 📱 Phone Analysis:");
-            Console.WriteLine($"[FareCalculator]    Country: {result.PhoneCountry ?? "Unknown"}");
-            Console.WriteLine($"[FareCalculator]    Is Mobile: {result.IsMobile}");
-            Console.WriteLine($"[FareCalculator]    City from Area Code: {result.PhoneCityFromAreaCode ?? "(none - mobile or unknown)"}");
-            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
-            Console.WriteLine($"[FareCalculator] 🌍 Detected Region: {result.DetectedRegion}");
-            Console.WriteLine($"[FareCalculator]    Source: {result.RegionSource}");
-            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
-            Console.WriteLine($"[FareCalculator] 📍 PICKUP:");
-            Console.WriteLine($"[FareCalculator]    Resolved: {result.PickupResolved}");
-            Console.WriteLine($"[FareCalculator]    Full Address: {result.PickupAddress ?? "(empty)"}");
-            Console.WriteLine($"[FareCalculator]    House Number: '{result.PickupHouseNumber ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    Street: '{result.PickupStreet ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    City: '{result.PickupCity ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    Confidence: {result.PickupConfidence:P0}");
+            Log($"════════════════════════════════════════════════════");
+            Log($"🤖 AI ADDRESS EXTRACTION RESULTS (V3)");
+            Log($"────────────────────────────────────────────────────");
+            Log($"📱 Phone Analysis:");
+            Log($"   Country: {result.PhoneCountry ?? "Unknown"}");
+            Log($"   Is Mobile: {result.IsMobile}");
+            Log($"   City from Area Code: {result.PhoneCityFromAreaCode ?? "(none - mobile or unknown)"}");
+            Log($"────────────────────────────────────────────────────");
+            Log($"🌍 Detected Region: {result.DetectedRegion}");
+            Log($"   Source: {result.RegionSource}");
+            Log($"────────────────────────────────────────────────────");
+            Log($"📍 PICKUP:");
+            Log($"   Resolved: {result.PickupResolved}");
+            Log($"   Full Address: {result.PickupAddress ?? "(empty)"}");
+            Log($"   House Number: '{result.PickupHouseNumber ?? ""}'");
+            Log($"   Street: '{result.PickupStreet ?? ""}'");
+            Log($"   City: '{result.PickupCity ?? ""}'");
+            Log($"   Confidence: {result.PickupConfidence:P0}");
             if (result.PickupAlternatives.Count > 0)
             {
-                Console.WriteLine($"[FareCalculator]    Alternatives: {string.Join(", ", result.PickupAlternatives)}");
+                Log($"   Alternatives: {string.Join(", ", result.PickupAlternatives)}");
             }
-            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
-            Console.WriteLine($"[FareCalculator] 🏁 DESTINATION:");
-            Console.WriteLine($"[FareCalculator]    Resolved: {result.DestinationResolved}");
-            Console.WriteLine($"[FareCalculator]    Full Address: {result.DestinationAddress ?? "(empty)"}");
-            Console.WriteLine($"[FareCalculator]    House Number: '{result.DestinationHouseNumber ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    Street: '{result.DestinationStreet ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    City: '{result.DestinationCity ?? ""}'");
-            Console.WriteLine($"[FareCalculator]    Confidence: {result.DestinationConfidence:P0}");
+            Log($"────────────────────────────────────────────────────");
+            Log($"🏁 DESTINATION:");
+            Log($"   Resolved: {result.DestinationResolved}");
+            Log($"   Full Address: {result.DestinationAddress ?? "(empty)"}");
+            Log($"   House Number: '{result.DestinationHouseNumber ?? ""}'");
+            Log($"   Street: '{result.DestinationStreet ?? ""}'");
+            Log($"   City: '{result.DestinationCity ?? ""}'");
+            Log($"   Confidence: {result.DestinationConfidence:P0}");
             if (result.DestinationAlternatives.Count > 0)
             {
-                Console.WriteLine($"[FareCalculator]    Alternatives: {string.Join(", ", result.DestinationAlternatives)}");
+                Log($"   Alternatives: {string.Join(", ", result.DestinationAlternatives)}");
             }
-            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
-            Console.WriteLine($"[FareCalculator] 📋 Status: {result.Status}");
+            Log($"────────────────────────────────────────────────────");
+            Log($"📋 Status: {result.Status}");
             if (result.Status == "clarification_required")
             {
-                Console.WriteLine($"[FareCalculator] ⚠️ CLARIFICATION NEEDED: {result.ClarificationMessage}");
+                Log($"⚠️ CLARIFICATION NEEDED: {result.ClarificationMessage}");
             }
-            Console.WriteLine($"[FareCalculator] ════════════════════════════════════════════════════");
+            Log($"════════════════════════════════════════════════════");
 
             return result;
         }
@@ -274,7 +282,7 @@ public static class FareCalculator
         {
             result.Status = "error";
             result.RawResponse = ex.Message;
-            Console.WriteLine($"[FareCalculator] ⚠️ AI extraction error: {ex.Message}");
+            Log($"⚠️ AI extraction error: {ex.Message}");
             return result;
         }
     }
@@ -301,7 +309,7 @@ public static class FareCalculator
 
         // Detect region from phone number
         var regionBias = DetectRegionFromPhone(phoneNumber);
-        Console.WriteLine($"[FareCalculator] Detected region: {regionBias.Country} (code: {regionBias.CountryCode})");
+        Log($"🌍 Detected region: {regionBias.Country} (code: {regionBias.CountryCode})");
 
         try
         {
@@ -352,9 +360,9 @@ public static class FareCalculator
                 result.Eta = eta;
                 result.DistanceMiles = distanceMiles;
 
-                Console.WriteLine($"[FareCalculator] Geocoded distance: {distanceMiles:F2} miles");
-                Console.WriteLine($"[FareCalculator] Pickup: {pickup} → {pickupGeo.FormattedAddress} ({pickupGeo.Lat:F4}, {pickupGeo.Lon:F4})");
-                Console.WriteLine($"[FareCalculator] Dest: {destination} → {destGeo.FormattedAddress} ({destGeo.Lat:F4}, {destGeo.Lon:F4})");
+                Log($"📏 Geocoded distance: {distanceMiles:F2} miles");
+                Log($"📍 Pickup: {pickup} → {pickupGeo.FormattedAddress} ({pickupGeo.Lat:F4}, {pickupGeo.Lon:F4})");
+                Log($"🏁 Dest: {destination} → {destGeo.FormattedAddress} ({destGeo.Lat:F4}, {destGeo.Lon:F4})");
 
                 return result;
             }
@@ -362,18 +370,18 @@ public static class FareCalculator
             {
                 // Log which geocoding failed
                 if (pickupGeo == null)
-                    Console.WriteLine($"[FareCalculator] ⚠️ Pickup geocoding FAILED for: '{pickup}'");
+                    Log($"⚠️ Pickup geocoding FAILED for: '{pickup}'");
                 if (destGeo == null)
-                    Console.WriteLine($"[FareCalculator] ⚠️ Destination geocoding FAILED for: '{destination}'");
+                    Log($"⚠️ Destination geocoding FAILED for: '{destination}'");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Geocoding failed: {ex.Message}");
+            Log($"⚠️ Geocoding failed: {ex.Message}");
         }
 
         // Fallback to keyword-based estimation
-        Console.WriteLine($"[FareCalculator] Using keyword fallback for: '{pickup}' → '{destination}'");
+        Log($"🔄 Using keyword fallback for: '{pickup}' → '{destination}'");
         var fallbackDistance = EstimateFromKeywords(pickup, destination);
         var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
         result.Fare = FormatFare(fallbackFare);
@@ -409,7 +417,7 @@ public static class FareCalculator
         
         if (!aiResult.Success)
         {
-            Console.WriteLine($"[FareCalculator] AI extraction failed, falling back to phone-based detection");
+            Log($"⚠️ AI extraction failed, falling back to phone-based detection");
             return await CalculateFareWithCoordsAsync(rawPickup, rawDestination, phoneNumber);
         }
 
@@ -421,7 +429,7 @@ public static class FareCalculator
             DefaultCity = aiResult.DetectedRegion ?? aiResult.PickupCity ?? aiResult.DestinationCity ?? "London"
         };
 
-        Console.WriteLine($"[FareCalculator] 🤖 AI region bias: {region.DefaultCity} (source: {aiResult.RegionSource})");
+        Log($"🤖 AI region bias: {region.DefaultCity} (source: {aiResult.RegionSource})");
 
         // Step 3: Get resolved addresses from AI (or fallback to raw)
         var pickupToGeocode = aiResult.PickupAddress ?? rawPickup;
@@ -495,20 +503,20 @@ public static class FareCalculator
                 result.Eta = eta;
                 result.DistanceMiles = distanceMiles;
 
-                Console.WriteLine($"[FareCalculator] ✓ AI-based fare: {distanceMiles:F2} miles = {result.Fare}");
-                Console.WriteLine($"[FareCalculator] ✓ Pickup: {result.PickupNumber} {result.PickupStreet}, {result.PickupCity}");
-                Console.WriteLine($"[FareCalculator] ✓ Dest: {result.DestNumber} {result.DestStreet}, {result.DestCity}");
+                Log($"✓ AI-based fare: {distanceMiles:F2} miles = {result.Fare}");
+                Log($"✓ Pickup: {result.PickupNumber} {result.PickupStreet}, {result.PickupCity}");
+                Log($"✓ Dest: {result.DestNumber} {result.DestStreet}, {result.DestCity}");
 
                 return result;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] AI-based geocoding failed: {ex.Message}");
+            Log($"⚠️ AI-based geocoding failed: {ex.Message}");
         }
 
         // Fallback to keyword estimation
-        Console.WriteLine($"[FareCalculator] Using keyword fallback");
+        Log($"🔄 Using keyword fallback");
         var fallbackDistance = EstimateFromKeywords(rawPickup, rawDestination);
         var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
         result.Fare = FormatFare(fallbackFare);
@@ -586,7 +594,7 @@ public static class FareCalculator
         }
 
         var region = DetectRegionFromPhone(phoneNumber);
-        Console.WriteLine($"[FareCalculator] Verifying address: '{address}' (region: {region.CountryCode})");
+        Log($"🔍 Verifying address: '{address}' (region: {region.CountryCode})");
 
         try
         {
@@ -595,7 +603,7 @@ public static class FareCalculator
             if (geocoded == null)
             {
                 result.Reason = "Address not found by geocoder";
-                Console.WriteLine($"[FareCalculator] ❌ Address verification failed: '{address}'");
+                Log($"❌ Address verification failed: '{address}'");
                 return result;
             }
 
@@ -617,13 +625,13 @@ public static class FareCalculator
             result.Confidence = Math.Min(1.0, confidence);
             result.Reason = confidence >= 0.8 ? "High confidence match" : "Partial match";
 
-            Console.WriteLine($"[FareCalculator] ✓ Verified: '{address}' → {result.Number} {result.Street}, {result.City} ({result.PostalCode}) [conf: {result.Confidence:P0}]");
+            Log($"✓ Verified: '{address}' → {result.Number} {result.Street}, {result.City} ({result.PostalCode}) [conf: {result.Confidence:P0}]");
             return result;
         }
         catch (Exception ex)
         {
             result.Reason = $"Geocoding error: {ex.Message}";
-            Console.WriteLine($"[FareCalculator] ❌ Address verification error: {ex.Message}");
+            Log($"❌ Address verification error: {ex.Message}");
             return result;
         }
     }
@@ -735,13 +743,13 @@ public static class FareCalculator
                 var lon = geometry.GetProperty("lng").GetDouble();
 
                 _callerLocationCache[phoneNumber] = (lat, lon, DateTime.UtcNow);
-                Console.WriteLine($"[FareCalculator] Caller location bias: {region.DefaultCity} ({lat:F4}, {lon:F4})");
+                Log($"📍 Caller location bias: {region.DefaultCity} ({lat:F4}, {lon:F4})");
                 return (lat, lon);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Failed to get caller location bias: {ex.Message}");
+            Log($"⚠️ Failed to get caller location bias: {ex.Message}");
         }
 
         return null;
@@ -765,7 +773,7 @@ public static class FareCalculator
         {
             if (Regex.IsMatch(address, $@"\b{Regex.Escape(city)}\b", RegexOptions.IgnoreCase))
             {
-                Console.WriteLine($"[FareCalculator] Detected city in address: {city}");
+                Log($"🏙️ Detected city in address: {city}");
                 return city;
             }
         }
@@ -811,7 +819,7 @@ public static class FareCalculator
                 url += "&radius=50000"; // 50km bias radius
             }
 
-            Console.WriteLine($"[FareCalculator] Places Search: '{searchQuery}'" + 
+            Log($"🔍 Places Search: '{searchQuery}'" + 
                 (callerLocation.HasValue ? $" (biased to {region.DefaultCity})" : ""));
 
             var response = await GetHttpClient().GetStringAsync(url);
@@ -823,7 +831,7 @@ public static class FareCalculator
                 var statusStr = status.GetString();
                 if (statusStr != "OK" && statusStr != "ZERO_RESULTS")
                 {
-                    Console.WriteLine($"[FareCalculator] Places API status: {statusStr}");
+                    Log($"⚠️ Places API status: {statusStr}");
                 }
 
                 if (statusStr == "OK" && root.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
@@ -876,14 +884,14 @@ public static class FareCalculator
                     result.IsVerified = true;
                     result.Confidence = 0.9; // High confidence for Places API matches
 
-                    Console.WriteLine($"[FareCalculator] ✓ Places found: {address} → {result.FormattedAddress}");
+                    Log($"✓ Places found: {address} → {result.FormattedAddress}");
                     return result;
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Places Search error for '{address}': {ex.Message}");
+            Log($"⚠️ Places Search error for '{address}': {ex.Message}");
         }
 
         return null;
@@ -970,7 +978,7 @@ public static class FareCalculator
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Place Details error: {ex.Message}");
+            Log($"⚠️ Place Details error: {ex.Message}");
         }
 
         return baseResult;
@@ -1060,19 +1068,19 @@ public static class FareCalculator
                         }
                     }
 
-                    Console.WriteLine($"[FareCalculator] Google geocoded: {address} → {result.City}, {result.PostalCode}");
+                    Log($"✓ Google geocoded: {address} → {result.City}, {result.PostalCode}");
                     return result;
                 }
             }
             else
             {
                 var statusStr = status.GetString();
-                Console.WriteLine($"[FareCalculator] Google geocode status: {statusStr}");
+                Log($"⚠️ Google geocode status: {statusStr}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] Google geocode error for '{address}': {ex.Message}");
+            Log($"⚠️ Google geocode error for '{address}': {ex.Message}");
         }
 
         return null;
@@ -1130,13 +1138,13 @@ public static class FareCalculator
                         result.City = village.GetString() ?? "";
                 }
 
-                Console.WriteLine($"[FareCalculator] OSM geocoded: {address} → {result.City}");
+                Log($"✓ OSM geocoded: {address} → {result.City}");
                 return result;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[FareCalculator] OSM geocode error for '{address}': {ex.Message}");
+            Log($"⚠️ OSM geocode error for '{address}': {ex.Message}");
         }
 
         return null;

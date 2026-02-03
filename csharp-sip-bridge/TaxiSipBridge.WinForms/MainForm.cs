@@ -40,6 +40,9 @@ public partial class MainForm : Form
             // Fallback: use a default key (should be configured in environment for production)
             FareCalculator.SetGoogleMapsApiKey("AIzaSyDGl7cFRFWlqvU7tpz7E5BVNLMp0HO6aGU");
         }
+        
+        // Wire up FareCalculator logging to unified log output
+        FareCalculator.OnLog = msg => AddLog(msg);
 
         // Run SpeexDSP diagnostics at startup
         SpeexDspResamplerHelper.LogStartupDiagnostics(msg => AddLog(msg));
