@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
-    public const string VERSION = "1.1"; // Tuned gate/AGC for conversational speech
+    public const string VERSION = "1.2"; // v3.3 sync - added STT corrections for Coventry mishearings
     // ===========================================
     // CONFIGURATION
     // ===========================================
