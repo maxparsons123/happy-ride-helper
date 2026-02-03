@@ -20,12 +20,24 @@ partial class MainForm
         this.components = new System.ComponentModel.Container();
         
         // Form settings
-        this.Text = "🚕 Taxi AI - SIP Auto-Answer";
+        this.Text = "🚕 Taxi AI - SIP Auto-Answer v1.1.1";
         this.Size = new Size(750, 650);
         this.MinimumSize = new Size(650, 550);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.Font = new Font("Segoe UI", 9F);
         this.BackColor = Color.FromArgb(248, 249, 250);
+
+        // Version label at top-right
+        lblVersion = new Label
+        {
+            Text = "v1.1.1",
+            Location = new Point(680, 2),
+            Size = new Size(50, 16),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F),
+            TextAlign = ContentAlignment.TopRight,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
 
         // === Configuration Panel ===
         var grpConfig = new GroupBox
@@ -365,7 +377,7 @@ partial class MainForm
         grpLogs.Controls.AddRange(new Control[] { lstLogs, btnClearLogs, btnCopyLogs });
 
         // Add all to form
-        this.Controls.AddRange(new Control[] { grpConfig, grpStatus, grpAvatar, grpLogs });
+        this.Controls.AddRange(new Control[] { lblVersion, grpConfig, grpStatus, grpAvatar, grpLogs });
     }
 
     #endregion
@@ -411,4 +423,5 @@ partial class MainForm
     private GroupBox grpAvatar;
     private PictureBox picAvatar;
     private Label lblAvatarStatus;
+    private Label lblVersion;
 }
