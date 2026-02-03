@@ -1358,6 +1358,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         ("I hate David girls", "52A David Road"),
         ("I hate Davey Girls", "52A David Road"),
         ("eight David girls", "52A David Road"),
+        ("baby girl", "David Road"),  // v3.3: partial match
         
         // v2.4: Name mishearings
         ("It's ours", "It's Max"),
@@ -1366,6 +1367,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         // v2.4: Passenger count mishearings  
         ("See you passengers", "Three passengers"),
         ("see you passengers", "three passengers"),
+        
+        // v3.3: City mishearings
+        ("Coltree", "Coventry"),
+        ("Coltre", "Coventry"),
+        ("Coltry", "Coventry"),
+        ("Coal Tree", "Coventry"),
+        ("in Country", "in Coventry"),
     };
 
     // ===========================================
@@ -1487,7 +1495,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         return t;
     }
 
-    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 2.5.
+    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.3.
 
 ## VOICE STYLE
 
