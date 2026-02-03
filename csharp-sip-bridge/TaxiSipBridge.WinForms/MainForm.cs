@@ -812,6 +812,14 @@ public partial class MainForm : Form
 
     private void AddLog(string message)
     {
+        // Thread-safe: FareCalculator and other async code may call from background threads
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => AddLog(message)); }
+            catch (ObjectDisposedException) { }
+            return;
+        }
+
         // MEMORY LEAK FIX: Bound log size
         if (lstLogs.Items.Count > 500)
         {
