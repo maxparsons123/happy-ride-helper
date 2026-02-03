@@ -1,10 +1,14 @@
 using System;
+using System.Collections.Generic;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// Streaming preprocessor for OpenAI Realtime 24kHz output → clean 8kHz PCM for PCMA encoding.
 /// Pipeline: DC removal → 3.4kHz low-pass → normalize → soft-clip → downsample
+/// 
+/// IMPORTANT: This is a STREAMING processor that handles variable-length audio chunks.
+/// OpenAI sends audio in variable-size chunks, NOT fixed 20ms frames.
 /// </summary>
 public static class TtsPreConditioner
 {
@@ -30,9 +34,47 @@ public static class TtsPreConditioner
     private static readonly object _lock = new object();
 
     /// <summary>
-    /// Process a single 20ms 24kHz PCM16 mono frame → 20ms 8kHz PCM16 frame.
+    /// Process STREAMING 24kHz PCM16 mono samples → 8kHz PCM16 samples.
+    /// Handles ANY length input, not just 20ms frames.
     /// Output is ready for PCMA (G.711 A-Law) encoding.
     /// </summary>
+    public static short[] ProcessStreaming(short[] samples24k)
+    {
+        if (samples24k == null || samples24k.Length == 0)
+            return Array.Empty<short>();
+
+        // Need at least 3 samples for 3:1 decimation
+        if (samples24k.Length < 3)
+            return Array.Empty<short>();
+
+        lock (_lock)
+        {
+            // Work on a copy to avoid modifying input
+            short[] working = new short[samples24k.Length];
+            Array.Copy(samples24k, working, samples24k.Length);
+
+            // 1) Remove DC offset (stateful high-pass)
+            RemoveDc(working);
+
+            // 2) Low-pass @ 3.4kHz for telephony band limiting
+            LowpassInPlace(working, 3400.0, InputSampleRate);
+
+            // 3) Normalize to 90% and soft-clip
+            NormalizeAndClip(working);
+
+            // 4) Downsample 24kHz → 8kHz (factor 3) - handles any length
+            short[] samples8k = Downsample24kTo8k(working);
+
+            return samples8k;
+        }
+    }
+
+    /// <summary>
+    /// Process a single 20ms 24kHz PCM16 mono frame → 20ms 8kHz PCM16 frame.
+    /// DEPRECATED: Use ProcessStreaming for variable-length audio.
+    /// Output is ready for PCMA (G.711 A-Law) encoding.
+    /// </summary>
+    [Obsolete("Use ProcessStreaming for variable-length audio from OpenAI")]
     public static short[] ProcessFrame(short[] samples24k)
     {
         if (samples24k == null || samples24k.Length == 0)
@@ -61,11 +103,24 @@ public static class TtsPreConditioner
 
     /// <summary>
     /// Process raw bytes from OpenAI Realtime → ready for PCMA encoding.
+    /// Handles variable-length streaming audio.
     /// </summary>
+    public static byte[] ProcessStreamingBytes(byte[] inputBytes)
+    {
+        short[] samples24k = BytesToPcm(inputBytes);
+        short[] samples8k = ProcessStreaming(samples24k);
+        return PcmToBytes(samples8k);
+    }
+
+    /// <summary>
+    /// Process raw bytes from OpenAI Realtime → ready for PCMA encoding.
+    /// DEPRECATED: Use ProcessStreamingBytes for variable-length audio.
+    /// </summary>
+    [Obsolete("Use ProcessStreamingBytes for variable-length audio from OpenAI")]
     public static byte[] ProcessFrameBytes(byte[] inputBytes)
     {
         short[] samples24k = BytesToPcm(inputBytes);
-        short[] samples8k = ProcessFrame(samples24k);
+        short[] samples8k = ProcessStreaming(samples24k); // Use streaming version
         return PcmToBytes(samples8k);
     }
 
@@ -194,10 +249,13 @@ public static class TtsPreConditioner
     /// <summary>
     /// Downsample 24kHz → 8kHz (factor 3) with averaging.
     /// Audio is already low-passed at 3.4kHz so aliasing is minimal.
+    /// Handles ANY length input (variable streaming chunks).
     /// </summary>
     private static short[] Downsample24kTo8k(short[] input)
     {
         int outLen = input.Length / 3;
+        if (outLen == 0) return Array.Empty<short>();
+        
         short[] output = new short[outLen];
 
         for (int i = 0; i < outLen; i++)
