@@ -23,7 +23,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.4";
+    public const string VERSION = "2.5";
 
     // =========================
     // G.711 CONFIG
@@ -58,10 +58,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private int _ignoreUserAudio;       // Per-call (set after goodbye starts)
     private int _deferredResponsePending; // Per-call (queued response after response.done)
     private int _noReplyWatchdogId;     // Incremented to cancel stale watchdogs
+    private int _transcriptPending;      // v2.5: Block response.create until transcript arrives
     private long _lastAdaFinishedAt;    // RTP playout completion time (source of truth for echo guard)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
     private long _responseCreatedAt;    // For transcript guard
+    private long _speechStoppedAt;      // v2.5: Track when user stopped speaking
 
     // Tracks current OpenAI response id to ignore duplicate events
     private string? _activeResponseId;
@@ -221,6 +223,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Interlocked.Exchange(ref _greetingSent, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
         Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Exchange(ref _transcriptPending, 0);  // v2.5
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -231,6 +234,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         Volatile.Write(ref _lastUserSpeechAt, 0);
         Volatile.Write(ref _lastToolCallAt, 0);
         Volatile.Write(ref _responseCreatedAt, 0);
+        Volatile.Write(ref _speechStoppedAt, 0);  // v2.5
 
         // Reset stats
         Interlocked.Exchange(ref _audioFramesSent, 0);
@@ -478,8 +482,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     // Record timestamp for transcript guard
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
-                    // Clear OpenAI's input audio buffer when Ada starts speaking
-                    _ = ClearInputAudioBufferAsync();
+                    // v2.5: DO NOT clear audio buffer here - it causes transcript truncation
+                    // Only clear AFTER response.done when we're sure the current turn is complete
 
                     Log("🤖 AI response started");
                     OnResponseStarted?.Invoke();
@@ -502,12 +506,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     _activeResponseId = null;
 
                     Interlocked.Exchange(ref _responseActive, 0);
+                    
+                    // v2.5: Clear audio buffer AFTER response completes (not during response.created)
+                    _ = ClearInputAudioBufferAsync();
+                    
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
-
-                    // Commit audio buffer after response completes
-                    await SendJsonAsync(new { type = "input_audio_buffer.commit" });
-                    Log("📝 Committed audio buffer (turn finalized)");
 
                     // Flush deferred response if pending (fast - 20ms delay)
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
@@ -628,17 +632,21 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
+                    // v2.5: Transcript arrived - clear the pending flag
+                    Interlocked.Exchange(ref _transcriptPending, 0);
+                    
                     if (doc.RootElement.TryGetProperty("transcript", out var userTranscript))
                     {
                         var text = userTranscript.GetString();
                         if (!string.IsNullOrEmpty(text))
                         {
-                            // TRANSCRIPT GUARD: Ignore stale transcripts within 400ms of response.created
+                            // Calculate timing for logging
+                            var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
                             var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-                            if (msSinceResponseCreated < 400 && Volatile.Read(ref _responseActive) == 1)
+                            
+                            if (Volatile.Read(ref _responseActive) == 1)
                             {
-                                 // Do not drop late transcripts: they often contain the caller's actual booking details.
-                                 Log($"⚠️ Late transcript ({msSinceResponseCreated}ms after response.created): {text}");
+                                Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
                             }
 
                             Log($"👤 User: {text}");
@@ -650,13 +658,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
+                    Interlocked.Exchange(ref _transcriptPending, 1);  // v2.5: Mark transcript pending
                     Log("✂️ Barge-in detected");
                     OnBargeIn?.Invoke();
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    Volatile.Write(ref _speechStoppedAt, NowMs());  // v2.5: Track when speech ended
                     _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                    Log("📝 Committed audio buffer (awaiting transcript)");
                     break;
 
                 case "error":
