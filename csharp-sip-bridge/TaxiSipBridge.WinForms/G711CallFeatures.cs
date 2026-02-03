@@ -60,7 +60,8 @@ public sealed class G711CallFeatures : IDisposable
         _callerPhone = callerPhone;
         
         // Wire up to base client events
-        _client.OnLog += msg => OnLog?.Invoke(msg);
+        // NOTE: Do NOT forward OnLog here - G711CallHandler already subscribes to _aiClient.OnLog
+        // Forwarding would cause duplicate log messages
         _client.OnResponseCompleted += HandleResponseCompleted;
     }
     
