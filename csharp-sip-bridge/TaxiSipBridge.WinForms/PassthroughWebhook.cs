@@ -239,7 +239,7 @@ namespace TaxiSipBridge.WinForms
 
             // Build confirmation message if not provided
             string message = customMessage ?? 
-                $"Brilliant! That's booked. The fare is £{fare} and your driver will be with you in {etaMinutes} minutes.";
+                $"Brilliant! That's booked. The fare is €{fare} and your driver will be with you in {etaMinutes} minutes.";
 
             return new WebhookResponse
             {
@@ -471,7 +471,7 @@ namespace TaxiSipBridge.WinForms
 
             string message = customMessage ?? 
                 $"Brilliant! That's booked from {booking.pickup_location} to {booking.dropoff_location}. " +
-                $"The fare is £{fare} and your driver will be with you in {etaMinutes} minutes. " +
+                $"The fare is €{fare} and your driver will be with you in {etaMinutes} minutes. " +
                 $"Your reference is {booking.reference_number}.";
 
             return new WebhookResponse
@@ -621,7 +621,7 @@ namespace TaxiSipBridge.WinForms
                 var (fare, eta) = await calculateFare(pickupLat, pickupLon, dropoffLat, dropoffLon, passengers);
 
                 response.AdaResponse = $"Brilliant! That's booked from {validatedPickup ?? adaPickup} to " +
-                    $"{validatedDestination ?? adaDestination}. The fare is £{fare:F2} and your driver will be " +
+                    $"{validatedDestination ?? adaDestination}. The fare is €{fare:F2} and your driver will be " +
                     $"with you in {eta} minutes. Anything else?";
                 response.BookingConfirmed = true;
                 response.SessionState["booking_confirmed"] = true;
@@ -941,7 +941,7 @@ namespace TaxiSipBridge.WinForms
         [JsonPropertyName("message")]
         public string Message { get; set; } = "";
 
-        /// <summary>Fare to quote (e.g., "£12.50")</summary>
+        /// <summary>Fare to quote (e.g., "€12.50")</summary>
         [JsonPropertyName("fare")]
         public string Fare { get; set; } = "";
 

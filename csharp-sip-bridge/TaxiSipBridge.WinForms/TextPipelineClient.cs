@@ -196,7 +196,7 @@ public class TextPipelineClient : IAudioAIClient
             OnLog?.Invoke($"[Pipeline] Booking: {pickup} → {dest}, {pax} pax");
             
             // Simulate webhook response
-            _llm?.AddToolResult("book_taxi", "fare: £8.50, eta: 5 minutes");
+            _llm?.AddToolResult("book_taxi", "fare: €8.50, eta: 5 minutes");
         }
     }
     
