@@ -5,11 +5,12 @@ using System.Text.RegularExpressions;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Local fare calculator for taxi bookings (v3.0).
+/// Local fare calculator for taxi bookings (v3.1).
 /// Uses Gemini AI for intelligent address extraction with geographic disambiguation:
 /// - Landline area codes → city detection (e.g., +44 24 = Coventry)
 /// - Mobile numbers → no geographic clue, uses destination context
 /// - Text analysis → neighborhood/landmark detection
+/// IMPORTANT: Gemini AI output is the SOURCE OF TRUTH for geocoding bias.
 /// Fallback to Google Places Search API then Geocoding API then OpenStreetMap.
 /// </summary>
 public static class FareCalculator
@@ -162,6 +163,10 @@ public static class FareCalculator
                     result.PickupResolved = resolved.GetBoolean();
                 if (pickupEl.TryGetProperty("address", out var addr))
                     result.PickupAddress = addr.GetString();
+                if (pickupEl.TryGetProperty("house_number", out var houseNum))
+                    result.PickupHouseNumber = houseNum.GetString();
+                if (pickupEl.TryGetProperty("street", out var street))
+                    result.PickupStreet = street.GetString();
                 if (pickupEl.TryGetProperty("city", out var city))
                     result.PickupCity = city.GetString();
                 if (pickupEl.TryGetProperty("confidence", out var conf))
@@ -184,6 +189,10 @@ public static class FareCalculator
                     result.DestinationResolved = resolved.GetBoolean();
                 if (destEl.TryGetProperty("address", out var addr))
                     result.DestinationAddress = addr.GetString();
+                if (destEl.TryGetProperty("house_number", out var houseNum))
+                    result.DestinationHouseNumber = houseNum.GetString();
+                if (destEl.TryGetProperty("street", out var street))
+                    result.DestinationStreet = street.GetString();
                 if (destEl.TryGetProperty("city", out var city))
                     result.DestinationCity = city.GetString();
                 if (destEl.TryGetProperty("confidence", out var conf))
@@ -340,6 +349,190 @@ public static class FareCalculator
         result.Eta = EstimateEta(fallbackDistance);
         result.DistanceMiles = fallbackDistance;
         return result;
+    }
+
+    /// <summary>
+    /// Calculate fare using Gemini AI for intelligent address resolution.
+    /// This is the PREFERRED method - uses AI-detected region as the source of truth for geocoding bias.
+    /// </summary>
+    /// <param name="rawPickup">Raw pickup address from user input</param>
+    /// <param name="rawDestination">Raw destination address from user input</param>
+    /// <param name="phoneNumber">Caller phone number for AI region detection</param>
+    public static async Task<FareResult> CalculateFareWithAiAsync(
+        string? rawPickup, 
+        string? rawDestination,
+        string? phoneNumber)
+    {
+        var result = new FareResult
+        {
+            Fare = FormatFare(MIN_FARE),
+            Eta = "5 minutes",
+            DistanceMiles = 0
+        };
+
+        if (string.IsNullOrWhiteSpace(rawPickup) || string.IsNullOrWhiteSpace(rawDestination))
+            return result;
+
+        // Step 1: Use Gemini AI to extract and resolve addresses with intelligent region detection
+        var aiResult = await ExtractAddressesWithAiAsync(rawPickup, rawDestination, phoneNumber);
+        
+        if (!aiResult.Success)
+        {
+            Console.WriteLine($"[FareCalculator] AI extraction failed, falling back to phone-based detection");
+            return await CalculateFareWithCoordsAsync(rawPickup, rawDestination, phoneNumber);
+        }
+
+        // Step 2: Build RegionInfo from AI result (SOURCE OF TRUTH)
+        var region = new RegionInfo
+        {
+            Country = aiResult.PhoneCountry == "NL" ? "Netherlands" : "United Kingdom",
+            CountryCode = aiResult.PhoneCountry == "NL" ? "NL" : "GB",
+            DefaultCity = aiResult.DetectedRegion ?? aiResult.PickupCity ?? aiResult.DestinationCity ?? "London"
+        };
+
+        Console.WriteLine($"[FareCalculator] 🤖 AI region bias: {region.DefaultCity} (source: {aiResult.RegionSource})");
+
+        // Step 3: Get resolved addresses from AI (or fallback to raw)
+        var pickupToGeocode = aiResult.PickupAddress ?? rawPickup;
+        var destToGeocode = aiResult.DestinationAddress ?? rawDestination;
+
+        try
+        {
+            // Geocode using AI-detected region as bias
+            var pickupTask = GeocodeAddressWithRegionAsync(pickupToGeocode, region);
+            var destTask = GeocodeAddressWithRegionAsync(destToGeocode, region);
+            
+            await Task.WhenAll(pickupTask, destTask);
+            
+            var pickupGeo = await pickupTask;
+            var destGeo = await destTask;
+
+            // Store pickup details with house number priority: AI → Geocoder → Raw extraction
+            if (pickupGeo != null)
+            {
+                result.PickupLat = pickupGeo.Lat;
+                result.PickupLon = pickupGeo.Lon;
+                result.PickupStreet = !string.IsNullOrEmpty(aiResult.PickupStreet) 
+                    ? aiResult.PickupStreet 
+                    : pickupGeo.StreetName;
+                result.PickupNumber = !string.IsNullOrEmpty(aiResult.PickupHouseNumber) 
+                    ? aiResult.PickupHouseNumber  // Priority 1: AI-extracted
+                    : !string.IsNullOrEmpty(pickupGeo.StreetNumber) 
+                        ? pickupGeo.StreetNumber  // Priority 2: Geocoder
+                        : ExtractHouseNumber(rawPickup); // Priority 3: Raw extraction
+                result.PickupPostalCode = pickupGeo.PostalCode;
+                result.PickupCity = !string.IsNullOrEmpty(aiResult.PickupCity) 
+                    ? aiResult.PickupCity 
+                    : !string.IsNullOrEmpty(pickupGeo.City) 
+                        ? pickupGeo.City 
+                        : aiResult.DetectedRegion;
+                result.PickupFormatted = pickupGeo.FormattedAddress;
+            }
+
+            // Store destination details with house number priority: AI → Geocoder → Raw extraction
+            if (destGeo != null)
+            {
+                result.DestLat = destGeo.Lat;
+                result.DestLon = destGeo.Lon;
+                result.DestStreet = !string.IsNullOrEmpty(aiResult.DestinationStreet) 
+                    ? aiResult.DestinationStreet 
+                    : destGeo.StreetName;
+                result.DestNumber = !string.IsNullOrEmpty(aiResult.DestinationHouseNumber) 
+                    ? aiResult.DestinationHouseNumber  // Priority 1: AI-extracted
+                    : !string.IsNullOrEmpty(destGeo.StreetNumber) 
+                        ? destGeo.StreetNumber  // Priority 2: Geocoder
+                        : ExtractHouseNumber(rawDestination); // Priority 3: Raw extraction
+                result.DestPostalCode = destGeo.PostalCode;
+                result.DestCity = !string.IsNullOrEmpty(aiResult.DestinationCity) 
+                    ? aiResult.DestinationCity 
+                    : !string.IsNullOrEmpty(destGeo.City) 
+                        ? destGeo.City 
+                        : aiResult.DetectedRegion;
+                result.DestFormatted = destGeo.FormattedAddress;
+            }
+
+            if (pickupGeo != null && destGeo != null)
+            {
+                var distanceMiles = HaversineDistanceMiles(
+                    pickupGeo.Lat, pickupGeo.Lon,
+                    destGeo.Lat, destGeo.Lon);
+
+                var fare = CalculateFareFromDistanceDecimal(distanceMiles);
+                var eta = EstimateEta(distanceMiles);
+
+                result.Fare = FormatFare(fare);
+                result.Eta = eta;
+                result.DistanceMiles = distanceMiles;
+
+                Console.WriteLine($"[FareCalculator] ✓ AI-based fare: {distanceMiles:F2} miles = {result.Fare}");
+                Console.WriteLine($"[FareCalculator] ✓ Pickup: {result.PickupNumber} {result.PickupStreet}, {result.PickupCity}");
+                Console.WriteLine($"[FareCalculator] ✓ Dest: {result.DestNumber} {result.DestStreet}, {result.DestCity}");
+
+                return result;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] AI-based geocoding failed: {ex.Message}");
+        }
+
+        // Fallback to keyword estimation
+        Console.WriteLine($"[FareCalculator] Using keyword fallback");
+        var fallbackDistance = EstimateFromKeywords(rawPickup, rawDestination);
+        var fallbackFare = CalculateFareFromDistanceDecimal(fallbackDistance);
+        result.Fare = FormatFare(fallbackFare);
+        result.Eta = EstimateEta(fallbackDistance);
+        result.DistanceMiles = fallbackDistance;
+        return result;
+    }
+
+    /// <summary>
+    /// Geocode address using a pre-determined region (from AI).
+    /// </summary>
+    private static async Task<GeocodedAddress?> GeocodeAddressWithRegionAsync(string address, RegionInfo region)
+    {
+        // Use the existing geocoding chain but with the AI-determined region
+        return await GeocodeAddressAsync(address, region, null);
+    }
+
+    /// <summary>
+    /// Extract house number from user's raw address input.
+    /// Handles formats like "52A", "52-8", "7", etc.
+    /// </summary>
+    public static string? ExtractHouseNumber(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            return null;
+
+        // Common patterns:
+        // "52A David Road" → "52A"
+        // "52-8 David Road" → "52-8"  
+        // "7 Russell Street" → "7"
+        // "Flat 3, 15 High Street" → "3, 15" or just "15"?
+        // "15a-17b Some Road" → "15a-17b"
+
+        // Pattern 1: Leading number with optional letter/hyphen suffix
+        var leadingMatch = Regex.Match(address, @"^(\d+[a-zA-Z]?(?:-\d+[a-zA-Z]?)?)\s");
+        if (leadingMatch.Success)
+        {
+            return leadingMatch.Groups[1].Value;
+        }
+
+        // Pattern 2: Number after comma (e.g., "Flat 3, 15 High Street" → extract "15")
+        var afterCommaMatch = Regex.Match(address, @",\s*(\d+[a-zA-Z]?(?:-\d+[a-zA-Z]?)?)\s");
+        if (afterCommaMatch.Success)
+        {
+            return afterCommaMatch.Groups[1].Value;
+        }
+
+        // Pattern 3: Any standalone number before a word that looks like a street name
+        var beforeStreetMatch = Regex.Match(address, @"(\d+[a-zA-Z]?(?:-\d+[a-zA-Z]?)?)\s+(?:[A-Z][a-z]+\s*(?:Street|Road|Avenue|Lane|Drive|Way|Close|Court|Place|Terrace|Gardens|Row|Walk|Grove|Square|Crescent|Hill|Rise|Park|View|Mews|Yard|Gate|Passage))", RegexOptions.IgnoreCase);
+        if (beforeStreetMatch.Success)
+        {
+            return beforeStreetMatch.Groups[1].Value;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -1138,6 +1331,8 @@ public class AiAddressExtractionResult
     // Pickup resolution
     public bool PickupResolved { get; set; }
     public string? PickupAddress { get; set; }
+    public string? PickupHouseNumber { get; set; } // e.g., "52A", "7", "15-17"
+    public string? PickupStreet { get; set; } // Street name only
     public string? PickupCity { get; set; }
     public double PickupConfidence { get; set; }
     public List<string> PickupAlternatives { get; set; } = new();
@@ -1145,6 +1340,8 @@ public class AiAddressExtractionResult
     // Destination resolution
     public bool DestinationResolved { get; set; }
     public string? DestinationAddress { get; set; }
+    public string? DestinationHouseNumber { get; set; } // e.g., "52A", "7", "15-17"
+    public string? DestinationStreet { get; set; } // Street name only
     public string? DestinationCity { get; set; }
     public double DestinationConfidence { get; set; }
     public List<string> DestinationAlternatives { get; set; } = new();

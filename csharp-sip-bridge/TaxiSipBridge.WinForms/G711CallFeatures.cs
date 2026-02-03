@@ -332,10 +332,10 @@ public sealed class G711CallFeatures : IDisposable
                 return new { success = false, error = "Missing pickup or destination" };
             }
             
-            // Calculate real fare using FareCalculator with geocoding
+            // Calculate real fare using AI-based region detection and geocoding
             try
             {
-                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                var fareResult = await FareCalculator.CalculateFareWithAiAsync(
                     _booking.Pickup, 
                     _booking.Destination,
                     _callerPhone);
@@ -401,7 +401,7 @@ public sealed class G711CallFeatures : IDisposable
         {
             try
             {
-                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                var fareResult = await FareCalculator.CalculateFareWithAiAsync(
                     _booking.Pickup,
                     _booking.Destination,
                     _callerPhone);
