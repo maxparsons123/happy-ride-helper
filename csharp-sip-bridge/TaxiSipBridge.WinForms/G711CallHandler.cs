@@ -208,8 +208,8 @@ Be concise, warm, and professional.
             };
 
             // Route OpenAI tool calls to feature handler
-            _aiClient.OnToolCall += async (toolName, toolCallId, args) =>
-                await _features.HandleToolCallAsync(toolName, toolCallId, args).ConfigureAwait(false);
+            _aiClient.OnToolCall += (toolName, toolCallId, args) =>
+                _features.HandleToolCallAsync(toolName, toolCallId, args);
             
             // Create DirectG711RtpPlayout - uses SIP-negotiated codec for correct payload type
             _playout = new DirectG711RtpPlayout(_currentMediaSession, sipCodec);
