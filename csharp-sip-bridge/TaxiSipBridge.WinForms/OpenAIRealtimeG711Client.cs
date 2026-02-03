@@ -164,10 +164,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 }
             }
 
-            await Task.Delay(delayMs).ConfigureAwait(false);
+            if (delayMs > 0)
+                await Task.Delay(delayMs).ConfigureAwait(false);
 
-            // If response is still active after waiting, defer to response.done handler
-            if (Volatile.Read(ref _responseActive) == 1)
+            // If forced (waitForCurrentResponse=false), skip the active check - just send it
+            if (waitForCurrentResponse && Volatile.Read(ref _responseActive) == 1)
             {
                 Interlocked.Exchange(ref _deferredResponsePending, 1);
                 Log("⏳ Response still active - deferring response.create");
@@ -178,7 +179,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 return;
 
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-            Log("🔄 response.create sent");
+            Log(waitForCurrentResponse ? "🔄 response.create sent" : "🔄 response.create sent (forced after tool)");
         }
         finally
         {
