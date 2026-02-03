@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.3";
+    public const string VERSION = "2.4";
 
     // =========================
     // CONFIG
@@ -129,7 +129,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     /// Waits for any active response to complete first, then sends response.create.
     /// OpenAI's response.created event will set _responseActive = 1.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -139,17 +139,22 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
         try
         {
-            // Wait for any active response to complete (up to 5s)
+            // Wait for any active response to complete (with configurable max wait)
             if (waitForCurrentResponse)
             {
-                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
-                    await Task.Delay(50).ConfigureAwait(false);
+                int waited = 0;
+                while (Volatile.Read(ref _responseActive) == 1 && waited < maxWaitMs)
+                {
+                    await Task.Delay(20).ConfigureAwait(false);
+                    waited += 20;
+                }
             }
 
-            await Task.Delay(delayMs).ConfigureAwait(false);
+            if (delayMs > 0)
+                await Task.Delay(delayMs).ConfigureAwait(false);
 
-            // If response is still active after waiting, defer to response.done handler
-            if (Volatile.Read(ref _responseActive) == 1)
+            // If forced (waitForCurrentResponse=false), skip the active check - just send it
+            if (waitForCurrentResponse && Volatile.Read(ref _responseActive) == 1)
             {
                 Interlocked.Exchange(ref _deferredResponsePending, 1);
                 Log("⏳ Response still active - deferring response.create");
@@ -161,7 +166,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
             // DO NOT set _responseActive = 1 here — let OpenAI's response.created do it
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-            Log("🔄 response.create sent");
+            Log(waitForCurrentResponse ? "🔄 response.create sent" : "🔄 response.create sent (forced after tool)");
         }
         finally
         {
@@ -594,7 +599,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
                         {
-                            await Task.Delay(50).ConfigureAwait(false);
+                            await Task.Delay(20).ConfigureAwait(false);
                             if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
                             {
                                 await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
@@ -706,7 +711,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                await QueueResponseCreateAsync().ConfigureAwait(false);
+                await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                 break;
 
             case "book_taxi":
@@ -727,7 +732,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             error = "Missing pickup or destination",
                             message = "Missing pickup or destination. Ask the caller to repeat it."
                         }).ConfigureAwait(false);
-                        await QueueResponseCreateAsync().ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                         break;
                     }
 
@@ -776,7 +781,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         message = $"The fare is {spokenFare}, and the driver will arrive in {fareResult.Eta}. Ask if they want to confirm."
                     }).ConfigureAwait(false);
 
-                    await QueueResponseCreateAsync().ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                 }
                 else if (action == "confirmed")
                 {
@@ -789,7 +794,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             error = "Missing pickup or destination",
                             message = "Missing pickup or destination. Ask the caller to repeat it before booking."
                         }).ConfigureAwait(false);
-                        await QueueResponseCreateAsync().ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                         break;
                     }
 
@@ -867,7 +872,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
                     }).ConfigureAwait(false);
 
-                    await QueueResponseCreateAsync().ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
 
                     // Extended grace period (15s) for "anything else?" flow, then force end
                     _ = Task.Run(async () =>
@@ -955,7 +960,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
                 }).ConfigureAwait(false);
 
-                await QueueResponseCreateAsync().ConfigureAwait(false);
+                await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                 break;
             }
 
@@ -1023,7 +1028,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 voice = _voice,
                 input_audio_format = "pcm16",
                 output_audio_format = "pcm16",
-                input_audio_transcription = new { model = "whisper-1" },
+                input_audio_transcription = new 
+                { 
+                    model = "whisper-1",
+                    language = _detectedLanguage  // v2.4: Add language hint for better transcription accuracy
+                },
                 turn_detection = new
                 {
                     type = "server_vad",
@@ -1038,7 +1047,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         };
 
         await SendJsonAsync(config).ConfigureAwait(false);
-        Log("🎧 Session configured");
+        Log($"🎧 Session configured (lang={_detectedLanguage})");
     }
 
     private async Task SendGreetingAsync()
@@ -1232,6 +1241,20 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         ("Servant, Russell", "7 Russell"),
         ("Servant Russell", "7 Russell"),
         ("Dave Redroth", "David Road"),
+        
+        // v2.4: New corrections from logs - David Road mishearings
+        ("I hate baby girls", "52A David Road"),
+        ("I hate David girls", "52A David Road"),
+        ("I hate Davey Girls", "52A David Road"),
+        ("eight David girls", "52A David Road"),
+        
+        // v2.4: Name mishearings
+        ("It's ours", "It's Max"),
+        ("It's ours.", "It's Max"),
+        
+        // v2.4: Passenger count mishearings  
+        ("See you passengers", "Three passengers"),
+        ("see you passengers", "three passengers"),
     };
 
     // ===========================================
@@ -1351,7 +1374,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         return t;
     }
 
-    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 2.3.
+    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 2.4.
 
 ## VOICE STYLE
 
