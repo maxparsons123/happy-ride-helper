@@ -170,8 +170,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             if (delayMs > 0)
                 await Task.Delay(delayMs).ConfigureAwait(false);
 
-            // If forced (waitForCurrentResponse=false), skip the active check - just send it
-            if (waitForCurrentResponse && Volatile.Read(ref _responseActive) == 1)
+            // CRITICAL FIX: If response is still active, ALWAYS defer - regardless of waitForCurrentResponse
+            // This handles tool results that complete before response.done arrives
+            if (Volatile.Read(ref _responseActive) == 1)
             {
                 Interlocked.Exchange(ref _deferredResponsePending, 1);
                 Log("⏳ Response still active - deferring response.create");
