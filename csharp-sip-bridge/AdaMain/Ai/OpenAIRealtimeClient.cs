@@ -303,7 +303,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
-                temperature = 0.5
+                temperature = 0.6
             }
         };
         

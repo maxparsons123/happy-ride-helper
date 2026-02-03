@@ -1029,7 +1029,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
-                temperature = 0.5
+                temperature = 0.6
             }
         };
 
