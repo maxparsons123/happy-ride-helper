@@ -28,6 +28,8 @@ public static class FareCalculator
     private static string? _googleMapsApiKey;
     private static string? _supabaseUrl;
     private static string? _supabaseAnonKey;
+    private static string? _geminiApiKey;
+    private static GeminiDispatchService? _geminiService;
 
     // Cached caller location bias (phone → lat/lon)
     private static readonly Dictionary<string, (double Lat, double Lon, DateTime CachedAt)> _callerLocationCache = new();
@@ -92,6 +94,134 @@ public static class FareCalculator
         _supabaseUrl = url.TrimEnd('/');
         _supabaseAnonKey = anonKey;
         Log("🤖 Supabase configured for AI address extraction");
+    }
+
+    /// <summary>
+    /// Set the Gemini API key for direct AI extraction (call once at startup)
+    /// </summary>
+    public static void SetGeminiApiKey(string apiKey)
+    {
+        _geminiApiKey = apiKey;
+        _geminiService = new GeminiDispatchService(apiKey);
+        _geminiService.OnLog = msg => Log(msg);
+        Log("🤖 Gemini API configured for direct AI address extraction");
+    }
+
+    /// <summary>
+    /// Extract addresses using local Gemini service (alternative to Supabase edge function).
+    /// Returns a GeminiDispatchResponse with structured address data.
+    /// </summary>
+    public static async Task<GeminiDispatchResponse?> ExtractAddressesWithGeminiAsync(
+        string pickup,
+        string destination,
+        string? phoneNumber)
+    {
+        if (_geminiService == null)
+        {
+            Log("⚠️ Gemini service not configured - call SetGeminiApiKey first");
+            return null;
+        }
+
+        try
+        {
+            Log($"🤖 Gemini extraction: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
+            
+            // Format as natural language message for Gemini
+            var userMessage = $"Pickup: {pickup}\nDestination: {destination}";
+            var result = await _geminiService.GetDispatchDetailsAsync(userMessage, phoneNumber ?? "");
+
+            if (result != null)
+            {
+                Log($"════════════════════════════════════════════════════");
+                Log($"🤖 GEMINI AI ADDRESS EXTRACTION RESULTS");
+                Log($"────────────────────────────────────────────────────");
+                Log($"📱 Phone Analysis:");
+                Log($"   Country: {result.phone_analysis?.detected_country ?? "Unknown"}");
+                Log($"   Is Mobile: {result.phone_analysis?.is_mobile ?? false}");
+                Log($"   City from Area Code: {result.phone_analysis?.landline_city ?? "(none)"}");
+                Log($"────────────────────────────────────────────────────");
+                Log($"🌍 Detected Area: {result.detected_area ?? "Unknown"}");
+                Log($"────────────────────────────────────────────────────");
+                Log($"📍 PICKUP:");
+                Log($"   Address: {result.pickup?.address ?? "(empty)"}");
+                Log($"   Ambiguous: {result.pickup?.is_ambiguous ?? false}");
+                if (result.pickup?.alternatives?.Length > 0)
+                {
+                    Log($"   Alternatives: {string.Join(", ", result.pickup.alternatives)}");
+                }
+                Log($"────────────────────────────────────────────────────");
+                Log($"🏁 DROPOFF:");
+                Log($"   Address: {result.dropoff?.address ?? "(empty)"}");
+                Log($"   Ambiguous: {result.dropoff?.is_ambiguous ?? false}");
+                if (result.dropoff?.alternatives?.Length > 0)
+                {
+                    Log($"   Alternatives: {string.Join(", ", result.dropoff.alternatives)}");
+                }
+                Log($"────────────────────────────────────────────────────");
+                Log($"📋 Status: {result.status}");
+                if (result.status == "clarification_needed")
+                {
+                    Log($"⚠️ CLARIFICATION NEEDED");
+                }
+                Log($"════════════════════════════════════════════════════");
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Gemini extraction error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Calculate fare using Gemini AI for address extraction (alternative pipeline).
+    /// Falls back to standard geocoding if Gemini fails.
+    /// </summary>
+    public static async Task<FareResult> CalculateFareWithGeminiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber = null)
+    {
+        var result = new FareResult
+        {
+            Fare = FormatFare(MIN_FARE),
+            Eta = "5 minutes",
+            DistanceMiles = 0
+        };
+
+        if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
+            return result;
+
+        // Try Gemini extraction first
+        var geminiResult = await ExtractAddressesWithGeminiAsync(pickup, destination, phoneNumber);
+        
+        if (geminiResult != null && geminiResult.status == "ready")
+        {
+            // Use Gemini-resolved addresses for geocoding
+            var resolvedPickup = geminiResult.pickup?.address ?? pickup;
+            var resolvedDest = geminiResult.dropoff?.address ?? destination;
+            
+            Log($"🤖 Using Gemini-resolved addresses:");
+            Log($"   Pickup: '{pickup}' → '{resolvedPickup}'");
+            Log($"   Dest: '{destination}' → '{resolvedDest}'");
+            
+            // Geocode with Gemini-enhanced addresses
+            return await CalculateFareWithCoordsAsync(resolvedPickup, resolvedDest, phoneNumber);
+        }
+        else if (geminiResult?.status == "clarification_needed")
+        {
+            // Store ambiguity info for caller to handle
+            result.NeedsClarification = true;
+            result.PickupAlternatives = geminiResult.pickup?.alternatives ?? Array.Empty<string>();
+            result.DestAlternatives = geminiResult.dropoff?.alternatives ?? Array.Empty<string>();
+            return result;
+        }
+        
+        // Fallback to standard geocoding
+        Log("⚠️ Gemini extraction failed, falling back to standard geocoding");
+        return await CalculateFareWithCoordsAsync(pickup, destination, phoneNumber);
     }
 
     /// <summary>
@@ -1341,6 +1471,11 @@ public class FareResult
     public string? DestPostalCode { get; set; }
     public string? DestCity { get; set; }
     public string? DestFormatted { get; set; }
+    
+    // Clarification support (from Gemini)
+    public bool NeedsClarification { get; set; }
+    public string[]? PickupAlternatives { get; set; }
+    public string[]? DestAlternatives { get; set; }
 }
 
 /// <summary>
