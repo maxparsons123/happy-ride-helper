@@ -1,12 +1,15 @@
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
 /// Local fare calculator for taxi bookings.
-/// Uses Google Maps Geocoding for accurate address resolution with phone-based region detection.
-/// Fallback to OpenStreetMap then keyword-based estimation if geocoding fails.
+/// Uses Google Places Search API for accurate address resolution with intelligent biasing:
+/// - Phone number → geocoded location bias
+/// - Detected city/area names from address text
+/// Fallback to Geocoding API then OpenStreetMap then keyword-based estimation.
 /// </summary>
 public static class FareCalculator
 {
@@ -16,11 +19,37 @@ public static class FareCalculator
     /// <summary>Rate per mile in euros (€1.00 default)</summary>
     public const decimal RATE_PER_MILE = 1.00m;
 
-    /// <summary>Minimum fare in pounds</summary>
+    /// <summary>Minimum fare in euros</summary>
     public const decimal MIN_FARE = 4.00m;
 
     // API keys loaded from environment
     private static string? _googleMapsApiKey;
+
+    // Cached caller location bias (phone → lat/lon)
+    private static readonly Dictionary<string, (double Lat, double Lon, DateTime CachedAt)> _callerLocationCache = new();
+    private static readonly TimeSpan _locationCacheExpiry = TimeSpan.FromHours(1);
+
+    // Known UK cities/towns for detection
+    private static readonly HashSet<string> _knownUkCities = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "London", "Birmingham", "Manchester", "Leeds", "Glasgow", "Liverpool", "Bristol", "Sheffield",
+        "Edinburgh", "Leicester", "Coventry", "Bradford", "Cardiff", "Belfast", "Nottingham", "Kingston upon Hull",
+        "Newcastle", "Stoke-on-Trent", "Southampton", "Derby", "Portsmouth", "Brighton", "Plymouth", "Wolverhampton",
+        "Reading", "Northampton", "Luton", "Bolton", "Aberdeen", "Bournemouth", "Norwich", "Swindon", "Swansea",
+        "Milton Keynes", "Watford", "Blackpool", "Dundee", "Ipswich", "Peterborough", "Slough", "Oxford",
+        "Cambridge", "Gloucester", "Exeter", "Warrington", "York", "Bath", "Chester", "Blackburn", "Chelmsford",
+        "Colchester", "Crawley", "Woking", "Guildford", "Harlow", "Basildon", "Maidstone", "Hastings", "Canterbury",
+        "Eastbourne", "High Wycombe", "Aylesbury", "St Albans", "Hemel Hempstead", "Stevenage", "Welwyn"
+    };
+
+    // Known NL cities for detection
+    private static readonly HashSet<string> _knownNlCities = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Amsterdam", "Rotterdam", "Den Haag", "The Hague", "Utrecht", "Eindhoven", "Tilburg", "Groningen",
+        "Almere", "Breda", "Nijmegen", "Apeldoorn", "Haarlem", "Arnhem", "Zaanstad", "Amersfoort",
+        "Haarlemmermeer", "Hertogenbosch", "'s-Hertogenbosch", "Zoetermeer", "Zwolle", "Maastricht",
+        "Leiden", "Dordrecht", "Ede", "Alphen aan den Rijn", "Alkmaar", "Delft", "Deventer", "Hilversum"
+    };
 
     // Lazy-initialized to avoid static constructor failures (TypeInitializationException)
     private static HttpClient? _httpClientBacking;
@@ -28,8 +57,8 @@ public static class FareCalculator
     {
         if (_httpClientBacking == null)
         {
-            _httpClientBacking = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            _httpClientBacking.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/1.0");
+            _httpClientBacking = new HttpClient { Timeout = TimeSpan.FromSeconds(8) }; // Longer timeout for Places API
+            _httpClientBacking.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/2.9");
         }
         return _httpClientBacking;
     }
@@ -40,7 +69,7 @@ public static class FareCalculator
     public static void SetGoogleMapsApiKey(string apiKey)
     {
         _googleMapsApiKey = apiKey;
-        Console.WriteLine("[FareCalculator] Google Maps API key configured");
+        Console.WriteLine("[FareCalculator] Google Maps API key configured (Places Search enabled)");
     }
 
     /// <summary>
@@ -69,9 +98,9 @@ public static class FareCalculator
 
         try
         {
-            // Geocode both addresses in parallel
-            var pickupTask = GeocodeAddressAsync(pickup, regionBias);
-            var destTask = GeocodeAddressAsync(destination, regionBias);
+            // Geocode both addresses in parallel with phone-based location bias
+            var pickupTask = GeocodeAddressAsync(pickup, regionBias, phoneNumber);
+            var destTask = GeocodeAddressAsync(destination, regionBias, phoneNumber);
             
             await Task.WhenAll(pickupTask, destTask);
             
@@ -170,7 +199,7 @@ public static class FareCalculator
 
         try
         {
-            var geocoded = await GeocodeAddressAsync(address, region);
+            var geocoded = await GeocodeAddressAsync(address, region, phoneNumber);
             
             if (geocoded == null)
             {
@@ -259,21 +288,303 @@ public static class FareCalculator
     }
 
     /// <summary>
-    /// Geocode an address using Google Maps Geocoding API (preferred) or OSM fallback.
-    /// Returns full address components for dispatch integration.
+    /// Geocode an address using Google Places Search API (preferred) with intelligent biasing,
+    /// then fallback to Geocoding API, then OSM.
     /// </summary>
-    private static async Task<GeocodedAddress?> GeocodeAddressAsync(string address, RegionInfo region)
+    private static async Task<GeocodedAddress?> GeocodeAddressAsync(string address, RegionInfo region, string? phoneNumber = null)
     {
-        // Try Google Maps first if API key is available
+        // Try Google Places Search first if API key is available
         if (!string.IsNullOrEmpty(_googleMapsApiKey))
         {
+            var placesResult = await GeocodeWithGooglePlacesAsync(address, region, phoneNumber);
+            if (placesResult != null) return placesResult;
+
+            // Fallback to standard Geocoding API
             var googleResult = await GeocodeWithGoogleAsync(address, region);
             if (googleResult != null) return googleResult;
         }
 
-        // Fallback to OpenStreetMap
+        // Final fallback to OpenStreetMap
         return await GeocodeWithOsmAsync(address, region);
     }
+
+    /// <summary>
+    /// Get or geocode the caller's approximate location from their phone number.
+    /// Uses the phone prefix to determine country/city, then caches the result.
+    /// </summary>
+    private static async Task<(double Lat, double Lon)?> GetCallerLocationBiasAsync(string? phoneNumber, RegionInfo region)
+    {
+        if (string.IsNullOrEmpty(phoneNumber))
+            return null;
+
+        // Check cache first
+        if (_callerLocationCache.TryGetValue(phoneNumber, out var cached) &&
+            DateTime.UtcNow - cached.CachedAt < _locationCacheExpiry)
+        {
+            return (cached.Lat, cached.Lon);
+        }
+
+        // Geocode the default city for this region
+        try
+        {
+            var cityQuery = $"{region.DefaultCity}, {region.Country}";
+            var url = $"https://maps.googleapis.com/maps/api/geocode/json" +
+                      $"?address={Uri.EscapeDataString(cityQuery)}" +
+                      $"&key={_googleMapsApiKey}";
+
+            var response = await GetHttpClient().GetStringAsync(url);
+            var doc = JsonDocument.Parse(response);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("status", out var status) && status.GetString() == "OK" &&
+                root.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
+            {
+                var geometry = results[0].GetProperty("geometry").GetProperty("location");
+                var lat = geometry.GetProperty("lat").GetDouble();
+                var lon = geometry.GetProperty("lng").GetDouble();
+
+                _callerLocationCache[phoneNumber] = (lat, lon, DateTime.UtcNow);
+                Console.WriteLine($"[FareCalculator] Caller location bias: {region.DefaultCity} ({lat:F4}, {lon:F4})");
+                return (lat, lon);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Failed to get caller location bias: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Detect city/area names mentioned in the address text for additional bias.
+    /// </summary>
+    private static string? DetectCityFromAddress(string address, RegionInfo region)
+    {
+        var lowerAddress = address.ToLowerInvariant();
+
+        // Check against known cities based on region
+        var citiesToCheck = region.CountryCode switch
+        {
+            "NL" => _knownNlCities,
+            _ => _knownUkCities
+        };
+
+        foreach (var city in citiesToCheck)
+        {
+            if (Regex.IsMatch(address, $@"\b{Regex.Escape(city)}\b", RegexOptions.IgnoreCase))
+            {
+                Console.WriteLine($"[FareCalculator] Detected city in address: {city}");
+                return city;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Geocode using Google Places Text Search API with intelligent biasing.
+    /// This is more accurate than Geocoding API for partial addresses and landmarks.
+    /// </summary>
+    private static async Task<GeocodedAddress?> GeocodeWithGooglePlacesAsync(string address, RegionInfo region, string? phoneNumber)
+    {
+        try
+        {
+            // Build search query with region context
+            var searchQuery = address;
+            var detectedCity = DetectCityFromAddress(address, region);
+            
+            // If no city detected in address, append the region's default city for context
+            if (detectedCity == null && !ContainsRegionContext(address, region))
+            {
+                searchQuery = $"{address}, {region.DefaultCity}, {region.Country}";
+            }
+            else if (!ContainsRegionContext(address, region))
+            {
+                searchQuery = $"{address}, {region.Country}";
+            }
+
+            // Get caller location for bias
+            var callerLocation = await GetCallerLocationBiasAsync(phoneNumber, region);
+
+            // Build Places Text Search URL
+            var url = $"https://maps.googleapis.com/maps/api/place/textsearch/json" +
+                      $"?query={Uri.EscapeDataString(searchQuery)}" +
+                      $"&region={region.CountryCode.ToLower()}" +
+                      $"&key={_googleMapsApiKey}";
+
+            // Add location bias if available (50km radius)
+            if (callerLocation.HasValue)
+            {
+                url += $"&location={callerLocation.Value.Lat},{callerLocation.Value.Lon}";
+                url += "&radius=50000"; // 50km bias radius
+            }
+
+            Console.WriteLine($"[FareCalculator] Places Search: '{searchQuery}'" + 
+                (callerLocation.HasValue ? $" (biased to {region.DefaultCity})" : ""));
+
+            var response = await GetHttpClient().GetStringAsync(url);
+            var doc = JsonDocument.Parse(response);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("status", out var status))
+            {
+                var statusStr = status.GetString();
+                if (statusStr != "OK" && statusStr != "ZERO_RESULTS")
+                {
+                    Console.WriteLine($"[FareCalculator] Places API status: {statusStr}");
+                }
+
+                if (statusStr == "OK" && root.TryGetProperty("results", out var results) && results.GetArrayLength() > 0)
+                {
+                    var first = results[0];
+                    var result = new GeocodedAddress();
+
+                    // Get coordinates
+                    if (first.TryGetProperty("geometry", out var geometry) &&
+                        geometry.TryGetProperty("location", out var location))
+                    {
+                        result.Lat = location.GetProperty("lat").GetDouble();
+                        result.Lon = location.GetProperty("lng").GetDouble();
+                    }
+
+                    // Get formatted address
+                    if (first.TryGetProperty("formatted_address", out var formatted))
+                    {
+                        result.FormattedAddress = formatted.GetString() ?? address;
+                    }
+
+                    // Get place name if it's a landmark/business
+                    string? placeName = null;
+                    if (first.TryGetProperty("name", out var name))
+                    {
+                        placeName = name.GetString();
+                    }
+
+                    // Now get detailed address components using Place Details API
+                    if (first.TryGetProperty("place_id", out var placeIdEl))
+                    {
+                        var placeId = placeIdEl.GetString();
+                        if (!string.IsNullOrEmpty(placeId))
+                        {
+                            var detailsResult = await GetPlaceDetailsAsync(placeId, result);
+                            if (detailsResult != null)
+                            {
+                                result = detailsResult;
+                            }
+                        }
+                    }
+
+                    // If place name is useful, include it
+                    if (!string.IsNullOrEmpty(placeName) && 
+                        !result.FormattedAddress.Contains(placeName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.FormattedAddress = $"{placeName}, {result.FormattedAddress}";
+                    }
+
+                    result.IsVerified = true;
+                    result.Confidence = 0.9; // High confidence for Places API matches
+
+                    Console.WriteLine($"[FareCalculator] ✓ Places found: {address} → {result.FormattedAddress}");
+                    return result;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Places Search error for '{address}': {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Get detailed address components from Place Details API.
+    /// </summary>
+    private static async Task<GeocodedAddress?> GetPlaceDetailsAsync(string placeId, GeocodedAddress baseResult)
+    {
+        try
+        {
+            var url = $"https://maps.googleapis.com/maps/api/place/details/json" +
+                      $"?place_id={placeId}" +
+                      $"&fields=address_components,formatted_address,geometry" +
+                      $"&key={_googleMapsApiKey}";
+
+            var response = await GetHttpClient().GetStringAsync(url);
+            var doc = JsonDocument.Parse(response);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("status", out var status) && status.GetString() == "OK" &&
+                root.TryGetProperty("result", out var result))
+            {
+                var address = new GeocodedAddress
+                {
+                    Lat = baseResult.Lat,
+                    Lon = baseResult.Lon,
+                    FormattedAddress = baseResult.FormattedAddress
+                };
+
+                // Update coords if available
+                if (result.TryGetProperty("geometry", out var geometry) &&
+                    geometry.TryGetProperty("location", out var location))
+                {
+                    address.Lat = location.GetProperty("lat").GetDouble();
+                    address.Lon = location.GetProperty("lng").GetDouble();
+                }
+
+                // Update formatted address
+                if (result.TryGetProperty("formatted_address", out var formatted))
+                {
+                    address.FormattedAddress = formatted.GetString() ?? address.FormattedAddress;
+                }
+
+                // Parse address components
+                if (result.TryGetProperty("address_components", out var components))
+                {
+                    foreach (var comp in components.EnumerateArray())
+                    {
+                        var types = comp.GetProperty("types").EnumerateArray()
+                                       .Select(t => t.GetString()).ToList();
+                        var longName = comp.GetProperty("long_name").GetString() ?? "";
+
+                        if (types.Contains("street_number"))
+                        {
+                            address.StreetNumber = longName;
+                        }
+                        else if (types.Contains("route"))
+                        {
+                            address.StreetName = longName;
+                        }
+                        else if (types.Contains("postal_code"))
+                        {
+                            address.PostalCode = longName;
+                        }
+                        else if (types.Contains("locality"))
+                        {
+                            address.City = longName;
+                        }
+                        else if (types.Contains("postal_town") && string.IsNullOrEmpty(address.City))
+                        {
+                            address.City = longName;
+                        }
+                        else if (types.Contains("administrative_area_level_2") && string.IsNullOrEmpty(address.City))
+                        {
+                            address.City = longName;
+                        }
+                    }
+                }
+
+                return address;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FareCalculator] Place Details error: {ex.Message}");
+        }
+
+        return baseResult;
+    }
+
 
     /// <summary>
     /// Geocode using Google Maps Geocoding API with region bias.
