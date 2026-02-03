@@ -1641,3 +1641,40 @@ public class AiAddressExtractionResult
     // Raw/debug
     public string? RawResponse { get; set; }
 }
+
+// ============================================
+// SIMPLIFIED MODELS FOR LOVABLE AI DISPATCH
+// Used by ExtractAddressesWithLovableAiAsync
+// ============================================
+
+/// <summary>
+/// Simplified response from Lovable AI dispatch edge function.
+/// </summary>
+public class GeminiDispatchResponse
+{
+    public string? detected_area { get; set; }
+    public string? status { get; set; }
+    public PhoneAnalysis? phone_analysis { get; set; }
+    public AddressDetail? pickup { get; set; }
+    public AddressDetail? dropoff { get; set; }
+}
+
+/// <summary>
+/// Phone number analysis for region detection.
+/// </summary>
+public class PhoneAnalysis
+{
+    public string? detected_country { get; set; }
+    public bool is_mobile { get; set; }
+    public string? landline_city { get; set; }
+}
+
+/// <summary>
+/// Simplified address detail from AI extraction.
+/// </summary>
+public class AddressDetail
+{
+    public string? address { get; set; }
+    public bool is_ambiguous { get; set; }
+    public string[]? alternatives { get; set; }
+}
