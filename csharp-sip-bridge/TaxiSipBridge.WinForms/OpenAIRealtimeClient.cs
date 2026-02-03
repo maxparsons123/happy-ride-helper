@@ -117,6 +117,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     {
         return Volatile.Read(ref _responseActive) == 0 &&
                Volatile.Read(ref _responseQueued) == 0 &&
+               Volatile.Read(ref _transcriptPending) == 0 &&  // v3.3: Wait for transcript before responding
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
@@ -1166,23 +1167,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         // Short delay to let session stabilize
         await Task.Delay(100).ConfigureAwait(false);
 
-        // FORCE greeting to fire — it's the FIRST response, so unconditionally clear any spurious state
-        // This handles race conditions where OpenAI may have pre-queued something
-        var respActive = Volatile.Read(ref _responseActive);
-        var respQueued = Volatile.Read(ref _responseQueued);
-        
-        if (respActive == 1 || respQueued == 1)
-        {
-            Log($"⚠️ Greeting: Force-clearing spurious state (active={respActive}, queued={respQueued})");
-        }
-        
-        // Unconditionally reset to ensure greeting fires
-        Interlocked.Exchange(ref _responseActive, 0);
-        Interlocked.Exchange(ref _responseQueued, 0);
-        _activeResponseId = null;
-
         var greeting = GetLocalizedGreeting(_detectedLanguage);
 
+        // v3.3: Do NOT manually reset _responseActive/_responseQueued - let OpenAI lifecycle manage this
+        // Forced resets corrupt turn timing and cause clipped/crispy audio
         await SendJsonAsync(new
         {
             type = "response.create",
