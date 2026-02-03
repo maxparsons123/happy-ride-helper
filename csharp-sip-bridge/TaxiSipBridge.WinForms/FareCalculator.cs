@@ -5,11 +5,12 @@ using System.Text.RegularExpressions;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Local fare calculator for taxi bookings.
-/// Uses Google Places Search API for accurate address resolution with intelligent biasing:
-/// - Phone number → geocoded location bias
-/// - Detected city/area names from address text
-/// Fallback to Geocoding API then OpenStreetMap then keyword-based estimation.
+/// Local fare calculator for taxi bookings (v3.0).
+/// Uses Gemini AI for intelligent address extraction with geographic disambiguation:
+/// - Landline area codes → city detection (e.g., +44 24 = Coventry)
+/// - Mobile numbers → no geographic clue, uses destination context
+/// - Text analysis → neighborhood/landmark detection
+/// Fallback to Google Places Search API then Geocoding API then OpenStreetMap.
 /// </summary>
 public static class FareCalculator
 {
@@ -22,8 +23,10 @@ public static class FareCalculator
     /// <summary>Minimum fare in euros</summary>
     public const decimal MIN_FARE = 4.00m;
 
-    // API keys loaded from environment
+    // API keys and URLs loaded from environment
     private static string? _googleMapsApiKey;
+    private static string? _supabaseUrl;
+    private static string? _supabaseAnonKey;
 
     // Cached caller location bias (phone → lat/lon)
     private static readonly Dictionary<string, (double Lat, double Lon, DateTime CachedAt)> _callerLocationCache = new();
@@ -57,8 +60,8 @@ public static class FareCalculator
     {
         if (_httpClientBacking == null)
         {
-            _httpClientBacking = new HttpClient { Timeout = TimeSpan.FromSeconds(8) }; // Longer timeout for Places API
-            _httpClientBacking.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/2.9");
+            _httpClientBacking = new HttpClient { Timeout = TimeSpan.FromSeconds(10) }; // Increased for AI calls
+            _httpClientBacking.DefaultRequestHeaders.Add("User-Agent", "TaxiSipBridge/3.0");
         }
         return _httpClientBacking;
     }
@@ -70,6 +73,170 @@ public static class FareCalculator
     {
         _googleMapsApiKey = apiKey;
         Console.WriteLine("[FareCalculator] Google Maps API key configured (Places Search enabled)");
+    }
+
+    /// <summary>
+    /// Set the Supabase URL and anon key for AI extraction (call once at startup)
+    /// </summary>
+    public static void SetSupabaseConfig(string url, string anonKey)
+    {
+        _supabaseUrl = url.TrimEnd('/');
+        _supabaseAnonKey = anonKey;
+        Console.WriteLine($"[FareCalculator] Supabase configured for AI address extraction");
+    }
+
+    /// <summary>
+    /// Extract and resolve addresses using Gemini AI with intelligent geographic disambiguation.
+    /// Uses phone number patterns (landline vs mobile) to detect caller region.
+    /// </summary>
+    /// <param name="pickup">Raw pickup address spoken by caller</param>
+    /// <param name="destination">Raw destination address spoken by caller</param>
+    /// <param name="phoneNumber">Caller's phone number for region detection</param>
+    /// <param name="conversation">Optional recent conversation context</param>
+    /// <returns>AI extraction result with resolved addresses and clarification requests</returns>
+    public static async Task<AiAddressExtractionResult> ExtractAddressesWithAiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber,
+        string? conversation = null)
+    {
+        var result = new AiAddressExtractionResult { Success = false };
+
+        if (string.IsNullOrEmpty(_supabaseUrl) || string.IsNullOrEmpty(_supabaseAnonKey))
+        {
+            result.Status = "error";
+            result.RawResponse = "Supabase not configured";
+            Console.WriteLine("[FareCalculator] ⚠️ AI extraction failed: Supabase not configured");
+            return result;
+        }
+
+        try
+        {
+            var payload = new
+            {
+                pickup = pickup ?? "",
+                destination = destination ?? "",
+                phone = phoneNumber ?? "",
+                conversation = conversation
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            
+            var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/functions/v1/address-extract")
+            {
+                Content = content
+            };
+            request.Headers.Add("Authorization", $"Bearer {_supabaseAnonKey}");
+
+            Console.WriteLine($"[FareCalculator] 🤖 AI extraction: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
+
+            var response = await GetHttpClient().SendAsync(request);
+            var responseBody = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                result.Status = "error";
+                result.RawResponse = responseBody;
+                Console.WriteLine($"[FareCalculator] ⚠️ AI extraction HTTP {(int)response.StatusCode}: {responseBody}");
+                return result;
+            }
+
+            // Parse the AI response
+            using var doc = JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+
+            result.Success = true;
+            result.RawResponse = responseBody;
+
+            // Extract region detection
+            if (root.TryGetProperty("detected_region", out var region))
+                result.DetectedRegion = region.GetString() ?? "";
+            if (root.TryGetProperty("region_source", out var regionSource))
+                result.RegionSource = regionSource.GetString() ?? "";
+
+            // Extract pickup info
+            if (root.TryGetProperty("pickup", out var pickupEl))
+            {
+                if (pickupEl.TryGetProperty("resolved", out var resolved))
+                    result.PickupResolved = resolved.GetBoolean();
+                if (pickupEl.TryGetProperty("address", out var addr))
+                    result.PickupAddress = addr.GetString();
+                if (pickupEl.TryGetProperty("city", out var city))
+                    result.PickupCity = city.GetString();
+                if (pickupEl.TryGetProperty("confidence", out var conf))
+                    result.PickupConfidence = conf.GetDouble();
+                if (pickupEl.TryGetProperty("alternatives", out var alts))
+                {
+                    foreach (var alt in alts.EnumerateArray())
+                    {
+                        var altStr = alt.GetString();
+                        if (!string.IsNullOrEmpty(altStr))
+                            result.PickupAlternatives.Add(altStr);
+                    }
+                }
+            }
+
+            // Extract destination info
+            if (root.TryGetProperty("destination", out var destEl))
+            {
+                if (destEl.TryGetProperty("resolved", out var resolved))
+                    result.DestinationResolved = resolved.GetBoolean();
+                if (destEl.TryGetProperty("address", out var addr))
+                    result.DestinationAddress = addr.GetString();
+                if (destEl.TryGetProperty("city", out var city))
+                    result.DestinationCity = city.GetString();
+                if (destEl.TryGetProperty("confidence", out var conf))
+                    result.DestinationConfidence = conf.GetDouble();
+                if (destEl.TryGetProperty("alternatives", out var alts))
+                {
+                    foreach (var alt in alts.EnumerateArray())
+                    {
+                        var altStr = alt.GetString();
+                        if (!string.IsNullOrEmpty(altStr))
+                            result.DestinationAlternatives.Add(altStr);
+                    }
+                }
+            }
+
+            // Extract status
+            if (root.TryGetProperty("status", out var status))
+                result.Status = status.GetString() ?? "ready_to_book";
+            if (root.TryGetProperty("clarification_message", out var clarification))
+                result.ClarificationMessage = clarification.GetString();
+
+            // Extract phone analysis
+            if (root.TryGetProperty("phone_analysis", out var phoneAnalysis))
+            {
+                if (phoneAnalysis.TryGetProperty("isMobile", out var isMobile))
+                    result.IsMobile = isMobile.GetBoolean();
+                if (phoneAnalysis.TryGetProperty("country", out var country))
+                    result.PhoneCountry = country.GetString();
+                if (phoneAnalysis.TryGetProperty("city", out var cityFromPhone))
+                    result.PhoneCityFromAreaCode = cityFromPhone.GetString();
+            }
+
+            // Log results
+            var pickupStatus = result.PickupResolved ? $"✓ {result.PickupAddress}" : $"⚠️ {result.PickupAlternatives.Count} alternatives";
+            var destStatus = result.DestinationResolved ? $"✓ {result.DestinationAddress}" : $"⚠️ {result.DestinationAlternatives.Count} alternatives";
+            Console.WriteLine($"[FareCalculator] 🤖 AI result: region={result.DetectedRegion} ({result.RegionSource})");
+            Console.WriteLine($"[FareCalculator] 🤖 Pickup: {pickupStatus}");
+            Console.WriteLine($"[FareCalculator] 🤖 Destination: {destStatus}");
+            
+            if (result.Status == "clarification_required")
+            {
+                Console.WriteLine($"[FareCalculator] 🤖 Clarification needed: {result.ClarificationMessage}");
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Status = "error";
+            result.RawResponse = ex.Message;
+            Console.WriteLine($"[FareCalculator] ⚠️ AI extraction error: {ex.Message}");
+            return result;
+        }
     }
 
     /// <summary>
@@ -956,4 +1123,41 @@ public class AddressVerifyResult
     public double? Lon { get; set; }
     public double Confidence { get; set; } // 0-1
     public string? Reason { get; set; } // Why verification failed/succeeded
+}
+
+/// <summary>
+/// Result from AI-powered address extraction using Gemini.
+/// Includes intelligent geographic disambiguation based on phone number patterns.
+/// </summary>
+public class AiAddressExtractionResult
+{
+    public bool Success { get; set; }
+    public string DetectedRegion { get; set; } = "";
+    public string RegionSource { get; set; } = ""; // landline_area_code, destination_landmark, text_mention, unknown
+    
+    // Pickup resolution
+    public bool PickupResolved { get; set; }
+    public string? PickupAddress { get; set; }
+    public string? PickupCity { get; set; }
+    public double PickupConfidence { get; set; }
+    public List<string> PickupAlternatives { get; set; } = new();
+    
+    // Destination resolution
+    public bool DestinationResolved { get; set; }
+    public string? DestinationAddress { get; set; }
+    public string? DestinationCity { get; set; }
+    public double DestinationConfidence { get; set; }
+    public List<string> DestinationAlternatives { get; set; } = new();
+    
+    // Status
+    public string Status { get; set; } = "ready_to_book"; // ready_to_book, clarification_required, error
+    public string? ClarificationMessage { get; set; }
+    
+    // Phone analysis
+    public bool IsMobile { get; set; }
+    public string? PhoneCountry { get; set; }
+    public string? PhoneCityFromAreaCode { get; set; }
+    
+    // Raw/debug
+    public string? RawResponse { get; set; }
 }
