@@ -23,7 +23,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.3";
+    public const string VERSION = "2.4";
 
     // =========================
     // G.711 CONFIG
@@ -71,6 +71,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // CALLER STATE (per-call)
     // =========================
     private string _callerId = "";
+    private string _detectedLanguage = "en";  // v2.4: Language hint for Whisper
 
     // =========================
     // WEBSOCKET
@@ -209,6 +210,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private void ResetCallState(string? caller)
     {
         _callerId = caller ?? "";
+        _detectedLanguage = DetectLanguage(caller);  // v2.4: Detect language for Whisper hint
         
         // Reset per-call flags (NOT _disposed - that's object lifetime)
         Interlocked.Exchange(ref _callEnded, 0);
@@ -792,7 +794,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 instructions = GetDefaultInstructions(),
                 input_audio_format = inputCodec,
                 output_audio_format = outputCodec,
-                input_audio_transcription = new { model = "whisper-1" },
+                input_audio_transcription = new { model = "whisper-1", language = _detectedLanguage },  // v2.4: Language hint
                 turn_detection = new
                 {
                     type = "server_vad",
@@ -1035,5 +1037,50 @@ These phrases mean YES - proceed immediately:
         _cts?.Cancel();
         try { _ws?.Dispose(); } catch { }
         _sendMutex.Dispose();
+    }
+
+    // =========================
+    // LANGUAGE DETECTION (v2.4)
+    // =========================
+    private static readonly Dictionary<string, string> CountryCodeToLanguage = new()
+    {
+        { "31", "nl" }, { "32", "nl" }, { "33", "fr" }, { "34", "es" },
+        { "39", "it" }, { "44", "en" }, { "45", "en" }, { "46", "en" },
+        { "47", "en" }, { "48", "pl" }, { "49", "de" }, { "35", "pt" },
+        { "30", "en" }, { "41", "de" }, { "43", "de" },
+    };
+
+    private string DetectLanguage(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone))
+            return "en";
+
+        var norm = phone.Replace(" ", "").Replace("-", "").Replace("(", "").Replace(")", "");
+
+        // Dutch local mobile format
+        if (norm.StartsWith("06") && norm.Length == 10 && norm.All(char.IsDigit))
+            return "nl";
+        if (norm.StartsWith("0") && !norm.StartsWith("00") && norm.Length == 10)
+            return "nl";
+
+        // Strip international prefix
+        if (norm.StartsWith("+"))
+            norm = norm.Substring(1);
+        else if (norm.StartsWith("00") && norm.Length > 4)
+            norm = norm.Substring(2);
+
+        // Check country code
+        if (norm.Length >= 2)
+        {
+            var code = norm.Substring(0, 2);
+            if (CountryCodeToLanguage.TryGetValue(code, out var lang))
+            {
+                Log($"🌍 Language: {lang} (country code {code})");
+                return lang;
+            }
+        }
+
+        Log($"🌍 Language: en (default)");
+        return "en";
     }
 }
