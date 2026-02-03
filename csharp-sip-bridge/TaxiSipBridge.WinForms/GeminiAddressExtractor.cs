@@ -8,27 +8,18 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Standalone Gemini-based address extraction and dispatch service.
-/// Uses the Google Gemini API directly for intelligent geographic disambiguation.
-/// 
-/// Biasing Logic:
-/// 1. Landline area codes (e.g., +44 24 for Coventry) → strong geographic anchor
-/// 2. Mobile numbers (+44 7) → no geographic clue, uses text context + destination inference
-/// 3. Neighborhood/landmark detection → secondary anchor
+/// Direct Gemini API address extraction with intelligent geographic disambiguation.
+/// Uses phone number patterns (landline vs mobile) to detect caller region.
 /// </summary>
-public class GeminiDispatchService
+public class GeminiAddressExtractor
 {
     private readonly string _apiKey;
     private readonly HttpClient _httpClient;
     private const string GeminiApiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
 
-    /// <summary>
-    /// Optional log callback for debugging.
-    /// </summary>
     public static Action<string>? OnLog;
     private static void Log(string msg) => OnLog?.Invoke(msg);
 
-    // The System Instruction defines the "Brain" of the dispatcher (V3 Smart Dispatcher)
     private const string SystemPrompt = @"
 Role: You are a professional, high-intelligence Taxi Dispatch Logic System.
 
@@ -58,7 +49,7 @@ AMBIGUITY PROTOCOL:
 - If a street exists in multiple locations AND the phone is mobile (+44 7) with no city mentioned, you MUST:
   - Set is_ambiguous: true
   - Provide the top 3 most likely options based on population density
-  - Set status: 'clarification_needed'
+  - Set status: 'clarification_required'
 
 HOUSE NUMBER EXTRACTION:
 - Extract house numbers EXACTLY as spoken (including letters like '52A', '15-17', '1/2')
@@ -67,16 +58,14 @@ HOUSE NUMBER EXTRACTION:
 
 OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
 {
-  ""detected_region"": ""string (city name or 'Unknown')"",
+  ""detected_area"": ""string (city name or 'Unknown')"",
   ""region_source"": ""landline_area_code|destination_landmark|neighborhood|text_mention|unknown"",
   ""phone_analysis"": {
-    ""country"": ""UK|NL|Unknown"",
+    ""detected_country"": ""UK|NL|Unknown"",
     ""is_mobile"": true/false,
-    ""area_code"": ""string or null"",
-    ""inferred_city"": ""string or null""
+    ""landline_city"": ""string or null""
   },
   ""pickup"": {
-    ""resolved"": true/false,
     ""address"": ""full address string"",
     ""house_number"": ""string or null"",
     ""street"": ""street name only"",
@@ -85,8 +74,7 @@ OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
     ""is_ambiguous"": true/false,
     ""alternatives"": [""option1"", ""option2"", ""option3""]
   },
-  ""destination"": {
-    ""resolved"": true/false,
+  ""dropoff"": {
     ""address"": ""full address string"",
     ""house_number"": ""string or null"",
     ""street"": ""street name only"",
@@ -95,29 +83,30 @@ OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
     ""is_ambiguous"": true/false,
     ""alternatives"": [""option1"", ""option2"", ""option3""]
   },
-  ""status"": ""ready_to_book|clarification_required"",
+  ""status"": ""ready|clarification_required"",
   ""clarification_message"": ""string or null (question to ask user if clarification needed)""
 }";
 
-    public GeminiDispatchService(string apiKey)
+    public GeminiAddressExtractor(string apiKey)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
     }
 
     /// <summary>
-    /// Extract and resolve addresses using Gemini AI with intelligent geographic disambiguation.
+    /// Extract addresses using Gemini AI with intelligent geographic disambiguation.
     /// </summary>
-    /// <param name="userMessage">The user's spoken message containing address info</param>
-    /// <param name="phoneNumber">Caller's phone number for region detection (E.164 format preferred)</param>
-    /// <returns>Structured dispatch response with resolved addresses</returns>
-    public async Task<GeminiDispatchResponse?> GetDispatchDetailsAsync(string userMessage, string phoneNumber)
+    public async Task<AddressExtractionResult?> ExtractAsync(
+        string pickup,
+        string destination,
+        string? phoneNumber = null)
     {
-        Log($"🤖 [Gemini] Extracting: message='{userMessage}', phone='{phoneNumber}'");
+        Log($"🤖 [Gemini] Extracting: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
 
         try
         {
-            // Build the request payload
+            var userMessage = $"Pickup: {pickup}\nDestination: {destination}";
+            
             var requestBody = new
             {
                 contents = new[]
@@ -125,23 +114,17 @@ OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
                     new
                     {
                         role = "user",
-                        parts = new[]
-                        {
-                            new { text = $"User Message: {userMessage}\nUser Phone: {phoneNumber}" }
-                        }
+                        parts = new[] { new { text = $"User Message: {userMessage}\nUser Phone: {phoneNumber ?? ""}" } }
                     }
                 },
                 systemInstruction = new
                 {
-                    parts = new[]
-                    {
-                        new { text = SystemPrompt }
-                    }
+                    parts = new[] { new { text = SystemPrompt } }
                 },
                 generationConfig = new
                 {
                     responseMimeType = "application/json",
-                    temperature = 0.1  // Low temperature for consistent structured output
+                    temperature = 0.1
                 }
             };
 
@@ -180,16 +163,56 @@ OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
             }
 
             // Parse the structured JSON response
-            var result = JsonSerializer.Deserialize<GeminiDispatchResponse>(textContent, new JsonSerializerOptions
+            var geminiResult = JsonSerializer.Deserialize<GeminiRawResponse>(textContent, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
 
-            if (result != null)
+            if (geminiResult == null) return null;
+
+            // Convert to unified result format
+            var result = new AddressExtractionResult
             {
-                LogResult(result);
+                DetectedArea = geminiResult.DetectedArea,
+                RegionSource = geminiResult.RegionSource,
+                Status = geminiResult.Status ?? "ready"
+            };
+
+            // Phone analysis
+            if (geminiResult.PhoneAnalysis != null)
+            {
+                result.PhoneCountry = geminiResult.PhoneAnalysis.DetectedCountry;
+                result.IsMobile = geminiResult.PhoneAnalysis.IsMobile;
+                result.LandlineCity = geminiResult.PhoneAnalysis.LandlineCity;
             }
 
+            // Pickup
+            if (geminiResult.Pickup != null)
+            {
+                result.PickupAddress = geminiResult.Pickup.Address;
+                result.PickupHouseNumber = geminiResult.Pickup.HouseNumber;
+                result.PickupStreet = geminiResult.Pickup.Street;
+                result.PickupCity = geminiResult.Pickup.City;
+                result.PickupAmbiguous = geminiResult.Pickup.IsAmbiguous;
+                result.PickupAlternatives = geminiResult.Pickup.Alternatives;
+                result.PickupConfidence = geminiResult.Pickup.Confidence;
+            }
+
+            // Dropoff
+            if (geminiResult.Dropoff != null)
+            {
+                result.DestinationAddress = geminiResult.Dropoff.Address;
+                result.DestinationHouseNumber = geminiResult.Dropoff.HouseNumber;
+                result.DestinationStreet = geminiResult.Dropoff.Street;
+                result.DestinationCity = geminiResult.Dropoff.City;
+                result.DestinationAmbiguous = geminiResult.Dropoff.IsAmbiguous;
+                result.DestinationAlternatives = geminiResult.Dropoff.Alternatives;
+                result.DestinationConfidence = geminiResult.Dropoff.Confidence;
+            }
+
+            result.ClarificationMessage = geminiResult.ClarificationMessage;
+
+            LogResult(result);
             return result;
         }
         catch (Exception ex)
@@ -199,130 +222,98 @@ OUTPUT FORMAT (STRICT JSON - no markdown, no explanation):
         }
     }
 
-    private static void LogResult(GeminiDispatchResponse result)
+    private static void LogResult(AddressExtractionResult result)
     {
         Log($"════════════════════════════════════════════════════");
-        Log($"🤖 GEMINI DISPATCH RESULTS (V3)");
+        Log($"🤖 GEMINI AI ADDRESS EXTRACTION RESULTS");
         Log($"────────────────────────────────────────────────────");
-        Log($"📱 Phone Analysis:");
-        Log($"   Country: {result.PhoneAnalysis?.Country ?? "Unknown"}");
-        Log($"   Is Mobile: {result.PhoneAnalysis?.IsMobile}");
-        Log($"   Area Code: {result.PhoneAnalysis?.AreaCode ?? "(none)"}");
-        Log($"   Inferred City: {result.PhoneAnalysis?.InferredCity ?? "(none)"}");
-        Log($"────────────────────────────────────────────────────");
-        Log($"🌍 Detected Region: {result.DetectedRegion}");
-        Log($"   Source: {result.RegionSource}");
+        Log($"📱 Phone: {result.PhoneCountry ?? "?"}, Mobile: {result.IsMobile}, City: {result.LandlineCity ?? "(none)"}");
+        Log($"🌍 Detected Area: {result.DetectedArea} (source: {result.RegionSource})");
         Log($"────────────────────────────────────────────────────");
         Log($"📍 PICKUP:");
-        Log($"   Resolved: {result.Pickup?.Resolved}");
-        Log($"   Address: {result.Pickup?.Address ?? "(empty)"}");
-        Log($"   House Number: '{result.Pickup?.HouseNumber ?? ""}'");
-        Log($"   Street: '{result.Pickup?.Street ?? ""}'");
-        Log($"   City: '{result.Pickup?.City ?? ""}'");
-        Log($"   Confidence: {result.Pickup?.Confidence:P0}");
-        Log($"   Ambiguous: {result.Pickup?.IsAmbiguous}");
-        if (result.Pickup?.Alternatives?.Length > 0)
-        {
-            Log($"   Alternatives: {string.Join(", ", result.Pickup.Alternatives)}");
-        }
+        Log($"   Address: {result.PickupAddress ?? "(empty)"}");
+        Log($"   House Number: '{result.PickupHouseNumber ?? ""}'");
+        Log($"   Street: '{result.PickupStreet ?? ""}'");
+        Log($"   City: '{result.PickupCity ?? ""}'");
+        Log($"   Confidence: {result.PickupConfidence:P0}");
+        Log($"   Ambiguous: {result.PickupAmbiguous}");
+        if (result.PickupAlternatives?.Length > 0)
+            Log($"   Alternatives: {string.Join(", ", result.PickupAlternatives)}");
         Log($"────────────────────────────────────────────────────");
         Log($"🏁 DESTINATION:");
-        Log($"   Resolved: {result.Destination?.Resolved}");
-        Log($"   Address: {result.Destination?.Address ?? "(empty)"}");
-        Log($"   House Number: '{result.Destination?.HouseNumber ?? ""}'");
-        Log($"   Street: '{result.Destination?.Street ?? ""}'");
-        Log($"   City: '{result.Destination?.City ?? ""}'");
-        Log($"   Confidence: {result.Destination?.Confidence:P0}");
-        Log($"   Ambiguous: {result.Destination?.IsAmbiguous}");
-        if (result.Destination?.Alternatives?.Length > 0)
-        {
-            Log($"   Alternatives: {string.Join(", ", result.Destination.Alternatives)}");
-        }
+        Log($"   Address: {result.DestinationAddress ?? "(empty)"}");
+        Log($"   House Number: '{result.DestinationHouseNumber ?? ""}'");
+        Log($"   Street: '{result.DestinationStreet ?? ""}'");
+        Log($"   City: '{result.DestinationCity ?? ""}'");
+        Log($"   Confidence: {result.DestinationConfidence:P0}");
+        Log($"   Ambiguous: {result.DestinationAmbiguous}");
+        if (result.DestinationAlternatives?.Length > 0)
+            Log($"   Alternatives: {string.Join(", ", result.DestinationAlternatives)}");
         Log($"────────────────────────────────────────────────────");
         Log($"📋 Status: {result.Status}");
-        if (result.Status == "clarification_required")
-        {
+        if (result.NeedsClarification)
             Log($"⚠️ CLARIFICATION NEEDED: {result.ClarificationMessage}");
-        }
         Log($"════════════════════════════════════════════════════");
     }
-}
 
-// ============================================
-// DATA MODELS
-// ============================================
+    // Internal models for Gemini JSON parsing
+    private class GeminiRawResponse
+    {
+        [JsonPropertyName("detected_area")]
+        public string? DetectedArea { get; set; }
 
-/// <summary>
-/// Complete response from Gemini dispatch service.
-/// </summary>
-public class GeminiDispatchResponse
-{
-    [JsonPropertyName("detected_region")]
-    public string? DetectedRegion { get; set; }
+        [JsonPropertyName("region_source")]
+        public string? RegionSource { get; set; }
 
-    [JsonPropertyName("region_source")]
-    public string? RegionSource { get; set; }
+        [JsonPropertyName("phone_analysis")]
+        public GeminiPhoneAnalysis? PhoneAnalysis { get; set; }
 
-    [JsonPropertyName("phone_analysis")]
-    public PhoneAnalysis? PhoneAnalysis { get; set; }
+        [JsonPropertyName("pickup")]
+        public GeminiAddressDetail? Pickup { get; set; }
 
-    [JsonPropertyName("pickup")]
-    public AddressDetail? Pickup { get; set; }
+        [JsonPropertyName("dropoff")]
+        public GeminiAddressDetail? Dropoff { get; set; }
 
-    [JsonPropertyName("destination")]
-    public AddressDetail? Destination { get; set; }
+        [JsonPropertyName("status")]
+        public string? Status { get; set; }
 
-    [JsonPropertyName("status")]
-    public string? Status { get; set; }
+        [JsonPropertyName("clarification_message")]
+        public string? ClarificationMessage { get; set; }
+    }
 
-    [JsonPropertyName("clarification_message")]
-    public string? ClarificationMessage { get; set; }
-}
+    private class GeminiPhoneAnalysis
+    {
+        [JsonPropertyName("detected_country")]
+        public string? DetectedCountry { get; set; }
 
-/// <summary>
-/// Phone number analysis results.
-/// </summary>
-public class PhoneAnalysis
-{
-    [JsonPropertyName("country")]
-    public string? Country { get; set; }
+        [JsonPropertyName("is_mobile")]
+        public bool IsMobile { get; set; }
 
-    [JsonPropertyName("is_mobile")]
-    public bool IsMobile { get; set; }
+        [JsonPropertyName("landline_city")]
+        public string? LandlineCity { get; set; }
+    }
 
-    [JsonPropertyName("area_code")]
-    public string? AreaCode { get; set; }
+    private class GeminiAddressDetail
+    {
+        [JsonPropertyName("address")]
+        public string? Address { get; set; }
 
-    [JsonPropertyName("inferred_city")]
-    public string? InferredCity { get; set; }
-}
+        [JsonPropertyName("house_number")]
+        public string? HouseNumber { get; set; }
 
-/// <summary>
-/// Detailed address extraction result.
-/// </summary>
-public class AddressDetail
-{
-    [JsonPropertyName("resolved")]
-    public bool Resolved { get; set; }
+        [JsonPropertyName("street")]
+        public string? Street { get; set; }
 
-    [JsonPropertyName("address")]
-    public string? Address { get; set; }
+        [JsonPropertyName("city")]
+        public string? City { get; set; }
 
-    [JsonPropertyName("house_number")]
-    public string? HouseNumber { get; set; }
+        [JsonPropertyName("confidence")]
+        public double Confidence { get; set; }
 
-    [JsonPropertyName("street")]
-    public string? Street { get; set; }
+        [JsonPropertyName("is_ambiguous")]
+        public bool IsAmbiguous { get; set; }
 
-    [JsonPropertyName("city")]
-    public string? City { get; set; }
-
-    [JsonPropertyName("confidence")]
-    public double Confidence { get; set; }
-
-    [JsonPropertyName("is_ambiguous")]
-    public bool IsAmbiguous { get; set; }
-
-    [JsonPropertyName("alternatives")]
-    public string[]? Alternatives { get; set; }
+        [JsonPropertyName("alternatives")]
+        public string[]? Alternatives { get; set; }
+    }
 }
