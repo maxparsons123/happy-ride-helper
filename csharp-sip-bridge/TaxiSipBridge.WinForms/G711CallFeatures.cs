@@ -312,13 +312,16 @@ public sealed class G711CallFeatures : IDisposable
             }
             
             OnBookingUpdated?.Invoke(_booking);
+            
+            var spokenFare = FormatFareForSpeech(_booking.Fare);
 
             return new
             {
                 success = true,
                 fare = _booking.Fare,
+                fare_spoken = spokenFare,
                 eta = _booking.Eta,
-                message = $"Fare is {_booking.Fare}, driver arrives in {_booking.Eta}. Confirm the booking?"
+                message = $"The fare is {spokenFare}, and the driver will arrive in {_booking.Eta}. Ask if they want to confirm."
             };
         }
 
@@ -473,6 +476,23 @@ public sealed class G711CallFeatures : IDisposable
         if (f.StartsWith("£")) return "€" + f.Substring(1);
         if (f.StartsWith("$")) return "€" + f.Substring(1);
         return f;
+    }
+    
+    /// <summary>
+    /// Convert "€12.50" to "12 euros 50" for TTS pronunciation.
+    /// </summary>
+    private static string FormatFareForSpeech(string? fare)
+    {
+        var clean = (fare ?? "").Replace("€", "").Replace("£", "").Replace("$", "").Trim();
+        if (decimal.TryParse(clean, out var amount))
+        {
+            var euros = (int)amount;
+            var cents = (int)((amount - euros) * 100);
+            if (cents > 0)
+                return $"{euros} euros {cents}";
+            return $"{euros} euros";
+        }
+        return fare ?? ""; // Fallback to original
     }
     
     /// <summary>

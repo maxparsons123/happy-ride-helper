@@ -764,12 +764,16 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"💰 Quote: {normalizedFare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
 
+                    // Extract numeric value for spoken fare (e.g., "€12.50" -> "12 euros 50")
+                    var spokenFare = FormatFareForSpeech(normalizedFare);
+                    
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
                         fare = normalizedFare,
+                        fare_spoken = spokenFare,
                         eta = fareResult.Eta,
-                        message = $"Fare is {normalizedFare}, driver arrives in {fareResult.Eta}. Book it?"
+                        message = $"The fare is {spokenFare}, and the driver will arrive in {fareResult.Eta}. Ask if they want to confirm."
                     }).ConfigureAwait(false);
 
                     await QueueResponseCreateAsync().ConfigureAwait(false);
@@ -1394,7 +1398,7 @@ These phrases mean YES - proceed immediately:
 
 ## RESPONSE STYLE
 
-One question at a time. Under 20 words per response. Use €. Only call end_call after user says no to 'anything else'.";
+One question at a time. Under 20 words per response. When announcing fares, use the 'fare_spoken' field from the tool result (e.g., '12 euros 50') - NEVER say 'dollars'. Only call end_call after user says no to 'anything else'.";
 
     private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
 
@@ -1454,6 +1458,24 @@ One question at a time. Under 20 words per response. Use €. Only call end_call
         if (f.StartsWith("£")) return "€" + f.Substring(1);
         if (f.StartsWith("$")) return "€" + f.Substring(1);
         return f;
+    }
+    
+    /// <summary>
+    /// Convert "€12.50" to "12 euros 50" for TTS pronunciation.
+    /// </summary>
+    private static string FormatFareForSpeech(string fare)
+    {
+        var clean = fare.Replace("€", "").Replace("£", "").Replace("$", "").Trim();
+        if (decimal.TryParse(clean, out var amount))
+        {
+            var euros = (int)amount;
+            var cents = (int)((amount - euros) * 100);
+            if (cents > 0)
+                return $"{euros} euros {cents}";
+            return $"{euros} euros";
+        }
+        return fare; // Fallback to original
+    }
     }
 
     private static object[] GetTools() => new object[]
