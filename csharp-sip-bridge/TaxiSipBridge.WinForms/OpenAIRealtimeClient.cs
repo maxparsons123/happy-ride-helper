@@ -750,20 +750,79 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     }
 
                     // Quote timeout guard: never stall the call if external services are slow/unavailable.
-                    // Matches the 4s fallback-quote policy used in the server pipelines.
                     FareResult fareResult;
                     try
                     {
-                        Log("💰 Starting fare calculation...");
-                        var fareTask = FareCalculator.CalculateFareWithAiAsync(
+                        Log("💰 Starting Lovable AI address extraction...");
+                        
+                        // Step 1: Try Lovable AI extraction for intelligent address resolution
+                        string resolvedPickup = _booking.Pickup!;
+                        string resolvedDest = _booking.Destination!;
+                        bool needsClarification = false;
+                        string[]? pickupAlternatives = null;
+                        string[]? destAlternatives = null;
+                        
+                        var aiTask = FareCalculator.ExtractAddressesWithLovableAiAsync(
                             _booking.Pickup,
                             _booking.Destination,
                             _callerId);
-
-                        var completed = await Task.WhenAny(fareTask, Task.Delay(4000)).ConfigureAwait(false);
-                        if (completed != fareTask)
+                        
+                        var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(3000)).ConfigureAwait(false);
+                        
+                        if (aiCompleted == aiTask)
                         {
-                            Log("⏱️ Fare calculation timed out (4s) — using fallback quote");
+                            var aiResult = await aiTask.ConfigureAwait(false);
+                            if (aiResult != null)
+                            {
+                                // Use AI-resolved addresses if available
+                                if (!string.IsNullOrEmpty(aiResult.pickup?.address))
+                                    resolvedPickup = aiResult.pickup.address;
+                                if (!string.IsNullOrEmpty(aiResult.dropoff?.address))
+                                    resolvedDest = aiResult.dropoff.address;
+                                
+                                // Check for ambiguity
+                                if (aiResult.status == "clarification_needed")
+                                {
+                                    needsClarification = true;
+                                    pickupAlternatives = aiResult.pickup?.alternatives;
+                                    destAlternatives = aiResult.dropoff?.alternatives;
+                                }
+                                
+                                Log($"🤖 AI resolved: '{_booking.Pickup}' → '{resolvedPickup}'");
+                                Log($"🤖 AI resolved: '{_booking.Destination}' → '{resolvedDest}'");
+                            }
+                        }
+                        else
+                        {
+                            Log("⏱️ Lovable AI extraction timed out (3s) — using raw addresses");
+                        }
+                        
+                        // If clarification needed, return that instead of a quote
+                        if (needsClarification)
+                        {
+                            Log("⚠️ Ambiguous addresses detected - requesting clarification");
+                            await SendToolResultAsync(callId, new
+                            {
+                                success = false,
+                                needs_clarification = true,
+                                pickup_options = pickupAlternatives ?? Array.Empty<string>(),
+                                destination_options = destAlternatives ?? Array.Empty<string>(),
+                                message = "I found multiple locations with that name. Ask which one they meant."
+                            }).ConfigureAwait(false);
+                            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                            break;
+                        }
+                        
+                        // Step 2: Geocode the resolved addresses and calculate fare
+                        var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
+                            resolvedPickup,
+                            resolvedDest,
+                            _callerId);
+
+                        var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(3000)).ConfigureAwait(false);
+                        if (fareCompleted != fareTask)
+                        {
+                            Log("⏱️ Geocoding timed out (3s) — using fallback quote");
                             fareResult = new FareResult { Fare = "€12.50", Eta = "6 minutes" };
                         }
                         else
@@ -844,9 +903,26 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     {
                         try
                         {
-                            var fareResult = await FareCalculator.CalculateFareWithAiAsync(
+                            // Use Lovable AI extraction for intelligent address resolution
+                            string resolvedPickup = _booking.Pickup!;
+                            string resolvedDest = _booking.Destination!;
+                            
+                            var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(
                                 _booking.Pickup,
                                 _booking.Destination,
+                                _callerId).ConfigureAwait(false);
+                            
+                            if (aiResult != null)
+                            {
+                                if (!string.IsNullOrEmpty(aiResult.pickup?.address))
+                                    resolvedPickup = aiResult.pickup.address;
+                                if (!string.IsNullOrEmpty(aiResult.dropoff?.address))
+                                    resolvedDest = aiResult.dropoff.address;
+                            }
+                            
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                                resolvedPickup,
+                                resolvedDest,
                                 _callerId).ConfigureAwait(false);
 
                             _booking.PickupLat = fareResult.PickupLat;
