@@ -10,7 +10,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// OpenAI Realtime client for G.711 telephony with local DSP processing.
-/// Version 2.4: Aligned with OpenAIRealtimeClient architecture.
+/// Version 3.4: Fixed response lifecycle - no manual state resets, transcript-gated responses.
 /// 
 /// Key improvements:
 /// - Proper ResetCallState() for clean per-call state
