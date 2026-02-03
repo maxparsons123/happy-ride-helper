@@ -38,6 +38,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private Action<SIPDialogue>? _currentHungupHandler;
     private SIPUserAgent? _currentUa;
     private int _hangupFired;
+    // If AI requests hangup, prefer waiting until RTP playout drains to avoid truncation.
+    private int _hangupPending;
 
     // ===========================================
     // AUDIO PROCESSING STATE
@@ -69,6 +71,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private const int FLUSH_PACKETS = 20;
     private const int EARLY_PROTECTION_MS = 500;
     private const int HANGUP_GRACE_MS = 5000;
+    // If playout never reports empty for some reason, we still need a hard stop.
+    // Keep this generous to avoid truncating long final messages.
+    private const int HANGUP_FALLBACK_MS = 20000;
 
     // ===========================================
     // EVENTS
@@ -239,6 +244,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     _botStoppedSpeakingAt = DateTime.UtcNow;
                     Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
                 }
+
+                // If AI asked to end the call, end as soon as the outbound audio buffer is drained.
+                if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
+                {
+                    Log($"📴 [{callId}] Playout drained - ending call now");
+                    try { cts.Cancel(); } catch { }
+                }
             };
             _playout.Start();
             Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
@@ -399,10 +411,16 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 _currentHungupHandler = null;
             }
 
-            Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
-            await Task.Delay(HANGUP_GRACE_MS);
-            Log($"📴 [{callId}] Grace period complete, ending call");
-            try { cts.Cancel(); } catch { }
+            Log($"📞 [{callId}] AI requested call end - waiting for playout to drain...");
+            Interlocked.Exchange(ref _hangupPending, 1);
+
+            // Fallback: if playout never reports empty (or no audio), end after a generous timeout.
+            await Task.Delay(HANGUP_FALLBACK_MS);
+            if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
+            {
+                Log($"📴 [{callId}] Hangup fallback timer fired - ending call");
+                try { cts.Cancel(); } catch { }
+            }
         };
         _aiClient.OnCallEnded += endCallHandler;
 
