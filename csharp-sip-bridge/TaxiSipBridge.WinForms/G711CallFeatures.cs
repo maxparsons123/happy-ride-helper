@@ -257,6 +257,9 @@ public sealed class G711CallFeatures : IDisposable
     
     private async Task<object> HandleBookTaxiAsync(JsonElement args)
     {
+        // Defensive: ensure booking state is populated even if the model skipped sync_booking_data.
+        ApplyBookingSnapshotFromArgs(args);
+
         var action = args.TryGetProperty("action", out var a) ? a.GetString() : null;
 
         if (action == "request_quote")
@@ -278,7 +281,7 @@ public sealed class G711CallFeatures : IDisposable
                     _callerPhone);
                 
                 // Populate geocoded address details in BookingState
-                _booking.Fare = fareResult.Fare;
+                _booking.Fare = NormalizeEuroFare(fareResult.Fare);
                 _booking.Eta = fareResult.Eta;
                 
                 // Pickup geocoded data
@@ -299,7 +302,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.DestCity = fareResult.DestCity;
                 _booking.DestFormatted = fareResult.DestFormatted;
                 
-                Log($"💰 [{_callId}] Quote: {fareResult.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
+                Log($"💰 [{_callId}] Quote: {_booking.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
             }
             catch (Exception ex)
             {
@@ -357,7 +360,7 @@ public sealed class G711CallFeatures : IDisposable
                 _booking.DestFormatted = fareResult.DestFormatted;
 
                 // Preserve existing fare if already set
-                if (!string.IsNullOrWhiteSpace(fareResult.Fare)) _booking.Fare ??= fareResult.Fare;
+                if (!string.IsNullOrWhiteSpace(fareResult.Fare)) _booking.Fare ??= NormalizeEuroFare(fareResult.Fare);
                 if (!string.IsNullOrWhiteSpace(fareResult.Eta)) _booking.Eta ??= fareResult.Eta;
             }
             catch (Exception ex)
@@ -436,6 +439,40 @@ public sealed class G711CallFeatures : IDisposable
                 ? "Your taxi is booked!"
                 : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
         };
+    }
+
+    private void ApplyBookingSnapshotFromArgs(JsonElement args)
+    {
+        if (args.TryGetProperty("caller_name", out var name) && name.ValueKind == JsonValueKind.String)
+            _booking.Name = name.GetString();
+        if (args.TryGetProperty("pickup", out var pickup) && pickup.ValueKind == JsonValueKind.String)
+            _booking.Pickup = pickup.GetString();
+        if (args.TryGetProperty("destination", out var dest) && dest.ValueKind == JsonValueKind.String)
+            _booking.Destination = dest.GetString();
+        if (args.TryGetProperty("passengers", out var pax))
+        {
+            try
+            {
+                _booking.Passengers = pax.ValueKind switch
+                {
+                    JsonValueKind.Number => pax.GetInt32(),
+                    JsonValueKind.String => int.TryParse(pax.GetString(), out var v) ? v : _booking.Passengers,
+                    _ => _booking.Passengers
+                };
+            }
+            catch { /* ignore */ }
+        }
+        if (args.TryGetProperty("pickup_time", out var time) && time.ValueKind == JsonValueKind.String)
+            _booking.PickupTime = time.GetString();
+    }
+
+    private static string NormalizeEuroFare(string? fare)
+    {
+        var f = (fare ?? "").Trim();
+        if (string.IsNullOrEmpty(f)) return f;
+        if (f.StartsWith("£")) return "€" + f.Substring(1);
+        if (f.StartsWith("$")) return "€" + f.Substring(1);
+        return f;
     }
     
     /// <summary>
