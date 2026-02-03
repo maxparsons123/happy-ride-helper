@@ -28,12 +28,13 @@ public sealed class DirectG711RtpPlayout : IDisposable
 {
     private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
-    private const int MAX_QUEUE_FRAMES = 3000; // ~60s max buffer (safety cap)
+    private const int MAX_QUEUE_FRAMES = 1500; // ~30s max buffer (safety cap)
     
-    // Adaptive jitter buffer: starts at 60ms, grows to 120ms on underruns
-    private const int JITTER_BUFFER_MIN = 3;  // 60ms initial
-    private const int JITTER_BUFFER_MAX = 6;  // 120ms after underruns
-    private const int UNDERRUN_THRESHOLD = 3; // Grow buffer after 3 consecutive underruns
+    // Adaptive jitter buffer: starts at 40ms, grows to 80ms on underruns
+    // Lower latency for LAN/VoIP while still handling network jitter
+    private const int JITTER_BUFFER_MIN = 2;  // 40ms initial (low latency)
+    private const int JITTER_BUFFER_MAX = 4;  // 80ms after underruns
+    private const int UNDERRUN_THRESHOLD = 2; // Grow buffer after 2 consecutive underruns
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
