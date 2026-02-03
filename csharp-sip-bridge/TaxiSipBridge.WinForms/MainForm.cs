@@ -41,6 +41,12 @@ public partial class MainForm : Form
             FareCalculator.SetGoogleMapsApiKey("AIzaSyDGl7cFRFWlqvU7tpz7E5BVNLMp0HO6aGU");
         }
         
+        // Initialize Supabase for AI address extraction
+        // Uses the same project as the edge functions
+        var supabaseUrl = "https://oerketnvlmptpfvttysy.supabase.co";
+        var supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
+        FareCalculator.SetSupabaseConfig(supabaseUrl, supabaseAnonKey);
+        
         // Wire up FareCalculator logging to unified log output
         FareCalculator.OnLog = msg => AddLog(msg);
 
