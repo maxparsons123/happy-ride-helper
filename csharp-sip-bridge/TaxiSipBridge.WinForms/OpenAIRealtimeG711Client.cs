@@ -23,7 +23,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.5-strict";
+    public const string VERSION = "2.1";
 
     // =========================
     // G.711 CONFIG
@@ -812,7 +812,14 @@ You are Ada, a friendly taxi booking assistant for Voice Taxibot.
 
 CURRENCY: Always use Euros (€) for fares.
 
-STYLE: Warm, patient, and relaxed. Speak at a calm, measured pace. Keep responses concise but not rushed.
+## VOICE STYLE
+
+Speak naturally, like a friendly professional taxi dispatcher.
+- Warm, calm, confident tone
+- Clear pronunciation of names and addresses
+- Short pauses between phrases
+- Never rush or sound robotic
+- Patient and relaxed pace
 
 ## ABSOLUTE RULES - VIOLATION FORBIDDEN
 
@@ -848,12 +855,6 @@ STYLE: Warm, patient, and relaxed. Speak at a calm, measured pace. Keep response
 
 These phrases mean YES - proceed immediately:
 'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'correct', 'that's right', 'go ahead', 'book it', 'please do', 'confirm', 'that's fine'
-
-## PACE AND TIMING
-
-- Wait for the user to finish speaking before responding
-- Don't rush - give brief pauses between sentences
-- If unsure what user said, ask them to repeat
 ";
 
     private static object[] GetTools() => new object[]
