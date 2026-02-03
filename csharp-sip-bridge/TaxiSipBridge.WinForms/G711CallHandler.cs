@@ -239,6 +239,11 @@ Be concise, warm, and professional.
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
+            // CRITICAL: Configure session with voice, instructions, tools BEFORE sending greeting
+            Log($"⚙️ [{callId}] Configuring session...");
+            await _aiClient.WaitForSessionAndConfigureAsync();
+            Log($"✅ [{callId}] Session configured");
+
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
@@ -246,11 +251,6 @@ Be concise, warm, and professional.
             
             // Start keepalive loop
             _features?.StartKeepalive();
-            
-            // Send greeting to start conversation
-            Log($"👋 [{callId}] Sending greeting...");
-            await _aiClient.SendGreetingAsync(_greeting ?? "Hello! Welcome to Voice Taxibot. May I have your name please?");
-            Log($"✅ [{callId}] Greeting sent");
 
             // Keep call alive
             while (!cts.IsCancellationRequested && _aiClient.IsConnected && !_disposed)
