@@ -715,12 +715,17 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         switch (name)
         {
             case "sync_booking_data":
-                ApplyBookingSnapshotFromArgs(args);
+            {
+                var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
+                
+                // Verify addresses with Google Maps (region-biased) to enrich with geocoded details
+                await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
                 await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                 break;
+            }
 
             case "book_taxi":
             {
@@ -758,7 +763,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _booking.PickupLat = fareResult.PickupLat;
                     _booking.PickupLon = fareResult.PickupLon;
                     _booking.PickupStreet = fareResult.PickupStreet;
-                    _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                    _booking.PickupNumber = fareResult.PickupNumber;
                     _booking.PickupPostalCode = fareResult.PickupPostalCode;
                     _booking.PickupCity = fareResult.PickupCity;
                     _booking.PickupFormatted = fareResult.PickupFormatted;
@@ -767,7 +772,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _booking.DestLat = fareResult.DestLat;
                     _booking.DestLon = fareResult.DestLon;
                     _booking.DestStreet = fareResult.DestStreet;
-                    _booking.DestNumber = fareResult.DestNumber?.ToString();
+                    _booking.DestNumber = fareResult.DestNumber;
                     _booking.DestPostalCode = fareResult.DestPostalCode;
                     _booking.DestCity = fareResult.DestCity;
                     _booking.DestFormatted = fareResult.DestFormatted;
@@ -825,7 +830,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             _booking.PickupLat = fareResult.PickupLat;
                             _booking.PickupLon = fareResult.PickupLon;
                             _booking.PickupStreet = fareResult.PickupStreet;
-                            _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                            _booking.PickupNumber = fareResult.PickupNumber;
                             _booking.PickupPostalCode = fareResult.PickupPostalCode;
                             _booking.PickupCity = fareResult.PickupCity;
                             _booking.PickupFormatted = fareResult.PickupFormatted;
@@ -833,7 +838,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             _booking.DestLat = fareResult.DestLat;
                             _booking.DestLon = fareResult.DestLon;
                             _booking.DestStreet = fareResult.DestStreet;
-                            _booking.DestNumber = fareResult.DestNumber?.ToString();
+                            _booking.DestNumber = fareResult.DestNumber;
                             _booking.DestPostalCode = fareResult.DestPostalCode;
                             _booking.DestCity = fareResult.DestCity;
                             _booking.DestFormatted = fareResult.DestFormatted;
@@ -1520,6 +1525,92 @@ One question at a time. Under 20 words per response. Only call end_call after us
             else if (int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
         }
         if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+    }
+
+    /// <summary>
+    /// Apply booking snapshot and return which address fields were newly set.
+    /// </summary>
+    private (string? newPickup, string? newDest) ApplyBookingSnapshotFromArgsWithTracking(Dictionary<string, object> args)
+    {
+        string? newPickup = null, newDest = null;
+        
+        if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
+        if (args.TryGetValue("pickup", out var p)) 
+        {
+            newPickup = p?.ToString();
+            _booking.Pickup = newPickup;
+        }
+        if (args.TryGetValue("destination", out var d))
+        {
+            newDest = d?.ToString();
+            _booking.Destination = newDest;
+        }
+        if (args.TryGetValue("passengers", out var pax))
+        {
+            if (pax is int i) _booking.Passengers = i;
+            else if (int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
+        }
+        if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+        
+        return (newPickup, newDest);
+    }
+
+    /// <summary>
+    /// Verify addresses with Google Maps and enrich BookingState with geocoded details.
+    /// </summary>
+    private async Task VerifyAndEnrichAddressesAsync(string? newPickup, string? newDest)
+    {
+        var tasks = new List<Task<(string type, AddressVerifyResult result)>>();
+        
+        if (!string.IsNullOrWhiteSpace(newPickup))
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                var result = await FareCalculator.VerifyAddressAsync(newPickup, _callerId);
+                return ("pickup", result);
+            }));
+        }
+        
+        if (!string.IsNullOrWhiteSpace(newDest))
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                var result = await FareCalculator.VerifyAddressAsync(newDest, _callerId);
+                return ("destination", result);
+            }));
+        }
+        
+        if (tasks.Count == 0) return;
+        
+        var verifications = await Task.WhenAll(tasks).ConfigureAwait(false);
+        
+        foreach (var (type, vResult) in verifications)
+        {
+            if (!vResult.Success) continue;
+            
+            if (type == "pickup")
+            {
+                _booking.PickupLat = vResult.Lat;
+                _booking.PickupLon = vResult.Lon;
+                _booking.PickupStreet = vResult.Street;
+                _booking.PickupNumber = vResult.Number;
+                _booking.PickupPostalCode = vResult.PostalCode;
+                _booking.PickupCity = vResult.City;
+                _booking.PickupFormatted = vResult.VerifiedAddress;
+                Log($"📍 Pickup verified: {vResult.Number} {vResult.Street}, {vResult.City} ({vResult.PostalCode})");
+            }
+            else if (type == "destination")
+            {
+                _booking.DestLat = vResult.Lat;
+                _booking.DestLon = vResult.Lon;
+                _booking.DestStreet = vResult.Street;
+                _booking.DestNumber = vResult.Number;
+                _booking.DestPostalCode = vResult.PostalCode;
+                _booking.DestCity = vResult.City;
+                _booking.DestFormatted = vResult.VerifiedAddress;
+                Log($"📍 Dest verified: {vResult.Number} {vResult.Street}, {vResult.City} ({vResult.PostalCode})");
+            }
+        }
     }
 
     private static string NormalizeEuroFare(string? fare)

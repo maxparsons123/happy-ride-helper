@@ -147,6 +147,68 @@ public static class FareCalculator
     }
 
     /// <summary>
+    /// Verify and enrich an address using Google Maps geocoding with phone-based region bias.
+    /// Use this during sync_booking_data to get accurate address components for dispatch.
+    /// </summary>
+    public static async Task<AddressVerifyResult> VerifyAddressAsync(string? address, string? phoneNumber = null)
+    {
+        var result = new AddressVerifyResult
+        {
+            OriginalInput = address ?? "",
+            Success = false,
+            Confidence = 0
+        };
+
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            result.Reason = "Empty address";
+            return result;
+        }
+
+        var region = DetectRegionFromPhone(phoneNumber);
+        Console.WriteLine($"[FareCalculator] Verifying address: '{address}' (region: {region.CountryCode})");
+
+        try
+        {
+            var geocoded = await GeocodeAddressAsync(address, region);
+            
+            if (geocoded == null)
+            {
+                result.Reason = "Address not found by geocoder";
+                Console.WriteLine($"[FareCalculator] ❌ Address verification failed: '{address}'");
+                return result;
+            }
+
+            // Calculate confidence based on completeness
+            double confidence = 0.5; // Base for finding any match
+            if (!string.IsNullOrEmpty(geocoded.StreetName)) confidence += 0.15;
+            if (!string.IsNullOrEmpty(geocoded.StreetNumber)) confidence += 0.15;
+            if (!string.IsNullOrEmpty(geocoded.City)) confidence += 0.1;
+            if (!string.IsNullOrEmpty(geocoded.PostalCode)) confidence += 0.1;
+
+            result.Success = true;
+            result.VerifiedAddress = geocoded.FormattedAddress;
+            result.Street = geocoded.StreetName;
+            result.Number = geocoded.StreetNumber;
+            result.City = geocoded.City;
+            result.PostalCode = geocoded.PostalCode;
+            result.Lat = geocoded.Lat;
+            result.Lon = geocoded.Lon;
+            result.Confidence = Math.Min(1.0, confidence);
+            result.Reason = confidence >= 0.8 ? "High confidence match" : "Partial match";
+
+            Console.WriteLine($"[FareCalculator] ✓ Verified: '{address}' → {result.Number} {result.Street}, {result.City} ({result.PostalCode}) [conf: {result.Confidence:P0}]");
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Reason = $"Geocoding error: {ex.Message}";
+            Console.WriteLine($"[FareCalculator] ❌ Address verification error: {ex.Message}");
+            return result;
+        }
+    }
+
+    /// <summary>
     /// Legacy method for backwards compatibility.
     /// </summary>
     public static async Task<(string Fare, string Eta, double DistanceMiles)> CalculateFareAsync(string? pickup, string? destination)
@@ -270,8 +332,8 @@ public static class FareCalculator
 
                             if (types.Contains("street_number"))
                             {
-                                int.TryParse(new string(longName.Where(char.IsDigit).ToArray()), out var num);
-                                result.StreetNumber = num;
+                                // Keep full string to preserve "52A" format
+                                result.StreetNumber = longName;
                             }
                             else if (types.Contains("route"))
                             {
@@ -353,9 +415,8 @@ public static class FareCalculator
                         result.StreetName = road.GetString() ?? "";
                     if (addr.TryGetProperty("house_number", out var houseNum))
                     {
-                        var numStr = houseNum.GetString() ?? "";
-                        int.TryParse(new string(numStr.Where(char.IsDigit).ToArray()), out var num);
-                        result.StreetNumber = num;
+                        // Keep full string to preserve "52A" format
+                        result.StreetNumber = houseNum.GetString() ?? "";
                     }
                     if (addr.TryGetProperty("postcode", out var pc))
                         result.PostalCode = pc.GetString() ?? "";
@@ -532,10 +593,12 @@ public class GeocodedAddress
     public double Lat { get; set; }
     public double Lon { get; set; }
     public string StreetName { get; set; } = "";
-    public int StreetNumber { get; set; }
+    public string StreetNumber { get; set; } = ""; // String to support "52A"
     public string PostalCode { get; set; } = "";
     public string City { get; set; } = "";
     public string FormattedAddress { get; set; } = "";
+    public bool IsVerified { get; set; } // True if geocoding succeeded
+    public double Confidence { get; set; } // 0-1 based on match quality
 }
 
 /// <summary>
@@ -551,7 +614,7 @@ public class FareResult
     public double? PickupLat { get; set; }
     public double? PickupLon { get; set; }
     public string? PickupStreet { get; set; }
-    public int? PickupNumber { get; set; }
+    public string? PickupNumber { get; set; } // String for "52A"
     public string? PickupPostalCode { get; set; }
     public string? PickupCity { get; set; }
     public string? PickupFormatted { get; set; }
@@ -560,8 +623,26 @@ public class FareResult
     public double? DestLat { get; set; }
     public double? DestLon { get; set; }
     public string? DestStreet { get; set; }
-    public int? DestNumber { get; set; }
+    public string? DestNumber { get; set; } // String for "52A"
     public string? DestPostalCode { get; set; }
     public string? DestCity { get; set; }
     public string? DestFormatted { get; set; }
+}
+
+/// <summary>
+/// Result from address verification - includes match confidence.
+/// </summary>
+public class AddressVerifyResult
+{
+    public bool Success { get; set; }
+    public string OriginalInput { get; set; } = "";
+    public string? VerifiedAddress { get; set; }
+    public string? Street { get; set; }
+    public string? Number { get; set; }
+    public string? City { get; set; }
+    public string? PostalCode { get; set; }
+    public double? Lat { get; set; }
+    public double? Lon { get; set; }
+    public double Confidence { get; set; } // 0-1
+    public string? Reason { get; set; } // Why verification failed/succeeded
 }
