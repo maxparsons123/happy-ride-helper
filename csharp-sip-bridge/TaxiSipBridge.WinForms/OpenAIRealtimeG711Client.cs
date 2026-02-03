@@ -135,6 +135,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     {
         return Volatile.Read(ref _responseActive) == 0 &&
                Volatile.Read(ref _responseQueued) == 0 &&
+               Volatile.Read(ref _transcriptPending) == 0 &&  // v2.6: Wait for transcript before responding
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
@@ -634,7 +635,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     break;
 
                 case "conversation.item.input_audio_transcription.completed":
-                    // v2.5: Transcript arrived - clear the pending flag
+                {
+                    // v2.6: Transcript arrived - clear the pending flag
                     Interlocked.Exchange(ref _transcriptPending, 0);
                     
                     if (doc.RootElement.TryGetProperty("transcript", out var userTranscript))
@@ -655,7 +657,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             OnTranscript?.Invoke($"You: {text}");
                         }
                     }
+                    
+                    // v2.6: Now that transcript is available, trigger response if not already active
+                    // This ensures OpenAI responds AFTER the transcript settles, not before
+                    if (Volatile.Read(ref _responseActive) == 0)
+                    {
+                        _ = QueueResponseCreateAsync(delayMs: 50, waitForCurrentResponse: false);
+                    }
                     break;
+                }
 
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
