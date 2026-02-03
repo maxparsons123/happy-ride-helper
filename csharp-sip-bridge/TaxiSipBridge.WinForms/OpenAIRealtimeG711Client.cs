@@ -23,7 +23,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.8";
+    public const string VERSION = "2.9";
 
     // =========================
     // G.711 CONFIG
