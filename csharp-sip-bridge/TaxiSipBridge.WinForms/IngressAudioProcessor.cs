@@ -29,14 +29,14 @@ public sealed class IngressAudioProcessor : IDisposable
     // ===========================================
     private const float DC_ALPHA = 0.995f;
     private const float PRE_EMPH = 0.90f;           // Reduced from 0.97 - less harsh, still clear
-    private const float GATE_OPEN_RMS = 25f;        // Lowered from 40 - catches soft consonants
-    private const float GATE_CLOSE_RMS = 10f;       // Lowered from 20 - only closes on true silence
+    private const float GATE_OPEN_RMS = 20f;        // Lowered from 25 - catches soft consonants/numbers
+    private const float GATE_CLOSE_RMS = 8f;        // Lowered from 10 - only closes on true silence
     private const int GATE_HOLD_FRAMES = 25;        // Increased from 15 (500ms hold)
     private const float RMS_ALPHA = 0.995f;
     private const float TARGET_RMS = 6000f;         // Lowered from 8000 - less harsh
     private const float AGC_MIN = 0.50f;            // Allow more dynamic range
     private const float AGC_MAX = 6.0f;             // Higher max gain for very quiet callers
-    private const float AGC_SMOOTH = 0.03f;         // Slower from 0.05 - smoother transitions
+    private const float AGC_SMOOTH = 0.02f;         // Slower from 0.03 - smoother transitions
     private const float LIMIT = 29000f;
     private const int GATE_RAMP_SAMPLES = 80;       // 5ms fade-in when gate opens
 
