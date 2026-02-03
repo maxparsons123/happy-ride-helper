@@ -14,7 +14,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.4";
+    public const string VERSION = "2.5";
 
     // =========================
     // CONFIG
@@ -37,10 +37,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private int _ignoreUserAudio;  // Per-call (set after goodbye starts)
     private int _deferredResponsePending; // Per-call (queued response after response.done)
     private int _noReplyWatchdogId;      // Incremented to cancel stale watchdogs
+    private int _transcriptPending;      // v2.5: Block response.create until transcript arrives
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
     private long _responseCreatedAt;     // For transcript guard (ignore stale transcripts)
+    private long _speechStoppedAt;       // v2.5: Track when user stopped speaking for settle timer
 
     // Tracks current OpenAI response id to ignore duplicate events
     private string? _activeResponseId;
@@ -473,12 +475,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     Interlocked.Exchange(ref _responseActive, 1);
                     
                     // CRITICAL: Record timestamp for transcript guard.
-                    // Any user transcripts arriving within 500ms of this are stale and should be ignored.
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
-                    // CRITICAL: Clear OpenAI's input audio buffer when Ada starts speaking.
-                    // This prevents stale audio from being transcribed as the user's response.
-                    _ = ClearInputAudioBufferAsync();
+                    // v2.5: DO NOT clear audio buffer here - it causes transcript truncation
+                    // Only clear AFTER response.done when we're sure the current turn is complete
 
                     Log("🤖 AI response started");
                     OnResponseStarted?.Invoke();
@@ -537,21 +537,22 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 case "conversation.item.input_audio_transcription.completed":
                 {
+                    // v2.5: Transcript arrived - clear the pending flag
+                    Interlocked.Exchange(ref _transcriptPending, 0);
+                    
                     if (doc.RootElement.TryGetProperty("transcript", out var u) &&
                         !string.IsNullOrWhiteSpace(u.GetString()))
                     {
                         var text = ApplySttCorrections(u.GetString()!);
                         
-                        // TRANSCRIPT GUARD: Ignore stale transcripts that arrive shortly after
-                        // Ada starts speaking. These are often delayed/queued transcripts from
-                        // audio that was already in OpenAI's ASR pipeline.
-                        // of Ada starting to speak. These are from audio processed before we
-                        // cleared the buffer and blocked inbound audio.
+                        // Calculate timing for logging
+                        var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
                         var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-                        if (msSinceResponseCreated < 900 && Volatile.Read(ref _responseActive) == 1)
+                        
+                        // Log transcript arrival with timing context
+                        if (Volatile.Read(ref _responseActive) == 1)
                         {
-                            // Do not drop late transcripts: they often contain the caller's actual booking details.
-                            Log($"⚠️ Late transcript (arrived {msSinceResponseCreated}ms after response.created): {text}");
+                            Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
                         }
                         
                         Log($"👤 User: {text}");
@@ -563,12 +564,16 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
+                    // v2.5: Mark that we're expecting a transcript
+                    Interlocked.Exchange(ref _transcriptPending, 1);
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    // Commit audio buffer to finalize VAD and prevent duplicate responses
+                    Volatile.Write(ref _speechStoppedAt, NowMs());  // v2.5: Track when speech ended
+                    // v2.5: Commit audio buffer - OpenAI will transcribe and respond after settle time
                     _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                    Log("📝 Committed audio buffer (awaiting transcript)");
                     break;
 
                 case "response.done":
@@ -589,6 +594,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                     Interlocked.Exchange(ref _responseActive, 0);
                     Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+                    
+                    // v2.5: Clear audio buffer AFTER response completes (not during response.created)
+                    // This ensures the transcript for the CURRENT turn is fully processed
+                    _ = ClearInputAudioBufferAsync();
 
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
@@ -1274,6 +1283,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Interlocked.Exchange(ref _responseActive, 0);
         Interlocked.Exchange(ref _responseQueued, 0);
         Interlocked.Exchange(ref _greetingSent, 0);
+        Interlocked.Exchange(ref _transcriptPending, 0);  // v2.5
 
         _activeResponseId = null;
         _lastCompletedResponseId = null;
@@ -1281,6 +1291,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
         Volatile.Write(ref _lastToolCallAt, 0);
+        Volatile.Write(ref _speechStoppedAt, 0);  // v2.5
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
         Interlocked.Exchange(ref _deferredResponsePending, 0);
         Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any stale watchdogs
@@ -1374,7 +1385,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         return t;
     }
 
-    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 2.4.
+    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 2.5.
 
 ## VOICE STYLE
 
