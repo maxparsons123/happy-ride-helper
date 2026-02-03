@@ -111,7 +111,7 @@ public static class FareCalculator
     /// Extract addresses using Supabase edge function with Lovable AI Gateway.
     /// No API key needed - uses LOVABLE_API_KEY automatically.
     /// </summary>
-    public static async Task<GeminiDispatchResponse?> ExtractAddressesWithLovableAiAsync(
+    public static async Task<EdgeDispatchResponse?> ExtractAddressesWithLovableAiAsync(
         string pickup,
         string destination,
         string? phoneNumber)
@@ -145,11 +145,11 @@ public static class FareCalculator
                 return null;
             }
 
-            // Parse response into GeminiDispatchResponse format
+            // Parse response into EdgeDispatchResponse format
             using var doc = JsonDocument.Parse(responseBody);
             var root = doc.RootElement;
 
-            var result = new GeminiDispatchResponse
+            var result = new EdgeDispatchResponse
             {
                 detected_area = root.TryGetProperty("detected_area", out var area) ? area.GetString() : null,
                 status = root.TryGetProperty("status", out var status) ? status.GetString() : "ready"
@@ -158,7 +158,7 @@ public static class FareCalculator
             // Parse phone analysis
             if (root.TryGetProperty("phone_analysis", out var phoneEl))
             {
-                result.phone_analysis = new PhoneAnalysis
+                result.phone_analysis = new EdgePhoneAnalysis
                 {
                     detected_country = phoneEl.TryGetProperty("detected_country", out var c) ? c.GetString() : null,
                     is_mobile = phoneEl.TryGetProperty("is_mobile", out var m) && m.GetBoolean(),
@@ -169,7 +169,7 @@ public static class FareCalculator
             // Parse pickup
             if (root.TryGetProperty("pickup", out var pickupEl))
             {
-                result.pickup = new AddressDetail
+                result.pickup = new EdgeAddressDetail
                 {
                     address = pickupEl.TryGetProperty("address", out var a) ? a.GetString() : null,
                     is_ambiguous = pickupEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean(),
@@ -182,7 +182,7 @@ public static class FareCalculator
             // Parse dropoff
             if (root.TryGetProperty("dropoff", out var dropoffEl))
             {
-                result.dropoff = new AddressDetail
+                result.dropoff = new EdgeAddressDetail
                 {
                     address = dropoffEl.TryGetProperty("address", out var a) ? a.GetString() : null,
                     is_ambiguous = dropoffEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean(),
@@ -1643,26 +1643,27 @@ public class AiAddressExtractionResult
 }
 
 // ============================================
-// SIMPLIFIED MODELS FOR LOVABLE AI DISPATCH
+// EDGE FUNCTION RESPONSE MODELS (Lovable AI)
 // Used by ExtractAddressesWithLovableAiAsync
+// Named differently to avoid collision with GeminiDispatchService
 // ============================================
 
 /// <summary>
-/// Simplified response from Lovable AI dispatch edge function.
+/// Response from Lovable AI address-dispatch edge function.
 /// </summary>
-public class GeminiDispatchResponse
+internal class EdgeDispatchResponse
 {
     public string? detected_area { get; set; }
     public string? status { get; set; }
-    public PhoneAnalysis? phone_analysis { get; set; }
-    public AddressDetail? pickup { get; set; }
-    public AddressDetail? dropoff { get; set; }
+    public EdgePhoneAnalysis? phone_analysis { get; set; }
+    public EdgeAddressDetail? pickup { get; set; }
+    public EdgeAddressDetail? dropoff { get; set; }
 }
 
 /// <summary>
-/// Phone number analysis for region detection.
+/// Phone number analysis from edge function.
 /// </summary>
-public class PhoneAnalysis
+internal class EdgePhoneAnalysis
 {
     public string? detected_country { get; set; }
     public bool is_mobile { get; set; }
@@ -1670,9 +1671,9 @@ public class PhoneAnalysis
 }
 
 /// <summary>
-/// Simplified address detail from AI extraction.
+/// Address detail from edge function.
 /// </summary>
-public class AddressDetail
+internal class EdgeAddressDetail
 {
     public string? address { get; set; }
     public bool is_ambiguous { get; set; }
