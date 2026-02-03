@@ -332,23 +332,80 @@ public sealed class G711CallFeatures : IDisposable
                 return new { success = false, error = "Missing pickup or destination" };
             }
             
-            // Calculate real fare using AI-based region detection and geocoding
+            // Calculate real fare using Lovable AI for address resolution + geocoding
             try
             {
-                Log($"💰 [{_callId}] Starting fare calculation...");
-
-                var fareTask = FareCalculator.CalculateFareWithAiAsync(
+                Log($"💰 [{_callId}] Starting Lovable AI address extraction...");
+                
+                // Step 1: Try Lovable AI extraction for intelligent address resolution
+                string resolvedPickup = _booking.Pickup!;
+                string resolvedDest = _booking.Destination!;
+                bool needsClarification = false;
+                string[]? pickupAlternatives = null;
+                string[]? destAlternatives = null;
+                
+                var aiTask = FareCalculator.ExtractAddressesWithLovableAiAsync(
                     _booking.Pickup,
                     _booking.Destination,
                     _callerPhone);
+                
+                var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(3000));
+                
+                if (aiCompleted == aiTask)
+                {
+                    var aiResult = await aiTask;
+                    if (aiResult != null)
+                    {
+                        // Use AI-resolved addresses if available
+                        if (!string.IsNullOrEmpty(aiResult.pickup?.address))
+                            resolvedPickup = aiResult.pickup.address;
+                        if (!string.IsNullOrEmpty(aiResult.dropoff?.address))
+                            resolvedDest = aiResult.dropoff.address;
+                        
+                        // Check for ambiguity
+                        if (aiResult.status == "clarification_needed")
+                        {
+                            needsClarification = true;
+                            pickupAlternatives = aiResult.pickup?.alternatives;
+                            destAlternatives = aiResult.dropoff?.alternatives;
+                        }
+                        
+                        Log($"🤖 [{_callId}] AI resolved: '{_booking.Pickup}' → '{resolvedPickup}'");
+                        Log($"🤖 [{_callId}] AI resolved: '{_booking.Destination}' → '{resolvedDest}'");
+                    }
+                }
+                else
+                {
+                    Log($"⏱️ [{_callId}] Lovable AI extraction timed out (3s) — using raw addresses");
+                }
+                
+                // If clarification needed, return that instead of a quote
+                if (needsClarification)
+                {
+                    Log($"⚠️ [{_callId}] Ambiguous addresses detected - requesting clarification");
+                    return new
+                    {
+                        success = false,
+                        needs_clarification = true,
+                        pickup_options = pickupAlternatives ?? Array.Empty<string>(),
+                        destination_options = destAlternatives ?? Array.Empty<string>(),
+                        message = "I found multiple locations with that name. Please confirm which one you meant."
+                    };
+                }
+                
+                // Step 2: Geocode the resolved addresses and calculate fare
+                var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
+                    resolvedPickup,
+                    resolvedDest,
+                    _callerPhone);
 
-                var completed = await Task.WhenAny(fareTask, Task.Delay(4000));
-                var fareResult = completed == fareTask
+                var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(3000));
+                var fareResult = fareCompleted == fareTask
                     ? await fareTask
                     : new FareResult { Fare = "€12.50", Eta = "6 minutes" };
 
-                if (completed != fareTask)
-                    Log($"⏱️ [{_callId}] Fare calculation timed out (4s) — using fallback quote");
+                if (fareCompleted != fareTask)
+                    Log($"⏱️ [{_callId}] Geocoding timed out (3s) — using fallback quote");
                 
                 // Populate geocoded address details in BookingState
                 _booking.Fare = NormalizeEuroFare(fareResult.Fare);
@@ -411,9 +468,26 @@ public sealed class G711CallFeatures : IDisposable
         {
             try
             {
-                var fareResult = await FareCalculator.CalculateFareWithAiAsync(
+                // Use Lovable AI extraction for intelligent address resolution
+                string resolvedPickup = _booking.Pickup!;
+                string resolvedDest = _booking.Destination!;
+                
+                var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(
                     _booking.Pickup,
                     _booking.Destination,
+                    _callerPhone);
+                
+                if (aiResult != null)
+                {
+                    if (!string.IsNullOrEmpty(aiResult.pickup?.address))
+                        resolvedPickup = aiResult.pickup.address;
+                    if (!string.IsNullOrEmpty(aiResult.dropoff?.address))
+                        resolvedDest = aiResult.dropoff.address;
+                }
+                
+                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                    resolvedPickup,
+                    resolvedDest,
                     _callerPhone);
 
                 _booking.PickupLat = fareResult.PickupLat;
