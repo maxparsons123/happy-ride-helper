@@ -10,15 +10,17 @@ namespace TaxiSipBridge;
 /// Keeps the base client simple while adding:
 /// - Keepalive loop
 /// - No-reply watchdog (triggered from playout completion)
-/// - Tool handling (sync_booking_data, book_taxi, end_call)
-/// - BookingState tracking
+/// - Tool handling (sync_booking_data, book_taxi, find_local_events, end_call)
+/// - BookingState tracking with geocoding
+/// - WhatsApp notifications
+/// - BSQD dispatch
 /// </summary>
 public sealed class G711CallFeatures : IDisposable
 {
     private readonly OpenAIRealtimeG711Client _client;
     private readonly BookingState _booking = new();
     private readonly string _callId;
-    private string? _callerPhone; // For geocoding region detection
+    private string? _callerPhone; // For geocoding region detection and WhatsApp
     
     // =========================
     // WATCHDOG STATE
@@ -34,6 +36,7 @@ public sealed class G711CallFeatures : IDisposable
     // =========================
     private int _disposed;
     private int _callEnded;
+    private int _ignoreUserAudio;
     private bool _awaitingConfirmation;
     private CancellationTokenSource? _keepaliveCts;
     
@@ -201,8 +204,12 @@ public sealed class G711CallFeatures : IDisposable
                 result = await HandleBookTaxiAsync(arguments);
                 break;
                 
+            case "find_local_events":
+                result = HandleFindLocalEvents(arguments);
+                break;
+                
             case "end_call":
-                result = HandleEndCall(arguments);
+                result = await HandleEndCallAsync(arguments);
                 break;
                 
             default:
@@ -297,6 +304,7 @@ public sealed class G711CallFeatures : IDisposable
             {
                 Log($"⚠️ [{_callId}] Fare calculation failed: {ex.Message}");
                 _booking.Fare = "£10.00"; // Fallback
+                _booking.Eta = "5 minutes";
             }
             
             OnBookingUpdated?.Invoke(_booking);
@@ -357,10 +365,10 @@ public sealed class G711CallFeatures : IDisposable
             }
         }
 
-        _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
+        _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
         _booking.Confirmed = true;
         
-        Log($"✅ [{_callId}] Booking confirmed: {_booking.BookingRef}");
+        Log($"✅ [{_callId}] Booking confirmed: {_booking.BookingRef} (caller={_callerPhone})");
         OnBookingUpdated?.Invoke(_booking);
         
         // Dispatch to BSQD API with geocoded address components
@@ -370,35 +378,126 @@ public sealed class G711CallFeatures : IDisposable
             BsqdDispatcher.Dispatch(_booking, _callerPhone);
         }
         
-        // Schedule call end after goodbye
+        // Send WhatsApp notification (fire-and-forget with logging)
         _ = Task.Run(async () =>
         {
-            await Task.Delay(15000); // Wait for goodbye
-            if (Volatile.Read(ref _callEnded) == 0)
+            try
             {
-                Log($"📞 [{_callId}] Post-booking timeout - ending call");
-                OnCallEnded?.Invoke();
+                await SendWhatsAppNotificationAsync();
             }
+            catch (Exception ex)
+            {
+                Log($"❌ [{_callId}] WhatsApp task error: {ex.Message}");
+            }
+        });
+        
+        // Extended grace period (15s) for "anything else?" flow, then force end
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(15000);
+            
+            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                return;
+            
+            // Only force timeout if no active interaction
+            if (!_client.IsConnected)
+                return;
+            
+            Log($"⏰ [{_callId}] Post-booking timeout - requesting farewell");
+            
+            await SendToOpenAIAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "input_text",
+                            text = "[TIMEOUT] Say 'Thank you for using the Voice Taxibot system. Goodbye!' and call end_call NOW."
+                        }
+                    }
+                }
+            });
+            
+            await Task.Delay(20);
+            await SendToOpenAIAsync(new { type = "response.create" });
         });
         
         return new
         {
             success = true,
             booking_ref = _booking.BookingRef,
-            message = $"Booked. Reference: {_booking.BookingRef}."
+            message = string.IsNullOrWhiteSpace(_booking.Name)
+                ? "Your taxi is booked!"
+                : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
         };
     }
     
-    private object HandleEndCall(JsonElement args)
+    /// <summary>
+    /// Handle find_local_events tool - returns mock events for now.
+    /// </summary>
+    private object HandleFindLocalEvents(JsonElement args)
+    {
+        var category = args.TryGetProperty("category", out var cat) ? cat.GetString() ?? "all" : "all";
+        var near = args.TryGetProperty("near", out var n) ? n.GetString() : null;
+        var date = args.TryGetProperty("date", out var dt) ? dt.GetString() ?? "this weekend" : "this weekend";
+        
+        Log($"🎭 [{_callId}] Events lookup: {category} near {near ?? "unknown"} on {date}");
+        
+        // Mock response - in production this would call an events API
+        var mockEvents = new[]
+        {
+            new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
+            new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
+            new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
+        };
+        
+        return new
+        {
+            success = true,
+            events = mockEvents,
+            message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+        };
+    }
+    
+    /// <summary>
+    /// Handle end_call tool with buffer drain logic.
+    /// </summary>
+    private async Task<object> HandleEndCallAsync(JsonElement args)
     {
         var reason = args.TryGetProperty("reason", out var r) ? r.GetString() : "completed";
         
         Log($"📞 [{_callId}] End call requested: {reason}");
         
-        // Fire call ended after grace period
+        // Stop accepting user audio immediately
+        Interlocked.Exchange(ref _ignoreUserAudio, 1);
+        
+        // Wait for audio buffer to drain (max 10s) then signal end
         _ = Task.Run(async () =>
         {
-            await Task.Delay(5000); // 5s grace for goodbye audio
+            var waitStart = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            const int MAX_WAIT_MS = 10000;
+            const int CHECK_INTERVAL_MS = 100;
+            
+            while (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - waitStart < MAX_WAIT_MS)
+            {
+                // Check if playout queue is empty
+                if (_client.PendingFrameCount == 0)
+                {
+                    Log($"✅ [{_callId}] Audio buffer drained, ending call");
+                    break;
+                }
+                await Task.Delay(CHECK_INTERVAL_MS);
+            }
+            
+            if (_client.PendingFrameCount > 0)
+                Log($"⚠️ [{_callId}] Buffer still has {_client.PendingFrameCount} frames, ending anyway");
+            
+            // Signal call ended
             if (Interlocked.Exchange(ref _callEnded, 1) == 0)
             {
                 OnCallEnded?.Invoke();
@@ -432,7 +531,24 @@ public sealed class G711CallFeatures : IDisposable
         await SendToOpenAIAsync(new { type = "response.create" });
     }
     
-    // CalculateMockQuote removed - now using real FareCalculator.CalculateFareWithCoordsAsync()
+    /// <summary>
+    /// Send WhatsApp notification via WhatsAppNotifier.
+    /// </summary>
+    private async Task SendWhatsAppNotificationAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_callerPhone))
+        {
+            Log($"⚠️ [{_callId}] WhatsApp: No caller phone number");
+            return;
+        }
+        
+        var (success, message) = await WhatsAppNotifier.SendAsync(_callerPhone);
+        
+        if (success)
+            Log($"📱 [{_callId}] WhatsApp: {message}");
+        else
+            Log($"⚠️ [{_callId}] WhatsApp failed: {message}");
+    }
     
     // =========================
     // RESPONSE HANDLING
@@ -465,6 +581,7 @@ public sealed class G711CallFeatures : IDisposable
     // =========================
     public BookingState Booking => _booking;
     public bool AwaitingConfirmation => _awaitingConfirmation;
+    public bool IgnoreUserAudio => Volatile.Read(ref _ignoreUserAudio) == 1;
     
     // =========================
     // DISPOSE
