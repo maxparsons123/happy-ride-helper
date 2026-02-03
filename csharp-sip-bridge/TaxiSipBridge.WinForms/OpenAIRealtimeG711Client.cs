@@ -143,7 +143,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     /// Waits for any active response to complete first, then sends response.create.
     /// OpenAI's response.created event will set _responseActive = 1.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -153,11 +153,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            // Wait for any active response to complete (up to 5s)
+            // Wait for any active response to complete (with configurable max wait)
             if (waitForCurrentResponse)
             {
-                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
-                    await Task.Delay(50).ConfigureAwait(false);
+                int waited = 0;
+                while (Volatile.Read(ref _responseActive) == 1 && waited < maxWaitMs)
+                {
+                    await Task.Delay(20).ConfigureAwait(false);
+                    waited += 20;
+                }
             }
 
             await Task.Delay(delayMs).ConfigureAwait(false);
@@ -502,13 +506,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     await SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     Log("📝 Committed audio buffer (turn finalized)");
 
-                    // Flush deferred response if pending
+                    // Flush deferred response if pending (fast - 20ms delay)
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
                         {
-                            await Task.Delay(50).ConfigureAwait(false);
+                            await Task.Delay(20).ConfigureAwait(false);
                             if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
                             {
                                 await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
@@ -711,7 +715,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
 
             await SendToolResultAsync(toolCallId!, result).ConfigureAwait(false);
-            await QueueResponseCreateAsync().ConfigureAwait(false);
+            // After tool result, trigger response immediately with minimal wait (500ms max)
+            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: true, maxWaitMs: 500).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
