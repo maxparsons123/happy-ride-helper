@@ -734,15 +734,23 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // PCM24 → G.711 PROCESSING
+    // PCM24 → G.711 PROCESSING (STREAMING)
     // =========================
+    /// <summary>
+    /// Process variable-length 24kHz PCM from OpenAI → G.711 for SIP.
+    /// Uses streaming DSP that handles any chunk size (not fixed 20ms frames).
+    /// </summary>
     private byte[] ProcessPcm24ToG711(byte[] pcm24Bytes)
     {
         if (pcm24Bytes == null || pcm24Bytes.Length == 0)
             return Array.Empty<byte>();
 
+        // Use STREAMING processor for variable-length audio from OpenAI
         short[] samples24k = TtsPreConditioner.BytesToPcm(pcm24Bytes);
-        short[] samples8k = TtsPreConditioner.ProcessFrame(samples24k);
+        short[] samples8k = TtsPreConditioner.ProcessStreaming(samples24k);
+
+        if (samples8k.Length == 0)
+            return Array.Empty<byte>();
 
         byte[] g711;
         if (_codec == G711Codec.ALaw)
