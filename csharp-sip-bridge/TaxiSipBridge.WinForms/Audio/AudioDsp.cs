@@ -35,7 +35,7 @@ public class AudioDsp
     // AGC state
     private float _lastGain = 1.0f;
     private float _preEmphasisState = 0f;
-    private float _outboundPreEmphasisState = 0f;
+    
 
     /// <summary>
     /// Applies full inbound DSP pipeline: high-pass → volume boost → AGC → adaptive pre-emphasis → soft clip
@@ -271,7 +271,6 @@ public class AudioDsp
         Array.Clear(_hpY, 0, _hpY.Length);
         _lastGain = 1.0f;
         _preEmphasisState = 0f;
-        _outboundPreEmphasisState = 0f;
     }
 
     /// <summary>
