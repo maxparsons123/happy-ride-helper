@@ -64,6 +64,9 @@
     <Compile Include="BsqdTaxiDispatcher.cs" />
     <Compile Include="GeminiDispatchService.cs" />
     <Compile Include="FareCalculator.cs" />
+    <Compile Include="FareCalculator.LegacyApi.cs" />
+    <Compile Include="EdgeAddressExtractor.cs" />
+    <Compile Include="GeminiAddressExtractor.cs" />
     <Compile Include="BookingState.cs" />
     <Compile Include="TtsPreConditioner.cs" />
     <Compile Include="TtsLowPassFilter.cs" />
