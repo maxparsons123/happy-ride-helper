@@ -9,7 +9,7 @@ namespace TaxiSipBridge;
 /// Takes addresses (optionally from extractors) and calculates fare/ETA.
 /// Uses Google Places/Geocoding API with phone-based region bias.
 /// </summary>
-public class FareCalculator
+public partial class FareCalculator
 {
     public const decimal BASE_FARE = 3.50m;
     public const decimal RATE_PER_MILE = 1.00m;
