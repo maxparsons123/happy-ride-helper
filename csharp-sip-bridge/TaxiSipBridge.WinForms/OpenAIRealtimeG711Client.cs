@@ -715,8 +715,13 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
 
             await SendToolResultAsync(toolCallId!, result).ConfigureAwait(false);
-            // After tool result, trigger response immediately with minimal wait (500ms max)
-            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: true, maxWaitMs: 500).ConfigureAwait(false);
+            
+            // CRITICAL: After tool result, the old response is done - clear state immediately
+            // The old response won't send response.done, a NEW response will be created
+            Interlocked.Exchange(ref _responseActive, 0);
+            
+            // Trigger new response immediately with NO wait (old response is already done)
+            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
