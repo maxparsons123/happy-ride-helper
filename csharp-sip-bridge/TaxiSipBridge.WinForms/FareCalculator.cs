@@ -412,7 +412,7 @@ public static class FareCalculator
     {
         var fare = BASE_FARE + (RATE_PER_MILE * (decimal)distanceMiles);
         fare = Math.Max(fare, MIN_FARE);
-        fare = Math.Ceiling(fare * 2) / 2; // Round to nearest 50p
+        fare = Math.Ceiling(fare * 2) / 2; // Round to nearest 50c
         return fare;
     }
 
@@ -490,7 +490,7 @@ public static class FareCalculator
 
     private static double ToRadians(double degrees) => degrees * Math.PI / 180.0;
 
-    private static string FormatFare(decimal fare) => $"£{fare:F2}";
+    private static string FormatFare(decimal fare) => $"€{fare:F2}";
 
     /// <summary>
     /// Parse fare string back to decimal.
