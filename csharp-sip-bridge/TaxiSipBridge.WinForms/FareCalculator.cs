@@ -108,6 +108,111 @@ public static class FareCalculator
     }
 
     /// <summary>
+    /// Extract addresses using Supabase edge function with Lovable AI Gateway.
+    /// No API key needed - uses LOVABLE_API_KEY automatically.
+    /// </summary>
+    public static async Task<GeminiDispatchResponse?> ExtractAddressesWithLovableAiAsync(
+        string pickup,
+        string destination,
+        string? phoneNumber)
+    {
+        if (string.IsNullOrEmpty(_supabaseUrl) || string.IsNullOrEmpty(_supabaseAnonKey))
+        {
+            Log("⚠️ Supabase not configured for Lovable AI dispatch");
+            return null;
+        }
+
+        try
+        {
+            var payload = new { pickup, destination, phone = phoneNumber ?? "" };
+            var json = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            
+            var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/functions/v1/address-dispatch")
+            {
+                Content = content
+            };
+            request.Headers.Add("Authorization", $"Bearer {_supabaseAnonKey}");
+
+            Log($"🤖 Lovable AI dispatch: pickup='{pickup}', dest='{destination}', phone='{phoneNumber}'");
+
+            var response = await GetHttpClient().SendAsync(request);
+            var responseBody = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Log($"⚠️ Lovable AI dispatch HTTP {(int)response.StatusCode}: {responseBody}");
+                return null;
+            }
+
+            // Parse response into GeminiDispatchResponse format
+            using var doc = JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+
+            var result = new GeminiDispatchResponse
+            {
+                detected_area = root.TryGetProperty("detected_area", out var area) ? area.GetString() : null,
+                status = root.TryGetProperty("status", out var status) ? status.GetString() : "ready"
+            };
+
+            // Parse phone analysis
+            if (root.TryGetProperty("phone_analysis", out var phoneEl))
+            {
+                result.phone_analysis = new PhoneAnalysis
+                {
+                    detected_country = phoneEl.TryGetProperty("detected_country", out var c) ? c.GetString() : null,
+                    is_mobile = phoneEl.TryGetProperty("is_mobile", out var m) && m.GetBoolean(),
+                    landline_city = phoneEl.TryGetProperty("landline_city", out var lc) ? lc.GetString() : null
+                };
+            }
+
+            // Parse pickup
+            if (root.TryGetProperty("pickup", out var pickupEl))
+            {
+                result.pickup = new AddressDetail
+                {
+                    address = pickupEl.TryGetProperty("address", out var a) ? a.GetString() : null,
+                    is_ambiguous = pickupEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean(),
+                    alternatives = pickupEl.TryGetProperty("alternatives", out var alts) 
+                        ? alts.EnumerateArray().Select(x => x.GetString() ?? "").ToArray() 
+                        : Array.Empty<string>()
+                };
+            }
+
+            // Parse dropoff
+            if (root.TryGetProperty("dropoff", out var dropoffEl))
+            {
+                result.dropoff = new AddressDetail
+                {
+                    address = dropoffEl.TryGetProperty("address", out var a) ? a.GetString() : null,
+                    is_ambiguous = dropoffEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean(),
+                    alternatives = dropoffEl.TryGetProperty("alternatives", out var alts) 
+                        ? alts.EnumerateArray().Select(x => x.GetString() ?? "").ToArray() 
+                        : Array.Empty<string>()
+                };
+            }
+
+            // Log results
+            Log($"════════════════════════════════════════════════════");
+            Log($"🤖 LOVABLE AI ADDRESS DISPATCH RESULTS");
+            Log($"────────────────────────────────────────────────────");
+            Log($"📱 Phone: {result.phone_analysis?.detected_country ?? "?"}, Mobile: {result.phone_analysis?.is_mobile}, City: {result.phone_analysis?.landline_city ?? "(none)"}");
+            Log($"🌍 Detected Area: {result.detected_area}");
+            Log($"📍 Pickup: {result.pickup?.address ?? "(empty)"} {(result.pickup?.is_ambiguous == true ? "⚠️ AMBIGUOUS" : "")}");
+            Log($"🏁 Dropoff: {result.dropoff?.address ?? "(empty)"} {(result.dropoff?.is_ambiguous == true ? "⚠️ AMBIGUOUS" : "")}");
+            Log($"📋 Status: {result.status}");
+            Log($"════════════════════════════════════════════════════");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Lovable AI dispatch error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Extract addresses using local Gemini service (alternative to Supabase edge function).
     /// Returns a GeminiDispatchResponse with structured address data.
     /// </summary>
