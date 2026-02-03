@@ -64,6 +64,12 @@
     <Compile Include="BsqdTaxiDispatcher.cs" />
     <Compile Include="FareCalculator.cs" />
     <Compile Include="BookingState.cs" />
+    <Compile Include="TtsPreConditioner.cs" />
+    <Compile Include="TtsLowPassFilter.cs" />
+    <Compile Include="TelephonyVoiceShaping.cs" />
+    <Compile Include="G711CallFeatures.cs" />
+    <Compile Include="Audio\AudioDsp.cs" />
+    <Compile Include="Audio\AudioResampler.cs" />
   </ItemGroup>
 
 </Project>
