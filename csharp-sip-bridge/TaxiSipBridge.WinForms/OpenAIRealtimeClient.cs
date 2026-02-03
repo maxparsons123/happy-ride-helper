@@ -1387,10 +1387,11 @@ After EVERY user message that provides or corrects booking info, call sync_booki
 ## ADDRESS INTEGRITY (CRITICAL - NO HALLUCINATION)
 
 NEVER add, invent, or guess address components the user did not say:
-- If user says 'Russell Street' without a house number → store 'Russell Street' (NOT '1214A Russell Street')
+- If user says 'Russell Street' without a house number → store 'Russell Street' (NOT '7 Russell Street' or '1214A Russell Street')
 - If user says '52A David Road' → store '52A David Road' (exact)
 - ONLY include house numbers, postcodes, or cities that the USER explicitly stated
 - When confirming, read back EXACTLY what was stored - do not embellish
+- HALLUCINATING addresses or house numbers is a CRITICAL ERROR - if unsure, ASK the user
 
 ## PICKUP TIME HANDLING
 
