@@ -829,7 +829,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                     new
                                     {
                                         type = "input_text",
-                                        text = "[TIMEOUT] Say 'Thank you for using the Voice Taxibot system. Goodbye!' and call end_call NOW."
+                                        text = "[POST-BOOKING TIMEOUT] The caller went silent. Say: 'You'll receive a WhatsApp with your booking details. Thank you for using the Voice Taxibot system. Goodbye!' THEN immediately call end_call(reason='booking_complete')."
                                     }
                                 }
                             }
@@ -837,6 +837,28 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                         // DO NOT set _responseActive = 1 here — let OpenAI do it
                         await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+
+                        // Safety net: if the model doesn't call end_call, force hangup anyway.
+                        // Only do this if the caller stays silent (speech_started increments _noReplyWatchdogId).
+                        var safetyWatchdogId = Volatile.Read(ref _noReplyWatchdogId);
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(12000).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                return;
+
+                            // Cancel safety hangup if the user spoke / watchdog was reset.
+                            if (Volatile.Read(ref _noReplyWatchdogId) != safetyWatchdogId)
+                                return;
+
+                            // If a response is currently active, don't interrupt.
+                            if (Volatile.Read(ref _responseActive) == 1)
+                                return;
+
+                            Log("⏰ Post-booking safety hangup (end_call not received)");
+                            Interlocked.Exchange(ref _ignoreUserAudio, 1);
+                            SignalCallEnded("post_booking_safety");
+                        });
                     });
                 }
                 break;
