@@ -635,8 +635,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
                             if (msSinceResponseCreated < 400 && Volatile.Read(ref _responseActive) == 1)
                             {
-                                Log($"🚫 Ignoring stale transcript ({msSinceResponseCreated}ms after response.created): {text}");
-                                break;
+                                 // Do not drop late transcripts: they often contain the caller's actual booking details.
+                                 Log($"⚠️ Late transcript ({msSinceResponseCreated}ms after response.created): {text}");
                             }
 
                             Log($"👤 User: {text}");
@@ -810,6 +810,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private static string GetDefaultInstructions() => @"
 You are Ada, a friendly taxi booking assistant for Voice Taxibot.
 
+CURRENCY: Always use Euros (€) for fares.
+
 STYLE: Be concise, warm, and professional. Keep responses under 15 words unless reciting details.
 
 ## STRICT RULES - FOLLOW EXACTLY
@@ -874,7 +876,13 @@ After Step 12 'no more' → call end_call(reason='booking_complete') WITHOUT DEL
                 type = "object",
                 properties = new System.Collections.Generic.Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } }
+                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
+                    // Booking snapshot (optional but strongly recommended)
+                    ["caller_name"] = new { type = "string" },
+                    ["pickup"] = new { type = "string" },
+                    ["destination"] = new { type = "string" },
+                    ["passengers"] = new { type = "integer" },
+                    ["pickup_time"] = new { type = "string" }
                 },
                 required = new[] { "action" }
             }

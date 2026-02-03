@@ -545,8 +545,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
                         if (msSinceResponseCreated < 900 && Volatile.Read(ref _responseActive) == 1)
                         {
-                            Log($"🚫 Ignoring stale transcript (arrived {msSinceResponseCreated}ms after response.created): {text}");
-                            break;
+                            // Do not drop late transcripts: they often contain the caller's actual booking details.
+                            Log($"⚠️ Late transcript (arrived {msSinceResponseCreated}ms after response.created): {text}");
                         }
                         
                         Log($"👤 User: {text}");
@@ -702,11 +702,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         switch (name)
         {
             case "sync_booking_data":
-                if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
-                if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
-                if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
-                if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
-                if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+                ApplyBookingSnapshotFromArgs(args);
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
@@ -715,17 +711,34 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
             case "book_taxi":
             {
+                // Defensive: make sure booking state is populated even if the model skipped sync_booking_data.
+                ApplyBookingSnapshotFromArgs(args);
+
                 var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
 
                 if (action == "request_quote")
                 {
+                    if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
+                    {
+                        Log($"⚠️ Quote requested but pickup/destination missing (pickup='{_booking.Pickup}', dest='{_booking.Destination}')");
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = false,
+                            error = "Missing pickup or destination",
+                            message = "Missing pickup or destination. Ask the caller to repeat it."
+                        }).ConfigureAwait(false);
+                        await QueueResponseCreateAsync().ConfigureAwait(false);
+                        break;
+                    }
+
                     // Use CalculateFareWithCoordsAsync to get geocoded address details for dispatch
                     var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
                         _booking.Pickup, 
                         _booking.Destination,
                         _callerId).ConfigureAwait(false);
 
-                    _booking.Fare = fareResult.Fare;
+                    var normalizedFare = NormalizeEuroFare(fareResult.Fare);
+                    _booking.Fare = normalizedFare;
                     _booking.Eta = fareResult.Eta;
                     
                     // Populate geocoded pickup details
@@ -749,23 +762,74 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     _awaitingConfirmation = true;
 
                     OnBookingUpdated?.Invoke(_booking);
-                    Log($"💰 Quote: {fareResult.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
+                    Log($"💰 Quote: {normalizedFare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
 
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
-                        fare = fareResult.Fare,
+                        fare = normalizedFare,
                         eta = fareResult.Eta,
-                        message = $"Fare is {fareResult.Fare}, driver arrives in {fareResult.Eta}. Book it?"
+                        message = $"Fare is {normalizedFare}, driver arrives in {fareResult.Eta}. Book it?"
                     }).ConfigureAwait(false);
 
                     await QueueResponseCreateAsync().ConfigureAwait(false);
                 }
                 else if (action == "confirmed")
                 {
+                    if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
+                    {
+                        Log($"⚠️ Booking confirmed but pickup/destination missing (pickup='{_booking.Pickup}', dest='{_booking.Destination}')");
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = false,
+                            error = "Missing pickup or destination",
+                            message = "Missing pickup or destination. Ask the caller to repeat it before booking."
+                        }).ConfigureAwait(false);
+                        await QueueResponseCreateAsync().ConfigureAwait(false);
+                        break;
+                    }
+
                     _booking.Confirmed = true;
                     _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     _awaitingConfirmation = false;
+
+                    // Ensure we have geocoded components before dispatch (e.g., if quote step was skipped/failed)
+                    if ((string.IsNullOrWhiteSpace(_booking.PickupStreet) || string.IsNullOrWhiteSpace(_booking.DestStreet)) &&
+                        !string.IsNullOrWhiteSpace(_booking.Pickup) &&
+                        !string.IsNullOrWhiteSpace(_booking.Destination))
+                    {
+                        try
+                        {
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                                _booking.Pickup,
+                                _booking.Destination,
+                                _callerId).ConfigureAwait(false);
+
+                            _booking.PickupLat = fareResult.PickupLat;
+                            _booking.PickupLon = fareResult.PickupLon;
+                            _booking.PickupStreet = fareResult.PickupStreet;
+                            _booking.PickupNumber = fareResult.PickupNumber?.ToString();
+                            _booking.PickupPostalCode = fareResult.PickupPostalCode;
+                            _booking.PickupCity = fareResult.PickupCity;
+                            _booking.PickupFormatted = fareResult.PickupFormatted;
+
+                            _booking.DestLat = fareResult.DestLat;
+                            _booking.DestLon = fareResult.DestLon;
+                            _booking.DestStreet = fareResult.DestStreet;
+                            _booking.DestNumber = fareResult.DestNumber?.ToString();
+                            _booking.DestPostalCode = fareResult.DestPostalCode;
+                            _booking.DestCity = fareResult.DestCity;
+                            _booking.DestFormatted = fareResult.DestFormatted;
+
+                            // Preserve existing fare if already set
+                            if (!string.IsNullOrWhiteSpace(fareResult.Fare)) _booking.Fare ??= NormalizeEuroFare(fareResult.Fare);
+                            if (!string.IsNullOrWhiteSpace(fareResult.Eta)) _booking.Eta ??= fareResult.Eta;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"⚠️ Pre-dispatch geocode failed: {ex.Message}");
+                        }
+                    }
 
                     OnBookingUpdated?.Invoke(_booking);
                     Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
@@ -1293,6 +1357,8 @@ DATA SYNC (CRITICAL): After EVERY user message that provides or corrects booking
 - Include ALL fields you know so far (caller_name, pickup, destination, passengers, pickup_time), not just the one you just collected.
 - If a user corrects a detail, treat the user's correction as the SOURCE OF TRUTH.
 
+WHEN CALLING book_taxi: Include the latest booking snapshot too (caller_name, pickup, destination, passengers, pickup_time).
+
 NO REPETITION: After booking is confirmed, say the ACTUAL reference ID from the tool response (e.g. 'Your taxi is booked, reference TX12345.'). NEVER say '[ID]' literally. Do NOT repeat pickup, destination, passengers, or time again.
 
 CORRECTIONS: If user corrects any detail, update it and give ONE new summary. Do not repeat the same summary multiple times.
@@ -1348,6 +1414,28 @@ RULES: One question at a time. Under 20 words per response. Use €. Only call e
         return args;
     }
 
+    private void ApplyBookingSnapshotFromArgs(Dictionary<string, object> args)
+    {
+        if (args.TryGetValue("caller_name", out var nm)) _booking.Name = nm?.ToString();
+        if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
+        if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
+        if (args.TryGetValue("passengers", out var pax))
+        {
+            if (pax is int i) _booking.Passengers = i;
+            else if (int.TryParse(pax?.ToString(), out var pn)) _booking.Passengers = pn;
+        }
+        if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+    }
+
+    private static string NormalizeEuroFare(string? fare)
+    {
+        var f = (fare ?? "").Trim();
+        if (string.IsNullOrEmpty(f)) return f;
+        if (f.StartsWith("£")) return "€" + f.Substring(1);
+        if (f.StartsWith("$")) return "€" + f.Substring(1);
+        return f;
+    }
+
     private static object[] GetTools() => new object[]
     {
         new
@@ -1378,7 +1466,13 @@ RULES: One question at a time. Under 20 words per response. Use €. Only call e
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } }
+                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
+                    // Booking snapshot (optional but strongly recommended)
+                    ["caller_name"] = new { type = "string" },
+                    ["pickup"] = new { type = "string" },
+                    ["destination"] = new { type = "string" },
+                    ["passengers"] = new { type = "integer" },
+                    ["pickup_time"] = new { type = "string" }
                 },
                 required = new[] { "action" }
             }
