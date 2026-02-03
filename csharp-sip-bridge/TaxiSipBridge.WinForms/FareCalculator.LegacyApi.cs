@@ -110,6 +110,7 @@ public partial class FareCalculator
 
     /// <summary>
     /// Legacy: geocode pickup & destination and compute fare/ETA.
+    /// Uses Edge AI extraction first to get city-biased addresses, then geocodes with that city context.
     /// </summary>
     public static async Task<FareResult> CalculateFareWithCoordsAsync(
         string? pickup,
@@ -122,6 +123,60 @@ public partial class FareCalculator
                 return new FareResult { Fare = "€12.50", Eta = "6 minutes" };
 
             var calc = GetDefaultCalculator();
+
+            // Try Edge AI extraction first (with 5s timeout) to get city-biased addresses
+            var extractor = GetEdgeExtractor();
+            if (extractor != null)
+            {
+                try
+                {
+                    Log("💰 Starting Lovable AI address extraction...");
+                    var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var extractionTask = extractor.ExtractAsync(pickup, destination, phoneNumber);
+                    var completed = await Task.WhenAny(extractionTask, Task.Delay(5000, cts.Token)).ConfigureAwait(false);
+
+                    if (completed == extractionTask && extractionTask.Result != null)
+                    {
+                        cts.Cancel();
+                        var extraction = extractionTask.Result;
+
+                        // Use edge-extracted addresses with city appended for better geocoding
+                        var resolvedPickup = extraction.PickupAddress ?? pickup;
+                        var resolvedDest = extraction.DestinationAddress ?? destination;
+
+                        Log($"💰 Using Edge addresses: pickup='{resolvedPickup}', dest='{resolvedDest}'");
+
+                        // Calculate fare with the better addresses
+                        var result = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
+
+                        // Enrich with Edge-extracted city info (may be more accurate than geocoding)
+                        if (!string.IsNullOrEmpty(extraction.DetectedArea))
+                        {
+                            if (string.IsNullOrEmpty(result.PickupCity))
+                                result.PickupCity = extraction.DetectedArea;
+                            if (string.IsNullOrEmpty(result.DestCity))
+                                result.DestCity = extraction.DetectedArea;
+                        }
+
+                        Log($"💰 Quote: {result.Fare} (pickup: {result.PickupCity}, dest: {result.DestCity})");
+                        return result;
+                    }
+                    else
+                    {
+                        Log("⏱️ Lovable AI extraction timed out (5s) — using raw addresses");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Log("⏱️ Lovable AI extraction cancelled — using raw addresses");
+                }
+                catch (Exception ex)
+                {
+                    Log($"⚠️ Edge extraction error: {ex.Message} — using raw addresses");
+                }
+            }
+
+            // Fallback: geocode raw addresses
             return await calc.CalculateAsync(pickup, destination, phoneNumber).ConfigureAwait(false);
         }
         catch (Exception ex)
