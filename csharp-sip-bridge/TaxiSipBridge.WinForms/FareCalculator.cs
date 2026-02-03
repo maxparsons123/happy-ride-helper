@@ -225,17 +225,48 @@ public static class FareCalculator
                     result.PhoneCityFromAreaCode = cityFromPhone.GetString();
             }
 
-            // Log results
-            var pickupStatus = result.PickupResolved ? $"✓ {result.PickupAddress}" : $"⚠️ {result.PickupAlternatives.Count} alternatives";
-            var destStatus = result.DestinationResolved ? $"✓ {result.DestinationAddress}" : $"⚠️ {result.DestinationAlternatives.Count} alternatives";
-            Console.WriteLine($"[FareCalculator] 🤖 AI result: region={result.DetectedRegion} ({result.RegionSource})");
-            Console.WriteLine($"[FareCalculator] 🤖 Pickup: {pickupStatus}");
-            Console.WriteLine($"[FareCalculator] 🤖 Destination: {destStatus}");
-            
+            // Detailed logging of AI extraction results
+            Console.WriteLine($"[FareCalculator] ════════════════════════════════════════════════════");
+            Console.WriteLine($"[FareCalculator] 🤖 AI ADDRESS EXTRACTION RESULTS (V3)");
+            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
+            Console.WriteLine($"[FareCalculator] 📱 Phone Analysis:");
+            Console.WriteLine($"[FareCalculator]    Country: {result.PhoneCountry ?? "Unknown"}");
+            Console.WriteLine($"[FareCalculator]    Is Mobile: {result.IsMobile}");
+            Console.WriteLine($"[FareCalculator]    City from Area Code: {result.PhoneCityFromAreaCode ?? "(none - mobile or unknown)"}");
+            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
+            Console.WriteLine($"[FareCalculator] 🌍 Detected Region: {result.DetectedRegion}");
+            Console.WriteLine($"[FareCalculator]    Source: {result.RegionSource}");
+            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
+            Console.WriteLine($"[FareCalculator] 📍 PICKUP:");
+            Console.WriteLine($"[FareCalculator]    Resolved: {result.PickupResolved}");
+            Console.WriteLine($"[FareCalculator]    Full Address: {result.PickupAddress ?? "(empty)"}");
+            Console.WriteLine($"[FareCalculator]    House Number: '{result.PickupHouseNumber ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    Street: '{result.PickupStreet ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    City: '{result.PickupCity ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    Confidence: {result.PickupConfidence:P0}");
+            if (result.PickupAlternatives.Count > 0)
+            {
+                Console.WriteLine($"[FareCalculator]    Alternatives: {string.Join(", ", result.PickupAlternatives)}");
+            }
+            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
+            Console.WriteLine($"[FareCalculator] 🏁 DESTINATION:");
+            Console.WriteLine($"[FareCalculator]    Resolved: {result.DestinationResolved}");
+            Console.WriteLine($"[FareCalculator]    Full Address: {result.DestinationAddress ?? "(empty)"}");
+            Console.WriteLine($"[FareCalculator]    House Number: '{result.DestinationHouseNumber ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    Street: '{result.DestinationStreet ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    City: '{result.DestinationCity ?? ""}'");
+            Console.WriteLine($"[FareCalculator]    Confidence: {result.DestinationConfidence:P0}");
+            if (result.DestinationAlternatives.Count > 0)
+            {
+                Console.WriteLine($"[FareCalculator]    Alternatives: {string.Join(", ", result.DestinationAlternatives)}");
+            }
+            Console.WriteLine($"[FareCalculator] ────────────────────────────────────────────────────");
+            Console.WriteLine($"[FareCalculator] 📋 Status: {result.Status}");
             if (result.Status == "clarification_required")
             {
-                Console.WriteLine($"[FareCalculator] 🤖 Clarification needed: {result.ClarificationMessage}");
+                Console.WriteLine($"[FareCalculator] ⚠️ CLARIFICATION NEEDED: {result.ClarificationMessage}");
             }
+            Console.WriteLine($"[FareCalculator] ════════════════════════════════════════════════════");
 
             return result;
         }
