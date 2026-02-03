@@ -12,7 +12,7 @@ namespace AdaMain.Ai;
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "2.1";
+    public const string VERSION = "2.2";
     
     private readonly ILogger<OpenAiRealtimeClient> _logger;
     private readonly OpenAiSettings _settings;
