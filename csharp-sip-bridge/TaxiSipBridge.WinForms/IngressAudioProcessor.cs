@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
-    public const string VERSION = "1.3";
+    public const string VERSION = "1.4"; // Tuned gate/AGC for conversational speech
     // ===========================================
     // CONFIGURATION
     // ===========================================
@@ -24,19 +24,21 @@ public sealed class IngressAudioProcessor : IDisposable
     private readonly int _jitterFrames;
 
     // ===========================================
-    // DSP CONSTANTS (ASR-tuned for low-level telephony audio)
+    // DSP CONSTANTS (ASR-tuned for conversational telephony)
+    // Tuned to preserve short words ("yes", "no") and soft consonants.
     // ===========================================
     private const float DC_ALPHA = 0.995f;
-    private const float PRE_EMPH = 0.97f;
-    private const float GATE_OPEN_RMS = 40f;    // Based on observed raw RMS (silence ~8-10, speech 200-4000)
-    private const float GATE_CLOSE_RMS = 20f;   // Close only on true silence
-    private const int GATE_HOLD_FRAMES = 15;    // Hold gate open 300ms after speech
+    private const float PRE_EMPH = 0.90f;           // Reduced from 0.97 - less harsh, still clear
+    private const float GATE_OPEN_RMS = 25f;        // Lowered from 40 - catches soft consonants
+    private const float GATE_CLOSE_RMS = 10f;       // Lowered from 20 - only closes on true silence
+    private const int GATE_HOLD_FRAMES = 25;        // Increased from 15 (500ms hold)
     private const float RMS_ALPHA = 0.995f;
-    private const float TARGET_RMS = 8000f;     // Lower target for natural sound
-    private const float AGC_MIN = 0.50f;        // Allow more dynamic range
-    private const float AGC_MAX = 6.0f;         // Higher max gain for very quiet callers
-    private const float AGC_SMOOTH = 0.05f;     // Faster AGC adaptation
+    private const float TARGET_RMS = 6000f;         // Lowered from 8000 - less harsh
+    private const float AGC_MIN = 0.50f;            // Allow more dynamic range
+    private const float AGC_MAX = 6.0f;             // Higher max gain for very quiet callers
+    private const float AGC_SMOOTH = 0.03f;         // Slower from 0.05 - smoother transitions
     private const float LIMIT = 29000f;
+    private const int GATE_RAMP_SAMPLES = 80;       // 5ms fade-in when gate opens
 
     // ===========================================
     // JITTER BUFFER
@@ -66,6 +68,7 @@ public sealed class IngressAudioProcessor : IDisposable
     private float _agcGain = 1.0f;
     private bool _gateOpen = true;
     private int _gateHold;
+    private int _gateRampRemaining;  // Samples remaining for fade-in when gate opens
     private int _framesSinceLastLog;
     private const int LOG_EVERY_N_FRAMES = 50; // Log RMS every ~1 second
 
@@ -228,6 +231,7 @@ public sealed class IngressAudioProcessor : IDisposable
         _totalFramesProcessed = 0;
         _avgRmsRaw = 0;
         _avgRmsProc = 0;
+        _gateRampRemaining = 0;
 
         Log("[Ingress] State reset");
     }
@@ -415,9 +419,9 @@ public sealed class IngressAudioProcessor : IDisposable
 
     private void PlcFill()
     {
-        // Attenuate to avoid robotic repetition
+        // Attenuate more aggressively to avoid robotic artifacts
         for (int i = 0; i < _lastPcmFrame.Length; i++)
-            _lastPcmFrame[i] = (short)(_lastPcmFrame[i] * 0.92f);
+            _lastPcmFrame[i] = (short)(_lastPcmFrame[i] * 0.85f); // Was 0.92
 
         ProcessPcmFrame(_lastPcmFrame, 8000);
     }
@@ -488,6 +492,7 @@ public sealed class IngressAudioProcessor : IDisposable
             {
                 _gateOpen = true;
                 _gateHold = 0;
+                _gateRampRemaining = GATE_RAMP_SAMPLES; // Start fade-in ramp
             }
         }
 
@@ -538,6 +543,16 @@ public sealed class IngressAudioProcessor : IDisposable
             if (val > LIMIT) val = LIMIT;
             else if (val < -LIMIT) val = -LIMIT;
             frame[i] = (short)val;
+        }
+        
+        // Apply gate reopen fade-in ramp (eliminates click when gate opens)
+        if (_gateRampRemaining > 0)
+        {
+            for (int i = 0; i < frame.Length && _gateRampRemaining > 0; i++, _gateRampRemaining--)
+            {
+                float t = 1f - ((float)_gateRampRemaining / GATE_RAMP_SAMPLES);
+                frame[i] = (short)(frame[i] * t);
+            }
         }
     }
 
