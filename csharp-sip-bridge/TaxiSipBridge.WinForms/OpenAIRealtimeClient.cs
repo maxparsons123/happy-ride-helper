@@ -749,11 +749,33 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         break;
                     }
 
-                    // Use CalculateFareWithAiAsync to get AI-based region detection and geocoded address details
-                    var fareResult = await FareCalculator.CalculateFareWithAiAsync(
-                        _booking.Pickup, 
-                        _booking.Destination,
-                        _callerId).ConfigureAwait(false);
+                    // Quote timeout guard: never stall the call if external services are slow/unavailable.
+                    // Matches the 4s fallback-quote policy used in the server pipelines.
+                    FareResult fareResult;
+                    try
+                    {
+                        Log("💰 Starting fare calculation...");
+                        var fareTask = FareCalculator.CalculateFareWithAiAsync(
+                            _booking.Pickup,
+                            _booking.Destination,
+                            _callerId);
+
+                        var completed = await Task.WhenAny(fareTask, Task.Delay(4000)).ConfigureAwait(false);
+                        if (completed != fareTask)
+                        {
+                            Log("⏱️ Fare calculation timed out (4s) — using fallback quote");
+                            fareResult = new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+                        }
+                        else
+                        {
+                            fareResult = await fareTask.ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ Fare calculation failed: {ex.Message} — using fallback quote");
+                        fareResult = new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+                    }
 
                     var normalizedFare = NormalizeEuroFare(fareResult.Fare);
                     _booking.Fare = normalizedFare;

@@ -335,10 +335,20 @@ public sealed class G711CallFeatures : IDisposable
             // Calculate real fare using AI-based region detection and geocoding
             try
             {
-                var fareResult = await FareCalculator.CalculateFareWithAiAsync(
-                    _booking.Pickup, 
+                Log($"💰 [{_callId}] Starting fare calculation...");
+
+                var fareTask = FareCalculator.CalculateFareWithAiAsync(
+                    _booking.Pickup,
                     _booking.Destination,
                     _callerPhone);
+
+                var completed = await Task.WhenAny(fareTask, Task.Delay(4000));
+                var fareResult = completed == fareTask
+                    ? await fareTask
+                    : new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+
+                if (completed != fareTask)
+                    Log($"⏱️ [{_callId}] Fare calculation timed out (4s) — using fallback quote");
                 
                 // Populate geocoded address details in BookingState
                 _booking.Fare = NormalizeEuroFare(fareResult.Fare);
@@ -367,8 +377,8 @@ public sealed class G711CallFeatures : IDisposable
             catch (Exception ex)
             {
                 Log($"⚠️ [{_callId}] Fare calculation failed: {ex.Message}");
-                _booking.Fare = "€10.00"; // Fallback
-                _booking.Eta = "5 minutes";
+                _booking.Fare = "€12.50"; // Fallback (keep conversation moving)
+                _booking.Eta = "6 minutes";
             }
             
             OnBookingUpdated?.Invoke(_booking);

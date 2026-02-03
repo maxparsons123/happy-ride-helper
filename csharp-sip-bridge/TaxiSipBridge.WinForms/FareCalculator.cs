@@ -412,8 +412,12 @@ public static class FareCalculator
         if (string.IsNullOrWhiteSpace(rawPickup) || string.IsNullOrWhiteSpace(rawDestination))
             return result;
 
+        Log($"💰 AI fare calc starting: pickup='{rawPickup}', dest='{rawDestination}', phone='{phoneNumber}'");
+
         // Step 1: Use Gemini AI to extract and resolve addresses with intelligent region detection
         var aiResult = await ExtractAddressesWithAiAsync(rawPickup, rawDestination, phoneNumber);
+
+        Log($"💰 AI extraction finished: success={aiResult.Success}, status={aiResult.Status}, region='{aiResult.DetectedRegion}', source='{aiResult.RegionSource}'");
         
         if (!aiResult.Success)
         {
