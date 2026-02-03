@@ -9,17 +9,21 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Simplified OpenAI Realtime client for native G.711 audio.
-/// Version 2.2-final-g711: Uses RTP playout completion as single source of truth.
+/// OpenAI Realtime client for G.711 telephony with local DSP processing.
+/// Version 2.4: Aligned with OpenAIRealtimeClient architecture.
 /// 
-/// Key design principles:
-/// - RTP playout completion (NotifyPlayoutComplete) is the ONLY source of truth for when Ada finishes speaking
-/// - No watchdog restarts from OpenAI events
-/// - 200ms echo guard based on real audio playout, not API events
+/// Key improvements:
+/// - Proper ResetCallState() for clean per-call state
+/// - Keepalive loop for connection health monitoring
+/// - Deferred response handling (queue response.create if one is active)
+/// - Transcript guard (ignores stale transcripts within 400ms of response.created)
+/// - No-reply watchdog (prompts user after silence)
+/// - CanCreateResponse() gate with multiple conditions
+/// - RTP playout completion as source of truth for echo guard
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.3-pcm24-dsp";
+    public const string VERSION = "2.4-aligned";
 
     // =========================
     // G.711 CONFIG
@@ -39,27 +43,42 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _voice;
+    private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
     // =========================
-    // STATE
+    // THREAD-SAFE STATE (per-call, reset by ResetCallState)
     // =========================
-    private int _disposed;
-    private int _callEnded;
-    private int _responseActive;
-    private int _responseQueued;
-    private int _sessionCreated;
-    private int _sessionUpdated;
-    private int _ignoreUserAudio;
+    private int _disposed;              // Object lifetime only (NEVER reset)
+    private int _callEnded;             // Per-call
+    private int _responseActive;        // OBSERVED only (set only by response.created / response.done)
+    private int _responseQueued;        // Per-call
+    private int _sessionCreated;        // Per-call
+    private int _sessionUpdated;        // Per-call
+    private int _greetingSent;          // Per-call
+    private int _ignoreUserAudio;       // Per-call (set after goodbye starts)
+    private int _deferredResponsePending; // Per-call (queued response after response.done)
+    private int _noReplyWatchdogId;     // Incremented to cancel stale watchdogs
+    private long _lastAdaFinishedAt;    // RTP playout completion time (source of truth for echo guard)
     private long _lastUserSpeechAt;
-    private long _lastAdaFinishedAt;
+    private long _lastToolCallAt;
+    private long _responseCreatedAt;    // For transcript guard
+
+    // Tracks current OpenAI response id to ignore duplicate events
     private string? _activeResponseId;
     private string? _lastCompletedResponseId;
+
+    // =========================
+    // CALLER STATE (per-call)
+    // =========================
+    private string _callerId = "";
 
     // =========================
     // WEBSOCKET
     // =========================
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
+    private Task? _receiveLoopTask;
+    private Task? _keepaliveTask;
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
 
     // =========================
@@ -79,7 +98,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // EVENTS
     // =========================
     public event Action<byte[]>? OnG711Audio;
-    public event Action<byte[]>? OnPcm24Audio;  // Not used in G.711 mode
+    public event Action<byte[]>? OnPcm24Audio;
     public event Action<string>? OnTranscript;
     public event Action<string>? OnLog;
     public event Action? OnConnected;
@@ -92,24 +111,41 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public event Action<BookingState>? OnBookingUpdated;
 
     // Tool calling (handled externally, e.g. by G711CallFeatures)
-    // toolName, toolCallId, argumentsJson
     public event Func<string, string, JsonElement, Task<object>>? OnToolCall;
 
     // =========================
     // PROPERTIES
     // =========================
-    public bool IsConnected => _ws?.State == WebSocketState.Open;
+    public bool IsConnected =>
+        Volatile.Read(ref _disposed) == 0 &&
+        _ws?.State == WebSocketState.Open;
+
     public int PendingFrameCount => Math.Max(0, Volatile.Read(ref _outboundQueueCount));
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private void Log(string msg) => OnLog?.Invoke(msg);
 
     // =========================
-    // RESPONSE GATE (for tool continuation)
+    // RESPONSE GATE
     // =========================
-    private async Task QueueResponseCreateAsync(int delayMs = 40)
+    private bool CanCreateResponse()
     {
-        if (_disposed != 0 || _callEnded != 0)
+        return Volatile.Read(ref _responseActive) == 0 &&
+               Volatile.Read(ref _responseQueued) == 0 &&
+               Volatile.Read(ref _callEnded) == 0 &&
+               Volatile.Read(ref _disposed) == 0 &&
+               IsConnected &&
+               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300;
+    }
+
+    /// <summary>
+    /// Queue a response.create. Does NOT set _responseActive manually.
+    /// Waits for any active response to complete first, then sends response.create.
+    /// OpenAI's response.created event will set _responseActive = 1.
+    /// </summary>
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true)
+    {
+        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
 
         if (Interlocked.CompareExchange(ref _responseQueued, 1, 0) == 1)
@@ -117,16 +153,29 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
+            // Wait for any active response to complete (up to 5s)
+            if (waitForCurrentResponse)
+            {
+                for (int i = 0; i < 100 && Volatile.Read(ref _responseActive) == 1; i++)
+                    await Task.Delay(50).ConfigureAwait(false);
+            }
+
             await Task.Delay(delayMs).ConfigureAwait(false);
 
-            // Only create a new response when OpenAI has ended the previous one
+            // If response is still active after waiting, defer to response.done handler
             if (Volatile.Read(ref _responseActive) == 1)
+            {
+                Interlocked.Exchange(ref _deferredResponsePending, 1);
+                Log("⏳ Response still active - deferring response.create");
+                return;
+            }
+
+            if (!CanCreateResponse())
                 return;
 
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
             Log("🔄 response.create sent");
         }
-        catch { }
         finally
         {
             Interlocked.Exchange(ref _responseQueued, 0);
@@ -142,11 +191,49 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         string voice = "sage",
         G711Codec codec = G711Codec.MuLaw)
     {
-        _apiKey = apiKey;
+        _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
         _codec = codec;
         _silenceByte = codec == G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
+    }
+
+    // =========================
+    // RESET CALL STATE
+    // =========================
+    private void ResetCallState(string? caller)
+    {
+        _callerId = caller ?? "";
+        
+        // Reset per-call flags (NOT _disposed - that's object lifetime)
+        Interlocked.Exchange(ref _callEnded, 0);
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _responseQueued, 0);
+        Interlocked.Exchange(ref _sessionCreated, 0);
+        Interlocked.Exchange(ref _sessionUpdated, 0);
+        Interlocked.Exchange(ref _greetingSent, 0);
+        Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Increment(ref _noReplyWatchdogId);
+
+        _activeResponseId = null;
+        _lastCompletedResponseId = null;
+
+        // Reset timestamps
+        Volatile.Write(ref _lastAdaFinishedAt, 0);
+        Volatile.Write(ref _lastUserSpeechAt, 0);
+        Volatile.Write(ref _lastToolCallAt, 0);
+        Volatile.Write(ref _responseCreatedAt, 0);
+
+        // Reset stats
+        Interlocked.Exchange(ref _audioFramesSent, 0);
+        Interlocked.Exchange(ref _audioChunksReceived, 0);
+
+        // Clear audio queue
+        ClearPendingFrames();
+
+        // Reset DSP state
+        TtsPreConditioner.Reset();
     }
 
     // =========================
@@ -155,30 +242,66 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public async Task ConnectAsync(string? callerPhone = null, CancellationToken ct = default)
     {
         ThrowIfDisposed();
-
-        // Reset TtsPreConditioner state for new call
-        TtsPreConditioner.Reset();
-        
-        Log("📞 Connecting to OpenAI Realtime (PCM16 24kHz → local DSP → G.711)...");
+        ResetCallState(callerPhone);
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
         _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
 
+        using var timeout = new CancellationTokenSource(_connectTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+
+        var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
+        Log($"📞 Connecting (caller: {callerPhone ?? "unknown"}, codec: PCM24→DSP→{codecName})");
+
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
-            ct);
+            linked.Token);
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _ = Task.Run(() => ReceiveLoopAsync(_cts.Token));
 
-        Log("⏳ Waiting for session.created...");
-        await WaitForSessionAsync();
-
+        Log("✅ Connected to OpenAI");
         OnConnected?.Invoke();
+
+        _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
+        _keepaliveTask = Task.Run(KeepaliveLoopAsync);
     }
 
-    private async Task WaitForSessionAsync()
+    /// <summary>
+    /// Keepalive loop monitors connection health every 20 seconds.
+    /// </summary>
+    private async Task KeepaliveLoopAsync()
+    {
+        const int KEEPALIVE_INTERVAL_MS = 20000;
+
+        try
+        {
+            while (!(_cts?.IsCancellationRequested ?? true))
+            {
+                await Task.Delay(KEEPALIVE_INTERVAL_MS, _cts!.Token).ConfigureAwait(false);
+
+                if (_ws?.State != WebSocketState.Open)
+                {
+                    Log($"⚠️ Keepalive: WebSocket disconnected (state: {_ws?.State})");
+                    break;
+                }
+
+                var responseActive = Volatile.Read(ref _responseActive) == 1;
+                var callEnded = Volatile.Read(ref _callEnded) == 1;
+                Log($"💓 Keepalive: connected (response_active={responseActive}, call_ended={callEnded})");
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Keepalive loop error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Wait for session.created and session.updated, then configure session.
+    /// </summary>
+    public async Task WaitForSessionAndConfigureAsync()
     {
         // Wait for session.created
         for (int i = 0; i < 100 && _sessionCreated == 0; i++)
@@ -199,23 +322,20 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             throw new TimeoutException("session.updated not received");
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"✅ Connected to OpenAI Realtime (PCM16@24kHz → TtsPreConditioner → {codecName}, voice={_voice})");
+        Log($"✅ Session configured (PCM16@24kHz → TtsPreConditioner → {codecName}, voice={_voice})");
     }
 
     // =========================
-    // SEND AUDIO (SIP → OPENAI)
+    // AUDIO INPUT (SIP → OPENAI)
     // =========================
     public async Task SendMuLawAsync(byte[] frame)
     {
-        if (_disposed != 0 || _ignoreUserAudio != 0)
-            return;
+        if (!IsConnected) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
+        if (frame.Length != FRAME_BYTES) return;
 
         // Echo guard: Only check RTP playout completion time
-        // This is the ONLY source of truth for when Ada finished speaking
         if (NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 200)
-            return;
-
-        if (frame.Length != FRAME_BYTES)
             return;
 
         var msg = JsonSerializer.SerializeToUtf8Bytes(new
@@ -231,7 +351,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (count % 50 == 0)
         {
             var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-            Log($"📤 Sent {count} audio frames to OpenAI ({codecName} native 8kHz - zero resample)");
+            Log($"📤 Sent {count} audio frames ({codecName} native 8kHz)");
         }
     }
 
@@ -243,7 +363,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (!IsConnected || pcmData == null || pcmData.Length == 0) return;
 
         var samples = Audio.AudioCodecs.BytesToShorts(pcmData);
-        
+
         if (sampleRate != SAMPLE_RATE)
             samples = Audio.AudioCodecs.Resample(samples, sampleRate, SAMPLE_RATE);
 
@@ -252,6 +372,22 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             : Audio.AudioCodecs.MuLawEncode(samples);
 
         await SendMuLawAsync(encoded).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Clear OpenAI's input audio buffer. Call this when Ada starts speaking
+    /// to prevent stale audio from being transcribed.
+    /// </summary>
+    private async Task ClearInputAudioBufferAsync()
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+
+        try
+        {
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
+            Log("🧹 Cleared OpenAI input audio buffer");
+        }
+        catch { }
     }
 
     // =========================
@@ -264,9 +400,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         try
         {
-            while (_ws?.State == WebSocketState.Open && !ct.IsCancellationRequested)
+            while (IsConnected && !ct.IsCancellationRequested)
             {
-                var res = await _ws.ReceiveAsync(buffer, ct);
+                var res = await _ws!.ReceiveAsync(buffer, ct);
                 if (res.MessageType == WebSocketMessageType.Close)
                     break;
 
@@ -282,9 +418,12 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            Log($"⚠️ Receive loop error: {ex.Message}");
+            Log($"❌ Receive error: {ex.Message}");
         }
 
+        Log("🔄 Receive loop ended");
+        try { _ws?.Dispose(); } catch { }
+        _ws = null;
         OnDisconnected?.Invoke();
     }
 
@@ -293,39 +432,68 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private async Task ProcessMessageAsync(string json)
     {
-        using var doc = JsonDocument.Parse(json);
-        if (!doc.RootElement.TryGetProperty("type", out var typeEl))
-            return;
+        if (Volatile.Read(ref _disposed) != 0) return;
 
-        var type = typeEl.GetString();
-        if (type == null) return;
-
-        switch (type)
+        try
         {
-            case "session.created":
-                Log("📋 session.created received");
-                _sessionCreated = 1;
-                break;
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("type", out var typeEl))
+                return;
 
-            case "session.updated":
-                Log("📋 session.updated received");
-                _sessionUpdated = 1;
-                Log("✅ Session configured");
-                break;
+            var type = typeEl.GetString();
+            if (type == null) return;
 
-            case "response.created":
-                _activeResponseId = TryGetResponseId(doc.RootElement);
-                Interlocked.Exchange(ref _responseActive, 1);
-                Log("🤖 AI response started");
-                OnResponseStarted?.Invoke();
-                break;
+            switch (type)
+            {
+                case "session.created":
+                    Log("📋 session.created received");
+                    Interlocked.Exchange(ref _sessionCreated, 1);
+                    break;
 
-            case "response.done":
-                var doneId = TryGetResponseId(doc.RootElement);
-                if (_activeResponseId == doneId)
+                case "session.updated":
+                    Log("📋 session.updated received");
+                    Interlocked.Exchange(ref _sessionUpdated, 1);
+                    if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
+                    {
+                        await SendGreetingAsync().ConfigureAwait(false);
+                    }
+                    break;
+
+                case "response.created":
                 {
-                    _lastCompletedResponseId = doneId;
+                    var responseId = TryGetResponseId(doc.RootElement);
+                    if (responseId != null && _activeResponseId == responseId)
+                        break; // Ignore duplicate
+
+                    _activeResponseId = responseId;
+                    Interlocked.Exchange(ref _responseActive, 1);
+
+                    // Record timestamp for transcript guard
+                    Volatile.Write(ref _responseCreatedAt, NowMs());
+
+                    // Clear OpenAI's input audio buffer when Ada starts speaking
+                    _ = ClearInputAudioBufferAsync();
+
+                    Log("🤖 AI response started");
+                    OnResponseStarted?.Invoke();
+                    break;
+                }
+
+                case "response.done":
+                {
+                    var responseId = TryGetResponseId(doc.RootElement);
+
+                    // Ignore duplicate response.done for same ID
+                    if (responseId == null || responseId == _lastCompletedResponseId)
+                        break;
+
+                    // Ignore stale response.done for different ID
+                    if (_activeResponseId != null && responseId != _activeResponseId)
+                        break;
+
+                    _lastCompletedResponseId = responseId;
                     _activeResponseId = null;
+
                     Interlocked.Exchange(ref _responseActive, 0);
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
@@ -333,88 +501,174 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     // Commit audio buffer after response completes
                     await SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     Log("📝 Committed audio buffer (turn finalized)");
-                }
-                break;
 
-            case "response.function_call_arguments.done":
-                await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
-                break;
-
-            case "response.audio.delta":
-                if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
-                {
-                    var b64 = deltaEl.GetString();
-                    if (!string.IsNullOrEmpty(b64))
+                    // Flush deferred response if pending
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
-                        var pcm24Bytes = Convert.FromBase64String(b64);
-                        
-                        // Fire PCM24 event for external DSP processing
-                        OnPcm24Audio?.Invoke(pcm24Bytes);
-                        
-                        // Also process internally and fire G711 for backward compatibility
-                        var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
-                        if (g711Bytes.Length > 0)
+                        Log("🔄 Flushing deferred response.create");
+                        _ = Task.Run(async () =>
                         {
-                            OnG711Audio?.Invoke(g711Bytes);
-                        }
-                        
-                        var count = Interlocked.Increment(ref _audioChunksReceived);
-                        if (count % 10 == 0)
+                            await Task.Delay(50).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
+                            {
+                                await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                                Log("🔄 response.create sent (deferred)");
+                            }
+                        });
+                    }
+
+                    // No-reply watchdog: prompt user after silence
+                    var watchdogDelayMs = 15000;
+                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
+
+                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                        if (Volatile.Read(ref _responseActive) == 1) return;
+
+                        Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
+
+                        await SendJsonAsync(new
                         {
-                            var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-                            Log($"📢 Received {count} audio chunks (PCM24→DSP→{codecName}), in={pcm24Bytes.Length}B out={g711Bytes.Length}B");
+                            type = "conversation.item.create",
+                            item = new
+                            {
+                                type = "message",
+                                role = "system",
+                                content = new[]
+                                {
+                                    new
+                                    {
+                                        type = "input_text",
+                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                                    }
+                                }
+                            }
+                        }).ConfigureAwait(false);
+
+                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                    });
+
+                    break;
+                }
+
+                case "response.function_call_arguments.done":
+                    await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
+
+                case "response.audio.delta":
+                    if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
+                    {
+                        var b64 = deltaEl.GetString();
+                        if (!string.IsNullOrEmpty(b64))
+                        {
+                            var pcm24Bytes = Convert.FromBase64String(b64);
+
+                            OnPcm24Audio?.Invoke(pcm24Bytes);
+
+                            var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
+                            if (g711Bytes.Length > 0)
+                            {
+                                OnG711Audio?.Invoke(g711Bytes);
+                            }
+
+                            var count = Interlocked.Increment(ref _audioChunksReceived);
+                            if (count % 10 == 0)
+                            {
+                                var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
+                                Log($"📢 Received {count} audio chunks (PCM24→DSP→{codecName}), in={pcm24Bytes.Length}B out={g711Bytes.Length}B");
+                            }
                         }
                     }
-                }
-                break;
+                    break;
 
-            case "response.audio_transcript.done":
-                if (doc.RootElement.TryGetProperty("transcript", out var transcriptEl))
-                {
-                    var text = transcriptEl.GetString();
-                    if (!string.IsNullOrEmpty(text))
+                case "response.audio_transcript.delta":
+                    if (doc.RootElement.TryGetProperty("delta", out var d))
+                        OnAdaSpeaking?.Invoke(d.GetString() ?? "");
+                    break;
+
+                case "response.audio_transcript.done":
+                    if (doc.RootElement.TryGetProperty("transcript", out var transcriptEl))
                     {
-                        Log($"💬 Ada: {text}");
-                        OnAdaSpeaking?.Invoke(text);
+                        var text = transcriptEl.GetString();
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            Log($"💬 Ada: {text}");
+                            OnTranscript?.Invoke($"Ada: {text}");
+
+                            // Goodbye detection watchdog
+                            if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+                                (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+                                 text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
+                                 text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
+                                _ = Task.Run(async () =>
+                                {
+                                    await Task.Delay(5000).ConfigureAwait(false);
+                                    if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                        return;
+
+                                    Log("⏰ Goodbye watchdog triggered - forcing call end");
+                                    Interlocked.Exchange(ref _ignoreUserAudio, 1);
+                                    SignalCallEnded("goodbye_watchdog");
+                                });
+                            }
+                        }
                     }
-                }
-                break;
+                    break;
 
-            case "input_audio_buffer.speech_started":
-                Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                Log("✂️ Barge-in detected");
-                OnBargeIn?.Invoke();
-                break;
-
-            case "input_audio_buffer.cleared":
-                Log("🧹 Cleared OpenAI input audio buffer");
-                break;
-
-            case "conversation.item.input_audio_transcription.completed":
-                if (doc.RootElement.TryGetProperty("transcript", out var userTranscript))
-                {
-                    var text = userTranscript.GetString();
-                    if (!string.IsNullOrEmpty(text))
+                case "conversation.item.input_audio_transcription.completed":
+                    if (doc.RootElement.TryGetProperty("transcript", out var userTranscript))
                     {
-                        Log($"👤 User: {text}");
-                        OnTranscript?.Invoke(text);
-                    }
-                }
-                break;
+                        var text = userTranscript.GetString();
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            // TRANSCRIPT GUARD: Ignore stale transcripts within 400ms of response.created
+                            var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
+                            if (msSinceResponseCreated < 400 && Volatile.Read(ref _responseActive) == 1)
+                            {
+                                Log($"🚫 Ignoring stale transcript ({msSinceResponseCreated}ms after response.created): {text}");
+                                break;
+                            }
 
-            case "error":
-                if (doc.RootElement.TryGetProperty("error", out var errorEl))
-                {
-                    var message = errorEl.TryGetProperty("message", out var msgEl)
-                        ? msgEl.GetString()
-                        : "Unknown error";
-                    // Suppress benign errors
-                    if (!string.IsNullOrEmpty(message) &&
-                        !message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase) &&
-                        !message.Contains("not found", StringComparison.OrdinalIgnoreCase))
-                        Log($"❌ OpenAI error: {message}");
-                }
-                break;
+                            Log($"👤 User: {text}");
+                            OnTranscript?.Invoke($"You: {text}");
+                        }
+                    }
+                    break;
+
+                case "input_audio_buffer.speech_started":
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
+                    Log("✂️ Barge-in detected");
+                    OnBargeIn?.Invoke();
+                    break;
+
+                case "input_audio_buffer.speech_stopped":
+                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
+                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                    break;
+
+                case "error":
+                    if (doc.RootElement.TryGetProperty("error", out var errorEl))
+                    {
+                        var message = errorEl.TryGetProperty("message", out var msgEl)
+                            ? msgEl.GetString()
+                            : "Unknown error";
+                        if (!string.IsNullOrEmpty(message) &&
+                            !message.Contains("buffer too small", StringComparison.OrdinalIgnoreCase) &&
+                            !message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+                            Log($"❌ OpenAI error: {message}");
+                    }
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Parse error: {ex.Message}");
         }
     }
 
@@ -423,6 +677,11 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private async Task HandleToolCallAsync(JsonElement root)
     {
+        var now = NowMs();
+        if (now - Volatile.Read(ref _lastToolCallAt) < 200)
+            return;
+        Volatile.Write(ref _lastToolCallAt, now);
+
         try
         {
             if (!root.TryGetProperty("name", out var n) || !root.TryGetProperty("call_id", out var c))
@@ -477,28 +736,20 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     // PCM24 → G.711 PROCESSING
     // =========================
-    /// <summary>
-    /// Process 24kHz PCM from OpenAI through TtsPreConditioner DSP, then encode to G.711.
-    /// Pipeline: PCM24 → DC removal → 3.4kHz LPF → normalize → soft-clip → 8kHz → G.711
-    /// </summary>
     private byte[] ProcessPcm24ToG711(byte[] pcm24Bytes)
     {
         if (pcm24Bytes == null || pcm24Bytes.Length == 0)
             return Array.Empty<byte>();
 
-        // Convert bytes to shorts
         short[] samples24k = TtsPreConditioner.BytesToPcm(pcm24Bytes);
-        
-        // Process through TtsPreConditioner (handles any length, not just 20ms frames)
         short[] samples8k = TtsPreConditioner.ProcessFrame(samples24k);
-        
-        // Encode to G.711
+
         byte[] g711;
         if (_codec == G711Codec.ALaw)
             g711 = AudioCodecs.ALawEncode(samples8k);
         else
             g711 = AudioCodecs.MuLawEncode(samples8k);
-        
+
         return g711;
     }
 
@@ -507,10 +758,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     private async Task ConfigureSessionAsync()
     {
-        // Request 24kHz PCM output for local DSP processing (richer audio quality)
         var inputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        var outputCodec = "pcm16"; // 24kHz PCM - we'll apply DSP and encode to G.711 locally
-        
+        var outputCodec = "pcm16"; // 24kHz PCM - we apply DSP locally
+
         Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@24kHz (DSP→G.711), voice={_voice}");
 
         await SendJsonAsync(new
@@ -548,15 +798,6 @@ GOAL: Collect (in this order): name, pickup address, destination, passengers, pi
 ## MANDATORY TOOL USAGE
 
 After EVERY user response that contains booking information, you MUST call sync_booking_data IMMEDIATELY with ALL fields you have collected so far.
-
-Examples:
-- User says '52A David Road' → call sync_booking_data with pickup='52A David Road'
-- User says '7 Russell Street' → call sync_booking_data with destination='7 Russell Street'  
-- User says 'three passengers' → call sync_booking_data with passengers=3
-- User says 'now' or 'as soon as possible' → call sync_booking_data with pickup_time='ASAP'
-- User gives their name → call sync_booking_data with caller_name='...'
-
-CRITICAL: When you confirm the booking summary, call sync_booking_data with ALL collected fields BEFORE calling book_taxi.
 
 ## BOOKING FLOW
 
@@ -626,9 +867,9 @@ CRITICAL: When you confirm the booking summary, call sync_booking_data with ALL 
         }
     };
 
-    /// <summary>
-    /// Send initial greeting to start the conversation.
-    /// </summary>
+    // =========================
+    // GREETING
+    // =========================
     public async Task SendGreetingAsync(string greeting = "Hello, welcome to Voice Taxibot. May I have your name?")
     {
         await SendJsonAsync(new
@@ -644,20 +885,27 @@ CRITICAL: When you confirm the booking summary, call sync_booking_data with ALL 
     }
 
     // =========================
+    // CALL END
+    // =========================
+    private void SignalCallEnded(string reason)
+    {
+        if (Interlocked.Exchange(ref _callEnded, 1) == 0)
+        {
+            Log($"📴 Call ended: {reason}");
+            OnCallEnded?.Invoke();
+        }
+    }
+
+    // =========================
     // CALLED BY RTP PLAYOUT
     // =========================
-    /// <summary>
-    /// Called by DirectG711RtpPlayout when audio queue becomes empty.
-    /// This is the ONLY source of truth for when Ada finished speaking.
-    /// Do NOT call this from OpenAI events!
-    /// </summary>
     public void NotifyPlayoutComplete()
     {
         Volatile.Write(ref _lastAdaFinishedAt, NowMs());
     }
 
     // =========================
-    // LEGACY QUEUE METHODS (for pull-based playout compatibility)
+    // LEGACY QUEUE METHODS
     // =========================
     public byte[]? GetNextMuLawFrame()
     {
@@ -718,14 +966,15 @@ CRITICAL: When you confirm the booking summary, call sync_booking_data with ALL 
     // =========================
     public async Task DisconnectAsync()
     {
-        if (_ws?.State == WebSocketState.Open)
+        SignalCallEnded("disconnect");
+
+        try
         {
-            try
-            {
-                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disconnect", CancellationToken.None);
-            }
-            catch { }
+            _cts?.Cancel();
+            if (_ws?.State == WebSocketState.Open)
+                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
         }
+        catch { }
     }
 
     public void Dispose()
@@ -733,11 +982,10 @@ CRITICAL: When you confirm the booking summary, call sync_booking_data with ALL 
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
 
+        SignalCallEnded("dispose");
+
         _cts?.Cancel();
         try { _ws?.Dispose(); } catch { }
         _sendMutex.Dispose();
-
-        if (Interlocked.Exchange(ref _callEnded, 1) == 0)
-            OnCallEnded?.Invoke();
     }
 }
