@@ -10,10 +10,10 @@ namespace TaxiSipBridge;
 /// </summary>
 public static class FareCalculator
 {
-    /// <summary>Starting fare in pounds (£3.50 default)</summary>
+    /// <summary>Starting fare in euros (€3.50 default)</summary>
     public const decimal BASE_FARE = 3.50m;
 
-    /// <summary>Rate per mile in pounds (£1.00 default)</summary>
+    /// <summary>Rate per mile in euros (€1.00 default)</summary>
     public const decimal RATE_PER_MILE = 1.00m;
 
     /// <summary>Minimum fare in pounds</summary>

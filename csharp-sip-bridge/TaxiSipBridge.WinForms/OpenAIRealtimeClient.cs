@@ -1308,7 +1308,7 @@ EVENTS: If caller asks about events or 'what's on', call find_local_events. List
 
 NEAREST: If caller says 'nearest' + place type, set destination to 'Nearest [place type]'.
 
-RULES: One question at a time. Under 20 words per response. Use £. Only call end_call after user says no to 'anything else'.";
+RULES: One question at a time. Under 20 words per response. Use €. Only call end_call after user says no to 'anything else'.";
 
     private static string GetDefaultSystemPrompt() => "You are Ada, a professional taxi booking assistant.";
 

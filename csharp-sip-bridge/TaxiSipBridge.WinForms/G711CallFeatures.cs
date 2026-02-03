@@ -304,7 +304,7 @@ public sealed class G711CallFeatures : IDisposable
             catch (Exception ex)
             {
                 Log($"⚠️ [{_callId}] Fare calculation failed: {ex.Message}");
-                _booking.Fare = "£10.00"; // Fallback
+                _booking.Fare = "€10.00"; // Fallback
                 _booking.Eta = "5 minutes";
             }
             

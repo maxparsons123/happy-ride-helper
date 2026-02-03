@@ -38,7 +38,7 @@ public class AdaDispatchRequest
     public string CallerPhone { get; set; } = string.Empty;
 
     /// <summary>
-    /// Fare amount (e.g. "£12.50")
+    /// Fare amount (e.g. "€12.50")
     /// </summary>
     [JsonPropertyName("fare")]
     public string? Fare { get; set; }
