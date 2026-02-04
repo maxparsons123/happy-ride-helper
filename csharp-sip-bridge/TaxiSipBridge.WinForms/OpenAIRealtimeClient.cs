@@ -748,9 +748,6 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 maxWaitMs: 0,
                 bypassTranscriptGuard: true
             ).ConfigureAwait(false);
-                waitForCurrentResponse: false,
-                maxWaitMs: 0
-            ).ConfigureAwait(false);
         });
     }
 
