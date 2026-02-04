@@ -11,18 +11,21 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// OpenAI Realtime API client with correct response lifecycle handling.
-/// Key rule: DO NOT set _responseActive manually. Only OpenAI events control it.
+/// OpenAI Realtime API client with G.711 A-law end-to-end passthrough.
 /// 
-/// v3.5 Optimizations:
-/// - Cached JsonSerializerOptions to avoid per-call allocation
-/// - Bit-shifting FIR filter (>> 2, >> 1) instead of floating-point
-/// - ArrayPool for high-frequency audio buffer reuse
-/// - Buffer.BlockCopy for faster primitive array operations
+/// v4.0: A-law passthrough - NO PCM, NO resampling, NO FIR filters
+/// Audio path: SIP (PCMA 8kHz) → OpenAI (g711_alaw) → SIP (PCMA 8kHz)
+/// 
+/// Key changes from v3.x:
+/// - input_audio_format = "g711_alaw" (not pcm16)
+/// - output_audio_format = "g711_alaw" (not pcm16)
+/// - SendALawAsync: direct passthrough (no decode/resample)
+/// - ProcessAudioDelta: direct passthrough (no decode/resample)
+/// - A-law silence = 0xD5 (not μ-law 0xFF)
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "3.6";
+    public const string VERSION = "4.0";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -192,52 +195,61 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // AUDIO INPUT
+    // AUDIO INPUT (A-LAW PASSTHROUGH)
     // =========================
-    public async Task SendMuLawAsync(byte[] ulawData)
+    
+    /// <summary>
+    /// Send A-law audio directly to OpenAI (no decoding, no resampling).
+    /// v4.0: Direct passthrough - SIP PCMA → OpenAI g711_alaw
+    /// </summary>
+    public async Task SendALawAsync(byte[] alawData)
     {
-        if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
+        if (!IsConnected || alawData == null || alawData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
         // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
         if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
             return;
 
-        var pcm8k = AudioCodecs.MuLawDecode(ulawData);
-        var pcm24k = Resample8kTo24k(pcm8k);
-        await SendAudioAsync(pcm24k).ConfigureAwait(false);
+        await SendJsonAsync(new
+        {
+            type = "input_audio_buffer.append",
+            audio = Convert.ToBase64String(alawData)
+        }).ConfigureAwait(false);
+
         Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
 
+    /// <summary>
+    /// Legacy μ-law support - converts to A-law before sending.
+    /// Use SendALawAsync directly if your SIP uses PCMA (payload type 8).
+    /// </summary>
+    public async Task SendMuLawAsync(byte[] ulawData)
+    {
+        if (!IsConnected || ulawData == null || ulawData.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
+
+        // Convert μ-law to A-law (both are 8kHz, 8-bit)
+        var alawData = AudioCodecs.MuLawToALaw(ulawData);
+        await SendALawAsync(alawData).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Send raw PCM audio - converts to A-law before sending.
+    /// For best quality, use SendALawAsync with native PCMA.
+    /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
         if (!IsConnected || pcmData == null || pcmData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
-        byte[] pcm24k = sampleRate == 24000
-            ? pcmData
-            : AudioCodecs.ShortsToBytes(
-                AudioCodecs.Resample(AudioCodecs.BytesToShorts(pcmData), sampleRate, 24000));
-
-        await SendAudioToOpenAIAsync(pcm24k).ConfigureAwait(false);
-        Volatile.Write(ref _lastUserSpeechAt, NowMs());
-    }
-
-    private async Task SendAudioToOpenAIAsync(byte[] pcm24k)
-    {
-        if (_ws?.State != WebSocketState.Open) return;
-
-        try
-        {
-            var msg = JsonSerializer.Serialize(new
-            {
-                type = "input_audio_buffer.append",
-                audio = Convert.ToBase64String(pcm24k)
-            });
-
-            await SendTextAsync(msg).ConfigureAwait(false);
-        }
-        catch { /* keep call alive */ }
+        // Convert PCM to 8kHz A-law
+        var samples = AudioCodecs.BytesToShorts(pcmData);
+        if (sampleRate != 8000)
+            samples = AudioCodecs.Resample(samples, sampleRate, 8000);
+        
+        var alawData = AudioCodecs.ALawEncode(samples);
+        await SendALawAsync(alawData).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -266,48 +278,37 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         while (_outboundQueue.TryDequeue(out _)) { }
     }
 
+    // =========================
+    // AUDIO OUTPUT (A-LAW PASSTHROUGH)
+    // =========================
+    
+    /// <summary>
+    /// v4.0: Direct A-law passthrough - no PCM conversion, no resampling.
+    /// OpenAI sends g711_alaw, we frame it directly for RTP.
+    /// </summary>
     private void ProcessAudioDelta(string base64)
     {
         if (string.IsNullOrEmpty(base64)) return;
 
-        // Rent buffer from ArrayPool to reduce GC pressure on high-frequency audio path
-        byte[]? rentedBuffer = null;
         try
         {
-            var pcm24k = Convert.FromBase64String(base64);
-            OnPcm24Audio?.Invoke(pcm24k);
+            var alaw = Convert.FromBase64String(base64);
+            
+            // Also emit raw audio for any listeners (e.g., avatar systems)
+            OnPcm24Audio?.Invoke(alaw);
 
-            // Downsample 24kHz → 8kHz with optimized 3-tap FIR filter
-            var samples = AudioCodecs.BytesToShorts(pcm24k);
-            var len = samples.Length / 3;
-            var pcm8k = new short[len];
-
-            // PERF: Bit-shifting instead of floating-point multiplication
-            // >> 2 = * 0.25, >> 1 = * 0.5 (arithmetic shift preserves sign for audio)
-            for (int i = 0; i < len; i++)
+            // Frame into 20ms chunks (160 bytes @ 8kHz A-law)
+            for (int i = 0; i < alaw.Length; i += 160)
             {
-                int idx = i * 3;
-                // Weighted average: 0.25, 0.5, 0.25 for smoother telephony audio
-                pcm8k[i] = (short)((samples[idx] >> 2) + (samples[idx + 1] >> 1) + (samples[idx + 2] >> 2));
-            }
-
-            var ulaw = AudioCodecs.MuLawEncode(pcm8k);
-
-            // Frame into 160-byte (20ms) chunks using ArrayPool for temp buffer
-            int frameCount = (ulaw.Length + 159) / 160;
-            rentedBuffer = ArrayPool<byte>.Shared.Rent(160);
-
-            for (int i = 0; i < ulaw.Length; i += 160)
-            {
-                var count = Math.Min(160, ulaw.Length - i);
+                var frame = new byte[160];
+                int count = Math.Min(160, alaw.Length - i);
                 
                 // PERF: Buffer.BlockCopy is faster than Array.Copy for primitives
-                Buffer.BlockCopy(ulaw, i, rentedBuffer, 0, count);
-                if (count < 160) Array.Fill(rentedBuffer, (byte)0xFF, count, 160 - count);
+                Buffer.BlockCopy(alaw, i, frame, 0, count);
 
-                // Copy to new frame for queue (can't enqueue rented buffer)
-                var frame = new byte[160];
-                Buffer.BlockCopy(rentedBuffer, 0, frame, 0, 160);
+                // A-law silence = 0xD5 (NOT μ-law 0xFF)
+                if (count < 160)
+                    Array.Fill(frame, (byte)0xD5, count, 160 - count);
 
                 while (_outboundQueue.Count >= MAX_QUEUE_FRAMES)
                     _outboundQueue.TryDequeue(out _);
@@ -319,41 +320,6 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             Log($"⚠️ Audio error: {ex.Message}");
         }
-        finally
-        {
-            // Return rented buffer to pool
-            if (rentedBuffer != null)
-                ArrayPool<byte>.Shared.Return(rentedBuffer);
-        }
-    }
-
-    private static byte[] Resample8kTo24k(short[] pcm8k)
-    {
-        if (pcm8k.Length == 0) return Array.Empty<byte>();
-        
-        // 3x upsampling with linear interpolation for smoother audio
-        var pcm24k = new short[pcm8k.Length * 3];
-        
-        for (int i = 0; i < pcm8k.Length - 1; i++)
-        {
-            var s0 = pcm8k[i];
-            var s1 = pcm8k[i + 1];
-            int o = i * 3;
-            
-            pcm24k[o] = s0;
-            // Linear interpolation: (2*s0 + s1) / 3 and (s0 + 2*s1) / 3
-            pcm24k[o + 1] = (short)((s0 * 2 + s1) / 3);
-            pcm24k[o + 2] = (short)((s0 + s1 * 2) / 3);
-        }
-        
-        // Handle last sample (repeat)
-        var last = pcm8k[^1];
-        var lastIdx = (pcm8k.Length - 1) * 3;
-        pcm24k[lastIdx] = last;
-        pcm24k[lastIdx + 1] = last;
-        pcm24k[lastIdx + 2] = last;
-        
-        return AudioCodecs.ShortsToBytes(pcm24k);
     }
 
     // =========================
@@ -1204,6 +1170,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     // =========================
     private async Task ConfigureSessionAsync()
     {
+        // v4.0: G.711 A-law end-to-end - no PCM, no resampling
         var config = new
         {
             type = "session.update",
@@ -1212,8 +1179,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = "pcm16",
-                output_audio_format = "pcm16",
+                input_audio_format = "g711_alaw",   // v4.0: A-law passthrough
+                output_audio_format = "g711_alaw",  // v4.0: A-law passthrough
                 input_audio_transcription = new 
                 { 
                     model = "whisper-1",
@@ -1233,7 +1200,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         };
 
         await SendJsonAsync(config).ConfigureAwait(false);
-        Log($"🎧 Session configured (lang={_detectedLanguage})");
+        Log($"🎧 Session configured (lang={_detectedLanguage}, format=g711_alaw)");
     }
 
     private async Task SendGreetingAsync()
