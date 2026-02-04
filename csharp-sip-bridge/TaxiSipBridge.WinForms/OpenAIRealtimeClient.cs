@@ -37,9 +37,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
 
     // =========================
-    // OUTPUT CODEC (A-law passthrough)
+    // OUTPUT CODEC (session output format selector)
     // =========================
-    private OutputCodecMode _outputCodec = OutputCodecMode.ALaw;
+    // Default MUST be the safe PCM16 path (OpenAI output_audio_format="pcm16").
+    // ALaw is only valid when the SIP playout is in direct A-law passthrough mode.
+    private OutputCodecMode _outputCodec = OutputCodecMode.MuLaw;
     public OutputCodecMode OutputCodec => _outputCodec;
     
     public void SetOutputCodec(OutputCodecMode codec)
