@@ -854,7 +854,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         8. After confirmation, call book_taxi with action="confirmed"
         9. Say goodbye and call end_call
         
-        RULES: Keep responses brief (under 20 words). Be warm but efficient. Always quote prices in € (Euro).
+        RULES: Keep responses brief (under 20 words). Be warm but efficient. Always quote prices in £ (GBP).
         """;
     
     public async ValueTask DisposeAsync()

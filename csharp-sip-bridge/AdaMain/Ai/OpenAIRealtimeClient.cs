@@ -461,7 +461,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         
         - Keep responses under 20 words
         - One question at a time
-        - Always use Euros (€) for fares
+        - Always use British Pounds (£) for fares
         - Preserve addresses exactly as user says them
         
         ## CONFIRMATION DETECTION

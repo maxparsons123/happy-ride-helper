@@ -120,7 +120,7 @@ public partial class FareCalculator
         try
         {
             if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
-                return new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+                return new FareResult { Fare = "£12.50", Eta = "6 minutes" };
 
             var calc = GetDefaultCalculator();
 
@@ -182,7 +182,7 @@ public partial class FareCalculator
         catch (Exception ex)
         {
             Log($"⚠️ CalculateFareWithCoordsAsync error: {ex.Message}");
-            return new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+            return new FareResult { Fare = "£12.50", Eta = "6 minutes" };
         }
     }
 

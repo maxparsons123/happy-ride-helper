@@ -404,7 +404,7 @@ public sealed class G711CallFeatures : IDisposable
                 var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(2000));
                 var fareResult = fareCompleted == fareTask
                     ? await fareTask
-                    : new FareResult { Fare = "€12.50", Eta = "6 minutes" };
+                    : new FareResult { Fare = "£12.50", Eta = "6 minutes" };
 
                 if (fareCompleted != fareTask)
                     Log($"⏱️ [{_callId}] Geocoding timed out (2s) — using fallback quote");
@@ -436,7 +436,7 @@ public sealed class G711CallFeatures : IDisposable
             catch (Exception ex)
             {
                 Log($"⚠️ [{_callId}] Fare calculation failed: {ex.Message}");
-                _booking.Fare = "€12.50"; // Fallback (keep conversation moving)
+                _booking.Fare = "£12.50"; // Fallback (keep conversation moving)
                 _booking.Eta = "6 minutes";
             }
             

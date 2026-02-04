@@ -34,7 +34,7 @@ public sealed class FareCalculator : IFareCalculator
         
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
         {
-            result.Fare = "€4.00";
+            result.Fare = "£4.00";
             result.Eta = "5 minutes";
             return result;
         }
@@ -85,14 +85,14 @@ public sealed class FareCalculator : IFareCalculator
             
             var etaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
             
-            result.Fare = $"€{fare:F2}";
+            result.Fare = $"£{fare:F2}";
             result.Eta = $"{etaMinutes} minutes";
             
             _logger.LogInformation("Fare calculated: {Fare} for {Distance:F1} miles", result.Fare, distanceMiles);
         }
         else
         {
-            result.Fare = "€8.00";
+            result.Fare = "£8.00";
             result.Eta = "8 minutes";
             _logger.LogWarning("Using fallback fare - geocoding failed");
         }
