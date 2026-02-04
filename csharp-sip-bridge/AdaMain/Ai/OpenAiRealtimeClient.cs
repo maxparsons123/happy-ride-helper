@@ -24,7 +24,7 @@ namespace AdaMain.Ai;
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "4.4";
+    public const string VERSION = "4.5";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -90,13 +90,16 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     }
     
     // =========================
-    // RESPONSE GATE (v4.3)
+    // RESPONSE GATE (v4.5)
     // =========================
-    private bool CanCreateResponse()
+    private bool CanCreateResponse(bool bypassTranscriptGuard = false)
     {
+        // v4.5: Tool results should bypass transcript pending guard
+        var transcriptCheck = bypassTranscriptGuard || Volatile.Read(ref _transcriptPending) == 0;
+        
         return Volatile.Read(ref _responseActive) == 0 &&
                Volatile.Read(ref _responseQueued) == 0 &&
-               Volatile.Read(ref _transcriptPending) == 0 &&
+               transcriptCheck &&
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
@@ -106,7 +109,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     /// <summary>
     /// Queue a response.create through the gate. All response.create MUST use this method.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000, bool bypassTranscriptGuard = false)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -137,8 +140,13 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                 return;
             }
 
-            if (!CanCreateResponse())
+            // v4.5: Tool results bypass transcript guard
+            if (!CanCreateResponse(bypassTranscriptGuard))
+            {
+                _logger.LogDebug("Gate blocked response.create - deferring");
+                Interlocked.Exchange(ref _deferredResponsePending, 1);
                 return;
+            }
 
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
             _logger.LogDebug("response.create sent");

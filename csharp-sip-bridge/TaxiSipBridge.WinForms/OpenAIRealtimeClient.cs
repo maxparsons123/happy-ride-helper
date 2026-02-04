@@ -28,7 +28,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "4.4";
+    public const string VERSION = "4.5";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -140,11 +140,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     // =========================
     // RESPONSE GATE
     // =========================
-    private bool CanCreateResponse()
+    private bool CanCreateResponse(bool bypassTranscriptGuard = false)
     {
+        // v4.5: Tool results should bypass transcript pending guard (we're responding to tool, not speech)
+        var transcriptCheck = bypassTranscriptGuard || Volatile.Read(ref _transcriptPending) == 0;
+        
         return Volatile.Read(ref _responseActive) == 0 &&
                Volatile.Read(ref _responseQueued) == 0 &&
-               Volatile.Read(ref _transcriptPending) == 0 &&  // v3.3: Wait for transcript before responding
+               transcriptCheck &&
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
@@ -156,7 +159,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     /// Waits for any active response to complete first, then sends response.create.
     /// OpenAI's response.created event will set _responseActive = 1.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000, bool bypassTranscriptGuard = false)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -189,8 +192,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 return;
             }
 
-            if (!CanCreateResponse())
+            // v4.5: Tool results bypass transcript guard (we're responding to tool completion, not user speech)
+            if (!CanCreateResponse(bypassTranscriptGuard))
+            {
+                Log("⏳ Gate blocked response.create (will retry via deferred flush)");
+                Interlocked.Exchange(ref _deferredResponsePending, 1);
                 return;
+            }
 
             // DO NOT set _responseActive = 1 here — let OpenAI's response.created do it
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
@@ -733,8 +741,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         Log("🔄 Flushing deferred response.create (via gate)");
         _ = Task.Run(async () =>
         {
+            // v4.5: Bypass transcript guard - we're responding to tool completion, not user speech
             await QueueResponseCreateAsync(
                 delayMs: 80,  // v2.7: Safe delay for SIP fade-out
+                waitForCurrentResponse: false,
+                maxWaitMs: 0,
+                bypassTranscriptGuard: true
+            ).ConfigureAwait(false);
                 waitForCurrentResponse: false,
                 maxWaitMs: 0
             ).ConfigureAwait(false);
@@ -885,7 +898,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 OnBookingUpdated?.Invoke(_booking);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms for sync
+                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                     break;
                 }
 
@@ -907,7 +920,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             error = "Missing pickup or destination",
                             message = "Missing pickup or destination. Ask the caller to repeat it."
                         }).ConfigureAwait(false);
-                        await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
+                        await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                             break;
                         }
 
@@ -929,7 +942,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 _booking.Destination,
                                 _callerId);
 
-                            var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(3000)).ConfigureAwait(false);
+                            // v4.5: Reduced timeout from 3s to 2s for faster response
+                            var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(2000)).ConfigureAwait(false);
 
                             if (aiCompleted == aiTask)
                             {
@@ -956,7 +970,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             }
                             else
                             {
-                                Log("⏱️ Lovable AI extraction timed out (3s) — using raw addresses");
+                                Log("⏱️ Lovable AI extraction timed out (2s) — using raw addresses");
                             }
 
                             // If clarification needed, return that instead of a quote
@@ -971,7 +985,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                     destination_options = destAlternatives ?? Array.Empty<string>(),
                                     message = "I found multiple locations with that name. Ask which one they meant."
                                 }).ConfigureAwait(false);
-                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
+                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                                 break;
                             }
 
@@ -981,10 +995,11 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 resolvedDest,
                                 _callerId);
 
-                            var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(3000)).ConfigureAwait(false);
+                            // v4.5: Reduced timeout from 3s to 2s for faster response
+                            var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(2000)).ConfigureAwait(false);
                             if (fareCompleted != fareTask)
                             {
-                                Log("⏱️ Geocoding timed out (3s) — using fallback quote");
+                                Log("⏱️ Geocoding timed out (2s) — using fallback quote");
                                 fareResult = new FareResult { Fare = "€12.50", Eta = "6 minutes" };
                             }
                             else
@@ -1038,7 +1053,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             message = $"The fare is {spokenFare}, and the driver will arrive in {fareResult.Eta}. Ask if they want to confirm."
                         }).ConfigureAwait(false);
 
-                        await QueueResponseCreateAsync(delayMs: 60, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 60ms for quote
+                        await QueueResponseCreateAsync(delayMs: 60, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                     }
                     else if (action == "confirmed")
                     {
@@ -1051,7 +1066,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 error = "Missing pickup or destination",
                                 message = "Missing pickup or destination. Ask the caller to repeat it before booking."
                             }).ConfigureAwait(false);
-                            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
+                            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                             break;
                         }
 
@@ -1147,7 +1162,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
                     }).ConfigureAwait(false);
 
-                    await QueueResponseCreateAsync(delayMs: 150, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 150ms for goodbye
+                    await QueueResponseCreateAsync(delayMs: 150, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
 
                         // Extended grace period (15s) for "anything else?" flow, then force end
                         _ = Task.Run(async () =>
@@ -1161,8 +1176,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                 return;
 
-                            // Only proceed if no response is active/queued
-                            if (!CanCreateResponse())
+                            // v4.5: Bypass transcript guard for tool-driven response
+                            if (!CanCreateResponse(bypassTranscriptGuard: true))
                                 return;
 
                             await SendJsonAsync(new
@@ -1184,7 +1199,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             }).ConfigureAwait(false);
 
                             // DO NOT set _responseActive = 1 here — let OpenAI do it
-                            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+                            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false, bypassTranscriptGuard: true).ConfigureAwait(false);
 
                             // Safety net: if the model doesn't call end_call, force hangup anyway.
                             // Only do this if the caller stays silent (speech_started increments _noReplyWatchdogId).
@@ -1235,7 +1250,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
                 }).ConfigureAwait(false);
 
-                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
+                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);  // v4.5
                     break;
                 }
 
@@ -1566,15 +1581,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             }
         }).ConfigureAwait(false);
         
-        // v2.7: Route through gate - prevents bypass of audio guards
+        // v4.5: Bypass transcript guard - this is a user-driven response trigger
         await QueueResponseCreateAsync(
             delayMs: 80,
             waitForCurrentResponse: false,
-            maxWaitMs: 0
+            maxWaitMs: 0,
+            bypassTranscriptGuard: true
         ).ConfigureAwait(false);
         
         Log("🔄 response.create queued (late confirmation)");
-    }
 
     // ===========================================
     // UTILITIES
