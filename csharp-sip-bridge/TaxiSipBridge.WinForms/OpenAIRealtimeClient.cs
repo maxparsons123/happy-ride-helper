@@ -1419,10 +1419,11 @@ public class OpenAIRealtimeClient : IAudioAIClient
 }
 
 /// <summary>
-/// Booking state tracking.
+/// Booking state tracking with full geocoding support.
 /// </summary>
 public class BookingState
 {
+    // Core booking fields
     public string? Pickup { get; set; }
     public string? Destination { get; set; }
     public int? Passengers { get; set; }
@@ -1431,4 +1432,26 @@ public class BookingState
     public string? Eta { get; set; }
     public bool Confirmed { get; set; }
     public string? BookingRef { get; set; }
+    
+    // Pickup geocoding
+    public double? PickupLat { get; set; }
+    public double? PickupLon { get; set; }
+    public string? PickupStreet { get; set; }
+    public string? PickupNumber { get; set; }
+    public string? PickupCity { get; set; }
+    public string? PickupPostal { get; set; }
+    
+    // Destination geocoding
+    public double? DestLat { get; set; }
+    public double? DestLon { get; set; }
+    public string? DestStreet { get; set; }
+    public string? DestNumber { get; set; }
+    public string? DestCity { get; set; }
+    public string? DestPostal { get; set; }
+    
+    // Additional fields
+    public string? CallerName { get; set; }
+    public string? SpecialRequests { get; set; }
+    public int? Luggage { get; set; }
+    public double? DistanceMiles { get; set; }
 }
