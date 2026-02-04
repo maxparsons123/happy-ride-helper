@@ -249,7 +249,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // v4.2: Use direct A-law passthrough for PCMA when USE_ALAW_DIRECT is enabled
+            // v5.1: Use direct A-law passthrough for PCMA when USE_ALAW_DIRECT is enabled
             bool useDirectALaw = USE_ALAW_DIRECT && _negotiatedCodec == AudioCodecsEnum.PCMA;
 
             if (useDirectALaw)
@@ -273,7 +273,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     }
                 };
                 _alawPlayout.Start();
-                Log($"🎵 [{callId}] ALawRtpPlayout started (v4.2 direct passthrough)");
+                Log($"🎵 [{callId}] ALawRtpPlayout started (v5.1 direct passthrough)");
             }
             else
             {
