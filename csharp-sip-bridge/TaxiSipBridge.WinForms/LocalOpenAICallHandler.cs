@@ -93,6 +93,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     public bool IsOpusAvailable => _remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS);
     public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
+    
+    /// <summary>
+    /// v4.2: When true, uses A-law direct passthrough (OpenAI g711_alaw → RTP).
+    /// When false, uses PCM mode (24kHz decode/resample/encode).
+    /// Must be set before the call starts.
+    /// </summary>
+    public bool UseALawDirect { get; set; } = true;
 
     // ===========================================
     // CONSTRUCTOR
@@ -233,8 +240,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // v4.2: Use direct A-law passthrough for PCMA, otherwise use MultiCodecRtpPlayout
-            if (_negotiatedCodec == AudioCodecsEnum.PCMA)
+            // v4.2: Use direct A-law passthrough for PCMA when UseALawDirect is enabled
+            bool useDirectALaw = UseALawDirect && _negotiatedCodec == AudioCodecsEnum.PCMA;
+            
+            if (useDirectALaw)
             {
                 // Direct A-law path: OpenAI g711_alaw → raw bytes → RTP (no decoding/resampling)
                 var rtpSession = _currentMediaSession.RtpSession;
@@ -333,8 +342,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 catch { }
             };
 
-            // Create OpenAI client
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
+            // Create OpenAI client (v4.2: pass A-law mode flag based on negotiated codec and user preference)
+            bool useDirectALaw = UseALawDirect && _negotiatedCodec == AudioCodecsEnum.PCMA;
+            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, useDirectALaw, _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
