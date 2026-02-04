@@ -54,7 +54,7 @@ public static class AIClientFactory
 
     private static IAudioAIClient CreateOpenAIClient(string apiKey, string model, string voice, string? systemPrompt)
     {
-        return new OpenAIRealtimeClient(apiKey, model, voice, systemPrompt);
+        return new OpenAIRealtimeClient(apiKey, model, voice, outputCodec: null, dispatchWebhookUrl: null);
     }
 }
 
