@@ -156,7 +156,7 @@ public sealed class ALawRtpPlayout : IDisposable
     /// </summary>
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out _)) count++;
+        while (_frameQueue.TryDequeue(out _)) { }
         lock (_accLock) { _accumulator = new byte[0]; }
     }
 
